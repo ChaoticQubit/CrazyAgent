@@ -30,6 +30,22 @@ test("a switch changes one kind and keeps the rest of the rule", () => {
   assert.deepEqual(wake.WAKE_KINDS.map((item) => item.kind), ["question", "finished", "failed", "change_set_ready", "progress"]);
 });
 
+test("after an applied wake rule change the editor waits until it is read back, so a quick second switch cannot revert it", () => {
+  const before = wake.wakeRuleView("project-chores", null, SHIPPED);
+  assert.equal(wake.wakeSaveBlocked(null, before, true), true, "a save in flight blocks the next one");
+  assert.equal(wake.wakeSaveBlocked(before, before, false), true, "an applied save blocks edits until its reload lands");
+  assert.equal(wake.wakeSaveBlocked(before, wake.wakeRuleView("project-chores", null, { ...SHIPPED }), false), true,
+    "a read that still shows the old rule keeps edits blocked");
+  const after = wake.wakeRuleView("project-chores", { ...SHIPPED, finished: false }, { ...SHIPPED, finished: false });
+  assert.equal(wake.wakeSaveBlocked(before, after, false), false, "the rule read back is what the next switch builds from");
+  assert.equal(wake.wakeSaveBlocked(null, before, false), false, "a refused save blocks nothing");
+  assert.equal(wake.wakeSaveBlocked(before, wake.wakeRuleView("agent-chores-7", null, SHIPPED), false), false,
+    "another target has its own editor");
+  const source = readFileSync(new URL("../src/screens/team/wake-rules.tsx", import.meta.url), "utf8");
+  assert.match(source, /const busy = wakeSaveBlocked\(savedFrom, view, saving\);/, "the editor gates every save and switch on it");
+  assert.match(source, /setSavedFrom\(message === "" \? view : null\);/, "only an applied save waits for its read-back");
+});
+
 test("an event reads like the line the master gets and says where it went", () => {
   assert.equal(wake.eventLine(event(1, "question", "queued", "Proceed? | 1. Yes | 2. No")), "claude-7 asks: Proceed? | 1. Yes | 2. No");
   assert.equal(wake.eventLine(event(2, "change_set_ready", "delivered", "3 files")), "claude-7 has changes ready: 3 files");

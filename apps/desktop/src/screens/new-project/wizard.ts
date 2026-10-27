@@ -16,6 +16,9 @@ export const NAME_CHARS_MAX = 80;
 export const ABOUT_CHARS_MAX = 4000;
 export const OTHER_PLATFORM_CHARS_MAX = 60;
 export const CUSTOM_STACK_CHARS_MAX = 40;
+export const NAME_BYTES_MAX = 256;
+export const ABOUT_BYTES_MAX = 8192;
+export const CUSTOM_STACK_BYTES_MAX = 64;
 export const STACK_MAX = 32;
 export const HARNESS_AGENTS_MAX = 15;
 export const TEAM_AGENTS_MAX = 64;
@@ -78,7 +81,20 @@ export function emptyDraft(): ProjectDraft {
 }
 
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u;
-const chars = (value: string) => [...value].length;
+const UTF8 = new TextEncoder();
+const bytes = (value: string) => UTF8.encode(value).length;
+
+/** Counts the characters the Create project form limits, as the owner sees them. Input: the text.
+ * Output: the count of Unicode characters. */
+export const chars = (value: string) => [...value].length;
+
+/** The description the engine stores for a draft: the owner's text with the "Other" platform
+ * text joined to it. Input: the draft. Output: the text, trimmed. */
+function aboutText(draft: ProjectDraft): string {
+  const other = draft.platforms.includes("other") ? draft.otherPlatform.trim() : "";
+  const about = draft.about.trim();
+  return other ? `${about}${about ? "\n\n" : ""}Other platform: ${other}` : about;
+}
 
 /** Checks the Basics step. Inputs: the draft and the names of existing projects.
  * Output: one plain message per field with a problem; empty when the step is valid. */
@@ -87,12 +103,17 @@ export function basicsErrors(draft: ProjectDraft, existing: string[]): { name?: 
   const name = draft.name.trim();
   if (!name) errors.name = "Enter a project name.";
   else if (chars(name) > NAME_CHARS_MAX) errors.name = `Use at most ${NAME_CHARS_MAX} characters.`;
+  else if (bytes(name) > NAME_BYTES_MAX) errors.name = "This name is too long to save. Shorten it.";
   else if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) errors.name = "Remove control characters from the name.";
   else {
     const same = existing.find((other) => other.trim().toLowerCase() === name.toLowerCase());
     if (same !== undefined) errors.name = `You already have a project called ${same}.`;
   }
   if (chars(draft.about) > ABOUT_CHARS_MAX) errors.about = `Use at most ${ABOUT_CHARS_MAX} characters.`;
+  else if (bytes(aboutText(draft)) > ABOUT_BYTES_MAX) {
+    errors.about = aboutText(draft) === draft.about.trim() ? "Shorten the description: it is too long to save."
+      : "Shorten the description or the Other platform text: together they are too long to save.";
+  }
   else if (CONTROL.test(draft.about)) errors.about = "Remove control characters from the description.";
   if (draft.platforms.includes("other")) {
     if (chars(draft.otherPlatform.trim()) > OTHER_PLATFORM_CHARS_MAX) errors.otherPlatform = `Use at most ${OTHER_PLATFORM_CHARS_MAX} characters.`;
@@ -107,6 +128,7 @@ export function addStack(stack: string[], entry: string): { stack: string[]; err
   const value = entry.trim();
   if (!value) return { stack, error: "Enter a name for the custom entry." };
   if (chars(value) > CUSTOM_STACK_CHARS_MAX) return { stack, error: `Custom entries can be up to ${CUSTOM_STACK_CHARS_MAX} characters.` };
+  if (bytes(value) > CUSTOM_STACK_BYTES_MAX) return { stack, error: "This custom entry is too long to save. Shorten it." };
   if (/[\u0000-\u001f\u007f-\u009f]/u.test(value)) return { stack, error: "Remove control characters." };
   if (stack.some((item) => item.toLowerCase() === value.toLowerCase())) return { stack };
   if (stack.length >= STACK_MAX) return { stack, error: `Pick at most ${STACK_MAX} tech stack items.` };
@@ -374,8 +396,7 @@ export function stepComplete(step: StepId, draft: ProjectDraft, existing: string
 /** Builds the engine request from a finished draft.
  * Input: the draft. Output: the project spec and setup; the "Other" platform text joins the description. */
 export function buildRequest(draft: ProjectDraft): { spec: ProjectSpec; setup: ProjectSetup } {
-  const other = draft.platforms.includes("other") ? draft.otherPlatform.trim() : "";
-  const about = other ? `${draft.about.trim()}${draft.about.trim() ? "\n\n" : ""}Other platform: ${other}` : draft.about.trim();
+  const about = aboutText(draft);
   return {
     spec: { name: draft.name.trim(), repositories: [] },
     setup: {

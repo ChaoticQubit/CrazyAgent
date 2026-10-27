@@ -49,6 +49,22 @@ export function withKind(rule: WakeRule, kind: TeamEventKind, on: boolean): Wake
   return { ...rule, [kind]: on };
 }
 
+/** Names what one wake rule editor shows: its target and the rule read for it, by value, so two
+ * reads of the same rule give the same view. Inputs: the editor's target key, its own rule or
+ * null and the rule in effect. Output: the view. */
+export function wakeRuleView(key: string, own: WakeRule | null, effective: WakeRule): string {
+  return JSON.stringify([key, own, effective]);
+}
+
+/** Whether a wake rule editor must not start another save: while one is in flight, and after one
+ * the engine applied until the rule read back is no longer the one it was made from, so a quick
+ * second switch cannot rebuild the rule from the stale copy and revert the first. Inputs: the view
+ * the last applied save was made from or null, the view now and whether a save is in flight.
+ * Output: true while edits wait. */
+export function wakeSaveBlocked(savedFrom: string | null, view: string, saving: boolean): boolean {
+  return saving || (savedFrom !== null && savedFrom === view);
+}
+
 /** Where the rule shown at one level comes from, for the line under its title. Inputs: whether
  * this level has its own rule and the level it falls back to. Output: one sentence. */
 export function ruleSource(own: boolean, fallback: WakeRuleLevel): string {
