@@ -20,6 +20,7 @@ const MASTER_TURNS_KEPT: i64 = 2000;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const NOT_WIRED: &str = "Team messaging is not available in this build yet.";
 const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right now.";
+const AGENT_SHOWN_MAX: usize = 64;
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
@@ -549,6 +550,97 @@ fn changes(answering: &Answering<'_>) -> (String, bool) {
         ),
         false,
     )
+}
+
+/// The team event handlers the engine gives a live master's `message`, `answer` and `status`
+/// tools: text typed into one of the project's running sub-agents, named by persona,
+/// `@handle` or `<harness>-<id>`, and the project's running sub-agents with their names and
+/// newest events.
+pub const EVENTS: TeamEvents = TeamEvents {
+    send_to_agent: message_agent,
+    answer: answer_agent,
+    status: status_text,
+};
+
+fn message_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    type_to_agent(connection, host, project, agent, text).map(|name| format!("Sent to {name}."))
+}
+
+fn answer_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    type_to_agent(connection, host, project, agent, text).map(|name| format!("Answered {name}."))
+}
+
+/// Types a master's text into the running sub-agent it names: a persona or `@handle` first,
+/// then the `<harness>-<id>` names events use. Takes the database, terminal host, project,
+/// the name and the text. Returns the agent's label, or the plain reason it was not sent.
+fn type_to_agent(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
+    let target = match super::names::resolve(connection, project, agent).map_err(unreadable)? {
+        Some(id) => format!("team-{id}"),
+        None => agent.to_owned(),
+    };
+    match super::events::send_to_agent(connection, host, project, &target, text)
+        .map_err(unreadable)?
+    {
+        Ok(id) => agent_label(connection, id).map_err(unreadable),
+        Err("team_message_invalid") => Err(format!(
+            "Not sent: give plain text up to {} bytes.",
+            super::events::SEND_BYTES_MAX
+        )),
+        Err("team_agent_not_running") => Err(format!("Not sent: {shown} is not running.")),
+        Err("team_agent_unreachable") => Err(format!(
+            "Not sent: the terminal of {shown} could not be reached."
+        )),
+        Err(_) => Err(format!(
+            "Not sent: no running sub-agent of this project is called {shown}. Call status() for their names."
+        )),
+    }
+}
+
+fn agent_label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
+    let name = super::names::name(connection, agent)?;
+    Ok(super::names::label(
+        super::AgentRole::Sub,
+        agent,
+        name.as_ref(),
+    ))
+}
+
+fn unreadable(problem: EngineError) -> String {
+    format!(
+        "Not done: the team state could not be read ({}).",
+        super::bound_text(&problem.0, 120)
+    )
+}
+
+/// Describes a project's running sub-agents for its live master, each named the way the
+/// owner sees it and the way events name it. Takes the database and the project. Returns
+/// the status text, or the plain reason it could not be read.
+fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, String> {
+    let mut status = super::events::status(connection, project).map_err(unreadable)?;
+    for line in &mut status.agents {
+        let label = agent_label(connection, line.agent).map_err(unreadable)?;
+        line.label = format!("{label} / {}", line.label);
+    }
+    Ok(status.text())
 }
 
 #[cfg(all(test, unix))]

@@ -4126,7 +4126,8 @@ pub fn start_for_engine(
         access,
         TeamLimits::default(),
     )
-    .map_err(|e| e.0)?;
+    .map_err(|e| e.0)?
+    .with_events(super::master::EVENTS);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,
