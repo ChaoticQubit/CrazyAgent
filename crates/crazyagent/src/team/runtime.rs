@@ -1500,10 +1500,10 @@ impl TeamRuntime {
             None
         };
         let fresh = fresh || grant.is_some();
-        let speaker = if author == "owner" {
-            "Message from the owner"
+        let (speaker, text) = if author == "owner" {
+            ("Message from the owner", text)
         } else {
-            "Message from the engine"
+            ("Message from the engine", super::events::agent_text(&text))
         };
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
@@ -4234,8 +4234,9 @@ fn conversation_note(ended: &EndedTask) -> String {
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
-/// task's line, its problem and its result, every agent-written part with its brackets made
-/// plain so no line can pose as the owner's. Takes the ready tasks, at least one.
+/// task's line, its problem and its result, every agent-written part through
+/// `events::agent_text` so no line can pose as the owner's. Takes the ready tasks, at least
+/// one.
 /// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
 fn results_message(ready: &[ReadyTask]) -> (String, usize) {
     assert!(!ready.is_empty());
@@ -4246,17 +4247,17 @@ fn results_message(ready: &[ReadyTask]) -> (String, usize) {
         let mut part = format!("\nTask {id} ({}): {label}", excerpt(harness, 64));
         if let Some(problem) = problem {
             part.push_str(" - ");
-            part.push_str(&super::events::plain_brackets(&bound_text(
-                problem.trim(),
+            part.push_str(&bound_text(
+                &super::events::agent_text(problem.trim()),
                 RESULT_IN_MESSAGE_BYTES_MAX,
-            )));
+            ));
         }
         part.push('\n');
         if let Some(result) = result {
-            part.push_str(&super::events::plain_brackets(&bound_text(
-                result.trim(),
+            part.push_str(&bound_text(
+                &super::events::agent_text(result.trim()),
                 RESULT_IN_MESSAGE_BYTES_MAX,
-            )));
+            ));
             part.push('\n');
         }
         if held > 0 && text.len() + part.len() + RESULTS_TRAILER.len() > RESULTS_MESSAGE_BYTES_MAX {
@@ -4630,7 +4631,8 @@ pub fn start_for_engine(
 /// Gives a fresh master the recent team conversation before one message.
 /// Takes a connection, the project, the id of the message being sent and a byte bound.
 /// Returns owner and master lines plus engine messages other than notes, oldest first,
-/// keeping the newest lines that fit within the bound.
+/// keeping the newest lines that fit within the bound; master and engine text goes through
+/// `events::agent_text`, since it can repeat what a sub-agent wrote.
 pub fn conversation_before(
     connection: &Connection,
     project: &ProjectId,
@@ -4654,14 +4656,14 @@ pub fn conversation_before(
     let mut lines = Vec::new();
     let mut used = 0;
     for (author, text) in rows {
-        let speaker = match author.as_str() {
-            "owner" => "Owner",
-            "master" => "Master",
-            _ => "Engine",
+        let (speaker, text) = match author.as_str() {
+            "owner" => ("Owner", text.trim().to_owned()),
+            "master" => ("Master", super::events::agent_text(text.trim())),
+            _ => ("Engine", super::events::agent_text(text.trim())),
         };
         let line = format!(
             "{speaker}: {}\n",
-            bound_text(text.trim(), HISTORY_MESSAGE_BYTES_MAX)
+            bound_text(&text, HISTORY_MESSAGE_BYTES_MAX)
         );
         if used + line.len() > max {
             break;
