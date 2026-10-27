@@ -420,7 +420,7 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     let committed = run(
         &sandbox,
         &profile,
-        "cd worktrees/engine-one && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && cd ../.. && echo root > root.txt && git add root.txt && git -c user.email=agent@local -c user.name=agent commit -q -m root && echo ok",
+        "cd worktrees/engine-one && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
     );
     assert!(
         committed.status.success(),
@@ -430,6 +430,148 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert_eq!(String::from_utf8_lossy(&committed.stdout), "ok\n");
     assert!(case.project.join(".git").is_dir());
     assert!(worktree.join(".git").is_file());
+    let root_commit = run(
+        &sandbox,
+        &profile,
+        "echo root > root.txt && git add root.txt && git -c user.email=agent@local -c user.name=agent commit -q -m root",
+    );
+    assert!(!root_commit.status.success());
+}
+
+/// Checks that `script`, run under `sandbox` and `profile`, cannot create `target`: the
+/// command fails and the file is absent. Input: the sandbox, the profile, the script and
+/// the target path.
+fn write_refused(sandbox: &ProjectSandbox, profile: &Path, script: &str, target: &Path) {
+    let output = run(sandbox, profile, script);
+    assert!(!output.status.success(), "{script}");
+    assert!(!target.exists(), "{}", target.display());
+}
+
+#[test]
+fn a_sandbox_refuses_writes_to_the_submodule_store() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let git = case.project.join(".git");
+    let admin = git.join("worktrees").join("engine-one").join("modules");
+    for (script, target) in [
+        (
+            "mkdir -p .git/modules/sub && : > .git/modules/sub/config",
+            git.join("modules").join("sub").join("config"),
+        ),
+        (
+            "mkdir -p .git/MODULES/sub && : > .git/MODULES/sub/config",
+            git.join("MODULES").join("sub").join("config"),
+        ),
+        (
+            "mkdir -p .git/worktrees/engine-one/modules/sub && : > .git/worktrees/engine-one/modules/sub/config",
+            admin.join("sub").join("config"),
+        ),
+    ] {
+        write_refused(&sandbox, &profile, script, &target);
+    }
+    for (script, target) in [
+        (
+            "mkdir -p sub/.git".to_owned(),
+            case.project.join("sub").join(".git"),
+        ),
+        (
+            "mkdir -p filed && : > filed/.git".to_owned(),
+            case.project.join("filed").join(".git"),
+        ),
+        (
+            "mkdir -p cased && : > cased/.GIT".to_owned(),
+            case.project.join("cased").join(".GIT"),
+        ),
+        (
+            format!(
+                "mkdir -p linked && ln -s {} linked/.git",
+                quoted(&case.project)
+            ),
+            case.project.join("linked").join(".git"),
+        ),
+        (
+            ": > staged && mkdir -p renamed && mv staged renamed/.git".to_owned(),
+            case.project.join("renamed").join(".git"),
+        ),
+        (
+            "mkdir -p worktrees/engine-one/nested/.git".to_owned(),
+            case.project
+                .join("worktrees")
+                .join("engine-one")
+                .join("nested")
+                .join(".git"),
+        ),
+    ] {
+        write_refused(&sandbox, &profile, &script, &target);
+    }
+    let index = git.join("index");
+    let before = fs::read(&index).ok();
+    let output = run(&sandbox, &profile, "printf planted > .git/index");
+    assert!(!output.status.success());
+    assert_eq!(fs::read(&index).ok(), before);
+
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&worktree)
+        .unwrap();
+    let profile = case.profiles.join("confined.sb");
+    let admin = case.project.join(".git/worktrees/one/modules");
+    for (script, target) in [
+        (
+            format!(
+                "mkdir -p {dir}/sub && : > {dir}/sub/config",
+                dir = quoted(&admin)
+            ),
+            admin.join("sub").join("config"),
+        ),
+        (
+            format!("mkdir -p {}/sub/.git", quoted(&worktree)),
+            worktree.join("sub").join(".git"),
+        ),
+        (
+            format!(
+                "mkdir -p {wt}/filed && : > {wt}/filed/.git",
+                wt = quoted(&worktree)
+            ),
+            worktree.join("filed").join(".git"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+            quoted(&worktree)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&committed.stdout), "ok\n");
 }
 
 #[test]
@@ -573,6 +715,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
+            git.join("modules"),
         ]
     );
     let text = sandbox.profile();

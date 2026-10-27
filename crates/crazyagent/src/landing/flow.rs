@@ -597,11 +597,19 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 }
 
 /// Says whether an agent worktree holds exactly a commit: nothing staged or changed in
-/// tracked files and no untracked file outside its ignore rules. Inputs: the worktree
-/// and the commit. Output: true when it holds nothing else.
+/// tracked files and no untracked file outside its ignore rules. A submodule counts by
+/// the commit it records, never by its own content, so no git runs inside it under
+/// config the engine did not write. Inputs: the worktree and the commit. Output: true
+/// when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
     repo.run(&["update-index", "-q", "--refresh"])?;
-    if !repo.test(&["diff-index", "--quiet", commit, "--"])? {
+    if !repo.test(&[
+        "diff-index",
+        "--quiet",
+        "--ignore-submodules=all",
+        commit,
+        "--",
+    ])? {
         return Ok(false);
     }
     let untracked = repo.exec(
