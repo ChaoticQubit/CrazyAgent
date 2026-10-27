@@ -426,9 +426,10 @@ impl ProjectPage {
                 }
                 "The master did not take that message."
             }
-            MasterOwnerAction::Open { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
-                "The master could not start."
-            }
+            MasterOwnerAction::Open { .. }
+            | MasterOwnerAction::NewSession { .. }
+            | MasterOwnerAction::RegisterRcliProfile { .. } => "The master could not start.",
+            MasterOwnerAction::Resume { .. } => "The session did not resume.",
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
             MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",

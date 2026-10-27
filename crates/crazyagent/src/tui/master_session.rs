@@ -14,7 +14,8 @@ use crate::master_session::{
     MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
     RcliProfileRegistration, RcliProfileRegistrationMetadata,
 };
-use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
+use crate::master_sessions::MasterSessionSummary;
+use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,7 @@ pub(super) enum Job {
     Read {
         context: Context,
         confirmation: Option<Box<Confirmation>>,
+        sessions: bool,
     },
     Mutation {
         submission: Submission,
@@ -98,6 +100,7 @@ pub(super) struct View {
     turns: Vec<MasterTurnView>,
     revision: Cursor,
     input: Option<ConversationEntry>,
+    sessions: Option<Vec<MasterSessionSummary>>,
 }
 
 struct Form {
@@ -145,6 +148,7 @@ pub(super) struct State {
     job: Option<Job>,
     home_confirmation: Option<RcliProfileRegistration>,
     registered_home: Option<RegisteredHome>,
+    sessions_shown: bool,
     pub notice: String,
 }
 
@@ -165,6 +169,7 @@ impl Default for State {
             job: None,
             home_confirmation: None,
             registered_home: None,
+            sessions_shown: false,
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -685,6 +690,73 @@ impl State {
         self.enqueue(action, self.generation)
     }
 
+    /// Parks the live session and opens a fresh one in one engine step, with the backend,
+    /// pool, account, sandbox and allowance of the session the view shows. Input: whether a
+    /// running reply may be stopped, set only after the owner confirms a
+    /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
+    pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
+        let session = self
+            .view
+            .as_ref()
+            .filter(|_| self.ready)
+            .and_then(|view| view.session.as_ref())
+            .ok_or("No master session yet; send a message to start one")?;
+        let (config_id, source_hash) = match &self.catalog {
+            Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
+            None => {
+                let (config_id, source_hash) = session.binding();
+                (config_id.clone(), source_hash.to_owned())
+            }
+        };
+        let action = MasterOwnerAction::NewSession {
+            project_id: session.project_id.clone(),
+            expected_config_id: config_id,
+            expected_source_hash: source_hash,
+            selection: Box::new(session.selection.clone()),
+            cancel_running,
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Makes a parked session live again, parking the live one, in one engine step.
+    /// Inputs: a session from the Sessions list and whether a running reply may be stopped,
+    /// set only after the owner confirms. Output: the intent is queued, or why it cannot be.
+    pub fn resume(&mut self, session_id: &SessionId, cancel_running: bool) -> Result<(), String> {
+        let project = self
+            .project
+            .clone()
+            .filter(|_| self.ready)
+            .ok_or("Waiting for actual master state; Ctrl-R reconnects")?;
+        let listed = self
+            .sessions()
+            .and_then(|sessions| sessions.iter().find(|item| &item.session_id == session_id))
+            .ok_or("That session is not in the Sessions list")?;
+        if listed.phase != MasterSessionPhase::Parked {
+            return Err("Only a parked session can be resumed".into());
+        }
+        let action = MasterOwnerAction::Resume {
+            project_id: project,
+            session_id: session_id.clone(),
+            cancel_running,
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Shows or hides the Sessions list. While shown, each master read also reads the
+    /// project's sessions. Input: whether the list is shown.
+    pub fn show_sessions(&mut self, shown: bool) {
+        if shown && !self.sessions_shown {
+            self.next_read = Instant::now();
+        }
+        self.sessions_shown = shown;
+    }
+
+    /// The project's sessions as last read, live one included, newest activity first.
+    /// Output: None while the list is hidden or before its first read.
+    pub fn sessions(&self) -> Option<&[MasterSessionSummary]> {
+        self.view.as_ref()?.sessions.as_deref()
+    }
+
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -758,6 +830,7 @@ impl State {
         Some(Job::Read {
             context,
             confirmation: confirmation.map(Box::new),
+            sessions: self.sessions_shown,
         })
     }
 
@@ -1300,6 +1373,21 @@ impl View {
                     && session.phase == MasterSessionPhase::Configured
                     && session.owner == *receipt
             }
+            MasterOwnerAction::NewSession {
+                selection,
+                expected_config_id,
+                expected_source_hash,
+                ..
+            } => {
+                session.selection == **selection
+                    && session.config_id == *expected_config_id
+                    && session.source_hash == *expected_source_hash
+                    && session.phase == MasterSessionPhase::Configured
+                    && session.owner == *receipt
+            }
+            MasterOwnerAction::Resume { session_id, .. } => {
+                session.session_id == *session_id && session.phase == MasterSessionPhase::Configured
+            }
             MasterOwnerAction::Submit {
                 session_id, text, ..
             } => {
@@ -1330,7 +1418,7 @@ impl View {
             }
             MasterOwnerAction::Close { session_id, .. } => {
                 session.session_id == *session_id
-                    && session.phase == MasterSessionPhase::Closed
+                    && session.phase == MasterSessionPhase::Parked
                     && session.current_turn.is_none()
             }
             MasterOwnerAction::Resolve {
@@ -1731,6 +1819,8 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
 pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
     match action {
         MasterOwnerAction::Open { project_id, .. }
+        | MasterOwnerAction::NewSession { project_id, .. }
+        | MasterOwnerAction::Resume { project_id, .. }
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
         | MasterOwnerAction::Close { project_id, .. }
@@ -2033,6 +2123,7 @@ pub(super) async fn read_view(
     controller: &mut OwnerController,
     context: &Context,
     confirmation: Option<&Confirmation>,
+    sessions: bool,
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2049,6 +2140,7 @@ pub(super) async fn read_view(
         turns: Vec::new(),
         revision: state.revision,
         input: None,
+        sessions: None,
     };
     if let Some(session) = &view.session {
         if session.project_id != context.project
@@ -2078,7 +2170,38 @@ pub(super) async fn read_view(
         )
         .await?;
     }
+    if sessions {
+        view.sessions = Some(read_sessions(controller, &context.project).await?);
+    }
     Ok(view)
+}
+
+/// Reads the project's master sessions for the Sessions list: the live one and the
+/// parked ones, newest activity first, at most fifty. Inputs: a connected owner
+/// controller and the project. Output: the engine's list, or the read's problem.
+pub(super) async fn read_sessions(
+    controller: &mut OwnerController,
+    project: &ProjectId,
+) -> Result<Vec<MasterSessionSummary>, String> {
+    let state = controller
+        .read(OwnerRead::ProjectMasterSessions {
+            project_id: project.clone(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let OwnerData::ProjectMasterSessions { sessions } = state.data else {
+        return Err("master_sessions_read_required".into());
+    };
+    if sessions.len() > crate::master_sessions::SESSIONS_LISTED_MAX
+        || sessions
+            .iter()
+            .filter(|session| session.phase == MasterSessionPhase::Configured)
+            .count()
+            > 1
+    {
+        return Err("master_sessions_read_context".into());
+    }
+    Ok(sessions)
 }
 
 async fn read_turns(

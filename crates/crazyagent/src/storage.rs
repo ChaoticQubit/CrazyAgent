@@ -679,6 +679,7 @@ impl Storage {
                                 &query,
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
+                                    | OwnerRead::ProjectMasterSessions { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
                                     &mut connection,
@@ -940,6 +941,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     worker_dispatch::initialize(connection)?;
     model_gateway::initialize(connection)?;
     master_session::initialize(connection)?;
+    crate::master_sessions::initialize(connection)?;
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
     harness_groups::initialize(connection)

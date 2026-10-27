@@ -12,6 +12,7 @@ import { Badge, NotReady, ProjectEmpty, ProjectMark, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, sendsMessage, type Tone } from "../../ui";
 import { useLinkOpener } from "./links";
+import { SessionsBar } from "./sessions";
 
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
@@ -210,6 +211,7 @@ export function ConversationTab({ data }: { data: ProjectData }) {
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
     </div>
+    <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     <div className="pj-thread" ref={thread} aria-live="polite">
       {turns.length === 0 && Object.keys(sent).length === 0 && <ProjectEmpty title="No messages yet">

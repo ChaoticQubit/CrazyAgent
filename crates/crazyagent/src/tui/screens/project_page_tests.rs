@@ -1035,14 +1035,14 @@ async fn e_ends_the_conversation_and_the_next_message_starts_a_new_one() {
     assert!(shown.contains("e End conversation"), "{shown}");
     shell.key(Key::Char('e'));
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("The master conversation is closed.")
+        shown.contains("This session is parked.")
     })
     .await;
     assert!(!shown.contains("e End conversation"), "{shown}");
     let (closed, _) = latest_master(&mut engine, &notes).await;
     let closed = closed.unwrap();
     assert_eq!(closed.session_id, first.session_id);
-    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.phase, MasterSessionPhase::Parked);
     assert_eq!(closed.current_turn, None);
 
     say(&mut shell, &mut connection, "Add a dark theme").await;

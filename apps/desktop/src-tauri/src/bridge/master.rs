@@ -16,6 +16,13 @@ pub struct MasterState {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MasterSessions {
+    pub ticket: String,
+    pub revision: String,
+    pub sessions: Vec<crazyagent::master_sessions::MasterSessionSummary>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MasterTurns {
     pub ticket: String,
     pub revision: String,
@@ -131,6 +138,8 @@ impl NativeBridge {
         let selected = self.master_project(ticket)?;
         let project_id = match &action {
             MasterOwnerAction::Open { project_id, .. }
+            | MasterOwnerAction::NewSession { project_id, .. }
+            | MasterOwnerAction::Resume { project_id, .. }
             | MasterOwnerAction::Submit { project_id, .. }
             | MasterOwnerAction::Cancel { project_id, .. }
             | MasterOwnerAction::Close { project_id, .. } => project_id,
@@ -228,6 +237,131 @@ impl NativeBridge {
         let action = MasterOwnerAction::Close {
             project_id,
             session_id,
+        };
+        self.apply_master(ticket, action, generation).await
+    }
+
+    /// Lists the selected project's master sessions, the live one first, then newest
+    /// activity first. Input: the selection ticket. Output: the bounded session list.
+    pub async fn master_sessions(&mut self, ticket: &str) -> Result<MasterSessions, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let state = self
+            .controller()?
+            .read(OwnerRead::ProjectMasterSessions {
+                project_id: project_id.clone(),
+            })
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let OwnerData::ProjectMasterSessions { sessions } = state.data else {
+            return Err(failure("unexpected_reply"));
+        };
+        if sessions.len() > crazyagent::master_sessions::SESSIONS_LISTED_MAX {
+            return Err(failure("unexpected_reply"));
+        }
+        bounded(MasterSessions {
+            ticket: ticket.into(),
+            revision: state.revision.value().to_string(),
+            sessions,
+        })
+    }
+
+    /// Reads one page of any session of the selected project, live or parked, so a past
+    /// session can be read before it is resumed. Inputs: the selection ticket, the
+    /// session id from the session list and the page cursor. Output: the turn page.
+    pub async fn session_turns(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        cursor: Option<MasterCursor>,
+    ) -> Result<MasterTurns, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        if cursor
+            .as_ref()
+            .is_some_and(|value| value.project_id != project_id || value.session_id != session_id)
+        {
+            return Err(failure("stale_master"));
+        }
+        let state = self
+            .controller()?
+            .read(OwnerRead::ProjectMasterTurns {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                cursor,
+                limit: PAGE_SIZE,
+            })
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let page = match state.data {
+            OwnerData::ProjectMasterTurns { page } => page,
+            OwnerData::ResyncRequired => return Err(failure("resync_required")),
+            _ => return Err(failure("unexpected_reply")),
+        };
+        if page.project_id != project_id
+            || page.session_id != session_id
+            || page.turns.len() > usize::from(PAGE_SIZE)
+            || page.turns.iter().any(|turn| turn.session_id != session_id)
+        {
+            return Err(failure("unexpected_reply"));
+        }
+        bounded(MasterTurns {
+            ticket: ticket.into(),
+            revision: state.revision.value().to_string(),
+            config_id: state.config_id.as_str().into(),
+            page,
+        })
+    }
+
+    /// Parks the selected project's live session and opens a fresh one with the same
+    /// defaults Open uses, in one engine action. Inputs: the selection ticket, whether
+    /// the owner confirmed stopping a running turn, and a fresh draft generation. Output:
+    /// the owner intent receipt; a running turn without the confirm is a plain rejection.
+    pub async fn new_master_session(
+        &mut self,
+        ticket: &str,
+        cancel_running: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let opened = crazyagent::tui::default_master_open(self.controller()?, &project_id)
+            .await
+            .map_err(|_| failure("master_open_unavailable"))?;
+        let MasterOwnerAction::Open {
+            project_id,
+            expected_config_id,
+            expected_source_hash,
+            selection,
+        } = opened
+        else {
+            return Err(failure("master_open_unavailable"));
+        };
+        let action = MasterOwnerAction::NewSession {
+            project_id,
+            expected_config_id,
+            expected_source_hash,
+            selection,
+            cancel_running,
+        };
+        self.apply_master(ticket, action, generation).await
+    }
+
+    /// Makes a parked session of the selected project live again, parking the live one, in
+    /// one engine action. Inputs: the selection ticket, the session id from the session
+    /// list, whether the owner confirmed stopping a running turn, and a fresh draft
+    /// generation. Output: the owner intent receipt.
+    pub async fn resume_master_session(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        cancel_running: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        let action = MasterOwnerAction::Resume {
+            project_id,
+            session_id,
+            cancel_running,
         };
         self.apply_master(ticket, action, generation).await
     }
