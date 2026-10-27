@@ -616,6 +616,27 @@ fn tabs_input_and_escape_follow_the_design_keys() {
 }
 
 #[test]
+fn in_the_master_input_shift_enter_and_ctrl_j_add_a_line_and_enter_never_does() {
+    let mut screen = ProjectScreen::new(ProjectId::new("keys").unwrap(), "Keys".into(), None);
+    screen.open(Tab::Conversation);
+    assert!(screen.typing);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.key(shifted(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('b'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+        ProjectReply::Handled
+    );
+    assert_eq!(screen.input.value(), "a\nb\n");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.input.value(),
+        "a\nb\n",
+        "Enter is the send key, never a new line; with no pool nothing is sent"
+    );
+}
+
+#[test]
 fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
     let project = ProjectId::new("order").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Order".into(), None);

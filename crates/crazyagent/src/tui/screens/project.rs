@@ -1127,6 +1127,10 @@ impl ProjectScreen {
                 self.typing = false;
                 ProjectReply::Handled
             }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.input.insert_str("\n");
+                ProjectReply::Handled
+            }
             KeyCode::Enter => {
                 let text = self.input.value().trim().to_owned();
                 if text.is_empty() || !self.master_usable() {

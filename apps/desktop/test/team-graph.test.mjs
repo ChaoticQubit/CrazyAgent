@@ -231,8 +231,8 @@ test("the composer names who reads the prompt and says a sub-agent's master is t
   const sub = panel(team.nodes[0]);
   assert.match(sub, /<label for="tg-prompt-team-2" class="pj-sr">Prompt codex-2<\/label>/);
   assert.match(sub, /placeholder="Tell codex-2 what to do\. Its master is told what you send\."/);
-  assert.match(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/);
-  assert.match(sub, /Opens once the terminal is live\./);
+  assert.doesNotMatch(sub, /<textarea id="tg-prompt-team-2"[^>]* disabled=""/, "the draft box takes typing before the terminal is live");
+  assert.match(sub, /Sends once the terminal is live\./);
   assert.match(sub, /<button type="submit" class="btn primary small" disabled=""/);
   const master = panel(team.nodes[2]);
   assert.match(master, /Prompt the master/);

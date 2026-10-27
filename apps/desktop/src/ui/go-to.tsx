@@ -24,7 +24,8 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Cmd+,", "Settings"],
   ["Cmd+[  Cmd+]", "Back, forward"],
   ["Cmd+1 to Cmd+6", "Project tabs"],
-  ["Cmd+Enter", "Send a message or prompt"],
+  ["Enter", "Send a message or prompt"],
+  ["Shift+Enter", "New line in a message or prompt"],
   ["Esc", "Close a dialog or panel"],
   ["Arrow keys", "Move a focused box in the team graph"],
 ];
