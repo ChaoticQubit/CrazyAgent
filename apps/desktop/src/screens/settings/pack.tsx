@@ -103,6 +103,29 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
   </div>;
 }
 
+/** The confirm before a pack change: Remove in a danger confirm, Install in a plain one, and
+ * neither closes or cancels while a change is in flight, so a request that still lands is never
+ * shown as cancelled. Inputs: the pending change, whether a change is in flight and the handlers. */
+export function PackConfirmDialogs({ ask, pending, onCancel, onConfirm }: {
+  ask: PackAsk | null;
+  pending: boolean;
+  onCancel: () => void;
+  onConfirm: (ask: PackAsk) => void;
+}) {
+  const words = ask ? packConfirm(ask) : null;
+  return <>
+    <ConfirmDialog open={ask?.kind === "remove"} title={words?.title ?? ""} confirmLabel={words?.confirm ?? "Remove"} pending={pending}
+      onCancel={onCancel} onConfirm={() => { if (ask) onConfirm(ask); }}>
+      {words?.body}
+    </ConfirmDialog>
+    <Dialog open={ask?.kind === "install"} title={words?.title ?? ""} busy={pending} onClose={onCancel}
+      footer={<><Button disabled={pending} onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" pending={pending} pendingLabel="Starting..." onClick={() => { if (ask) onConfirm(ask); }}>{words?.confirm ?? "Install"}</Button></>}>
+      <p>{words?.body}</p>
+    </Dialog>
+  </>;
+}
+
 /** Settings, Pack: reads the tools and the pack, installs missing tools, switches, removes and
  * installs entries, and reads again every few seconds while a tool is checked or setup installs. */
 export function PackSettings() {
@@ -141,19 +164,10 @@ export function PackSettings() {
     else void apply(pending.entry.id, () => runSetup([pending.entry.id]), `Installing ${name}.`);
   };
 
-  const words = ask ? packConfirm(ask) : null;
   return <>
     <PackSettingsView status={status} busy={busy} problem={problem} skills={listed.kind === "ok" ? skillEntries(listed.value) : []} onRetry={reload} onAsk={setAsk}
       onInstallTools={() => void apply(TOOLS_BUSY, () => runSetup([]), "Installing tmux, uv and graphify.")}
       onSwitch={(entry, on) => void apply(entry.id, () => setPackEntry(entry.id, on), `${entryName(entry)} is ${on ? "on" : "off"}.`)} />
-    <ConfirmDialog open={ask?.kind === "remove"} title={words?.title ?? ""} confirmLabel={words?.confirm ?? "Remove"} pending={busy !== null}
-      onCancel={() => setAsk(null)} onConfirm={() => { if (ask) confirm(ask); }}>
-      {words?.body}
-    </ConfirmDialog>
-    <Dialog open={ask?.kind === "install"} title={words?.title ?? ""} onClose={() => setAsk(null)}
-      footer={<><Button onClick={() => setAsk(null)}>Cancel</Button>
-        <Button variant="primary" pending={busy !== null} pendingLabel="Starting..." onClick={() => { if (ask) confirm(ask); }}>{words?.confirm ?? "Install"}</Button></>}>
-      <p>{words?.body}</p>
-    </Dialog>
+    <PackConfirmDialogs ask={ask} pending={busy !== null} onCancel={() => { if (busy === null) setAsk(null); }} onConfirm={confirm} />
   </>;
 }
