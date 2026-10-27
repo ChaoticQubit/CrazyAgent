@@ -89,7 +89,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
 /** The desktop setup screen: reads setup, installs missing tools and the ticked pack, and reads
  * again every few seconds while setup runs. Input: what to do on Continue. */
 export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
-  const [loaded, reload] = useLoad(loadSetupStatus);
+  const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
   const [fresh, setFresh] = useState<SetupStatus | null>(null);
   const [ticks, setTicks] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);

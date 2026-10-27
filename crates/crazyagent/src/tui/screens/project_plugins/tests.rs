@@ -21,6 +21,7 @@ use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::KeyModifiers;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::text::Line;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 
@@ -389,6 +390,54 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
 }
 
 #[test]
+fn enter_on_a_skill_asks_the_host_for_its_page_and_skill_names_share_the_accent() {
+    let mut view = loaded();
+    assert!(
+        frame(&view, 120, 36)
+            .last()
+            .unwrap()
+            .contains("Enter Details")
+    );
+    match view.key(press(KeyCode::Enter)) {
+        PluginsReply::OpenSkill { id, name } => {
+            assert_eq!(id, "pl0xfrontend-design");
+            assert_eq!(name, "frontend-design");
+        }
+        other => panic!("the skill page expected, got {other:?}"),
+    }
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    assert!(
+        !frame(&view, 120, 36)
+            .last()
+            .unwrap()
+            .contains("Enter Details")
+    );
+    assert!(
+        matches!(view.key(press(KeyCode::Enter)), PluginsReply::Ignored),
+        "Enter on an approved server stays with the host"
+    );
+
+    let mut look = Look::plain();
+    look.accent = Style::new().fg(ratatui::style::Color::Cyan);
+    let (rows, _) = loaded().rows(116, 30, &look);
+    let lines: Vec<Line<'static>> = rows.into_iter().map(Row::line).collect();
+    let fg = |name: &str| {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content.trim() == name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+            .style
+            .fg
+    };
+    assert_eq!(fg("linear-method"), look.accent.fg);
+    assert_eq!(fg("tidepool-style"), look.accent.fg);
+    assert_ne!(fg("github"), look.accent.fg, "server names stay plain");
+}
+
+#[test]
 fn a_and_m_ask_the_host_for_the_project_add_forms() {
     let mut view = loaded();
     assert!(matches!(
@@ -734,6 +783,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                     sent.push(match job.as_ref() {
                         SettingsJob::ProjectPlugins { .. } => "project plugins",
                         SettingsJob::Plugin(_) => "plugin change",
+                        SettingsJob::SkillDetail { .. } => "skill detail",
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
@@ -845,4 +895,36 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Project settings"), "{shown}");
     assert!(shown.contains("Off here"), "{shown}");
+
+    shell.key(Key::Enter);
+    let sent = drive(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["skill detail"]);
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Tidepool  /  Settings  /  release-notes"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("release-notes  Off for this project"),
+        "{shown}"
+    );
+    shell.key(Key::Char(' '));
+    let sent = drive(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["plugin change", "skill detail"]);
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("release-notes  On for this project"),
+        "{shown}"
+    );
+    let skills = engine
+        .controller
+        .plugin_skills(Some(project()))
+        .await
+        .unwrap();
+    assert_eq!(skills[0].on_here, Some(true));
+    shell.key(Key::Esc);
+    drive(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Project settings"), "{shown}");
+    assert!(!shown.contains("Off here"), "{shown}");
 }

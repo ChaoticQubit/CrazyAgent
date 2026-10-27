@@ -537,6 +537,30 @@ export function accountSchedule(): Promise<Result<AccountSchedule>> {
   return call<AccountSchedule>("desktop_account_schedule");
 }
 
+export type AccountStanding =
+  | { kind: "next"; weekly_resets_ms: number | null; weekly_left_percent: number | null; use_last: boolean }
+  | { kind: "paused"; until_ms: number }
+  | { kind: "never_use" }
+  | { kind: "five_hour_cap"; until_ms: number | null }
+  | { kind: "reserve_reached"; reserve_percent: number; until_ms: number | null };
+
+export interface RankedAccount {
+  connection: string;
+  standing: AccountStanding;
+}
+
+export interface PoolRanking {
+  pool: string;
+  strategy: AccountStrategy;
+  accounts: RankedAccount[];
+}
+
+/** Reads each pool's account ranking: the order work would try its accounts now, then each
+ * held account with why. Output: one ranking per pool. */
+export function accountRanking(): Promise<Result<PoolRanking[]>> {
+  return call<PoolRanking[]>("desktop_account_ranking");
+}
+
 /** Saves one account choice change. Input: the change. Output: ok once the engine applied
  * it, or a plain error. */
 export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {

@@ -1144,20 +1144,57 @@ export function useAppSession(): Session {
   return session;
 }
 
+export const LOAD_CACHE_MAX = 64;
+const loadCache = new Map<string, Result<unknown>>();
+
+/** The cache key of one read: its name and the keys it reads with. Inputs: the read's cache
+ * name and keys. Output: the key. */
+export function loadKey(cache: string, keys: readonly unknown[]): string {
+  return `${cache}\n${JSON.stringify(keys)}`;
+}
+
+/** Keeps a read's good reply for the next mount, in memory only, newest last, dropping the
+ * oldest past LOAD_CACHE_MAX. Errors and not-ready replies leave the cached value as it was.
+ * Inputs: the cache key and the reply. Output: none. */
+export function cacheLoad<T>(key: string, result: Result<T>): void {
+  if (result.kind !== "ok") return;
+  loadCache.delete(key);
+  loadCache.set(key, result);
+  for (const oldest of loadCache.keys()) {
+    if (loadCache.size <= LOAD_CACHE_MAX) break;
+    loadCache.delete(oldest);
+  }
+}
+
+/** The last good reply cached for a key. Input: the cache key, or null for an uncached read.
+ * Output: the reply, or undefined. */
+export function cachedLoad<T>(key: string | null): Result<T> | undefined {
+  return key === null ? undefined : loadCache.get(key) as Result<T> | undefined;
+}
+
 /** Loads one engine read for a screen and reloads it when the session revision or the given
- * keys change. Inputs: the read and its keys. Output: the loaded value and a reload action. */
-export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = []): [Loaded<T>, () => void] {
+ * keys change. A read given a cache name first shows its last good reply from an earlier mount,
+ * then refreshes in the background; a failed refresh shows its error as an uncached read does.
+ * Inputs: the read, its keys and an optional cache name. Output: the loaded value and a reload action. */
+export function useLoad<T>(read: () => Promise<Result<T>>, keys: unknown[] = [], cache?: string): [Loaded<T>, () => void] {
   const session = useContext(SessionContext);
-  const [value, setValue] = useState<Loaded<T>>({ kind: "loading" });
+  const key = cache === undefined ? null : loadKey(cache, keys);
+  const [value, setValue] = useState<Loaded<T>>(() => cachedLoad<T>(key) ?? { kind: "loading" });
   const [tick, setTick] = useState(0);
+  const shownKey = useRef(key);
   useEffect(() => {
     let live = true;
-    setValue((old) => old.kind === "ok" ? old : { kind: "loading" });
+    const cached = cachedLoad<T>(key);
+    const same = shownKey.current === key;
+    shownKey.current = key;
+    setValue((old) => cached ?? (old.kind === "ok" && same ? old : { kind: "loading" }));
     void read().then((result) => {
       if (!live) return;
-      setValue(session ? session.noteResult(result) : result);
+      const noted = session ? session.noteResult(result) : result;
+      if (key !== null) cacheLoad(key, noted);
+      setValue(noted);
     });
     return () => { live = false; };
-  }, [session?.revision, tick, ...keys]);
+  }, [session?.revision, tick, key, ...keys]);
   return [value, () => setTick((old) => old + 1)];
 }
