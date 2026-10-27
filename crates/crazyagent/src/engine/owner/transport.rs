@@ -66,9 +66,9 @@ mod owner_server_tests;
 mod secret_storage_wait_tests;
 
 const SOCKET: &str = "owner.sock";
-const CLIENTS_MAX: usize = 2;
+const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
-const HANDSHAKES_MAX: usize = 3;
+const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
 
