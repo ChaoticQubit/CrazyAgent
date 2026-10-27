@@ -63,6 +63,13 @@ pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) drop: &'a Path,
 }
 
+/// The most stream output one Claude master run may read: the 64 MiB a default master turn
+/// is allowed. Claude Code writes each tool result whole on its stream, a written file twice,
+/// so a 1 MiB bound stopped a turn at its first large result. Frames are decoded one line at
+/// a time, so memory stays within the line bound.
+#[cfg(unix)]
+const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
+
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
@@ -80,7 +87,7 @@ impl ClaudeHostLimits {
             || self.run_time > Duration::from_secs(600)
             || self.cleanup_time.is_zero()
             || self.cleanup_time > Duration::from_secs(5)
-            || !(1..=1_048_576).contains(&self.stdout_bytes)
+            || !(1..=STDOUT_BYTES_MAX).contains(&self.stdout_bytes)
             || !(1..=262_144).contains(&self.stderr_bytes)
             || !(1..=4096).contains(&self.events)
         {
@@ -96,7 +103,7 @@ impl ClaudeHostLimits {
         let limits = Self {
             run_time: Duration::from_millis(budget.wall_time_ms.min(600_000)),
             cleanup_time: Duration::from_secs(5),
-            stdout_bytes: usize::try_from(budget.output_bytes.min(1_048_576))
+            stdout_bytes: usize::try_from(budget.output_bytes.min(STDOUT_BYTES_MAX as u64))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
             stderr_bytes: usize::try_from(budget.output_bytes.min(262_144))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
