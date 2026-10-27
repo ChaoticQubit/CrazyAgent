@@ -20,6 +20,7 @@ pub(in crate::tui) enum ChangesQuery {
     Accept {
         id: ChangeSetId,
         expected_head: String,
+        message: String,
     },
     Discard {
         id: ChangeSetId,
@@ -114,9 +115,13 @@ impl NativeOwner {
             ChangesQuery::Diff { id, page } => {
                 ChangesView::Diff(controller.change_diff(id, page).await.map_err(problem)?)
             }
-            ChangesQuery::Accept { id, expected_head } => ChangesView::Accepted(
+            ChangesQuery::Accept {
+                id,
+                expected_head,
+                message,
+            } => ChangesView::Accepted(
                 controller
-                    .accept_changes(id, expected_head)
+                    .accept_changes(id, expected_head, Some(message))
                     .await
                     .map_err(problem)?,
             ),

@@ -1425,12 +1425,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: String,
                 expected_head: String,
+                message: Option<String>,
             }
-            let Args { id, expected_head } = match parse(args) {
+            let Args { id, expected_head, message } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.accept_change(id, expected_head)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .accept_change(id, expected_head, message)?; call.await }.await;
             routed(result)
         }
         "desktop_discard_change" => {

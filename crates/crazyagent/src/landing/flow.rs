@@ -14,6 +14,21 @@ const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
 const NAME_BYTES_MAX: usize = 128;
 const SUBJECT_CHARS_MAX: usize = 72;
+const PROPOSED_BYTES_MAX: usize = 1024;
+const AGENT_COMMITS_READ_MAX: usize = 200;
+const MORE_COMMITS: &str = "\n- and more commits";
+const LOCAL_ROOTS: [&str; 10] = [
+    "~/",
+    "/Users/",
+    "/home/",
+    "/root/",
+    "/private/",
+    "/tmp/",
+    "/var/",
+    "/Volumes/",
+    "/mnt/",
+    "/opt/",
+];
 const LINK_BYTES_MAX: usize = 4096;
 const CONFLICTS_SHOWN_MAX: usize = 50;
 static BUSY: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
@@ -106,17 +121,104 @@ fn name(text: &str) -> Result<String, EngineError> {
     Ok(text.to_owned())
 }
 
-/// The first line of a prompt as a commit subject: plain, trimmed and at most
-/// `SUBJECT_CHARS_MAX` characters. Input: the prompt. Output: the line, maybe empty.
-pub(super) fn subject(prompt: &str) -> String {
-    let line = plain(prompt.lines().next().unwrap_or_default());
-    let line: String = line
-        .trim()
-        .chars()
-        .filter(|c| *c != '\u{FFFD}' && *c != '\t')
-        .take(SUBJECT_CHARS_MAX)
-        .collect();
-    line.trim().to_owned()
+/// A commit subject from free text: its first line, plain, with paths under `roots`
+/// made relative to them and any other absolute local path cut to its last component,
+/// ended at the last whole word within `SUBJECT_CHARS_MAX` characters. A first word
+/// longer than that is cut to fit. Inputs: the text and the folders, innermost first.
+/// Output: the subject, maybe empty.
+pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
+    let mut line = plain(text.lines().next().unwrap_or_default());
+    for root in roots.iter().filter_map(|root| root.to_str()) {
+        if root.len() > 1 {
+            line = line.replace(&format!("{}/", root.trim_end_matches('/')), "");
+        }
+    }
+    let mut subject = String::new();
+    let words = line
+        .split(|c: char| c.is_whitespace() || c == '\u{FFFD}')
+        .map(local_path)
+        .filter(|word| !word.is_empty());
+    for word in words {
+        let (used, more) = (subject.chars().count(), word.chars().count());
+        if used == 0 && more > SUBJECT_CHARS_MAX {
+            return word.chars().take(SUBJECT_CHARS_MAX).collect();
+        }
+        if used + usize::from(used > 0) + more > SUBJECT_CHARS_MAX {
+            break;
+        }
+        if used > 0 {
+            subject.push(' ');
+        }
+        subject.push_str(&word);
+    }
+    assert!(subject.chars().count() <= SUBJECT_CHARS_MAX);
+    subject
+}
+
+/// One word with an absolute local path in it cut to the path's last component, the
+/// punctuation around it kept. Input: the word. Output: the word, maybe empty.
+fn local_path(word: &str) -> String {
+    let core = word.trim_start_matches(['(', '"', '\'', '<', '[', '`']);
+    let path = core.trim_end_matches([')', '"', '\'', '>', ']', '`', ',', '.', ';', ':', '!', '?']);
+    if !LOCAL_ROOTS.iter().any(|root| path.starts_with(root)) {
+        return word.to_owned();
+    }
+    let (lead, tail) = (&word[..word.len() - core.len()], &core[path.len()..]);
+    match path.rsplit('/').find(|part| !part.is_empty()) {
+        Some(last) => format!("{lead}{last}{tail}"),
+        None => String::new(),
+    }
+}
+
+/// The message an Accept proposes from the commits the agent made itself above the
+/// base: the latest subject, then the earlier ones newest first as a list. Commits the
+/// engine made and merges are left out. Inputs: the agent repository, the record and
+/// the folders paths are shown relative to. Output: the message, empty when the agent
+/// made no commit, at most `PROPOSED_BYTES_MAX` bytes.
+fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, EngineError> {
+    let count = format!("--max-count={AGENT_COMMITS_READ_MAX}");
+    let range = format!("{}..{}", record.base, record.head);
+    let printed = repo.run(&[
+        "log",
+        "-z",
+        "--no-merges",
+        "--no-show-signature",
+        "--format=%ae%x00%s",
+        &count,
+        &range,
+        "--",
+    ])?;
+    let printed = String::from_utf8_lossy(&printed);
+    let fields: Vec<&str> = printed.split_terminator('\0').collect();
+    let mut subjects = fields
+        .chunks_exact(2)
+        .filter(|commit| commit[0] != ENGINE.1)
+        .map(|commit| subject(commit[1], roots))
+        .filter(|line| !line.is_empty());
+    let Some(mut message) = subjects.next() else {
+        return Ok(String::new());
+    };
+    let mut cut = fields.len() / 2 >= AGENT_COMMITS_READ_MAX;
+    let mut list = String::new();
+    for earlier in subjects {
+        if message.len() + 2 + list.len() + earlier.len() + 3 + MORE_COMMITS.len()
+            > PROPOSED_BYTES_MAX
+        {
+            cut = true;
+            break;
+        }
+        list.push_str("\n- ");
+        list.push_str(&earlier);
+    }
+    if cut {
+        list.push_str(MORE_COMMITS);
+    }
+    if !list.is_empty() {
+        message.push('\n');
+        message.push_str(&list);
+    }
+    assert!(message.len() <= PROPOSED_BYTES_MAX);
+    Ok(message)
 }
 
 pub(super) fn now_ms() -> Result<u64, EngineError> {
@@ -362,7 +464,8 @@ pub(super) fn record(
     if above != head && diff::changed_paths(&repo, above, &head)?.len() > bounds.files {
         return Err(failure("changes_too_large"));
     }
-    let line = subject(&turn.prompt_line);
+    let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
+    let line = subject(&turn.prompt_line, &roots);
     let message = format!(
         "{}\n\nTurn {turn_id} ended: {}.\n",
         if line.is_empty() { "Agent turn" } else { &line },
@@ -384,6 +487,7 @@ pub(super) fn record(
             last_outcome: turn.outcome,
             turn: turn_id.clone(),
             prompt_line: line,
+            message: String::new(),
             files: 0,
             added: 0,
             removed: 0,
@@ -409,6 +513,7 @@ pub(super) fn record(
     record.head = current.clone();
     let stats = diff::stats(&repo, &record.base, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
+    record.message = proposed(&repo, &record, &roots)?;
     record.updated_ms = now;
     store::save(db, &record)?;
     let shared = shared(&workspace.repository)?;

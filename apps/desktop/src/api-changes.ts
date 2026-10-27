@@ -20,6 +20,7 @@ export interface ChangeSet {
   updated_ms: number;
   restorable_until_ms: number | null;
   conflicts: string[];
+  message: string;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -58,6 +59,7 @@ const REFUSALS: Record<string, string> = {
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
   changes_agent_has_pending: "This agent has newer changes waiting. Accept or discard those first.",
   changes_agent_busy: "The agent is working right now. Try again when it finishes.",
@@ -105,11 +107,11 @@ export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeD
   return call<ChangeDiff>("desktop_change_diff", { id, page });
 }
 
-/** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id and
- * the head the owner reviewed. Output: the new commit and its branch, or the files that
- * conflict with the branch, in which case nothing changed. */
-export function acceptChange(id: string, expectedHead: string): Promise<Result<AcceptOutcome>> {
-  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead });
+/** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id,
+ * the head the owner reviewed and the owner's commit message. Output: the new commit and
+ * its branch, or the files that conflict with the branch, in which case nothing changed. */
+export function acceptChange(id: string, expectedHead: string, message: string): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the

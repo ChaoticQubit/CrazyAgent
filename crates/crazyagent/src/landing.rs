@@ -23,6 +23,8 @@ pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// The most change sets one list reply carries, newest first.
 pub const LIST_MAX: usize = 32;
+/// The most bytes an owner-edited Accept message may hold.
+pub const MESSAGE_BYTES_MAX: usize = 4096;
 
 /// Who made a change set: the master of a project conversation or one team sub-agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +128,7 @@ pub struct TurnEnd {
 
 /// One change set as the owner's Changes view shows it. `checked` is false in V1: no
 /// CrazyAgent check ran. `conflicts` names the files the last Accept conflicted on.
+/// `message` is the commit message an Accept proposes for the owner to edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -143,6 +146,8 @@ pub struct ChangeSetView {
     pub updated_ms: u64,
     pub restorable_until_ms: Option<u64>,
     pub conflicts: Vec<String>,
+    #[serde(default)]
+    pub message: String,
 }
 
 /// How a file changed between a change set's base and head.
@@ -325,19 +330,21 @@ pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, 
 
 /// Lands a change set as one squash commit on the owner's checked-out branch, authored
 /// with the owner's git identity. Inputs: the store, the owner's home folder (where git
-/// finds the owner's own user.name and user.email), the change set and the head the
-/// owner reviewed. Output: the landed commit and branch, or the conflicting files.
+/// finds the owner's own user.name and user.email), the change set, the head the owner
+/// reviewed and the owner's edited message, None for the proposed one. Output: the
+/// landed commit and branch, or the conflicting files.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
     id: &ChangeSetId,
     expected_head: &str,
+    message: Option<&str>,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, &|_| false);
+    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
     #[cfg(not(unix))]
     {
-        let _ = (db, owner_home, id, expected_head);
+        let _ = (db, owner_home, id, expected_head, message);
         Err(unavailable())
     }
 }

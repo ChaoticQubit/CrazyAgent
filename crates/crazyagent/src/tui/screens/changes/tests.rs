@@ -32,6 +32,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         updated_ms: 2,
         restorable_until_ms: None,
         conflicts: Vec::new(),
+        message: "Add a file".into(),
     }
 }
 
@@ -40,7 +41,7 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 fn text(view: &ProjectChanges) -> String {
-    let (rows, _) = view.rows(100, 40, NOW, &Look::plain());
+    let (rows, _, _) = view.rows(100, 40, NOW, &Look::plain());
     rows.iter().map(|row| row.text() + "\n").collect()
 }
 
@@ -91,7 +92,7 @@ fn a_pending_change_set_shows_its_agent_size_and_that_crazyagent_did_not_check_i
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
-    let (_, help) = view.rows(100, 40, NOW, &Look::plain());
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
     assert!(help.contains(&("a", "Accept")) && help.contains(&("d", "Discard")));
     assert!(!help.iter().any(|(key, _)| *key == "u" || *key == "r"));
 }
@@ -142,7 +143,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
 
     assert!(view.key(key(KeyCode::Char('a')), NOW));
     assert!(text(&view).contains("Accept these changes?"));
-    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    assert!(view.key(key(KeyCode::Enter), NOW));
     let landed = AcceptOutcome::Landed {
         commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
         branch: "main".into(),
@@ -152,7 +153,8 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
         query,
         ChangesQuery::Accept {
             id: id('1'),
-            expected_head: "1".repeat(40)
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
         }
     );
     let shown = text(&view);
@@ -168,10 +170,10 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
 fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     view.key(key(KeyCode::Char('a')), NOW);
-    view.key(key(KeyCode::Char('n')), NOW);
+    view.key(key(KeyCode::Esc), NOW);
     assert_eq!(view.next_query(NOW), None);
     view.key(key(KeyCode::Char('a')), NOW);
-    view.key(key(KeyCode::Char('y')), NOW);
+    view.key(key(KeyCode::Enter), NOW);
     reply(&mut view, Err("changes_owner_dirty".into()));
     assert!(text(&view).contains(
         "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again."
@@ -193,6 +195,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_agent_busy",
         "changes_not_found",
         "changes_owner_identity_missing",
+        "changes_message_invalid",
         "changes_unavailable",
     ] {
         assert!(
@@ -208,7 +211,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
 fn a_conflicting_accept_names_the_files_and_offers_ask_agent_to_update() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     view.key(key(KeyCode::Char('a')), NOW);
-    view.key(key(KeyCode::Char('y')), NOW);
+    view.key(key(KeyCode::Enter), NOW);
     let files: Vec<String> = (1..=7).map(|n| format!("f{n}.txt")).collect();
     reply(
         &mut view,
@@ -289,4 +292,91 @@ fn the_changes_tab_glyph_has_an_ascii_fallback() {
     let glyph = super::super::project::Tab::Changes.glyph();
     assert_eq!(ascii.glyph(glyph), "~");
     assert_eq!(Look::plain().glyph(glyph), "\u{2213}");
+}
+
+#[test]
+fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
+    let mut proposed = set('1', ChangeState::Pending);
+    proposed.message = "Add a main\n\n- Add the fourth line".into();
+    let mut view = listed(vec![proposed]);
+    assert!(!view.editing());
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.editing());
+    let (rows, cursor, help) = view.rows(100, 40, NOW, &Look::plain());
+    let shown: Vec<String> = rows.iter().map(|row| row.text()).collect();
+    let line = shown
+        .iter()
+        .position(|row| row.trim_end() == "  - Add the fourth line")
+        .expect("the proposed message is shown");
+    assert_eq!(shown[line - 2].trim_end(), "  Add a main");
+    assert_eq!(cursor, Some((2 + "- Add the fourth line".len(), line)));
+    assert!(help.contains(&("Enter", "Accept")) && help.contains(&("Esc", "Keep reviewing")));
+
+    view.key(
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        NOW,
+    );
+    assert!(text(&view).contains("Write a commit message to accept."));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(view.next_query(NOW), None);
+    for typed in "Owner title".chars() {
+        assert!(view.key(key(KeyCode::Char(typed)), NOW));
+    }
+    view.key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        NOW,
+    );
+    view.key(
+        KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
+        NOW,
+    );
+    assert!(view.paste("y n ? why\tit changed"));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert!(!view.editing());
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Owner title\n\ny n ? why it changed".into(),
+        })
+    );
+    assert!(!view.paste("ignored"));
+}
+
+#[test]
+fn an_answer_acts_on_the_change_set_it_was_asked_for_even_after_the_list_reorders() {
+    let mut view = listed(vec![
+        set('1', ChangeState::Pending),
+        set('2', ChangeState::Pending),
+    ]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let poll = view.next_query(NOW + LIST_POLL_MS).unwrap();
+    view.apply(&ChangesEvent {
+        query: poll,
+        result: Ok(ChangesView::List(vec![
+            set('2', ChangeState::Pending),
+            set('1', ChangeState::Pending),
+        ])),
+    });
+    assert!(view.editing());
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW + LIST_POLL_MS),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        })
+    );
+    let poll = ChangesQuery::List { project: project() };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    view.key(key(KeyCode::Char('d')), NOW);
+    assert_eq!(view.next_query(NOW + LIST_POLL_MS), Some(poll.clone()));
+    view.apply(&ChangesEvent {
+        query: poll,
+        result: Ok(ChangesView::List(vec![set('2', ChangeState::Pending)])),
+    });
+    assert!(!view.key(key(KeyCode::Char('y')), NOW));
+    assert_eq!(view.next_query(NOW), None);
 }

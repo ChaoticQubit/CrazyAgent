@@ -53,10 +53,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Overview => overview(screen, width, content, look),
         Tab::Conversation => conversation(screen, content, room, look),
         Tab::Agents => agents(screen, width, content, room, look),
-        Tab::Changes => {
-            let (lines, help) = screen.changes.rows(content, room, screen.now_ms, look);
-            (lines, None, help)
-        }
+        Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
         Tab::Context => {
             if screen.reading
                 && width < 100

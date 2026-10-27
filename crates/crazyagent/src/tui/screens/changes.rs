@@ -1,11 +1,12 @@
 use super::intake::NOT_READY;
+use super::new_project_input::TextInput;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeSetId, ChangeSetView, ChangeState, ChangedFile, FileKind,
-    FileMark, FileStatus, TurnOutcome,
+    FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -24,6 +25,7 @@ const TAB_SPACES: &str = "    ";
 const AGENT_WIDTH: usize = 24;
 const STATE_WIDTH: usize = 26;
 const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
+const MESSAGE_ROWS: usize = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
@@ -59,6 +61,8 @@ pub(in crate::tui) struct ProjectChanges {
     cursor: usize,
     diff: Option<Diff>,
     asking: Option<Ask>,
+    target: Option<(ChangeSetId, String)>,
+    message: TextInput,
     notice: Option<Notice>,
     queued: Option<ChangesQuery>,
     sent: Option<ChangesQuery>,
@@ -79,6 +83,8 @@ impl ProjectChanges {
             cursor: 0,
             diff: None,
             asking: None,
+            target: None,
+            message: TextInput::multi(MESSAGE_BYTES_MAX),
             notice: None,
             queued: None,
             sent: None,
@@ -219,7 +225,11 @@ impl ProjectChanges {
 
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.sets.len().saturating_sub(1));
-        if self.chosen().is_none() {
+        let target_listed = self
+            .target
+            .as_ref()
+            .is_some_and(|(id, _)| self.sets.iter().any(|set| &set.id == id));
+        if self.chosen().is_none() || !target_listed {
             self.asking = None;
         }
         assert!(self.sets.is_empty() || self.cursor < self.sets.len());
@@ -241,10 +251,25 @@ impl ProjectChanges {
     }
 
     /// Handles one key: move through the change sets, open a diff and scroll it,
-    /// accept or discard after a yes, ask the agent to update, or restore.
-    /// Takes the key event. Returns true when the view used the key; other keys,
-    /// including Esc on the list, are left to the host.
+    /// accept after editing the commit message or discard after a yes, ask the agent to
+    /// update, or restore. Takes the key event. Returns true when the view used the key;
+    /// other keys, including Esc on the list, are left to the host.
     pub fn key(&mut self, key: KeyEvent, now_ms: i64) -> bool {
+        if self.asking == Some(Ask::Accept) {
+            match key.code {
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    if !self.message.value().trim().is_empty() {
+                        self.asking = None;
+                        self.act(Ask::Accept);
+                    }
+                }
+                KeyCode::Esc => self.asking = None,
+                _ => {
+                    self.message.handle(key);
+                }
+            }
+            return true;
+        }
         if key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
@@ -268,11 +293,13 @@ impl ProjectChanges {
         let actions = self.chosen().map(|set| Actions::of(set, now_ms));
         let used = match (key.code, actions) {
             (KeyCode::Char('a'), Some(actions)) if actions.accept => {
-                self.asking = Some(Ask::Accept);
+                let proposed = self.chosen().map(|set| set.message.clone());
+                self.message.set(&proposed.unwrap_or_default());
+                self.ask(Ask::Accept);
                 true
             }
             (KeyCode::Char('d'), Some(actions)) if actions.discard => {
-                self.asking = Some(Ask::Discard);
+                self.ask(Ask::Discard);
                 true
             }
             (KeyCode::Char('u'), Some(actions)) if actions.update => {
@@ -288,6 +315,21 @@ impl ProjectChanges {
         };
         self.clamp();
         used
+    }
+
+    /// Tells whether the owner is editing the Accept commit message, so the host leaves
+    /// typed characters to it. Output: true while the message editor is open.
+    pub fn editing(&self) -> bool {
+        self.asking == Some(Ask::Accept)
+    }
+
+    /// Inserts pasted text into the Accept commit message while it is being edited.
+    /// Input: untrusted pasted text. Output: true when the editor took it.
+    pub fn paste(&mut self, text: &str) -> bool {
+        if self.editing() {
+            self.message.insert_str(text);
+        }
+        self.editing()
     }
 
     fn list_key(&mut self, code: KeyCode) -> bool {
@@ -346,13 +388,22 @@ impl ProjectChanges {
         self.queued = Some(query);
     }
 
+    fn ask(&mut self, ask: Ask) {
+        let id = self.chosen().map(|set| set.id.clone());
+        self.target = id.zip(self.reviewed_head());
+        self.asking = self.target.is_some().then_some(ask);
+    }
+
     fn act(&mut self, ask: Ask) {
-        let (Some(set), Some(expected_head)) = (self.chosen(), self.reviewed_head()) else {
+        let Some((id, expected_head)) = self.target.take() else {
             return;
         };
-        let id = set.id.clone();
         self.queue(match ask {
-            Ask::Accept => ChangesQuery::Accept { id, expected_head },
+            Ask::Accept => ChangesQuery::Accept {
+                id,
+                expected_head,
+                message: self.message.value().trim().to_owned(),
+            },
             Ask::Discard => ChangesQuery::Discard { id, expected_head },
         });
     }
@@ -373,30 +424,40 @@ impl ProjectChanges {
 
     /// Draws the Changes tab: the change sets and the chosen one's details, or its diff.
     /// Takes the content width, the rows available, the time now and the look.
-    /// Returns the rows and the help keys.
-    pub fn rows(&self, content: usize, room: usize, now_ms: i64, look: &Look) -> (Vec<Row>, Help) {
+    /// Returns the rows, the commit message cursor as a column and row of those rows
+    /// while it is edited, and the help keys.
+    pub fn rows(
+        &self,
+        content: usize,
+        room: usize,
+        now_ms: i64,
+        look: &Look,
+    ) -> (Vec<Row>, Option<(usize, usize)>, Help) {
         let mut lines = Vec::new();
         if self.not_ready {
             lines.push(Row::of("Changes", look.heading));
             lines.push(Row::of(NOT_READY, look.fg));
             lines.push(Row::of(NOT_READY_LINE, look.muted));
-            return (lines, vec![TABS, ("Esc", "Home")]);
+            return (lines, None, vec![TABS, ("Esc", "Home")]);
         }
         if !self.loaded {
             lines.push(Row::of("Changes", look.heading));
             lines.push(Row::of("Loading changes...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
-            return (lines, vec![TABS, ("Esc", "Home")]);
+            return (lines, None, vec![TABS, ("Esc", "Home")]);
         }
-        let footer = self.footer(content, look);
+        let (footer, at) = self.footer(content, look);
         if let Some(diff) = &self.diff {
             let body = room.saturating_sub(footer.len());
             lines.extend(self.diff_rows(diff, content, body, now_ms, look));
         } else {
             lines.extend(self.list_rows(content, room.saturating_sub(footer.len()), now_ms, look));
         }
+        let cursor = at
+            .map(|(column, row)| (column, lines.len() + row))
+            .filter(|(_, row)| *row < room);
         lines.extend(footer);
-        (lines, self.help(now_ms))
+        (lines, cursor, self.help(now_ms))
     }
 
     fn list_rows(&self, content: usize, room: usize, now_ms: i64, look: &Look) -> Vec<Row> {
@@ -496,40 +557,62 @@ impl ProjectChanges {
         lines
     }
 
-    fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
+    fn footer(&self, content: usize, look: &Look) -> (Vec<Row>, Option<(usize, usize)>) {
         let Some(ask) = self.asking else {
-            return self.notice.iter().map(|notice| notice.row(look)).collect();
+            let rows = self.notice.iter().map(|notice| notice.row(look)).collect();
+            return (rows, None);
         };
-        let (question, yes, explain) = match ask {
-            Ask::Accept => (
-                "Accept these changes?",
-                " Accept   ",
-                "They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.",
-            ),
-            Ask::Discard => (
-                "Discard these changes?",
-                " Discard   ",
-                "The agent's working copy goes back to your branch. You can restore these changes for 7 days.",
-            ),
-        };
+        if ask == Ask::Accept {
+            return self.message_rows(content, look);
+        }
         let mut rows = vec![
-            Row::of(question, look.warning)
+            Row::of("Discard these changes?", look.warning)
                 .push("   y", look.heading)
-                .push(yes, look.fg)
+                .push(" Discard   ", look.fg)
                 .push("n", look.heading)
                 .push(" Keep reviewing", look.fg),
         ];
+        let explain = "The agent's working copy goes back to your branch. You can restore these changes for 7 days.";
         rows.extend(
             wrap_words(explain, content)
                 .into_iter()
                 .map(|line| Row::of(line, look.muted)),
         );
-        rows
+        (rows, None)
+    }
+
+    fn message_rows(&self, content: usize, look: &Look) -> (Vec<Row>, Option<(usize, usize)>) {
+        let mut rows = vec![Row::of("Accept these changes?", look.warning)];
+        rows.extend(
+            wrap_words(
+                "They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them. Edit the commit message if you like.",
+                content,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+        rows.push(Row::of("Commit message", look.heading));
+        let (lines, (line, column)) = self.message.wrap(content.saturating_sub(2).max(1));
+        let first = window(line, lines.len(), MESSAGE_ROWS);
+        let cursor = (2 + column, rows.len() + line - first);
+        for text in lines.into_iter().skip(first).take(MESSAGE_ROWS) {
+            rows.push(Row::of(format!("  {text}"), look.fg).pad(content));
+        }
+        if self.message.value().trim().is_empty() {
+            rows.push(Row::of("Write a commit message to accept.", look.warning));
+        }
+        (rows, Some(cursor))
     }
 
     fn help(&self, now_ms: i64) -> Help {
         match self.asking {
-            Some(Ask::Accept) => return vec![("y", "Accept"), ("n", "Keep reviewing")],
+            Some(Ask::Accept) => {
+                return vec![
+                    ("Enter", "Accept"),
+                    ("Ctrl-J", "New line"),
+                    ("Esc", "Keep reviewing"),
+                ];
+            }
             Some(Ask::Discard) => return vec![("y", "Discard"), ("n", "Keep reviewing")],
             None => {}
         }
@@ -810,6 +893,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_agent_busy" => "The agent is working right now. Try again when it finishes.",
         "changes_not_found" => "These changes are gone. The list is up to date now.",
+        "changes_message_invalid" => {
+            "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again."
+        }
         "changes_owner_identity_missing" => {
             "Git doesn't know your name and email yet. Set user.name and user.email, then accept again."
         }

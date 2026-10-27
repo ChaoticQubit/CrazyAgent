@@ -845,6 +845,7 @@ impl Screen for ProjectPage {
             || self.screen.adding.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
+            || (self.changes_have_keys() && self.screen.changes.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {

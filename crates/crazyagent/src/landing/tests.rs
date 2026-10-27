@@ -153,10 +153,14 @@ impl Case {
     }
 
     fn turn(&self, outcome: TurnOutcome) -> Option<ChangeSetId> {
+        self.turn_with(outcome, "Add the fourth line\nand more")
+    }
+
+    fn turn_with(&self, outcome: TurnOutcome, prompt: &str) -> Option<ChangeSetId> {
         let turn = TurnEnd {
             outcome,
             turn: "turn-1".into(),
-            prompt_line: "Add the fourth line\nand more".into(),
+            prompt_line: prompt.into(),
         };
         record_turn_end(&self.db, &self.workspace, &turn).unwrap()
     }
@@ -170,7 +174,21 @@ impl Case {
     }
 
     fn accept(&self, id: &ChangeSetId) -> Result<AcceptOutcome, EngineError> {
-        accept(&self.db, &self.home, id, &self.view(id).head)
+        self.accept_with(id, None)
+    }
+
+    fn accept_with(
+        &self,
+        id: &ChangeSetId,
+        message: Option<&str>,
+    ) -> Result<AcceptOutcome, EngineError> {
+        accept(&self.db, &self.home, id, &self.view(id).head, message)
+    }
+
+    fn landed_message(&self, commit: &str) -> String {
+        self.owner(&["log", "-1", "--format=%B", commit])
+            .trim_end()
+            .to_owned()
     }
 
     /// Hashes everything an owner sees in the checkout: its files, HEAD, index, refs
@@ -385,7 +403,7 @@ fn a_dirty_detached_busy_or_conflicting_checkout_refuses_accept_and_changes_noth
         );
     }
     assert_eq!(
-        refused(accept(&case.db, &case.home, &id, &case.tip())),
+        refused(accept(&case.db, &case.home, &id, &case.tip(), None)),
         "changes_stale"
     );
     case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
@@ -628,7 +646,7 @@ fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() 
         let head = case.view(&id).head;
         let tip = case.tip();
         let before = case.checkout();
-        let stopped = owner::accept(&case.db, &case.home, &id, &head, &|at| at == step);
+        let stopped = owner::accept(&case.db, &case.home, &id, &head, None, &|at| at == step);
         assert_eq!(refused(stopped), "changes_git_failed", "{step:?}");
         assert_eq!(store::in_flight(&case.db).unwrap().len(), 1, "{step:?}");
         reconcile(&case.db).unwrap();
@@ -962,4 +980,106 @@ fn commits_the_agent_made_past_the_file_bound_are_refused_and_change_nothing() {
     );
     assert_eq!(case.agent_head(), head);
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+}
+
+#[test]
+fn the_proposed_message_reuses_the_agent_commit_subjects_newest_first_and_lands() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let tree = case.workspace.worktree.display().to_string();
+    case.agent_commit(&format!("Add a main in {tree}/src/new.rs\n\nBody text"));
+    case.edit("LATER", "later\n");
+    let id = case
+        .turn_with(TurnOutcome::Succeeded, "Ignored prompt line")
+        .unwrap();
+    let message = "Add a main in src/new.rs\n\n- Add the fourth line";
+    assert_eq!(case.view(&id).message, message);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), message);
+}
+
+#[test]
+fn without_agent_commits_the_message_is_the_prompt_line_with_local_paths_cut_at_a_word() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let prompt = format!(
+        "Fix the parser in {}/src/parse.rs per (/Users/someone/Downloads/spec.pdf), \
+         ~/notes/todo.md and keep going with words\nsecond line",
+        case.repo.display()
+    );
+    let id = case.turn_with(TurnOutcome::Succeeded, &prompt).unwrap();
+    let message = "Fix the parser in src/parse.rs per (spec.pdf), todo.md and keep going";
+    assert_eq!(case.view(&id).message, message);
+    assert_eq!(
+        case.agent(&["log", "-1", "--format=%s", "HEAD"]).trim(),
+        message
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), message);
+    let roots = [case.repo.as_path()];
+    let long = "x".repeat(80);
+    assert_eq!(flow::subject(&long, &roots), "x".repeat(72));
+    assert_eq!(flow::subject(&format!("Rename {long}"), &roots), "Rename");
+    assert_eq!(
+        flow::subject("Fix\u{202E}\ttabs  and /api/users routes", &roots),
+        "Fix tabs and /api/users routes"
+    );
+}
+
+#[test]
+fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let before = case.checkout();
+    let long = "x".repeat(MESSAGE_BYTES_MAX + 1);
+    for message in [
+        " \r\n\t ",
+        "Bad \u{1b}[31m red",
+        "Bad\rreturn",
+        long.as_str(),
+    ] {
+        assert_eq!(
+            refused(case.accept_with(&id, Some(message))),
+            "changes_message_invalid"
+        );
+        assert_eq!(case.checkout(), before);
+        let view = case.view(&id);
+        assert_eq!(
+            (view.state, view.head.as_str()),
+            (ChangeState::Pending, head.as_str())
+        );
+    }
+    let edited = "  Owner title\r\n\r\nWhy it changed\twith a tab\n";
+    let AcceptOutcome::Landed { commit, .. } = case.accept_with(&id, Some(edited)).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.landed_message(&commit),
+        "Owner title\n\nWhy it changed\twith a tab"
+    );
+}
+
+#[test]
+fn a_store_from_before_proposed_messages_gains_the_column_and_falls_back_to_the_prompt() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.db
+        .execute_batch("ALTER TABLE landing_change_sets DROP COLUMN message")
+        .unwrap();
+    store::initialize(&case.db).unwrap();
+    assert_eq!(case.view(&id).message, "Add the fourth line");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), "Add the fourth line");
 }

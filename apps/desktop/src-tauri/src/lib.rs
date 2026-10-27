@@ -1668,9 +1668,12 @@ async fn desktop_accept_change(
     state: State<'_, NativeState>,
     id: String,
     expected_head: String,
+    message: Option<String>,
 ) -> Result<AcceptOutcome, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.accept_change(id, expected_head)?;
+    let call = lock(&state)
+        .await?
+        .accept_change(id, expected_head, message)?;
     call.await
 }
 
