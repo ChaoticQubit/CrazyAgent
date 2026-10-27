@@ -1179,6 +1179,9 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
     );
 
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "", "the first Esc clears the prompt");
+    assert!(screen.typing);
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(drawn.help.contains(&("r", "Try again")), "{:?}", drawn.help);
     assert!(
@@ -1246,6 +1249,9 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
     assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Handled);
     assert_eq!(screen.input.value(), "t");
 
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "", "the first Esc clears the prompt");
+    assert!(screen.typing);
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     let drawn = project_screen(&mut screen, 140, 24, &look);
     assert!(drawn.help.contains(&("t", "Team")), "{:?}", drawn.help);
@@ -2194,6 +2200,36 @@ fn the_console_sends_on_enter_breaks_lines_recalls_history_and_clears_on_escape(
     assert_eq!(screen.input.value(), "");
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.typing, "Esc on an empty prompt leaves it");
+}
+
+#[test]
+fn a_path_message_and_a_draft_ending_in_a_slash_word_are_sent_not_run() {
+    use super::project::Picks;
+    let mut screen = console_screen();
+    type_text(&mut screen, "/etc/hosts has a bad entry, fix it");
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Send("/etc/hosts has a bad entry, fix it".into())
+    );
+    assert!(screen.console_note.is_empty(), "{:?}", screen.console_note);
+
+    for last in ["/help", "/st"] {
+        type_text(&mut screen, "Steps:");
+        screen.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        type_text(&mut screen, last);
+        assert!(
+            matches!(screen.picks(), Picks::None),
+            "{last}: a later line opens no menu"
+        );
+        let draft = format!("Steps:\n{last}");
+        assert_eq!(screen.input.value(), draft);
+        assert_eq!(
+            screen.key(key(KeyCode::Enter)),
+            ProjectReply::Send(draft.clone()),
+            "{last}: the whole draft is sent, nothing runs"
+        );
+        assert!(screen.console_note.is_empty(), "{:?}", screen.console_note);
+    }
 }
 
 #[test]

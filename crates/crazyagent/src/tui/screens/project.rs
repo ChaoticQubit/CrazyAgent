@@ -1289,10 +1289,10 @@ impl ProjectScreen {
         if self.tab != Tab::Conversation || !self.typing || self.live_master() {
             return Picks::None;
         }
-        let head = self.input.head();
-        if let Some(commands) = console::menu(head) {
+        if let Some(commands) = console::menu(self.input.value()) {
             return Picks::Commands(commands);
         }
+        let head = self.input.head();
         let Some(query) = console::tag_query(head) else {
             return Picks::None;
         };
@@ -1315,16 +1315,7 @@ impl ProjectScreen {
         let at = self.menu_cursor.min(picks.len().saturating_sub(1));
         match picks {
             Picks::None => {}
-            Picks::Commands(commands) => {
-                let typed = self
-                    .input
-                    .head()
-                    .rsplit('\n')
-                    .next()
-                    .map_or(0, |line| line.chars().count());
-                self.input
-                    .replace_back(typed, &format!("/{}", commands[at].name));
-            }
+            Picks::Commands(commands) => self.input.set(&format!("/{}", commands[at].name)),
             Picks::Tags { typed, tags } => {
                 self.input.replace_back(typed, &format!("{} ", tags[at]))
             }

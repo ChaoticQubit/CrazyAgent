@@ -66,32 +66,50 @@ pub(in crate::tui) const COMMANDS: &[Command] = &[
     },
 ];
 
-/// The menu a prompt opens while its cursor line is a `/` word at line start.
-/// Takes the prompt text before the cursor.
-/// Returns the commands whose names start with the typed word, or None when no menu is open.
-pub(in crate::tui) fn menu(head: &str) -> Option<Vec<&'static Command>> {
-    let word = head.rsplit('\n').next()?.strip_prefix('/')?;
+/// The menu a prompt opens while the whole prompt is one `/` word, as the desktop console.
+/// Takes the whole prompt text.
+/// Returns the commands whose names start with the typed word, or contain it when none
+/// starts with it, or None when no menu is open.
+pub(in crate::tui) fn menu(text: &str) -> Option<Vec<&'static Command>> {
+    let word = text.strip_prefix('/')?.to_lowercase();
     if word.chars().any(char::is_whitespace) {
         return None;
     }
-    Some(
+    let matching = |test: &dyn Fn(&str) -> bool| -> Vec<&'static Command> {
         COMMANDS
             .iter()
-            .filter(|command| command.name.starts_with(word))
-            .collect(),
-    )
+            .filter(|command| test(command.name))
+            .collect()
+    };
+    let starts = matching(&|name| name.starts_with(&word));
+    Some(if starts.is_empty() {
+        matching(&|name| name.contains(&word))
+    } else {
+        starts
+    })
 }
 
-/// Reads a prompt about to be sent as a command when it starts with `/`.
+/// Reads a prompt about to be sent, with the desktop console's rule: its first word is a
+/// command when it is `/`, a letter, then letters, digits or hyphens; anything else, a path
+/// starting with `/` included, is a message.
 /// Takes the whole prompt text.
-/// Returns None for a message, the action of a known command, or the unknown word.
+/// Returns None for a message, the action of a known command, or the unknown `/word`.
 pub(in crate::tui) fn command(text: &str) -> Option<Result<Action, String>> {
-    let word = text.trim().strip_prefix('/')?;
-    let found = COMMANDS.iter().find(|command| command.name == word);
+    let word = text.split_whitespace().next()?.strip_prefix('/')?;
+    let mut letters = word.chars();
+    let named = letters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && letters.all(|rest| rest.is_ascii_alphanumeric() || rest == '-');
+    if !named {
+        return None;
+    }
+    let name = word.to_ascii_lowercase();
+    let found = COMMANDS.iter().find(|command| command.name == name);
     Some(
         found
             .map(|command| command.action)
-            .ok_or_else(|| format!("/{word}")),
+            .ok_or_else(|| format!("/{name}")),
     )
 }
 

@@ -50,9 +50,9 @@ fn context(paths: &[&str]) -> ProjectContext {
 }
 
 #[test]
-fn a_slash_at_line_start_opens_the_menu_filtered_by_the_typed_word() {
+fn a_lone_slash_word_opens_the_menu_filtered_by_the_typed_word() {
     let names =
-        |head: &str| menu(head).map(|found| found.iter().map(|c| c.name).collect::<Vec<_>>());
+        |text: &str| menu(text).map(|found| found.iter().map(|c| c.name).collect::<Vec<_>>());
     assert_eq!(
         names("/"),
         Some(vec![
@@ -61,21 +61,43 @@ fn a_slash_at_line_start_opens_the_menu_filtered_by_the_typed_word() {
     );
     assert_eq!(names("/c"), Some(vec!["clear", "changes"]));
     assert_eq!(names("/st"), Some(vec!["stop"]));
+    assert_eq!(
+        names("/ang"),
+        Some(vec!["changes"]),
+        "no name starts with it: names containing it"
+    );
     assert_eq!(names("/zzz"), Some(vec![]));
-    assert_eq!(names("first line\n/he"), Some(vec!["help"]));
+    assert_eq!(
+        names("first line\n/he"),
+        None,
+        "a slash word on a later line of a draft is text"
+    );
     assert_eq!(names("say /he"), None, "a slash inside a line is text");
     assert_eq!(names("/stop now"), None, "the menu closes after a space");
     assert_eq!(names("hello"), None);
 }
 
 #[test]
-fn a_prompt_starting_with_a_slash_is_a_command_and_an_unknown_one_is_named() {
+fn a_first_word_of_slash_and_letters_is_a_command_and_anything_else_is_a_message() {
     assert_eq!(command("/agents"), Some(Ok(Action::Agents)));
     assert_eq!(command("  /stop \n"), Some(Ok(Action::Stop)));
-    assert_eq!(command("/clear"), Some(Ok(Action::Clear)));
+    assert_eq!(command("/Clear"), Some(Ok(Action::Clear)));
+    assert_eq!(command("/stop now"), Some(Ok(Action::Stop)));
     assert_eq!(command("/deploy"), Some(Err("/deploy".into())));
-    assert_eq!(command("/stop now"), Some(Err("/stop now".into())));
+    assert_eq!(command("/re-run it"), Some(Err("/re-run".into())));
     assert_eq!(command("Plan the page"), None);
+    assert_eq!(
+        command("/etc/hosts has a bad entry, fix it"),
+        None,
+        "a path is a message"
+    );
+    assert_eq!(command("/"), None);
+    assert_eq!(command("/9lives"), None);
+    assert_eq!(
+        command("Steps:\n1. read the brief\n/help"),
+        None,
+        "a draft ending in a slash word is a message"
+    );
 }
 
 #[test]
