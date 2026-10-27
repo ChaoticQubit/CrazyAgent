@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { consoleLines } = await import("../src/screens/project/conversation.tsx");
+const { consoleLines, sendGate, queuedLines, QUEUED_LINE, QUEUE_FAILED } = await import("../src/screens/project/conversation.tsx");
 
 const turn = (patch) => ({ id: "t1", ordinal: 1, phase: "succeeded", reason: null, reply: null, ...patch });
 
@@ -37,6 +37,23 @@ test("a resumed session's turns show the owner's words read back from the engine
     ["owner", "Sent here"],
     ["engine", "Your message 3 (its text stays in the window that sent it)"],
   ]);
+});
+
+test("the first message on a fresh project, typed while its conversation still opens, is queued and sent, never held", () => {
+  const fresh = { readOnly: false, ticket: "", openFailed: false, working: true, waiting: false, notReady: false, queued: false };
+  assert.equal(sendGate(fresh), "queue", "opening the conversation: the message waits for it");
+  assert.equal(sendGate({ ...fresh, working: false }), "queue", "before the opening has even started");
+  assert.equal(sendGate({ ...fresh, ticket: "t-1", working: false }), "send", "opened with no live session: the send opens one");
+  assert.equal(sendGate({ ...fresh, queued: true }), "hold", "one queued message at a time");
+  assert.equal(sendGate({ ...fresh, openFailed: true, working: false }), "hold", "a conversation that failed to open takes nothing");
+  assert.equal(sendGate({ ...fresh, ticket: "t-1", working: true }), "hold", "a send already in flight");
+  assert.equal(sendGate({ ...fresh, ticket: "t-1", working: false, waiting: true }), "hold", "a reply still coming");
+  assert.equal(sendGate({ ...fresh, ticket: "t-1", working: false, notReady: true }), "hold");
+  assert.equal(sendGate({ ...fresh, ticket: "t-1", working: false, readOnly: true }), "hold");
+  assert.deepEqual(queuedLines(null, false), []);
+  assert.deepEqual(queuedLines("Hello master", false).map((line) => [line.kind, line.text]), [["owner", "Hello master"], ["engine", QUEUED_LINE]]);
+  assert.deepEqual(queuedLines("Hello master", true).map((line) => [line.kind, line.text]), [["owner", "Hello master"], ["error", QUEUE_FAILED]]);
+  assert.doesNotMatch(QUEUED_LINE, /Waiting to start|Thinking/, "the queued line never reads as an engine turn state");
 });
 
 test("a message this window sent shows with a thinking line until its turn arrives", () => {
