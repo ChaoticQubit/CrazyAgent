@@ -60,10 +60,14 @@ impl NativeBridge {
         let project = project(project_id)?;
         let client = self.cleanup_client()?;
         Ok(Box::pin(async move {
-            client
+            let removal = client
                 .remove_finished_agents(project, agents)
                 .await
-                .map_err(cleanup_error)
+                .map_err(cleanup_error)?;
+            match removal.kept {
+                None => Ok(removal.agents),
+                Some(code) => Err(cleanup_error(EngineError(code))),
+            }
         }))
     }
 }
