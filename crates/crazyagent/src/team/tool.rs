@@ -1,6 +1,6 @@
 use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
 #[cfg(unix)]
-use rustix::fs::{Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::File;
@@ -465,58 +465,207 @@ fn call_id_valid(id: &str) -> bool {
 }
 
 /// Lists the mailbox entries with one suffix whose names carry a valid call id, oldest
-/// first, never more than `MAILBOX_SCAN_MAX` entries looked at.
+/// first, never more than `MAILBOX_SCAN_MAX` entries looked at; a link at the mailbox's
+/// own name is never followed.
 fn calls(mailbox: &Path, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
-    let Ok(entries) = std::fs::read_dir(mailbox) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, String)> = entries
-        .take(MAILBOX_SCAN_MAX)
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let id = name.strip_suffix(suffix)?;
-            let metadata = entry.metadata().ok()?;
-            (call_id_valid(id) && metadata.is_file()).then(|| {
-                (
-                    metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
-                    id.to_owned(),
-                )
-            })
-        })
-        .collect();
-    found.sort();
-    found
+    Mailbox::open(mailbox)
+        .map(|mailbox| mailbox.entries(suffix))
+        .unwrap_or_default()
 }
 
-/// Takes the oldest calls a live master's server left in its mailbox, each claimed by
-/// renaming it before it is read so a server that withdraws it at its deadline cannot
-/// report a call the engine runs as never taken, and removes answers and claims nobody
-/// collected for `REPLY_STALE`. Links and other non-files are never read; a call past
-/// `CALL_BYTES_MAX` is removed unread. Takes the mailbox and how many to take.
-/// Returns each call id with its call, or none when the file did not hold a valid call.
-pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
-    if !std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir()) {
-        return Vec::new();
+/// A live master's mailbox folder, opened once without following a link; every listing,
+/// claim, answer and removal then goes through this handle, so a link the master swaps in
+/// for the folder's path afterwards is never followed.
+#[cfg(unix)]
+struct Mailbox(rustix::fd::OwnedFd);
+
+/// A live master's mailbox where no directory-relative no-follow open exists; it cannot be
+/// opened, so every use is unreachable by construction.
+#[cfg(not(unix))]
+enum Mailbox {}
+
+#[cfg(unix)]
+impl Mailbox {
+    fn folder_flags() -> OFlags {
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
     }
+
+    /// Opens a mailbox folder, refusing a link at its own name. Takes its path. Returns
+    /// the handle or the I/O error.
+    fn open(path: &Path) -> std::io::Result<Self> {
+        Ok(Self(rustix::fs::open(
+            path,
+            Self::folder_flags(),
+            Mode::empty(),
+        )?))
+    }
+
+    /// Opens a live master's mailbox for the engine from the folder above the master's
+    /// temporary folder, refusing a link at the temporary folder or the mailbox: the master
+    /// can replace both. Takes the mailbox path. Returns the handle or the I/O error.
+    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+        let refused = || std::io::Error::other("the mailbox is not inside a folder");
+        let mailbox = path.file_name().ok_or_else(refused)?;
+        let holder = path.parent().ok_or_else(refused)?;
+        let held = holder.file_name().ok_or_else(refused)?;
+        let above = holder.parent().ok_or_else(refused)?;
+        let flags = Self::folder_flags();
+        let above = rustix::fs::open(above, flags, Mode::empty())?;
+        let holder = rustix::fs::openat(&above, held, flags, Mode::empty())?;
+        Ok(Self(rustix::fs::openat(
+            &holder,
+            mailbox,
+            flags,
+            Mode::empty(),
+        )?))
+    }
+
+    /// Lists the entries with one suffix whose names carry a valid call id and that are
+    /// plain files, oldest first, never more than `MAILBOX_SCAN_MAX` entries looked at.
+    fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+        let Ok(listed) = rustix::fs::Dir::read_from(&self.0) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(std::time::SystemTime, String)> = listed
+            .flatten()
+            .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+            .take(MAILBOX_SCAN_MAX)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_str().ok()?;
+                let id = name.strip_suffix(suffix)?;
+                if !call_id_valid(id) {
+                    return None;
+                }
+                let stat =
+                    rustix::fs::statat(&self.0, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW)
+                        .ok()?;
+                (FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile)
+                    .then(|| (modified(&stat), id.to_owned()))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// Creates a new entry 0600 for writing, failing when anything, a link included, is
+    /// there. Takes its name. Returns the open file or the I/O error.
+    fn create(&self, name: &str) -> std::io::Result<File> {
+        Ok(File::from(rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?))
+    }
+
+    /// Opens an entry to read without following a link or blocking on a FIFO. Takes its
+    /// name. Returns the open file or the I/O error.
+    fn read(&self, name: &str) -> std::io::Result<File> {
+        Ok(File::from(rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?))
+    }
+
+    /// Renames an entry within the mailbox; a link is moved, never followed. Takes both
+    /// names. Returns the I/O error.
+    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+        rustix::fs::renameat(&self.0, from, &self.0, to).map_err(std::io::Error::from)
+    }
+
+    /// Removes an entry; a link is removed, never followed. Takes its name. Returns the
+    /// I/O error.
+    fn remove(&self, name: &str) -> std::io::Result<()> {
+        rustix::fs::unlinkat(&self.0, name, AtFlags::empty()).map_err(std::io::Error::from)
+    }
+}
+
+/// Refuses a mailbox where no directory-relative no-follow open exists: both opens return
+/// an `Unsupported` error reading `team_mailbox_unavailable`, and the other operations
+/// cannot be reached.
+#[cfg(not(unix))]
+impl Mailbox {
+    fn open(_path: &Path) -> std::io::Result<Self> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "team_mailbox_unavailable",
+        ))
+    }
+
+    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+        Self::open(path)
+    }
+
+    fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+        match *self {}
+    }
+
+    fn create(&self, _name: &str) -> std::io::Result<File> {
+        match *self {}
+    }
+
+    fn read(&self, _name: &str) -> std::io::Result<File> {
+        match *self {}
+    }
+
+    fn rename(&self, _from: &str, _to: &str) -> std::io::Result<()> {
+        match *self {}
+    }
+
+    fn remove(&self, _name: &str) -> std::io::Result<()> {
+        match *self {}
+    }
+}
+
+/// Reads an entry's last change time from its status, the epoch when it does not fit.
+/// Takes the status. Returns the time.
+#[cfg(unix)]
+fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
+    let seconds = u64::try_from(stat.st_mtime).ok();
+    let nanos = u32::try_from(stat.st_mtime_nsec)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000);
+    seconds
+        .zip(nanos)
+        .and_then(|(seconds, nanos)| {
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds, nanos))
+        })
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Takes the oldest calls in a live master's mailbox, each claimed by renaming it before
+/// it is read, so a call withdrawn at its deadline is never run, and removes answers and
+/// claims left for `REPLY_STALE`. Links and other non-files, the mailbox and the master's
+/// temporary folder included, are never followed; a call past `CALL_BYTES_MAX` is removed
+/// unread. Takes the mailbox and how many to take. Returns each call id with its call, or
+/// none when the file did not hold a valid call.
+pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
+    let Ok(mailbox) = Mailbox::open_for_engine(mailbox) else {
+        return Vec::new();
+    };
     let now = std::time::SystemTime::now();
     for suffix in [REPLY_SUFFIX, TAKEN_SUFFIX] {
-        for (modified, id) in calls(mailbox, suffix) {
+        for (modified, id) in mailbox.entries(suffix) {
             if now
                 .duration_since(modified)
                 .is_ok_and(|age| age >= REPLY_STALE)
             {
-                let _ = std::fs::remove_file(mailbox.join(format!("{id}{suffix}")));
+                let _ = mailbox.remove(&format!("{id}{suffix}"));
             }
         }
     }
     let mut taken = Vec::new();
-    for (_, id) in calls(mailbox, CALL_SUFFIX).into_iter().take(max) {
-        let claimed = mailbox.join(format!("{id}{TAKEN_SUFFIX}"));
-        if std::fs::rename(mailbox.join(format!("{id}{CALL_SUFFIX}")), &claimed).is_err() {
+    for (_, id) in mailbox.entries(CALL_SUFFIX).into_iter().take(max) {
+        let claimed = format!("{id}{TAKEN_SUFFIX}");
+        if mailbox
+            .rename(&format!("{id}{CALL_SUFFIX}"), &claimed)
+            .is_err()
+        {
             continue;
         }
-        let call = open_recorded(&claimed).ok().and_then(|file| {
+        let call = mailbox.read(&claimed).ok().and_then(|file| {
             let metadata = file.metadata().ok()?;
             if !metadata.is_file() || metadata.len() > CALL_BYTES_MAX {
                 return None;
@@ -525,7 +674,7 @@ pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
             (&file).take(CALL_BYTES_MAX).read_to_end(&mut bytes).ok()?;
             serde_json::from_slice::<Call>(bytes.trim_ascii()).ok()
         });
-        let _ = std::fs::remove_file(&claimed);
+        let _ = mailbox.remove(&claimed);
         taken.push((id, call));
     }
     assert!(taken.len() <= max);
@@ -535,8 +684,8 @@ pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
 /// Answers one call in the mailbox: the answer is written beside it under a part name and
 /// renamed into place, so the server never reads half an answer. Takes the mailbox, the
 /// call id `take_calls` returned, the text, bounded to `REPLY_TEXT_MAX`, and whether it is
-/// an error. Returns the I/O failure; a planted part file makes the answer fail, never land
-/// elsewhere.
+/// an error. Returns the I/O failure; a planted part file, or a link at the mailbox or the
+/// master's temporary folder, makes the answer fail, never land elsewhere.
 pub fn answer_call(mailbox: &Path, id: &str, text: &str, error: bool) -> std::io::Result<()> {
     assert!(call_id_valid(id));
     let reply = Reply {
@@ -545,13 +694,16 @@ pub fn answer_call(mailbox: &Path, id: &str, text: &str, error: bool) -> std::io
     };
     let bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
     assert!(bytes.len() as u64 <= REPLY_BYTES_MAX);
-    let part = mailbox.join(format!("{id}{PART_SUFFIX}"));
-    let written = create_private(&part).and_then(|mut file| file.write_all(&bytes));
+    let mailbox = Mailbox::open_for_engine(mailbox)?;
+    let part = format!("{id}{PART_SUFFIX}");
+    let written = mailbox
+        .create(&part)
+        .and_then(|mut file| file.write_all(&bytes));
     if let Err(problem) = written {
-        let _ = std::fs::remove_file(&part);
+        let _ = mailbox.remove(&part);
         return Err(problem);
     }
-    std::fs::rename(&part, mailbox.join(format!("{id}{REPLY_SUFFIX}")))
+    mailbox.rename(&part, &format!("{id}{REPLY_SUFFIX}"))
 }
 
 /// Creates a new file 0600 for writing, failing when anything, a link included, is there.
