@@ -49,6 +49,89 @@ fn set_up_project(root: &Path, folder: &Path) -> ProjectId {
     project
 }
 
+fn claude_room() -> u32 {
+    let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
+        - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - 1;
+    u32::try_from(room).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit() {
+    let root = private_root("ca-tclaude-");
+    let work = private_root("ca-tclaude-work-");
+    let folder = std::fs::canonicalize(work.path()).unwrap().join("project");
+    std::fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let project = set_up_project(root.path(), &folder);
+    let app = "a".repeat(20_000);
+    let own = "b".repeat(20_000);
+
+    let Ok(ProcessReply::Saved(alone)) = native
+        .process(ProcessQuery::Save {
+            project: None,
+            text: app.clone(),
+        })
+        .await
+        .result
+    else {
+        panic!("the app save lands");
+    };
+    assert_eq!(
+        alone.bytes as usize,
+        crate::agent_home::render(&app, "").len()
+    );
+    assert_eq!(alone.claude_bytes_max, claude_room());
+    assert_eq!(
+        alone.claude_warning(),
+        None,
+        "20,000 bytes of app text fit a Claude master"
+    );
+
+    let Ok(ProcessReply::Saved(both)) = native
+        .process(ProcessQuery::Save {
+            project: Some(project.clone()),
+            text: own.clone(),
+        })
+        .await
+        .result
+    else {
+        panic!("a save past what a Claude master takes still lands");
+    };
+    assert_eq!(
+        std::fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+        own
+    );
+    let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+    let tx = connection.unchecked_transaction().unwrap();
+    let launch = crate::launch_context::agent_project(&tx, &project).unwrap();
+    let given = crate::agent_home::text(&launch).unwrap();
+    drop(tx);
+    assert_eq!(
+        both.bytes as usize,
+        given.len(),
+        "the save reports exactly what the project's agents now get"
+    );
+    assert!(both.bytes > both.claude_bytes_max);
+    let warning = both.claude_warning().expect("the save warns");
+    assert!(
+        warning.contains("a Claude master takes 27.5 KB")
+            && warning.contains(&format!("not {:.1} KB", given.len() as f64 / 1024.0)),
+        "{warning}"
+    );
+    service.shutdown().await.unwrap();
+}
+
 #[test]
 fn a_request_without_a_trusted_connection_answers_for_its_own_query() {
     let query = ProcessQuery::Save {
@@ -84,9 +167,13 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let event = native.process(read(None)).await;
     assert_eq!(event.query, read(None));
     assert_eq!(event.result, Ok(ProcessReply::Text(String::new())));
-    for (scope, text) in [
-        (None, "APP-RULE-51\n"),
-        (Some(project.clone()), "PROJECT-RULE-52\n"),
+    for (scope, text, given) in [
+        (None, "APP-RULE-51\n", ("APP-RULE-51\n", "")),
+        (
+            Some(project.clone()),
+            "PROJECT-RULE-52\n",
+            ("APP-RULE-51\n", "PROJECT-RULE-52\n"),
+        ),
     ] {
         let save = ProcessQuery::Save {
             project: scope.clone(),
@@ -94,7 +181,10 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         };
         assert_eq!(
             native.process(save).await.result,
-            Ok(ProcessReply::Text(String::new()))
+            Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
+                bytes: crate::agent_home::render(given.0, given.1).len() as u32,
+                claude_bytes_max: claude_room(),
+            }))
         );
         assert_eq!(
             native.process(read(scope)).await.result,

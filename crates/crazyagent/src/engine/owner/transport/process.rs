@@ -77,7 +77,10 @@ enum Reply {
     Text {
         bytes: u32,
     },
-    Saved,
+    Saved {
+        bytes: u32,
+        claude_bytes_max: u32,
+    },
     Received {
         agent: i64,
         harness: String,
@@ -103,9 +106,38 @@ pub struct AgentInstructions {
     pub skills: Vec<String>,
 }
 
+/// What a saved instructions text comes to: the bytes of app and project instructions the
+/// project's agents now receive (the app text alone after an app save) and the most a
+/// Claude master is sure to take beside the largest project context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSaved {
+    pub bytes: u32,
+    pub claude_bytes_max: u32,
+}
+
+impl ProcessSaved {
+    /// The short sentence to show after a save a Claude master may refuse, naming what it
+    /// takes and what agents now get; it fits an 80-column status line after "Instructions
+    /// saved.". Input: the save. Output: the sentence, or none when a Claude master takes it.
+    pub fn claude_warning(&self) -> Option<String> {
+        (self.bytes > self.claude_bytes_max).then(|| {
+            format!(
+                "Shorten: a Claude master takes {}, not {}.",
+                kilobytes(self.claude_bytes_max),
+                kilobytes(self.bytes)
+            )
+        })
+    }
+}
+
+fn kilobytes(bytes: u32) -> String {
+    format!("{:.1} KB", f64::from(bytes) / 1024.0)
+}
+
 enum Answer {
     Text(String),
-    Saved,
+    Saved(ProcessSaved),
     Agent(AgentInstructions),
 }
 
@@ -122,18 +154,28 @@ impl OwnerClient {
 
     /// Saves the owner's instructions whole: the app-wide text, or one project's text.
     /// Inputs: none for the app, or the project, and the text, at most
-    /// `agent_home::TEXT_BYTES_MAX` bytes. Output: unit, or a `PROCESS_CODES` refusal.
+    /// `agent_home::TEXT_BYTES_MAX` bytes. Output: what agents now receive beside what a
+    /// Claude master is sure to take, or a `PROCESS_CODES` refusal.
     pub async fn save_process_text(
         &self,
         project: Option<ProjectId>,
         text: String,
-    ) -> Result<(), EngineError> {
+    ) -> Result<ProcessSaved, EngineError> {
         crate::agent_home::validate(&text).map_err(|problem| EngineError(problem.0))?;
         match self
             .process_exchange(Action::Save { project }, Some(text))
             .await?
         {
-            (Reply::Saved, None) => Ok(()),
+            (
+                Reply::Saved {
+                    bytes,
+                    claude_bytes_max,
+                },
+                None,
+            ) if bytes as usize <= PROCESS_BYTES_MAX => Ok(ProcessSaved {
+                bytes,
+                claude_bytes_max,
+            }),
             _ => Err(unknown()),
         }
     }
@@ -314,7 +356,13 @@ pub(super) async fn serve(
             },
             Some(text),
         ),
-        Ok(Answer::Saved) => (Reply::Saved, None),
+        Ok(Answer::Saved(saved)) => (
+            Reply::Saved {
+                bytes: saved.bytes,
+                claude_bytes_max: saved.claude_bytes_max,
+            },
+            None,
+        ),
         Ok(Answer::Agent(view)) => {
             assert!(view.text.len() <= PROCESS_BYTES_MAX);
             let reply = Reply::Received {
@@ -389,8 +437,17 @@ async fn handle(
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
         }
-        action => run(&root, home.as_deref(), action, text)
-            .map(|text| text.map_or(Answer::Saved, Answer::Text)),
+        action => {
+            let saved = match &action {
+                Action::Save { project } => Some(project.clone()),
+                _ => None,
+            };
+            match (saved, run(&root, home.as_deref(), action, text)?) {
+                (Some(project), None) => sized(&root, project.as_ref()).map(Answer::Saved),
+                (None, Some(text)) => Ok(Answer::Text(text)),
+                _ => Err(unknown()),
+            }
+        }
     })
     .await
     .map_err(|_| failure("process_unavailable"))?
@@ -436,6 +493,28 @@ fn run(
         }
         (Action::Default, None) => Some(crate::agent_home::DEFAULT_PROCESS.to_owned()),
         _ => return Err(failure("process_request_invalid")),
+    })
+}
+
+/// Measures what the owner's instructions come to after a save: the app and project text
+/// the project's agents now receive, or the app text alone after an app save, beside what a
+/// Claude master is sure to take. Inputs: the engine root and the project, none for the
+/// app. Output: the sizes, or a plain code.
+fn sized(root: &Path, project: Option<&ProjectId>) -> Result<ProcessSaved, EngineError> {
+    let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+    let app = crate::agent_home::read_app(root).map_err(code)?;
+    let own = match project {
+        Some(project) => {
+            crate::agent_home::read_project(&project_folder(root, project)?).map_err(code)?
+        }
+        None => String::new(),
+    };
+    let given = crate::agent_home::render(&app, &own);
+    assert!(given.len() <= PROCESS_BYTES_MAX);
+    Ok(ProcessSaved {
+        bytes: u32::try_from(given.len()).map_err(|_| unknown())?,
+        claude_bytes_max: u32::try_from(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX)
+            .map_err(|_| unknown())?,
     })
 }
 

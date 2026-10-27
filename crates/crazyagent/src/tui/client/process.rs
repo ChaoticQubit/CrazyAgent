@@ -25,11 +25,12 @@ pub(in crate::tui) enum ProcessQuery {
     },
 }
 
-/// What one Process request returned: the text read (empty for a save), or what one team
-/// agent received at its last launch.
+/// What one Process request returned: the text read, what a save comes to beside what a
+/// Claude master takes, or what one team agent received at its last launch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
+    Saved(crate::engine::owner::ProcessSaved),
     Agent(Box<crate::engine::owner::AgentInstructions>),
 }
 
@@ -102,7 +103,7 @@ impl NativeOwner {
             ProcessQuery::Save { project, text } => controller
                 .save_process_text(project, text)
                 .await
-                .map(|()| ProcessReply::Text(String::new())),
+                .map(ProcessReply::Saved),
             ProcessQuery::ImportGlobal => controller
                 .import_global_instructions()
                 .await

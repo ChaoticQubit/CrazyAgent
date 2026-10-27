@@ -553,7 +553,61 @@ fn home_cards_put_new_team_notifications_before_suggested_memories() {
         assert!(shown.contains("2 new team notifications"), "{shown}");
         assert_eq!(shown.matches("new team notification").count(), 2, "{shown}");
         assert!(!shown.contains("1 new team notifications"), "{shown}");
-        assert!(!shown.contains("3 suggested memories"), "{shown}");
+        assert!(shown.contains("3 suggested memories"), "{shown}");
+    }
+}
+
+#[test]
+fn home_cards_show_suggested_memories_beside_new_team_notifications() {
+    let mut cards = projects();
+    cards[0].activity = Activity {
+        working: Some(0),
+        suggestions: 3,
+        notifications: 2,
+    };
+    cards[1].activity = Activity {
+        working: Some(0),
+        suggestions: 1,
+        notifications: 1,
+    };
+    for (width, height, narrow) in [(80, 24, false), (120, 36, false), (80, 24, true)] {
+        let mut ctx = ready(width, height);
+        if narrow {
+            ctx.store.setup = Load::Ready(tools(&[Dependency::Uv]));
+        }
+        ctx.store.projects = Load::Ready(cards.clone());
+        ctx.store.pools = Load::Ready(pools());
+        let mut shell = shell_at(ctx, Place::Home);
+        shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+        let rows = render(&mut shell, width, height);
+        let shown = rows.join("\n");
+        if narrow {
+            assert!(
+                shown.contains("Get set up"),
+                "the setup panel narrows the cards: {shown}"
+            );
+        }
+        for (notifications, memories) in [(2, "3 suggested memories"), (1, "1 suggested memory")] {
+            let row = rows
+                .iter()
+                .find(|row| row.contains(memories))
+                .unwrap_or_else(|| {
+                    panic!("{memories} shows on its card at {width}x{height}: {shown}")
+                });
+            let notice = row
+                .find(&format!("{notifications} new team notification"))
+                .or_else(|| row.find(&format!("{notifications} notification")));
+            assert!(
+                notice.is_some_and(|at| at < row.find(memories).unwrap()),
+                "the card shows its unseen notifications first, then its suggested memories, at {width}x{height}: {shown}"
+            );
+        }
+        assert!(!shown.contains("1 new team notifications"), "{shown}");
+        assert!(!shown.contains("1 notifications"), "{shown}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width as usize),
+            "{shown}"
+        );
     }
 }
 

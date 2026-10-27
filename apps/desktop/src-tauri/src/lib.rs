@@ -2073,7 +2073,7 @@ async fn desktop_save_process_text(
     state: State<'_, NativeState>,
     project_id: Option<String>,
     text: String,
-) -> Result<(), BridgeError> {
+) -> Result<crazyagent::engine::owner::ProcessSaved, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.save_process_text(project_id, text)?;
     call.await

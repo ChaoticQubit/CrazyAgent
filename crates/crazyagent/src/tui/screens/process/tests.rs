@@ -12,6 +12,16 @@ fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
     }))))
 }
 
+fn saved(query: ProcessQuery, bytes: u32) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query,
+        result: Ok(ProcessReply::Saved(crate::engine::owner::ProcessSaved {
+            bytes,
+            claude_bytes_max: 28_159,
+        })),
+    }))))
+}
+
 fn requests(shell: &mut Shell) -> Vec<ProcessQuery> {
     let mut sent = Vec::new();
     while let Some(request) = shell.ctx.next_request() {
@@ -137,8 +147,46 @@ fn the_app_page_reads_the_saved_text_and_saves_only_on_ctrl_s() {
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.key(Key::Ctrl('s'));
     assert_eq!(requests(&mut shell), vec![], "one request at a time");
-    shell.arrive(reply(save, Ok("")));
+    shell.arrive(saved(save, 24));
     assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_save_a_claude_master_may_refuse_warns_with_the_limit() {
+    let mut shell = opened(Scope::App, "Use tdd.\n");
+    typed(&mut shell, "Ask the master. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Ask the master. Use tdd.\n".into(),
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(saved(save, 40_000));
+    let shown = screen(&mut shell);
+    assert!(
+        !shown.contains("Not saved yet"),
+        "the text is saved: {shown}"
+    );
+    assert!(
+        shown.contains("Instructions saved. Shorten: a Claude master takes 27.5 KB, not 39.1 KB."),
+        "the save names what a Claude master takes and what agents get: {shown}"
+    );
+    assert!(!shown.contains("Agents started from now on"), "{shown}");
+
+    typed(&mut shell, "Short. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Ask the master. Short. Use tdd.\n".into(),
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(saved(save, 28_159));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Instructions saved. Agents started from now on get them."),
+        "exactly the limit is no warning: {shown}"
+    );
+    assert!(!shown.contains("Shorten"), "{shown}");
 }
 
 #[test]
