@@ -6,31 +6,33 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
 const OWNER_WAIT_MS: u64 = 5000;
-const IN_FLIGHT: Duration = Duration::from_millis(300);
+pub(super) const IN_FLIGHT: Duration = Duration::from_millis(300);
 const AT_MS: i64 = 1_800_000_000_000;
 
 /// A real engine with an owner client and the folder of its usage store.
-struct Usage {
-    root: tempfile::TempDir,
+pub(super) struct Usage {
+    pub(super) root: tempfile::TempDir,
     service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
-    client: OwnerClient,
-    engine_root: PathBuf,
+    pub(super) client: OwnerClient,
+    pub(super) engine_root: PathBuf,
 }
 
 impl Usage {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
+        Self::start_waiting(OWNER_WAIT_MS).await
+    }
+
+    /// Starts the engine with its owner wait. Input: the wait in milliseconds.
+    /// Output: the engine with a TUI owner client.
+    pub(super) async fn start_waiting(wait_ms: u64) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-usage-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(
-            &global,
-            format!("version = 1\ntimeout_ms = {OWNER_WAIT_MS}\n"),
-        )
-        .unwrap();
+        std::fs::write(&global, format!("version = 1\ntimeout_ms = {wait_ms}\n")).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -58,7 +60,7 @@ impl Usage {
         }
     }
 
-    fn runtime(&self) -> &OwnerRuntimeHandle {
+    pub(super) fn runtime(&self) -> &OwnerRuntimeHandle {
         self.service.owner_runtime().unwrap()
     }
 
@@ -70,7 +72,7 @@ impl Usage {
         packet
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         drop(self.client);
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
             .await
@@ -78,6 +80,28 @@ impl Usage {
             .unwrap();
         drop(self.root);
     }
+}
+
+/// A connected socket pair whose buffers hold about 1 KiB, so a reply larger than that
+/// waits for its client to read. Output: the engine end and the client end.
+fn small_buffers() -> (UnixStream, UnixStream) {
+    let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+    for end in [&server, &client] {
+        end.set_nonblocking(true).unwrap();
+    }
+    let server = UnixStream::from_std(server).unwrap();
+    let client = UnixStream::from_std(client).unwrap();
+    nix::sys::socket::setsockopt(&server, nix::sys::socket::sockopt::SndBuf, &1024usize).unwrap();
+    nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize).unwrap();
+    (server, client)
+}
+
+/// The body of a usage report request over all time. Output: the request body.
+fn report_body() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "usage": { "kind": "report", "since_ms": null, "offset_minutes": 0 }
+    }))
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -157,18 +181,8 @@ async fn a_revocation_waits_for_a_usage_reply_in_flight_and_refuses_the_next() {
     let runtime = usage.runtime();
     let packet = usage.packet();
     let admission = runtime.authority.authenticate(&packet).unwrap();
-    let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
-    for end in [&server, &client] {
-        end.set_nonblocking(true).unwrap();
-    }
-    let mut server = UnixStream::from_std(server).unwrap();
-    let mut client = UnixStream::from_std(client).unwrap();
-    nix::sys::socket::setsockopt(&server, nix::sys::socket::sockopt::SndBuf, &1024usize).unwrap();
-    nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize).unwrap();
-    let body = serde_json::to_vec(&json!({
-        "usage": { "kind": "report", "since_ms": null, "offset_minutes": 0 }
-    }))
-    .unwrap();
+    let (mut server, mut client) = small_buffers();
+    let body = report_body();
     let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
     let serving = tokio::spawn(async move {
         super::usage::serve(&mut server, &engine, &authority, &packet, &admission, &body).await
@@ -208,5 +222,43 @@ async fn a_revocation_waits_for_a_usage_reply_in_flight_and_refuses_the_next() {
         usage.client.usage_report(None, None, 0).await.is_err(),
         "the revoked client reads no more usage"
     );
+    usage.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_that_stops_reading_its_reply_is_dropped_and_frees_the_owner_barrier() {
+    let usage = Usage::start().await;
+    let db = crate::usage::open(&usage.engine_root).unwrap();
+    fill_past_one_frame(&db, crate::team::now_ms());
+    drop(db);
+    let runtime = usage.runtime();
+    let packet = usage.packet();
+    let admission = runtime.authority.authenticate(&packet).unwrap();
+    let (mut server, client) = small_buffers();
+    let body = report_body();
+
+    let started = Instant::now();
+    let served = tokio::time::timeout(
+        Duration::from_secs(10),
+        super::usage::serve(
+            &mut server,
+            &runtime.engine,
+            &runtime.authority,
+            &packet,
+            &admission,
+            &body,
+        ),
+    )
+    .await
+    .expect("the reply write to a client that stopped reading is bounded");
+    assert_eq!(served.unwrap_err().0, "owner_reply_stalled");
+    assert!(started.elapsed() >= REPLY_WRITE_TIME);
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, runtime.engine.owner_egress.write())
+            .await
+            .is_ok(),
+        "the stalled client no longer holds the owner barrier"
+    );
+    drop(client);
     usage.stop().await;
 }

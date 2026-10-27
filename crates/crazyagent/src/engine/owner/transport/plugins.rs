@@ -202,6 +202,32 @@ impl Action {
             _ => Ok(()),
         }
     }
+
+    /// Whether this request changes plugin state or starts work, and so runs under the
+    /// owner barrier. Output: true for a change, false for a read.
+    fn changes(&self) -> bool {
+        match self {
+            Self::Skills { .. }
+            | Self::SkillDetail { .. }
+            | Self::Servers { .. }
+            | Self::Server { .. }
+            | Self::ImportScan
+            | Self::Effective { .. } => false,
+            Self::AddSkill { .. }
+            | Self::ImportSkill { .. }
+            | Self::SetSkill { .. }
+            | Self::RemoveSkill { .. }
+            | Self::AddServer { .. }
+            | Self::UpdateServer { .. }
+            | Self::Approve { .. }
+            | Self::SetServer { .. }
+            | Self::RemoveServer { .. }
+            | Self::Switch { .. }
+            | Self::SetSecret { .. }
+            | Self::RemoveSecret { .. }
+            | Self::Check { .. } => true,
+        }
+    }
 }
 
 impl OwnerClient {
@@ -575,6 +601,18 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// A plugins request read and checked once: the reply of a read already made, or a change
+/// still to make under the owner barrier, with the secret it carries.
+enum Prepared {
+    Read(Box<Reply>),
+    Change(Action, Option<AccountSecret>),
+}
+
+/// Serves one plugins request. A read is made first; then, under the owner barrier, the
+/// grant is checked again, any change is made and the reply is written, so a revocation
+/// that returned saw every change and reply admitted before it and lets none through after.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -590,7 +628,7 @@ pub(super) async fn serve(
     } else {
         None
     };
-    let reply = match handle(
+    let prepared = prepare(
         engine,
         authority,
         packet,
@@ -598,8 +636,9 @@ pub(super) async fn serve(
         envelope.plugins,
         secret,
     )
-    .await
-    {
+    .await;
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match finish(engine, authority, packet, admission, prepared).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
             code: public_code(error),
@@ -612,7 +651,52 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
+}
+
+/// Checks the grant of a plugins request, and makes a read outside the owner barrier.
+/// Inputs: the engine, authority, packet, admission, request and its secret.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    action: Action,
+    secret: Option<AccountSecret>,
+) -> Result<Prepared, EngineError> {
+    {
+        let _barrier = engine.owner_egress.write().await;
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
+    }
+    if action.changes() {
+        return Ok(Prepared::Change(action, secret));
+    }
+    handle(engine, authority, action, secret)
+        .await
+        .map(|reply| Prepared::Read(Box::new(reply)))
+}
+
+/// Answers a prepared request under the owner barrier its caller holds: checks the grant
+/// again, then makes any change. Inputs: the engine, authority, packet, admission and the
+/// prepared request. Output: the reply, or the refusal.
+async fn finish(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    prepared: Result<Prepared, EngineError>,
+) -> Result<Reply, EngineError> {
+    let prepared = prepared?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    match prepared {
+        Prepared::Read(reply) => Ok(*reply),
+        Prepared::Change(action, secret) => handle(engine, authority, action, secret).await,
+    }
 }
 
 fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
@@ -628,17 +712,9 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
-    packet: &[u8; 37],
-    admission: &Admission,
     action: Action,
     secret: Option<AccountSecret>,
 ) -> Result<Reply, EngineError> {
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
-    }
     action.validate()?;
     if secret.is_some() != matches!(action, Action::SetSecret { .. }) {
         return Err(failure("server_secret_invalid"));
