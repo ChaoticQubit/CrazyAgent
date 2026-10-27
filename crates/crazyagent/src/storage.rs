@@ -2419,7 +2419,7 @@ fn owner_read(
             status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
         },
         OwnerRead::IdeAsks { project_id } => OwnerData::IdeAsks {
-            entries: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
+            asks: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
         },
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
             events: Box::new(crate::team::events::app(&tx)?),

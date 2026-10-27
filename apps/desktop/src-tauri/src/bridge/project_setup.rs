@@ -31,6 +31,15 @@ pub struct MemoryItem {
     pub human_reviewed: bool,
 }
 
+/// One decision the IDE asked the owner to confirm: the memory at the asked version and
+/// whether to approve or reject it.
+#[derive(Debug, Serialize)]
+pub struct IdeAskItem {
+    #[serde(flatten)]
+    pub memory: MemoryItem,
+    pub decision: crazyagent::ide::bridge::Decision,
+}
+
 impl From<KnowledgeEntry> for MemoryItem {
     fn from(entry: KnowledgeEntry) -> Self {
         Self {
@@ -265,17 +274,24 @@ impl NativeBridge {
         Ok(entries.into_iter().map(MemoryItem::from).collect())
     }
 
-    /// Lists the memories the project's IDE asked the owner to approve, still waiting at the
-    /// asked version. The desktop draws the confirm, which the IDE cannot click, and approves
-    /// through `review_memory` with Keep. Takes the project id. Returns the memories.
-    pub async fn ide_asks(&self, id: &str) -> Result<Vec<MemoryItem>, BridgeError> {
+    /// Lists the decisions the project's IDE asked the owner to confirm on memories still
+    /// waiting at the asked version. The desktop draws the confirm, which the IDE cannot
+    /// click, and decides through `review_memory` with Keep or Reject. Takes the project id.
+    /// Returns the asks.
+    pub async fn ide_asks(&self, id: &str) -> Result<Vec<IdeAskItem>, BridgeError> {
         let project_id = project(id)?;
-        let entries = self
+        let asks = self
             .reader()?
             .ide_asks(project_id)
             .await
             .map_err(|e| read_failure(&e.0))?;
-        Ok(entries.into_iter().map(MemoryItem::from).collect())
+        Ok(asks
+            .into_iter()
+            .map(|ask| IdeAskItem {
+                memory: MemoryItem::from(ask.entry),
+                decision: ask.decision,
+            })
+            .collect())
     }
 
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.

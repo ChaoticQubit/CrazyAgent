@@ -1088,7 +1088,7 @@ pub enum OwnerData {
         graph: Box<crate::team::TeamGraph>,
     },
     IdeAsks {
-        entries: Vec<crate::memory::KnowledgeEntry>,
+        asks: Vec<crate::ide::bridge::memory::IdeAsk>,
     },
     ProjectFiles {
         project_id: ProjectId,

@@ -1396,3 +1396,106 @@ async fn research_text_with_hidden_characters_stored_before_the_check_is_never_k
     drop(owner);
     engine.stop().await;
 }
+
+/// An IDE Approve or Reject on a waiting memory only asks: the memory stays waiting, the
+/// desktop's list shows the newest ask with its decision, and the owner's own Keep at that
+/// revision clears the list; an IDE decision on the reviewed revision is then stale.
+#[tokio::test]
+async fn an_ide_decision_waits_in_the_desktop_list_until_the_owner_reviews_it() {
+    use crate::ide::bridge::memory::{Decide, decide};
+    use crate::ide::bridge::{Decision, IdeReply};
+
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-ide", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-ide")
+            .join("context/research/market_research.md"),
+        "# Market\n\nAbout 2 million households plan meals weekly.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let entry = owner
+        .project_memories(meals.clone(), None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(entry.status, KnowledgeStatus::Provisional);
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
+
+    let runtime = engine.service.as_ref().unwrap().owner_runtime().unwrap();
+    let asked = |decision| Decide {
+        id: entry.id.clone(),
+        revision: entry.version,
+        decision,
+    };
+    for decision in [Decision::Reject, Decision::Approve] {
+        assert_eq!(
+            decide(runtime, &meals, &asked(decision)).await.unwrap(),
+            IdeReply::Ok {
+                data: serde_json::json!({ "confirm": "desktop" }),
+            }
+        );
+        let waiting = owner.ide_asks(meals.clone()).await.unwrap();
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|ask| (ask.entry.id.clone(), ask.entry.version, ask.decision))
+                .collect::<Vec<_>>(),
+            [(entry.id.clone(), entry.version, decision)],
+            "the newest IDE decision on a memory is the one the desktop asks"
+        );
+        let shown = owner.project_memories(meals.clone(), None).await.unwrap();
+        assert_eq!(
+            (shown[0].status.clone(), shown[0].version),
+            (KnowledgeStatus::Provisional, entry.version),
+            "an IDE decision writes no memory"
+        );
+    }
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    entry.id.clone(),
+                    entry.version,
+                    ReviewDecision::Keep,
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        owner.ide_asks(meals.clone()).await.unwrap().is_empty(),
+        "the owner's own review clears the ask"
+    );
+    let kept = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(kept[0].status, KnowledgeStatus::Confirmed);
+    assert!(kept[0].human_reviewed);
+    assert!(matches!(
+        decide(runtime, &meals, &asked(Decision::Reject))
+            .await
+            .unwrap(),
+        IdeReply::Stale { .. }
+    ));
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
+    drop(owner);
+    engine.stop().await;
+}

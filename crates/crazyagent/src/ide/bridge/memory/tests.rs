@@ -1,8 +1,10 @@
 use super::*;
 use crate::config::{EffectiveConfig, resolve_config};
 use crate::engine::Engine;
+use crate::engine::owner::OwnerMutation;
 use crate::memory::{
     ActivityInput, CaptureCategory, KnowledgeAction, KnowledgeRole, NominationInput, Principal,
+    ReviewDecision,
 };
 use crate::protocol::{
     BaselineId, ClientId, Command, CredentialRef, Cursor, ExecutionContext, PROTOCOL_VERSION,
@@ -185,12 +187,11 @@ fn decide(id: &str, revision: u64, decision: Decision) -> Decide {
     }
 }
 
-/// The sidebar's Approve never writes from the IDE: it becomes an ask the desktop app shows
-/// until the owner's own review keeps that revision, and an ask expires. Reject goes through
-/// the engine's own owner review with the revision the owner saw. A decision on an older
-/// revision writes nothing and returns the stale reply with the current revision and its
-/// writer, a revision that changes between the check and the write asks for a new check,
-/// and another project's memory is unknown.
+/// The sidebar's Approve and Reject never write from the IDE: each becomes an ask, with its
+/// decision, that the desktop app shows until the owner's own review moves that revision,
+/// and an ask expires. A decision on an older revision writes nothing and returns the stale
+/// reply with the current revision and its writer, and another project's memory is
+/// unknown.
 #[tokio::test]
 async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     let mut store = Store::open().await;
@@ -233,21 +234,30 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
         Ok(Plan::Ask {
             entry_id: id("fact"),
             version: 1,
+            decision: Decision::Approve,
         }),
         "an approval from the IDE is only asked, never written"
     );
     assert_eq!(store.memories(&p, None).await, shown);
     let database = store.database();
     let now = 1_000_000;
-    ask(&database, &p, &id("fact"), 1, now).unwrap();
-    ask(&database, &p, &id("fact"), 1, now + 1).unwrap();
+    ask(&database, &p, &id("fact"), 1, Decision::Reject, now).unwrap();
+    ask(&database, &p, &id("fact"), 1, Decision::Approve, now + 1).unwrap();
     let waiting = asks(&database, &p, now + 2).unwrap();
     assert_eq!(
         waiting
             .iter()
-            .map(|entry| (entry.id.as_str(), entry.version, entry.text.as_str()))
+            .map(|ask| {
+                (
+                    ask.entry.id.as_str(),
+                    ask.entry.version,
+                    ask.entry.text.as_str(),
+                    ask.decision,
+                )
+            })
             .collect::<Vec<_>>(),
-        [("fact", 1, "curated fact fact")]
+        [("fact", 1, "curated fact fact", Decision::Approve)],
+        "a newer ask for the same memory replaces the older one"
     );
     assert!(asks(&database, &q, now + 2).unwrap().is_empty());
     assert!(
@@ -272,6 +282,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
             &r,
             &id(entry),
             1,
+            Decision::Approve,
             now + i64::try_from(n).unwrap(),
         )
         .unwrap();
@@ -280,7 +291,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
         asks(&database, &r, now + 100)
             .unwrap()
             .iter()
-            .map(|entry| entry.id.as_str().to_owned())
+            .map(|ask| ask.entry.id.as_str().to_owned())
             .collect::<Vec<_>>(),
         many[1..],
         "a project keeps its newest asks only"
@@ -293,7 +304,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
             decision: ReviewDecision::Keep,
         },
     };
-    assert_eq!(decided(&store.write(confirmed).await), Decided::Applied);
+    assert_eq!(store.write(confirmed).await, Outcome::Applied);
     let approved = store.memories(&p, None).await;
     assert_eq!(approved[0].revision, 2);
     assert_eq!(approved[0].state, MemoryState::Approved);
@@ -324,24 +335,40 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     );
 
     let reject = decide("other", 1, Decision::Reject);
-    let Plan::Apply(mutation) = store.plan(&p, &reject).await.unwrap() else {
-        panic!("the current revision is applied");
-    };
-    let competing = OwnerMutation::Knowledge {
+    assert_eq!(
+        store.plan(&p, &reject).await,
+        Ok(Plan::Ask {
+            entry_id: id("other"),
+            version: 1,
+            decision: Decision::Reject,
+        }),
+        "a rejection from the IDE is only asked too"
+    );
+    ask(&database, &p, &id("other"), 1, Decision::Reject, now + 3).unwrap();
+    assert_eq!(
+        asks(&database, &p, now + 4)
+            .unwrap()
+            .iter()
+            .map(|ask| (ask.entry.id.as_str(), ask.decision))
+            .collect::<Vec<_>>(),
+        [("other", Decision::Reject)]
+    );
+    assert_eq!(
+        store.memories(&p, None).await[1].state,
+        MemoryState::Pending,
+        "an asked rejection writes nothing"
+    );
+    let refused = OwnerMutation::Knowledge {
         review: HumanReview::Review {
             entry_id: id("other"),
             version: 1,
-            decision: ReviewDecision::Keep,
+            decision: ReviewDecision::Reject,
         },
     };
-    assert_eq!(decided(&store.write(competing).await), Decided::Applied);
-    assert_eq!(decided(&store.write(mutation).await), Decided::Recheck);
-    assert_eq!(
-        decided(&Outcome::Rejected {
-            code: "stale_revision".into(),
-        }),
-        Decided::Recheck,
-        "a write the engine refused because it moved on is checked again"
+    assert_eq!(store.write(refused).await, Outcome::Applied);
+    assert!(
+        asks(&database, &p, now + 4).unwrap().is_empty(),
+        "a rejection the owner confirmed leaves the desktop list"
     );
     assert_eq!(
         store.plan(&p, &reject).await,
@@ -353,7 +380,7 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
     );
     assert_eq!(
         store.memories(&p, None).await[1].state,
-        MemoryState::Approved
+        MemoryState::Rejected
     );
 
     assert_eq!(
@@ -372,5 +399,55 @@ async fn ide_memory_approval_uses_engine_approval_with_the_revision() {
         Err(UNKNOWN)
     );
     assert_eq!(check(&decide("fact", 0, Decision::Approve)), Err(INVALID));
+    store.engine.close().await.unwrap();
+}
+
+/// A table an earlier build made without the decision column gains it at the next engine
+/// open: the old asks read as approvals, and a new ask records its own decision.
+#[tokio::test]
+async fn an_ask_table_from_an_earlier_build_gains_the_decision_column() {
+    let mut store = Store::open().await;
+    store.seed("ide-old", &["fact"]).await;
+    let old = project("ide-old");
+    let database = store.database();
+    let now = 1_000_000;
+    database
+        .execute_batch(
+            "DROP TABLE ide_asks;
+             CREATE TABLE ide_asks (
+                project TEXT NOT NULL,
+                entry TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0),
+                asked_ms INTEGER NOT NULL,
+                PRIMARY KEY (project, entry)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+    database
+        .execute(
+            "INSERT INTO ide_asks(project,entry,version,asked_ms) VALUES ('ide-old','fact',1,?1)",
+            [now],
+        )
+        .unwrap();
+
+    initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    let decided = |database: &rusqlite::Connection, at: i64| {
+        asks(database, &old, at)
+            .unwrap()
+            .iter()
+            .map(|ask| (ask.entry.id.as_str().to_owned(), ask.decision))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        decided(&database, now + 1),
+        [("fact".to_owned(), Decision::Approve)],
+        "an ask from the earlier build reads as the approval it was"
+    );
+    ask(&database, &old, &id("fact"), 1, Decision::Reject, now + 2).unwrap();
+    assert_eq!(
+        decided(&database, now + 3),
+        [("fact".to_owned(), Decision::Reject)]
+    );
     store.engine.close().await.unwrap();
 }

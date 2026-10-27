@@ -349,15 +349,15 @@ impl OwnerController {
         }
     }
 
-    /// Lists the memories the project's IDE asked the owner to approve that still wait at
-    /// the asked version, oldest ask first. Takes the project id. Returns the entries; the
-    /// owner approves each through `review_memory` with Keep.
+    /// Lists the decisions the project's IDE asked the owner to confirm on memories that
+    /// still wait at the asked version, oldest ask first. Takes the project id. Returns the
+    /// asks; the owner confirms each through `review_memory` with Keep or Reject.
     pub async fn ide_asks(
         &mut self,
         project_id: ProjectId,
-    ) -> Result<Vec<KnowledgeEntry>, EngineError> {
+    ) -> Result<Vec<crate::ide::bridge::memory::IdeAsk>, EngineError> {
         match self.read(OwnerRead::IdeAsks { project_id }).await?.data {
-            OwnerData::IdeAsks { entries } => Ok(entries),
+            OwnerData::IdeAsks { asks } => Ok(asks),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }

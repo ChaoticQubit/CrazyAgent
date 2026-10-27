@@ -65,16 +65,11 @@ function sidebarMemories(context, engine) {
         const memory = row?.memory;
         if (memory === undefined || memory.state !== "pending")
             return;
-        if (decision === "reject") {
-            const sure = await vscode.window.showWarningMessage("Reject this memory? Agents will not use it.", { modal: true, detail: memory.text }, "Reject");
-            if (sure !== "Reject")
-                return;
-        }
         const reply = await (0, tree_js_1.ask)(engine, "ide.memory_decide", { id: memory.id, revision: memory.revision, decision });
         if (reply?.kind !== "ok")
             void vscode.window.showWarningMessage((0, tree_js_1.trouble)(reply));
-        else if (decision === "approve")
-            void vscode.window.showInformationMessage("Confirm in the CrazyAgent window to save this memory.");
+        else
+            void vscode.window.showInformationMessage(`Confirm in the CrazyAgent window to ${decision === "approve" ? "save" : "reject"} this memory.`);
         refresh();
     };
     context.subscriptions.push(tree, engine.on("memories_changed", refresh), vscode.commands.registerCommand("crazyagent.memories.approve", decide("approve")), vscode.commands.registerCommand("crazyagent.memories.reject", decide("reject")), vscode.commands.registerCommand("crazyagent.memories.refresh", refresh));
