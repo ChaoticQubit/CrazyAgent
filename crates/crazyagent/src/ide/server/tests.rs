@@ -266,6 +266,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("AWS_SECRET_ACCESS_KEY", "fixture-cloud-key"),
         ("CRAZYAGENT_POOL_ACCOUNT", "fixture-pool-account"),
         ("CRAZYAGENT_IDE_CAPABILITY_FILE", "/private/tmp/forged"),
+        ("CRAZYAGENT_IDE_LOCKED_FILE", "/private/tmp/forged-locks"),
         ("CODEX_HOME", "/private/tmp/codex"),
         ("GIT_ASKPASS", "/private/tmp/askpass"),
         ("NODE_OPTIONS", "--require /private/tmp/evil.js"),
@@ -277,7 +278,8 @@ fn server_env_holds_only_allowlisted_names() {
         .iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));
     let capability = Path::new("/private/tmp/ide/project/capability");
-    let built = env::server_env(source, capability);
+    let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
+    let built = env::server_env(source, capability, locked);
     let mut command = Command::new("/usr/bin/env");
     command
         .env_clear()
@@ -298,12 +300,17 @@ fn server_env_holds_only_allowlisted_names() {
         env::CAPABILITY_VARIABLE,
         "/private/tmp/ide/project/capability",
     ));
+    expected.push((
+        crate::ide::settings::LOCKED_VARIABLE,
+        "/private/tmp/ide/project/locked-settings.json",
+    ));
     expected.sort();
     assert_eq!(seen, expected);
     assert!(
         seen.iter()
             .all(|(name, _)| env::allowed(std::ffi::OsStr::new(name))
-                || *name == env::CAPABILITY_VARIABLE)
+                || *name == env::CAPABILITY_VARIABLE
+                || *name == crate::ide::settings::LOCKED_VARIABLE)
     );
     assert!(
         !printed.contains("fixture-") && !printed.contains("forged") && !printed.contains("evil")

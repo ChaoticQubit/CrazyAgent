@@ -46,8 +46,9 @@ pub fn qualified() -> bool {
 /// project's toolchains readable, `home` and `tmp` writable and the build readable. On top,
 /// the whole engine data root is denied, then only the grants are given back, then every key
 /// file directly in a folder of the data root (the owner keys) and the engine database are
-/// denied again, and last every locked folder is denied for writing, case-insensitively as
-/// APFS matches names, with its folders up to its grant kept from being moved. Network:
+/// denied again, then every locked folder is denied for writing, case-insensitively as APFS
+/// matches names, with its folders up to its grant kept from being moved, and last agent IDE
+/// config in the project is denied for reading ([`agent_config`]). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, and connect to an owner socket.
 /// Inputs: the grants and the server port. Output: the profile text, or
 /// `ide_sandbox_invalid` for an unsafe place.
@@ -136,6 +137,7 @@ pub fn profile(grants: &Grants, port: u16) -> Result<String, EngineError> {
         ")\n(deny file-read* file-write*\n  (regex #\"^{pattern}/[^/]+/[^/]*\\.cap$\")\n  (regex #\"^{pattern}/engine\\.db(-wal|-shm|-journal)?$\"))\n"
     ));
     text.push_str(&locks(&held));
+    text.push_str(&agent_config(grants.root));
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
     ));
@@ -223,12 +225,37 @@ fn locks(held: &[(&Path, &Path)]) -> String {
     format!("{writes})\n{moves})\n")
 }
 
+/// The rule that keeps agents from setting the owner's IDE (DEC-098 addendum 9): the server
+/// reads no `.vscode` folder of an agent worktree and no `.code-workspace` file in one,
+/// under either agents root a project uses (`.crazyagent/worktrees` or `worktrees`), in any
+/// letter case. The engine's workspace file and Remote settings stay the only settings
+/// source for agent folders. Input: the project folder. Output: the rule text.
+fn agent_config(root: &Path) -> String {
+    let agents = format!(
+        "^{}({})?/{}/[^/]+/",
+        caseless(root),
+        anycase("/\\.crazyagent"),
+        anycase("worktrees")
+    );
+    let folder = anycase("\\.vscode");
+    let workspace = anycase("\\.code-workspace");
+    format!(
+        "(deny file-read*\n  (regex #\"{agents}{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\"))\n"
+    )
+}
+
 /// A Seatbelt regex matching `path` in any letter case, as APFS matches names, so a case
 /// variant of a locked name cannot be created or written. Input: a plain absolute path.
 /// Output: the pattern text, without anchors.
 fn caseless(path: &Path) -> String {
+    anycase(&seatbelt_pattern(path))
+}
+
+/// Makes a Seatbelt pattern match in any letter case: each ASCII letter becomes a class of
+/// both its cases. Input: the pattern. Output: the caseless pattern.
+fn anycase(text: &str) -> String {
     let mut pattern = String::new();
-    for character in seatbelt_pattern(path).chars() {
+    for character in text.chars() {
         if character.is_ascii_alphabetic() {
             pattern.push('[');
             pattern.push(character.to_ascii_lowercase());

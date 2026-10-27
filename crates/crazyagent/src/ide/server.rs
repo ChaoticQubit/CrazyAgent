@@ -1,5 +1,5 @@
 use super::ports::{self, Ports};
-use super::{env, sandbox, token, webview};
+use super::{env, sandbox, settings, token, webview};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
@@ -39,8 +39,6 @@ pub const WORKSPACE: &str = "crazyagent.code-workspace";
 
 const GROUP: &str = "server.pid";
 const SERVER_DATA: &str = "server";
-const USER_DATA: &str = "data";
-const REMOTE_SETTINGS: &str = "Machine";
 const EXTENSIONS: &str = "extensions";
 const SERVER_MAIN: &str = "out/server-main.js";
 const PROJECTS_MAX: usize = 256;
@@ -310,8 +308,6 @@ impl Servers {
             self.folder.clone(),
             folder.clone(),
             folder.join(SERVER_DATA),
-            folder.join(SERVER_DATA).join(USER_DATA),
-            remote_settings(&folder),
             folder.join(EXTENSIONS),
         ] {
             token::private_folder(&path).map_err(|_| failure("ide_folder_unsafe"))?;
@@ -484,22 +480,13 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
     Ok(real)
 }
 
-/// The folder where the server keeps its Remote settings, `Machine` in the user data folder
-/// it uses without `--user-data-dir`. The engine owns it: the profile locks it and the AI
-/// lock writes its settings there before each launch. Input: the project's IDE folder.
-/// Output: the folder.
-fn remote_settings(folder: &Path) -> PathBuf {
-    folder
-        .join(SERVER_DATA)
-        .join(USER_DATA)
-        .join(REMOTE_SETTINGS)
-}
-
-/// The server's command line under the Seatbelt profile installed for this launch: loopback
-/// host and port, the token file (never the token), its own data folder with the Remote
-/// settings locked, its extensions folder read only, telemetry off, a cleared environment
-/// holding only [`env::server_env`] with TMPDIR at its short temp folder, output to the
-/// launch's log, and its own process group.
+/// The server's command line under the Seatbelt profile installed for this launch, after
+/// the AI lock is written ([`settings::write`]); a lock that cannot be written stops the
+/// start. Loopback host and port, the token file (never the token), its own data folder
+/// with the Remote settings folder locked, the locked-keys file readable, its extensions
+/// folder read only, telemetry off, a cleared environment holding only
+/// [`env::server_env`] with TMPDIR at its short temp folder, output to the launch's log, and
+/// its own process group.
 fn command(
     build: &Path,
     folder: &Path,
@@ -522,10 +509,11 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
+    let written = settings::write(folder, &home)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (extensions, workspace) = (folder.join(EXTENSIONS), folder.join(WORKSPACE));
-    let settings = remote_settings(folder);
+    let machine = settings::machine_folder(&home);
     let grants = sandbox::Grants {
         data,
         root,
@@ -538,8 +526,9 @@ fn command(
             info.token_path.as_path(),
             info.capability_path.as_path(),
             workspace.as_path(),
+            written.locked.as_path(),
         ],
-        locked: &[settings.as_path()],
+        locked: &[machine.as_path()],
     };
     let profile = sandbox::install(folder, &grants, info.port)?;
     let mut command = sandbox::command(&profile, &build.join("node"));
@@ -551,13 +540,17 @@ fn command(
         .arg(&info.token_path)
         .arg("--accept-server-license-terms")
         .arg("--server-data-dir")
-        .arg(folder.join(SERVER_DATA))
+        .arg(&home)
         .arg("--extensions-dir")
         .arg(folder.join(EXTENSIONS))
         .args(["--telemetry-level", "off"])
         .current_dir(folder)
         .env_clear()
-        .envs(env::server_env(std::env::vars_os(), &info.capability_path))
+        .envs(env::server_env(
+            std::env::vars_os(),
+            &info.capability_path,
+            &written.locked,
+        ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
         .stdout(log)

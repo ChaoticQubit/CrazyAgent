@@ -19,7 +19,7 @@ const LOCALES_MAX: usize = 16;
 const VALUE_BYTES_MAX: usize = 16 * 1024;
 
 /// The most variables the IDE server's environment holds.
-pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 1;
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 2;
 
 /// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
 /// `LC_` followed by capital letters. Input: the name. Output: the answer.
@@ -37,12 +37,15 @@ pub fn allowed(name: &OsStr) -> bool {
 
 /// Builds the IDE server's whole environment from the engine's own: only the variables
 /// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
-/// [`CAPABILITY_VARIABLE`] naming the capability file. The server starts from a cleared
-/// environment holding exactly this. Inputs: the engine's variables, such as
-/// `std::env::vars_os()`, and the capability file path. Output: the variables in order.
+/// [`CAPABILITY_VARIABLE`] naming the capability file and the AI lock's
+/// [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file; neither is ever taken
+/// from the engine's own variables. The server starts from a cleared environment holding
+/// exactly this. Inputs: the engine's variables, such as `std::env::vars_os()`, the
+/// capability file path and the locked-keys file path. Output: the variables in order.
 pub fn server_env(
     source: impl IntoIterator<Item = (OsString, OsString)>,
     capability: &Path,
+    locked: &Path,
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     let mut locales = 0;
@@ -65,10 +68,13 @@ pub fn server_env(
         OsString::from(CAPABILITY_VARIABLE),
         capability.as_os_str().to_owned(),
     ));
+    env.push((
+        OsString::from(super::settings::LOCKED_VARIABLE),
+        locked.as_os_str().to_owned(),
+    ));
     assert!(env.len() <= ENV_MAX);
-    assert!(
-        env.iter()
-            .all(|(name, _)| allowed(name) || name == CAPABILITY_VARIABLE)
-    );
+    assert!(env.iter().all(|(name, _)| allowed(name)
+        || name == CAPABILITY_VARIABLE
+        || name == super::settings::LOCKED_VARIABLE));
     env
 }

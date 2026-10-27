@@ -43,9 +43,10 @@ pub struct Written {
 /// the engine's private IDE folder and renamed into place, so the server never reads a
 /// partial file and a link to the old file changes nothing. A Remote settings file that is
 /// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
-/// never followed. The server's sandbox refuses it every write to the file and its folders
-/// ([`seatbelt_denies`]). Inputs: the project's IDE folder and the server data folder inside
-/// it. Output: the written files, or a plain refusal.
+/// never followed. The server's profile locks the whole Remote settings folder
+/// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
+/// Inputs: the project's IDE folder and the server data folder inside it. Output: the
+/// written files, or a plain refusal.
 #[cfg(unix)]
 pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> {
     if !folder.is_absolute()
@@ -58,20 +59,15 @@ pub fn write(folder: &Path, server_data: &Path) -> Result<Written, EngineError> 
         return Err(failure("ide_settings_invalid"));
     }
     let user_data = server_data.join(USER_DATA);
-    let machine_folder = user_data.join(MACHINE);
-    for path in [
-        folder,
-        server_data,
-        user_data.as_path(),
-        machine_folder.as_path(),
-    ] {
+    let machine = machine_folder(server_data);
+    for path in [folder, server_data, user_data.as_path(), machine.as_path()] {
         super::bridge::private_folder(path)?;
     }
-    let target = machine_folder.join(SETTINGS);
+    let target = machine.join(SETTINGS);
     let mut settings = match owner_settings(&target)? {
         Owner::Kept(settings) => settings,
         Owner::Unreadable => {
-            std::fs::rename(&target, machine_folder.join(UNREADABLE)).map_err(unwritable)?;
+            std::fs::rename(&target, machine.join(UNREADABLE)).map_err(unwritable)?;
             Map::new()
         }
         Owner::Absent => Map::new(),
@@ -99,30 +95,13 @@ pub fn write(_folder: &Path, _server_data: &Path) -> Result<Written, EngineError
     Err(failure("ide_unavailable"))
 }
 
-/// The Seatbelt rules the IDE server's profile adds after its grants: every write to the
-/// Remote settings file, its `Machine` folder and the user data folder is denied, which also
-/// refuses a rename, link, mode change or new file in their place, while the rest of the
-/// server data folder stays writable. A read-only file mode alone is not enough: the
-/// workbench offers to overwrite it. Input: the server data folder. Output: the rules, or
-/// `ide_settings_invalid` for a path the profile cannot hold.
-pub fn seatbelt_denies(server_data: &Path) -> Result<String, EngineError> {
-    let user_data = server_data.join(USER_DATA);
-    let machine_folder = user_data.join(MACHINE);
-    let mut rules = String::from("(deny file-write*");
-    for path in [&user_data, &machine_folder, &machine_folder.join(SETTINGS)] {
-        let text = path
-            .to_str()
-            .filter(|text| {
-                path.is_absolute()
-                    && !text
-                        .chars()
-                        .any(|c| c.is_control() || matches!(c, '"' | '\\'))
-            })
-            .ok_or_else(|| failure("ide_settings_invalid"))?;
-        rules.push_str(&format!("\n  (literal \"{text}\")"));
-    }
-    rules.push_str(")\n");
-    Ok(rules)
+/// The Remote settings folder `<server data>/data/Machine` that [`write`] fills before each
+/// server start. The server's profile locks it as a whole, matched in any letter case, and
+/// keeps the folders up to the server data folder from being moved, since a literal deny
+/// leaves the granted parents movable. A read-only file mode alone is not enough: the
+/// workbench offers to overwrite it. Input: the server data folder. Output: the folder.
+pub fn machine_folder(server_data: &Path) -> PathBuf {
+    server_data.join(USER_DATA).join(MACHINE)
 }
 
 /// Every locked key with its value: the Remote settings, workspace and application keys.
@@ -135,10 +114,12 @@ pub fn locked() -> Map<String, Value> {
 }
 
 /// The keys the generated workspace file carries, the layer above Remote settings that the
-/// workbench applies for window keys: MCP access, extension tools, the settings AI search
-/// toggle, extension recommendations and the start editor. Output: the keys.
+/// workbench applies for window keys: AI features off again, since a window key there would
+/// override Remote settings, MCP access, extension tools, the settings AI search toggle,
+/// extension recommendations and the start editor. Output: the keys.
 pub fn workspace() -> Map<String, Value> {
     table([
+        ("chat.disableAIFeatures", json!(true)),
         ("chat.mcp.access", json!("none")),
         ("chat.extensionTools.enabled", json!(false)),
         ("workbench.settings.showAISearchToggle", json!(false)),

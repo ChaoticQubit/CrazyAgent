@@ -319,6 +319,16 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
             locked.display()
         );
     }
+    let quoted = home.join("da\"ta").join("Machine");
+    let locks = [quoted.as_path()];
+    assert_eq!(
+        invalid(&Grants {
+            locked: &locks,
+            ..grants
+        }),
+        "ide_sandbox_invalid",
+        "a path the profile cannot quote"
+    );
     let inside = home.join("data");
     for read_only in [inside.as_path(), mine.as_path(), home.as_path()] {
         let folders = [read_only];
@@ -332,6 +342,80 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
             "{}",
             read_only.display()
         );
+    }
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// DEC-098 addendum 9: the server cannot read an agent's IDE config, the `.vscode` folder
+/// of an agent worktree and any `.code-workspace` file in one, under either agents root and
+/// in any letter case, so an agent cannot set the owner's IDE settings. The project's own
+/// files, the agent's other files and the engine's workspace file stay readable.
+#[test]
+fn the_ide_server_cannot_read_agent_ide_config() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let inner = root.join(".crazyagent").join("worktrees").join("agent-1");
+    let outer = root.join("worktrees").join("agent-2");
+    for path in [
+        &home,
+        &build,
+        &inner.join(".vscode"),
+        &inner.join("src"),
+        &outer.join(".VSCode"),
+        &root.join(".vscode"),
+    ] {
+        folder(path);
+    }
+    let planted = r#"{"php.validate.executablePath": "./run.sh"}"#;
+    let refused = [
+        inner.join(".vscode").join("settings.json"),
+        inner.join(".vscode").join("tasks.json"),
+        outer.join(".VSCode").join("settings.json"),
+        inner.join("team.code-workspace"),
+        inner.join("src").join("Other.Code-Workspace"),
+        outer.join("agents.code-workspace"),
+    ];
+    let workspace = mine.join("crazyagent.code-workspace");
+    let allowed = [
+        root.join(".vscode").join("settings.json"),
+        inner.join("src").join("main.rs"),
+        outer.join("README.md"),
+        workspace.clone(),
+    ];
+    for path in refused.iter().chain(allowed.iter()) {
+        fs::write(path, planted).unwrap();
+    }
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[workspace.as_path()],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    let read = |path: &Path| run(&profile, "/bin/cat", &[path.as_os_str()]);
+    for path in &refused {
+        let (ran, printed) = read(path);
+        assert!(!ran && printed.is_empty(), "{}", path.display());
+    }
+    let variant = inner.join(".VSCODE").join("Settings.json");
+    assert!(!read(&variant).0, "{}", variant.display());
+    assert!(!run(&profile, "/bin/ls", &[inner.join(".vscode").as_os_str()]).0);
+    for path in &allowed {
+        assert_eq!(read(path), (true, planted.to_owned()), "{}", path.display());
     }
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }

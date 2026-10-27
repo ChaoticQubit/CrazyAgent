@@ -198,6 +198,7 @@ fn the_lock_layers_agree_and_leave_the_theme_free() {
     assert_eq!(
         Value::Object(workspace()),
         json!({
+            "chat.disableAIFeatures": true,
             "chat.mcp.access": "none",
             "chat.extensionTools.enabled": false,
             "workbench.settings.showAISearchToggle": false,
@@ -242,45 +243,46 @@ fn settings_outside_the_ide_folder_are_refused() {
         );
     }
     assert!(!case.root.join("server").exists());
-    assert_eq!(
-        seatbelt_denies(Path::new("/tmp/quote\"d/server"))
-            .unwrap_err()
-            .0,
-        "ide_settings_invalid"
-    );
 }
 
-/// Runs a shell command under a real Seatbelt profile: the agent profile that the IDE
-/// server's profile starts from, with the server data folder as its writable home, then
-/// [`seatbelt_denies`]. Returns whether the command succeeded.
+/// Runs a shell command under the IDE server's real profile, built and installed by
+/// [`super::super::sandbox`] with the server data folder as its home and the Remote settings
+/// folder ([`machine_folder`]) locked, as the server starts. Returns whether it succeeded.
 #[cfg(target_os = "macos")]
 fn sandboxed(case: &Case, script: &str) -> bool {
-    use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork};
+    use super::super::sandbox::{Grants, command, install};
+    let data = case.root.join("data");
     let project = case.root.join("project");
-    let tmp = case.root.join("tmp");
-    for folder in [&project, &tmp] {
+    let build = data.join("ide").join("build");
+    for folder in [&project, &build] {
         std::fs::create_dir_all(folder).unwrap();
     }
-    let sandbox = ProjectSandbox::new(
-        &project,
-        &case.server_data,
-        &tmp,
-        SandboxNetwork::Only(vec![]),
-    )
-    .unwrap();
-    let mut profile = sandbox.profile();
-    profile.push_str(&seatbelt_denies(&case.server_data).unwrap());
-    let path = case.root.join("server.sb");
-    std::fs::write(&path, profile).unwrap();
-    let mut command = std::process::Command::new(SANDBOX_EXEC);
-    command
-        .arg("-f")
-        .arg(&path)
-        .args(["/bin/sh", "-c", script])
+    let tmp = crate::sandbox::toolchains::make_tmp(&case.server_data).unwrap();
+    let locked = case.folder.join(LOCKED_FILE);
+    let machine = machine_folder(&case.server_data);
+    let grants = Grants {
+        data: &data,
+        root: &project,
+        build: &build,
+        home: &case.server_data,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[locked.as_path()],
+        locked: &[machine.as_path()],
+    };
+    let profile = install(&case.folder, &grants, 45_733).unwrap();
+    let mut shell = command(&profile, Path::new("/bin/sh"));
+    shell
+        .args(["-c", script])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    crate::spawn_gate::status(&mut command).unwrap().success()
+    let ran = crate::spawn_gate::status(&mut shell).unwrap().success();
+    crate::sandbox::toolchains::remove_tmp(&case.server_data).unwrap();
+    ran
 }
 
 #[cfg(target_os = "macos")]
@@ -293,6 +295,8 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
     let data = case.server_data.join("data");
     let (machine, data) = (machine.display(), data.display());
     let home = case.server_data.display();
+    let project = case.root.join("project");
+    let project = project.display();
     let off = r#"{"chat.disableAIFeatures": false}"#;
     for attempt in [
         format!("printf '%s' '{off}' > '{file}'"),
@@ -308,6 +312,11 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         format!(
             "ln -s '{home}/new.json' '{machine}/link.json' && mv '{machine}/link.json' '{file}'"
         ),
+        format!("printf '{{}}' > '{machine}/mcp.json'"),
+        format!("mkdir '{machine}/User'"),
+        format!("printf '%s' '{off}' > '{data}/MACHINE/Settings.json'"),
+        format!("mv '{data}' '{project}/data-aside'"),
+        format!("mv '{home}' '{project}/server-aside'"),
     ] {
         assert!(
             !sandboxed(&case, &attempt),
@@ -320,10 +329,18 @@ fn the_server_can_never_change_replace_or_remove_its_remote_settings() {
         sandboxed(
             &case,
             &format!(
-                "mkdir -p '{data}/User' && printf '{{}}' > '{data}/User/settings.json' && printf '{{}}' > '{machine}/mcp.json'"
+                "mkdir -p '{data}/User' && printf '{{}}' > '{data}/User/settings.json' && printf '{{}}' > '{data}/logs.txt'"
             )
         ),
         "the server still writes the rest of its data folder"
     );
     assert_eq!(read(&written.machine), expected_locks());
+    assert!(case.server_data.join("data").join("Machine").is_dir());
+    assert_eq!(
+        std::fs::read_dir(case.server_data.join("data").join("Machine"))
+            .unwrap()
+            .count(),
+        1,
+        "nothing was added next to the engine's settings"
+    );
 }
