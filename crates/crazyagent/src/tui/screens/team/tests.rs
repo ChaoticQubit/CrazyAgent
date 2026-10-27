@@ -199,19 +199,19 @@ fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
     let rows = render(&mut shell);
     let mut expected = vec![format!("┌─ Team {}┐", "─".repeat(21))];
     for line in [
-        "> Master  ▸ Working",
+        "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
         "  ├─ Claude Code (2)",
-        "  │  ├─ claude-1  ▸ Working",
+        "  │  ├─ ▸ claude-1  Working",
         "  │  │  Claude Max - work",
-        "  │  └─ claude-2  ◌ Waiting…",
+        "  │  └─ ◌ claude-2  Waiting…",
         "  └─ Codex (1)",
-        "     └─ codex-1  ▸ Starting",
+        "     └─ ▸ codex-1  Starting",
         "        ChatGPT Plus",
         "",
         "  Tasks",
-        "  ▸ Master → claude-1  Fix …",
-        "  ✓ Master → codex-1  Write…",
+        "  ▸ claude-1  Fix the login…",
+        "  ✓ codex-1  Write tests",
         "",
         "",
         "",
@@ -224,6 +224,36 @@ fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
     let drawn: Vec<String> = rows[2..22].iter().map(|row| chars(row, 2, 32)).collect();
     assert_eq!(drawn, expected);
     assert!(rows[0].contains("Tidepool  /  Team"), "{}", rows[0]);
+}
+
+#[test]
+fn long_names_and_task_text_are_cut_with_an_ellipsis_behind_the_status_glyph() {
+    let mut team = graph();
+    team.nodes[2].label = "Ada Lovelace (@onboarding-fix-for-reused-ids)".into();
+    team.nodes[2].status = Some(AgentStatus::Failed);
+    team.edges[0].text = "\n  Fix\tthe   login\u{7} bug\u{1b}[31m now\nsecond line".into();
+    let mut shell = fresh(80, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(team),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows[3..21].iter().map(|row| chars(row, 3, 31)).collect();
+    assert!(tree[3].starts_with("  │  ├─ ✗ Ada Lovelace"), "{}", tree[3]);
+    assert!(tree[3].ends_with('…'), "{}", tree[3]);
+    assert!(tree[11].starts_with("  ▸ Ada Lovelace"), "{}", tree[11]);
+    assert!(tree[11].ends_with('…'), "{}", tree[11]);
+    assert!(
+        rows.iter()
+            .all(|row| row.chars().all(|character| !character.is_control())),
+        "no control character reaches the screen"
+    );
+    assert_eq!(
+        super::title("\n  Fix\tthe   login\u{7} bug\u{1b}[31m now\nsecond line"),
+        "Fix the login bug[31m now"
+    );
+    assert_eq!(super::title(" \t\n\u{7}\n"), "Untitled task");
+    assert_eq!(super::plain("a\tb\u{1b}c\nd"), "a bc\nd");
 }
 
 #[test]
@@ -398,7 +428,7 @@ fn enter_on_a_task_shows_its_route_status_source_text_and_reply() {
     }
     assert_eq!(
         chars(&rows[14], 2, 32),
-        format!("│{:<28}│", "> ▸ Master → claude-1  Fix …")
+        format!("│{:<28}│", "> ▸ claude-1  Fix the login…")
     );
 
     shell.key(Key::Down);
@@ -444,7 +474,7 @@ fn a_failed_refresh_keeps_the_team_on_screen() {
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[3], 2, 32),
-        format!("│{:<28}│", "> Master  ▸ Working")
+        format!("│{:<28}│", "> ▸ Master  Working")
     );
 }
 
