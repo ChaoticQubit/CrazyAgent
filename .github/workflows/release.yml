@@ -41,6 +41,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -51,6 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REF_TYPE" = tag ]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master || { echo "::error::tag $REF_NAME points at a commit master does not hold; push master first"; exit 1; }
             version="$(node scripts/release/version.mjs stable "$REF_NAME")"
             channel=stable
             tag="$REF_NAME"
@@ -73,6 +75,7 @@ jobs:
 
   build:
     needs: [prepare, ci]
+    environment: release
     timeout-minutes: 150
     permissions:
       contents: read

@@ -23,13 +23,42 @@ function block(text, indent, name) {
   return lines.slice(start, end < 0 ? lines.length : end);
 }
 
-test("CI runs for pull requests and as a reusable workflow, with a concurrency group that needs no pull request", async () => {
+test("CI runs for pull requests and as a reusable workflow; a pull request cancels its own older run, and a release's CI never shares a group with another ref or gets cancelled", async () => {
   const ci = await workflow("ci.yml");
   const on = block(ci, 0, "on");
   assert(on.includes("  pull_request:"));
   assert(on.includes("  workflow_call:"));
-  assert.match(ci, /^ {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}$/m);
+  assert.deepEqual(block(ci, 0, "concurrency").filter(Boolean), [
+    "concurrency:",
+    "  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.ref, github.sha) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+  ]);
   assert.doesNotMatch(ci, /secrets\./);
+});
+
+test("a stable release ships only from a v* tag on a commit that master already holds", async () => {
+  const release = await workflow("release.yml");
+  const prepare = steps(release, "prepare");
+  const checkout = prepare.find((step) => step.includes("uses: actions/checkout@"));
+  assert.match(checkout, /\n {10}fetch-depth: 0(\n|$)/, "prepare sees master's history");
+  const version = prepare.find((step) => step.includes("- id: version"));
+  const tagBranch = version.slice(version.indexOf('if [ "$REF_TYPE" = tag ]; then'), version.indexOf("          else"));
+  assert.match(tagBranch, /git merge-base --is-ancestor "\$GITHUB_SHA" refs\/remotes\/origin\/master \|\| \{ echo "::error::[^"]+"; exit 1; \}/);
+  assert(tagBranch.indexOf("git merge-base") < tagBranch.indexOf("version.mjs stable"), "the commit is checked before a stable version is made");
+  assert(block(release, 2, "publish").includes("    needs: [prepare, build]"), "nothing publishes without prepare");
+});
+
+test("signing secrets reach only the build job, which is bound to the release environment", async () => {
+  const release = await workflow("release.yml");
+  const jobs = block(release, 0, "jobs").join("\n");
+  const build = block(jobs, 2, "build");
+  assert(build.includes("    environment: release"), "build runs in the release environment");
+  for (const job of ["prepare", "ci", "publish"]) {
+    const lines = block(jobs, 2, job);
+    assert(!lines.some((line) => line.includes("secrets.")), `${job} reads no secret`);
+    assert(!lines.some((line) => /^ {4}environment:/.test(line)), `${job} needs no environment`);
+  }
+  assert(release.split("\n").filter((line) => line.includes("secrets.")).length > 0);
 });
 
 test("every release, dev or stable, builds only after the whole CI workflow passes, and CI gets no secrets", async () => {
