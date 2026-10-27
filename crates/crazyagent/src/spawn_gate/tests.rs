@@ -32,3 +32,30 @@ fn output_keeps_the_stdio_the_caller_set() {
     assert_eq!(captured.stdout, b"out");
     assert!(captured.stderr.is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn accept_failures_a_later_accept_outlives_are_retried_and_lasting_ones_end_the_server() {
+    use rustix::io::Errno;
+    for passing in [
+        Errno::CONNABORTED,
+        Errno::CONNRESET,
+        Errno::INTR,
+        Errno::MFILE,
+        Errno::NFILE,
+        Errno::NOBUFS,
+        Errno::NOMEM,
+        Errno::PROTO,
+    ] {
+        assert!(
+            super::passing(&std::io::Error::from(passing)),
+            "{passing:?} is retried"
+        );
+    }
+    for lasting in [Errno::BADF, Errno::INVAL, Errno::NOTSOCK, Errno::OPNOTSUPP] {
+        assert!(
+            !super::passing(&std::io::Error::from(lasting)),
+            "{lasting:?} ends the server"
+        );
+    }
+}

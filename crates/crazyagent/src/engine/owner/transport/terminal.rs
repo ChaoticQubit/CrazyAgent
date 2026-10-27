@@ -203,6 +203,15 @@ async fn granted(
     authority.authenticate(packet)
 }
 
+/// Checks before each typed key, prompt or resize that the viewer's grant still stands.
+/// It reads the authority directly, without the owner barrier, so typing never waits on
+/// other owner work and a revocation published a moment ago already refuses the next key.
+/// Inputs: the authority, the viewer's packet and its admission. Output: whether it holds.
+#[cfg(unix)]
+fn still_granted(authority: &Authority, packet: &[u8; 37], admission: &Admission) -> bool {
+    authority.authenticate(packet).ok().as_ref() == Some(admission)
+}
+
 async fn write(
     stream: &mut (impl AsyncWrite + Unpin),
     frame: &TerminalFrame,
@@ -374,6 +383,9 @@ async fn watch(
             request = asked.recv() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
                 Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
+                Some(_) if !still_granted(authority, packet, &admission) => {
+                    break "owner_grant_stale_or_revoked";
+                }
                 Some(TerminalRequest::Prompt { text }) => {
                     let typed = prompt(&host, &agent, text.clone()).await;
                     if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
