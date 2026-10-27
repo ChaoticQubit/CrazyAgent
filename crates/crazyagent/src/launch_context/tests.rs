@@ -481,7 +481,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
-        process: Some(Process { project, text }),
+        process: Some(Box::new(Process { project, text })),
     };
     let home = |name: &str| {
         let home = root.join(name);

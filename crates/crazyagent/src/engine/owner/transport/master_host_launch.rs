@@ -1385,6 +1385,12 @@ mod tests {
         ]);
         expected.extend(crate::sandbox::AGENT_GIT_ENV);
         expected.extend(crate::sandbox::AGENT_TLS_ENV);
+        let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
+        expected.extend(
+            tools
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
         assert_eq!(environment, expected);
 
         let claude = crate::engine::claude_host::launch_command(
@@ -1426,6 +1432,11 @@ mod tests {
         ]);
         expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
         expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
+        expected_claude.extend(
+            tools
+                .iter()
+                .map(|(name, value)| (*name, value.to_str().unwrap())),
+        );
         assert_eq!(claude_environment, expected_claude);
 
         let run = |target: &Path| {

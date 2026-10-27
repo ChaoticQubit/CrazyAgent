@@ -74,7 +74,7 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
-    process: Option<Process>,
+    process: Option<Box<Process>>,
 }
 
 /// The owner's app and project instructions one launch writes into the agent's home,
@@ -118,10 +118,10 @@ pub fn for_project(
     Ok(AgentContext {
         plugins,
         instructions,
-        process: Some(Process {
+        process: Some(Box::new(Process {
             project: home_project,
             text,
-        }),
+        })),
     })
 }
 
