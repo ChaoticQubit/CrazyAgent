@@ -290,7 +290,7 @@ impl EventsStatus {
                 text.push_str(&format!(", task {task}: {prompt}"));
             }
             if let Some(question) = &agent.waiting {
-                text.push_str(&format!(", waiting on: {question}"));
+                text.push_str(&format!(", waiting on: {}", plain_brackets(question)));
             }
             text.push('\n');
         }
@@ -1215,8 +1215,34 @@ fn line(event: &TeamEvent) -> String {
         "[team] {} {}: {}{task}",
         event.label,
         event.kind.verb(),
-        event.text
+        plain_brackets(&event.text)
     )
+}
+
+const OPEN_BRACKETS: [char; 16] = [
+    '[', '\u{FF3B}', '\u{27E6}', '\u{3010}', '\u{3014}', '\u{3016}', '\u{3018}', '\u{301A}',
+    '\u{2045}', '\u{2772}', '\u{298B}', '\u{298D}', '\u{298F}', '\u{27EC}', '\u{FE5D}', '\u{FE47}',
+];
+const CLOSE_BRACKETS: [char; 16] = [
+    ']', '\u{FF3D}', '\u{27E7}', '\u{3011}', '\u{3015}', '\u{3017}', '\u{3019}', '\u{301B}',
+    '\u{2046}', '\u{2773}', '\u{298C}', '\u{298E}', '\u{2990}', '\u{27ED}', '\u{FE5E}', '\u{FE48}',
+];
+
+/// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
+/// and tortoise shell ones among them, into parentheses, so agent text can never show a
+/// `[owner]` or `[team]` tag to the master. Takes the text. Returns it with them replaced.
+fn plain_brackets(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if OPEN_BRACKETS.contains(&c) {
+                '('
+            } else if CLOSE_BRACKETS.contains(&c) {
+                ')'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Turns a terminal screen, as an attach redraws it, into its text rows: escape sequences
