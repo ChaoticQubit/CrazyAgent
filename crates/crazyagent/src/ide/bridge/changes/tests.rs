@@ -48,21 +48,46 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
 
 impl Case {
     pub(in crate::ide::bridge) fn new() -> Self {
-        Self::with(ChangeAgent {
-            kind: AgentKind::Sub,
-            id: "7".into(),
-            label: "Ada (@builder) \u{b7} Codex".into(),
-        })
+        Self::in_store(None)
+    }
+
+    /// The case with its change set in the store of an engine root, such as a running
+    /// owner server's, or of a new root in the case's own folder. Input: the engine root,
+    /// or None. Output: the case.
+    pub(in crate::ide::bridge) fn in_store(engine: Option<&Path>) -> Self {
+        Self::made(
+            engine,
+            ChangeAgent {
+                kind: AgentKind::Sub,
+                id: "7".into(),
+                label: "Ada (@builder) \u{b7} Codex".into(),
+            },
+        )
     }
 
     /// The case with its change set made by `agent`.
     pub(in crate::ide::bridge) fn with(agent: ChangeAgent) -> Self {
+        Self::made(None, agent)
+    }
+
+    /// The case with its change set made by `agent` in the store of an engine root, or
+    /// of a new root in the case's own folder. Inputs: the engine root or None, and the
+    /// agent. Output: the case.
+    fn made(engine: Option<&Path>, agent: ChangeAgent) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let (repo, home, engine) = (root.join("repo"), root.join("home"), root.join("engine"));
-        for folder in [&repo, &home, &engine] {
+        let (repo, home) = (root.join("repo"), root.join("home"));
+        for folder in [&repo, &home] {
             std::fs::create_dir(folder).unwrap();
         }
+        let engine = match engine {
+            Some(engine) => engine.to_path_buf(),
+            None => {
+                let engine = root.join("engine");
+                std::fs::create_dir(&engine).unwrap();
+                engine
+            }
+        };
         let owner = |args: &[&str]| git_in(&home, &repo, args);
         owner(&["init", "-q", "--template=", "-b", "main"]);
         owner(&["config", "user.name", "Repo Owner"]);
@@ -116,7 +141,7 @@ impl Case {
         sets.remove(0)
     }
 
-    fn owner_head(&self) -> String {
+    pub(in crate::ide::bridge) fn owner_head(&self) -> String {
         git_in(&self.home, &self.repo, &["rev-parse", "HEAD"])
             .trim()
             .to_owned()
