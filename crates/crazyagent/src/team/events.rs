@@ -1381,6 +1381,39 @@ fn option(row: &str) -> Option<(usize, &str, bool)> {
 /// list without a marker is not a question. Takes the screen bytes. Returns one bounded line
 /// with the question and its options, or none.
 pub fn question(screen: &[u8]) -> Option<String> {
+    choice(screen).map(|choice| choice.line())
+}
+
+/// A numbered choice an agent's app waits on, read from its screen: the question line above
+/// it and each option's text, in order, without its number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub asked: String,
+    pub options: Vec<String>,
+}
+
+impl Choice {
+    /// The question and its numbered options as one line of at most EVENT_TEXT_BYTES_MAX
+    /// bytes. Takes the choice. Returns the line.
+    pub fn line(&self) -> String {
+        let numbered: Vec<String> = self
+            .options
+            .iter()
+            .enumerate()
+            .map(|(at, text)| format!("{}. {text}", at + 1))
+            .collect();
+        let text = one_line(
+            &format!("{} | {}", self.asked, numbered.join(" | ")),
+            EVENT_TEXT_BYTES_MAX,
+        );
+        assert!(text.len() <= EVENT_TEXT_BYTES_MAX);
+        text
+    }
+}
+
+/// Finds the choice an agent's app waits on in its screen, as `question` describes. Takes
+/// the screen bytes. Returns the question line and at least two options, or none.
+pub fn choice(screen: &[u8]) -> Option<Choice> {
     let rows: Vec<String> = screen_rows(screen)
         .into_iter()
         .map(|row| {
@@ -1401,7 +1434,7 @@ pub fn question(screen: &[u8]) -> Option<String> {
                 if number == options.len() + 1 && options.len() < OPTIONS_MAX =>
             {
                 marked |= marker;
-                options.push(format!("{number}. {text}"));
+                options.push(text.to_owned());
             }
             Some(_) => break,
             None => {}
@@ -1416,12 +1449,10 @@ pub fn question(screen: &[u8]) -> Option<String> {
         .rev()
         .find(|row| row.ends_with('?'))
         .or_else(|| above.last())?;
-    let text = one_line(
-        &format!("{asked} | {}", options.join(" | ")),
-        EVENT_TEXT_BYTES_MAX,
-    );
-    assert!(text.len() <= EVENT_TEXT_BYTES_MAX);
-    Some(text)
+    Some(Choice {
+        asked: asked.clone(),
+        options,
+    })
 }
 
 /// Reads the wake rule in force for a project's agent: the agent's own, else the project's,
