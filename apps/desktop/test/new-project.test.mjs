@@ -55,6 +55,24 @@ test("tech stack entries are unique, bounded and custom entries are short", () =
   assert.deepEqual(wizard.removeStack(["A", "B"], "A"), ["B"]);
 });
 
+test("the form counts the bytes the engine stores, with the Other platform text joined to the description", () => {
+  const draft = { ...wizard.emptyDraft(), name: "Harbor Notes" };
+  const japanese = "説".repeat(3000);
+  assert.equal([...japanese].length, 3000, "well under the 4000 character limit");
+  assert.equal(wizard.basicsErrors({ ...draft, about: japanese }, []).about, "Shorten the description: it is too long to save.");
+  assert.equal(wizard.basicsErrors({ ...draft, about: "a".repeat(4000) }, []).about, undefined);
+  const near = "説".repeat(2730);
+  assert.equal(wizard.basicsErrors({ ...draft, about: near }, []).about, undefined, "8190 bytes fit");
+  const joined = { ...draft, about: near, platforms: ["other"], otherPlatform: "Kiosk" };
+  assert.equal(wizard.basicsErrors(joined, []).about, "Shorten the description or the Other platform text: together they are too long to save.");
+  assert.ok(new TextEncoder().encode(wizard.buildRequest(joined).setup.about).length > 8192, "the joined text is what the engine checks");
+  assert.equal(wizard.basicsErrors({ ...joined, otherPlatform: "" }, []).about, undefined);
+  assert.equal(wizard.addStack([], "説".repeat(22)).error, "This custom entry is too long to save. Shorten it.");
+  assert.deepEqual(wizard.addStack([], "説".repeat(21)), { stack: ["説".repeat(21)] });
+  assert.equal(wizard.basicsErrors({ ...draft, name: "😀".repeat(65) }, []).name, "This name is too long to save. Shorten it.");
+  assert.equal(wizard.basicsErrors({ ...draft, name: "😀".repeat(64) }, []).name, undefined, "256 bytes fit");
+});
+
 test("documents are checked by type, name and count before the engine copies them", () => {
   const extensions = ["pdf", "md", "txt", "docx", "csv", "png", "jpg", "jpeg"];
   const added = wizard.addDocuments([], ["/Users/m/brief.PDF", "/Users/m/budget.xlsx", "relative/notes.md", "/Users/m/folder/"], extensions, 16);

@@ -6,7 +6,7 @@ import { Button, Notice, Select, StatusBadge, Switch, TextField, formatRoute } f
 import { displayText } from "../conversation";
 import { ago } from "../project/research";
 import { changeNote } from "./controls";
-import { WAKE_KINDS, capInput, eventLine, eventState, ruleSource, withKind } from "./wake";
+import { WAKE_KINDS, capInput, eventLine, eventState, ruleSource, wakeRuleView, wakeSaveBlocked, withKind } from "./wake";
 
 const RECENT_SHOWN = 10;
 
@@ -28,17 +28,21 @@ export function WakeRuleEditor({ target, own, effective, fallback, reload }: {
 }) {
   const shown = own ?? effective;
   const key = targetKey(target);
+  const view = wakeRuleView(key, own, effective);
   const [cap, setCap] = useState(String(shown.hourly_cap));
-  const [busy, setBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedFrom, setSavedFrom] = useState<string | null>(null);
+  const busy = wakeSaveBlocked(savedFrom, view, saving);
   const [note, setNote] = useState("");
   useEffect(() => setCap(String(shown.hourly_cap)), [key, shown.hourly_cap]);
   const checked = capInput(cap);
 
   async function save(rule: WakeRule | null) {
     if (busy) return;
-    setBusy(true);
+    setSaving(true);
     const message = changeNote(await setWakeRule(target, rule, nextGeneration()), "wake rules");
-    setBusy(false);
+    setSavedFrom(message === "" ? view : null);
+    setSaving(false);
     setNote(message);
     reload();
   }

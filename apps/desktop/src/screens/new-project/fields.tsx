@@ -4,7 +4,7 @@ import type { Platform, ProjectCatalog, ResearchKind } from "../../api-projects"
 import { Icon, Switch } from "../../ui";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, RESEARCH_LABELS } from "./team-editor";
-import { RESEARCH_COPY, addStack, removeStack } from "./wizard";
+import { ABOUT_CHARS_MAX, RESEARCH_COPY, addStack, chars, removeStack } from "./wizard";
 import type { ProjectDraft, basicsErrors } from "./wizard";
 
 const PLATFORMS: { kind: Platform; label: string }[] = [
@@ -50,7 +50,7 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
     <div className="pj-field">
       <label htmlFor={`${prefix}-about`}>What is it about?{mark("about")}</label>
       <textarea className="pj-input" id={`${prefix}-about`} rows={5} value={draft.about} aria-describedby={`${prefix}-about-help`} onChange={(event) => onChange({ ...draft, about: event.target.value })} />
-      <p className="pj-help" id={`${prefix}-about-help`}>Who it's for and what it should do. Agents use this for research.{draft.about.length > 3600 ? ` ${draft.about.length} of 4000.` : ""}</p>
+      <p className="pj-help" id={`${prefix}-about-help`}>Who it's for and what it should do. Agents use this for research.{chars(draft.about) > 3600 ? ` ${chars(draft.about)} of ${ABOUT_CHARS_MAX}.` : ""}</p>
       {errors.about && <p className="pj-error" role="alert">{errors.about}</p>}
     </div>
     <fieldset className="pj-field">
