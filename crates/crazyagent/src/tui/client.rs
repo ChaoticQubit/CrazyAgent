@@ -25,6 +25,7 @@ pub(super) mod accounts;
 pub(super) mod app_setup;
 pub(super) mod changes;
 mod claude_code;
+pub(super) mod cleanup;
 pub(super) mod intake;
 pub(super) mod process;
 mod project_setup;
@@ -58,6 +59,7 @@ enum Job {
     Intake(Box<intake::IntakeJob>),
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
+    Cleanup(Box<cleanup::CleanupQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -179,6 +181,7 @@ pub(super) enum OwnerEvent {
     Intake(Box<intake::IntakeEvent>),
     Changes(Box<changes::ChangesEvent>),
     Process(Box<process::ProcessEvent>),
+    Cleanup(Box<cleanup::CleanupEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -711,6 +714,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Process(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Cleanup(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.cleanup(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => cleanup::CleanupEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Cleanup(Box::new(event)),
                                 })
                                 .is_err()
                             {

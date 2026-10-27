@@ -14,6 +14,8 @@ mod git;
 #[cfg(unix)]
 mod owner;
 #[cfg(unix)]
+mod retire;
+#[cfg(unix)]
 mod store;
 #[cfg(all(test, unix))]
 mod tests;
@@ -435,6 +437,47 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = db;
+        Err(unavailable())
+    }
+}
+
+/// Says why a finished agent's worktree cannot be removed now, as a plain code:
+/// `cleanup_changes_open`, `cleanup_changes_restorable`, `cleanup_worktree_invalid`,
+/// `cleanup_commits_unlanded` or `cleanup_worktree_dirty`. Inputs: the store, the owner's
+/// checkout root, the worktree, its git folder and the time now. Output: None when it can
+/// be removed.
+pub fn retire_blocker(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+    now_ms: u64,
+) -> Result<Option<&'static str>, EngineError> {
+    #[cfg(unix)]
+    return retire::blocker(db, repository, worktree, git_dir, now_ms);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir, now_ms);
+        Err(unavailable())
+    }
+}
+
+/// Removes a finished agent's worktree with the host git, never forcing, after checking
+/// `retire_blocker` again while no landing step can run on its repository. Inputs: the
+/// store, the owner's checkout root, the worktree, its git folder and the time now.
+/// Output: Ok once removed, or the plain code that kept it.
+pub fn retire_worktree(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+    now_ms: u64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    #[cfg(unix)]
+    return retire::remove(db, repository, worktree, git_dir, now_ms);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir, now_ms);
         Err(unavailable())
     }
 }
