@@ -185,25 +185,29 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.capture("team");
 
       await me.click("Conversation", "a, button, [role=tab]");
-      await me.waitFor("the master conversation", (text) => text.includes("/ for commands, @ to tag"));
-      await me.type(".cs textarea", "Hello master, what is in this repository?");
-      await me.enter();
-      const line = /Waiting to start|Thinking\.\.\.|The master stopped|Not signed in|Sign-in is out of date|Couldn't send|isn't installed/;
-      const turned = await me.waitFor("the master's first turn", (text) => line.test(text), STEP_MS);
-      await me.capture("master-turn");
-      assert.match(turned, /Hello master, what is in this repository\?/, "the owner's message is shown");
-      assert.doesNotMatch(turned, /master repository missing/i, "the project has its repository (LB-13)");
-      const turns = log.answers.get("desktop_master_turns")?.value?.page?.turns ?? [];
-      assert.ok(turns.length > 0, `the engine admitted the master's first turn: ${JSON.stringify(log.answers.get("desktop_master_turns") ?? null)}`);
-      const words = { queued: "Waiting to start", prepared: "Waiting to start", delivering: "Waiting to start", running: "Thinking...", waiting_approval: "Waiting for your approval", succeeded: "Replied", cancelled: "Stopped" };
-      const engineTurn = () => log.answers.get("desktop_master_turns")?.value?.page?.turns?.at(-1);
-      const agrees = (text) => {
-        const last = engineTurn();
-        if (!last.reason) return text.includes(words[last.phase] ?? "The master stopped");
-        const code = last.cause ?? (last.reason !== "unknown" ? last.reason : last.phase);
-        return text.includes(`(${code})`);
-      };
-      await me.waitFor("the page showing the engine's own turn state", agrees, STEP_MS);
+      const master = log.answers.get("desktop_project_setup")?.value?.team?.master;
+      assert.ok(["codex", "claude-code"].includes(master), `the setup gave the project a master that runs live in its terminal: ${master}`);
+      const waiting = "Waiting for the master's terminal. It opens once the master signs in and starts.";
+      const live = await me.waitFor("the live master waiting for its sign-in", (text) => /Master: [^\n,]+, live/.test(text) && text.includes(waiting), STEP_MS);
+      await me.capture("live-master");
+      assert.match(live, /Live master starts when you open this tab\./, "the header says when the live master starts");
+      assert.match(live, /Stop live master/, "the header can stop the live master");
+      assert.doesNotMatch(live, /couldn't start/i, "the engine took the live master switch");
+      const switches = () => log.trail.filter((entry) => entry.cmd === "desktop_team_live_master").map((entry) => [entry.args?.on, entry.answer?.value?.outcome]);
+      assert.deepEqual(switches(), [[true, "applied"]], "the first open turned the live master on once and the engine applied it");
+
+      await me.click("Earlier conversation");
+      const earlier = await me.waitFor("the earlier conversation, read only", (text) => text.includes("Read-only: the master runs live in its terminal now."));
+      await me.capture("earlier-conversation");
+      assert.match(earlier, /No earlier conversation\. Messages sent to the master before it ran live stay here to read\./, "a fresh project has no earlier conversation");
+      await me.click("Back to the live master");
+      await me.waitFor("the live master again", (text) => text.includes(waiting), STEP_MS);
+
+      await me.click("Stop live master");
+      const stopped = await me.waitFor("the live master stopped", (text) => /Master: [^\n,]+, stopped/.test(text) && text.includes("The live master is stopped. Its terminal opens again once you start it."), STEP_MS);
+      await me.capture("live-master-stopped");
+      assert.match(stopped, /Start live master/, "a stopped live master can be started again");
+      assert.deepEqual(switches(), [[true, "applied"], [false, "applied"]], "Stop live master turned it off once and the engine applied it");
 
       const remove = async () => {
         await me.follow("#tab-settings");
@@ -215,23 +219,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Remove project", "dialog button");
       };
       const database = join(runtime, "engine.db");
-      await me.click("Conversation actions");
-      await me.click("End conversation", "[role=menuitem]");
-      await me.waitFor("the master conversation ended", (text) => /\bStopped\b/.test(text));
-      await me.capture("master-ended");
-      await me.type(".cs textarea", "Hello again, master.");
-      await me.enter();
-      await me.waitFor("a new master conversation", (text) => text.includes("Hello again, master.") && line.test(text), STEP_MS);
-      assert.deepEqual(masterPhases(database), ["closed", "configured"], "End conversation closed the first conversation and the next message opened a new one");
-      const closes = () => log.trail.filter((entry) => entry.cmd === "desktop_close_master").length;
-      const ended = closes();
+      const conversations = masterPhases(database).length;
 
       await remove();
       await me.waitFor("Home with no projects again", (text) => /No projects yet/.test(text));
       await me.capture("home-empty-again");
-      assert.equal(log.answers.get("desktop_remove_project")?.value?.outcome, "applied", `one Remove project removes the project with its conversation open: ${JSON.stringify(log.answers.get("desktop_remove_project") ?? null)}`);
-      assert.equal(closes(), ended, "Remove project made no separate End conversation call");
-      assert.deepEqual(masterPhases(database), ["closed", "closed"], "the engine ended the open conversation in the same owner action");
+      assert.equal(log.answers.get("desktop_remove_project")?.value?.outcome, "applied", `one Remove project removes the project: ${JSON.stringify(log.answers.get("desktop_remove_project") ?? null)}`);
+      assert.equal(log.trail.filter((entry) => entry.cmd === "desktop_close_master").length, 0, "Remove project made no separate End conversation call");
+      const phases = masterPhases(database);
+      assert.equal(phases.length, conversations, "removing the project recorded no new master conversation");
+      assert.ok(phases.every((phase) => phase === "closed"), `the engine closed every master conversation in the same owner action: ${JSON.stringify(phases)}`);
       assert.ok(existsSync(join(repo, ".git")) && existsSync(join(repo, "README.md")), "the folder is still on disk");
       assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "no page errors");
     }
