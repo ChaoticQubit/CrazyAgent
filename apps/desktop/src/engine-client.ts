@@ -831,6 +831,12 @@ export function teamHandOff(id: string, reply: number, step: number, generation:
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
 }
 
+/** Turns a project's live master on or off. Inputs: project id, the switch and a generation.
+ * Output: the commit receipt; a master harness with no terminal app is rejected. */
+export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, generation });
+}
+
 /** Renames a live sub-agent's role handle. Inputs: project id, team agent id, the new handle
  * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
 export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
