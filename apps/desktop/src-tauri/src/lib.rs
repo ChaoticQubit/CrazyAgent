@@ -213,16 +213,19 @@ async fn desktop_engine_versions(window: WebviewWindow) -> Result<EngineVersions
 }
 
 /// Restarts the default engine through its login service, pointing the service at this
-/// app's sidecar so the engine and the app share one version, then reconnects.
+/// app's sidecar so the engine and the app share one version, then reconnects. Refuses
+/// `busy` while an update check or install holds the update lock, and holds it itself.
 #[tauri::command]
 async fn desktop_restart_engine(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    update: State<'_, UpdateState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Err(engine_failure("engine_restart_unavailable"));
     }
+    let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
     start_engine(&layout, &service, true).await?;
