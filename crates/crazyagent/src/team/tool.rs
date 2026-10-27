@@ -824,10 +824,11 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
 }
 
 /// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the record.
-/// Takes the drop file in the master's private temporary folder; a link or other non-file is never read.
+/// Takes the drop file in the master's private temporary folder; a link or other non-file is never
+/// read, nor a file reached through a link the master put in place of that folder.
 /// Returns at most eight valid proposals in call order, none when there is no record.
 pub fn take(drop: &Path) -> Vec<Delegation> {
-    let opened = open_recorded(drop);
+    let opened = open_taken(drop);
     clear(drop);
     let Ok(file) = opened else {
         return Vec::new();
@@ -857,9 +858,55 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
 }
 
 /// Removes a master's drop file so a new turn starts with no recorded proposal.
-/// Takes the drop file path; a link there is removed, never followed.
+/// Takes the drop file path; a link there is removed, never followed, and nothing is removed
+/// through a link the master put in place of its private temporary folder.
 /// Returns nothing; a missing file is already clear.
 pub fn clear(drop: &Path) {
+    remove_drop(drop);
+}
+
+/// Opens the master's private temporary folder that holds its drop file, for the engine,
+/// refusing a link at that folder or at the agent folder above it, which the master can
+/// replace. Takes the drop file path. Returns the folder handle and the file's name.
+#[cfg(unix)]
+fn drop_folder(drop: &Path) -> std::io::Result<(Mailbox, &str)> {
+    let refused = || std::io::Error::other("the drop file is not inside a folder");
+    let name = drop
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(refused)?;
+    let folder = drop.parent().ok_or_else(refused)?;
+    Ok((Mailbox::open_for_engine(folder)?, name))
+}
+
+/// Opens the drop file for the engine through its folder's handle, without following a link
+/// or blocking on a FIFO. Takes its path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    let (folder, name) = drop_folder(drop)?;
+    folder.read(name)
+}
+
+/// Opens the drop file for the engine as the reparse point itself, never a link's target.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    open_recorded(drop)
+}
+
+/// Removes the drop file through its folder's handle; a link there is removed, never
+/// followed, and a folder of that name stays. Takes its path.
+#[cfg(unix)]
+fn remove_drop(drop: &Path) {
+    if let Ok((folder, name)) = drop_folder(drop) {
+        let _ = folder.remove(name);
+    }
+}
+
+/// Removes the drop file by its path unless a folder is there; a link is removed, never
+/// followed. Takes its path.
+#[cfg(windows)]
+fn remove_drop(drop: &Path) {
     if std::fs::symlink_metadata(drop).is_ok_and(|metadata| !metadata.is_dir()) {
         let _ = std::fs::remove_file(drop);
     }

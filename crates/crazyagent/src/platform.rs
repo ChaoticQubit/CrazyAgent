@@ -260,7 +260,7 @@ pub fn read_plain_file(path: &Path, limit: u64) -> Option<String> {
 /// Opens a path to read without following a link in its last part and without waiting
 /// for a FIFO writer. Takes the path. Returns the open file or the I/O error.
 #[cfg(unix)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
     std::fs::OpenOptions::new()
@@ -272,7 +272,7 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
 /// Opens a path to read as the reparse point itself, never a link's target.
 /// Takes the path. Returns the open file or the I/O error.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)

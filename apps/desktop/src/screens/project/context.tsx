@@ -7,7 +7,7 @@ import { Button, ConfirmDialog, Icon, Segmented, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
-import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
+import { MarkdownView, headings, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
 import { ProjectMemory } from "./memory";
 import { deletable, deleteQuestion, fileIcon, retryPath } from "./research";
@@ -127,7 +127,6 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const text = file?.kind === "ok" ? file.value.text : null;
   const markdown = chosen !== null && extension(chosen) === "md";
   const blocks = useMemo(() => text !== null && markdown ? parseMarkdown(text) : [], [text, markdown]);
-  const sources = markdownLinks(blocks);
   const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
 
   const readSelection = () => {
@@ -294,10 +293,7 @@ export function ContextTab({ data }: { data: ProjectData }) {
         {file?.kind === "ok" && text === null && <p className="pj-secondary">{formatBytes(item.bytes)}. A preview isn't shown for this kind of file. Use Open in default app.</p>}
         <div ref={reading} onMouseUp={readSelection} onKeyUp={readSelection}>
         {text !== null && markdown && <article className="pj-md">
-          <MarkdownView source={text} onOpenLink={open} headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
-          {sources.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
-            <ol>{sources.map((source) => <li key={source.href}><a href={source.href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); open(source.href); }}>{displayText(source.text)}</a>
-              {source.text !== source.href && <span className="pj-small pj-muted pj-mono"> {displayText(source.href)}</span>}</li>)}</ol></section>}
+          <MarkdownView source={text} onOpenLink={open} sources headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
         </article>}
         {text !== null && !markdown && TEXT_TYPES.includes(extension(item.path)) && <pre className="pj-preview">{displayText(text)}</pre>}
         </div>

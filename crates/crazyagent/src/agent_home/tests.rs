@@ -437,3 +437,66 @@ fn the_received_view_holds_its_bounds() {
         );
     }
 }
+
+/// A FIFO that replaces the instruction file between any check and the open never makes
+/// the read wait for a writer: every read ends with the text or `process_text_unsafe`.
+#[cfg(unix)]
+#[test]
+fn a_fifo_swapped_in_for_the_instruction_file_never_blocks_the_read() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let state = folder.join(".crazyagent");
+    let path = state.join("instructions.md");
+    let plain = root.join("plain.md");
+    let fifo = root.join("fifo.md");
+    let swapped = state.join("swapped.md");
+    fs::write(&plain, "Use TDD.\n").unwrap();
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    fs::hard_link(&plain, &path).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = std::thread::spawn({
+        let (stop, path) = (stop.clone(), path.clone());
+        move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::SeqCst) {
+                for source in [&fifo, &plain] {
+                    fs::hard_link(source, &swapped).unwrap();
+                    fs::rename(&swapped, &path).unwrap();
+                    swaps += 1;
+                }
+            }
+            swaps
+        }
+    });
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut outcomes = Vec::new();
+        while Instant::now() < deadline {
+            outcomes.push(read_project(&folder).map_err(|problem| problem.0));
+        }
+        let _ = sent.send(outcomes);
+    });
+    let outcomes = received.recv_timeout(Duration::from_secs(20));
+    stop.store(true, Ordering::SeqCst);
+    let swaps = swapper.join().unwrap();
+    let outcomes = outcomes.expect("a read waited on the FIFO swapped in for the instruction file");
+    assert!(swaps > 0 && !outcomes.is_empty());
+    for outcome in &outcomes {
+        assert!(
+            matches!(
+                outcome.as_deref(),
+                Ok("Use TDD.\n") | Err("process_text_unsafe")
+            ),
+            "{outcome:?}"
+        );
+    }
+}
