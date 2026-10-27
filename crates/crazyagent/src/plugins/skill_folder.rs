@@ -139,7 +139,9 @@ pub fn stored_description(skill_md: &Path) -> Result<String, &'static str> {
         .map_err(unreadable)?;
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
-        Err(cut) => std::str::from_utf8(&bytes[..cut.valid_up_to()]).map_err(unreadable)?,
+        Err(cut) => {
+            std::str::from_utf8(&bytes[..cut.valid_up_to()]).map_err(|_| "skill_unreadable")?
+        }
     };
     frontmatter(text).map(|(_, description)| description)
 }
