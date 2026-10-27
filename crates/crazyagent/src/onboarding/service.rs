@@ -509,7 +509,9 @@ fn mapping_step(
     let mut base = claimed.drafted.clone();
     base.draft.pool = Some(claimed.pool.clone());
     let base = draft::merge(&base, &Answer::default(), &found, &stack);
-    let _ = store_draft(database, &work.claimer, claimed, &base);
+    if base != claimed.drafted {
+        let _ = store_draft(database, &work.claimer, claimed, &base);
+    }
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
