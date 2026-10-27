@@ -37,6 +37,10 @@ fn every_start_failure_has_a_plain_cause_code_without_its_text() {
             RunError::Uncertain("warden_unconfirmed"),
             "cleanup_uncertain",
         ),
+        (
+            RunError::Setup("worktree_checkout_failed"),
+            "worktree_checkout_failed",
+        ),
         (RunError::Io(io()), "io_permission_denied"),
     ];
     for (error, code) in cases {
