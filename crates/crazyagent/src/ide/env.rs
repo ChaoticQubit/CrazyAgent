@@ -6,18 +6,11 @@ use std::path::Path;
 pub const CAPABILITY_VARIABLE: &str = "CRAZYAGENT_IDE_CAPABILITY_FILE";
 
 /// Every variable the IDE server may inherit from the engine, besides the `LC_` locale
-/// variables: what an owner shell and the owner's own git credentials need, and nothing a
-/// provider, pool or engine secret travels in.
+/// variables: what an owner shell needs, and nothing a provider, pool or engine secret or
+/// the owner's credentials travel in. The owner's key agent socket is refused, as it is for
+/// agents.
 pub const ALLOWED: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "LANG",
-    "TERM",
-    "TMPDIR",
-    "SSH_AUTH_SOCK",
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TMPDIR",
 ];
 
 const LOCALE_PREFIX: &str = "LC_";

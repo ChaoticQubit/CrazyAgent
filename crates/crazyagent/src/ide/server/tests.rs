@@ -293,7 +293,7 @@ fn server_env_holds_only_allowlisted_names() {
         .map(|line| line.split_once('=').unwrap())
         .collect();
     seen.sort();
-    let mut expected: Vec<(&str, &str)> = given[..11].to_vec();
+    let mut expected: Vec<(&str, &str)> = given[..10].to_vec();
     expected.push((
         env::CAPABILITY_VARIABLE,
         "/private/tmp/ide/project/capability",
@@ -308,6 +308,8 @@ fn server_env_holds_only_allowlisted_names() {
     assert!(
         !printed.contains("fixture-") && !printed.contains("forged") && !printed.contains("evil")
     );
+    assert!(!env::allowed(std::ffi::OsStr::new("SSH_AUTH_SOCK")));
+    assert!(!printed.contains("SSH_AUTH_SOCK") && !printed.contains("agent.sock"));
 }
 
 #[tokio::test]
