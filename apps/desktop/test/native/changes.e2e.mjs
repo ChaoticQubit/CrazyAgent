@@ -17,6 +17,7 @@ const SETUP_MS = 120000;
 
 const GIT = "/usr/bin/git";
 const AGENT = "agent-builder";
+const AGENT_LABEL = "Ada (@builder) \u00b7 Codex";
 const XSS = '<img src=x onerror="window.__changesXss=1">';
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
 
@@ -105,7 +106,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.ok(existsSync(join(runtime, "engine.db")), "the engine keeps its database in its root");
     git(repo, "worktree", "add", "-q", "--detach", worktree, "HEAD");
     const recordTurn = (prompt) => {
-      const result = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, AGENT, "Builder", repo, worktree, join(repo, ".git", "worktrees", AGENT), prompt], { encoding: "utf8", env: { ...env } });
+      const result = spawnSync(bridgeBinary, ["record-turn-end", runtime, project, AGENT, AGENT_LABEL, repo, worktree, join(repo, ".git", "worktrees", AGENT), prompt], { encoding: "utf8", env: { ...env } });
       assert.equal(result.status, 0, `the engine records the agent's turn: ${result.stderr}`);
       const id = result.stdout.trim();
       assert.match(id, /^[0-9a-f]{32}$/, "an edited worktree makes a change set");
@@ -134,7 +135,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         agentEdits(worktree);
         const first = recordTurn("Add tomatoes and a grow script");
         const rows = () => page.evaluate("document.querySelectorAll('.ch-row').length");
-        await me.waitFor("the agent's change set in the list", (text) => /Sub-agent Builder/.test(text) && /Ready to review/.test(text));
+        await me.waitFor("the agent's change set in the list", (text) => text.includes(AGENT_LABEL) && /Ready to review/.test(text));
         await me.follow(".ch-row");
         const review = await me.waitFor("the change set's files and diff", (text) => /Now with tomatoes\./.test(text) && text.includes(".gitmodules: changes the project's submodules"));
         await me.capture("changes-review");
