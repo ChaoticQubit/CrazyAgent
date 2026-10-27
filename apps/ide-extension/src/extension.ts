@@ -12,11 +12,12 @@ const features: Feature[] = [sandboxedTerminal];
 
 /**
  * Starts every feature when the CrazyAgent engine launched this IDE server, which it
- * shows by setting the capability and socket variables; otherwise does nothing.
+ * shows by setting the capability and socket variables; otherwise does nothing. The
+ * bridge keeps its session token in the context's secret storage.
  * Input: the extension context. Output: none; the bridge closes with the context.
  */
 export function activate(context: vscode.ExtensionContext): void {
-  const engine = Engine.fromEnv(process.env);
+  const engine = Engine.fromEnv(process.env, context.secrets);
   if (engine === undefined) return;
   context.subscriptions.push(engine);
   for (const feature of features) feature(context, engine);

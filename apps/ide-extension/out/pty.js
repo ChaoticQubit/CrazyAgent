@@ -48,13 +48,13 @@ class SandboxedPty {
         this.#open = open;
     }
     open(initial) {
-        this.#size = clampSize(initial);
-        let socket;
-        try {
-            socket = this.#open("ide.terminal", { cols: this.#size.columns, rows: this.#size.rows });
-        }
-        catch {
-            this.#stop("ide_capability_invalid");
+        const opened = clampSize(initial);
+        this.#size = opened;
+        this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows }).then((socket) => this.#attach(socket, opened), (error) => this.#stop(error instanceof Error ? error.message : "unknown"));
+    }
+    #attach(socket, opened) {
+        if (this.#ended) {
+            socket.destroy();
             return;
         }
         this.#socket = socket;
@@ -73,6 +73,8 @@ class SandboxedPty {
         });
         socket.on("error", () => undefined);
         socket.on("close", () => this.#stop("ide_engine_closed"));
+        if (this.#size.columns !== opened.columns || this.#size.rows !== opened.rows)
+            this.setDimensions(this.#size);
     }
     handleInput(data) {
         if (this.#ended || this.#socket === undefined)

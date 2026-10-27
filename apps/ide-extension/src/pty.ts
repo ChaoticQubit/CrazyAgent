@@ -26,8 +26,8 @@ export interface Size {
   rows: number;
 }
 
-/** Opens one streaming bridge call and returns its socket, as `Engine.stream` does. */
-export type Open = (name: string, args: Record<string, unknown>) => Socket;
+/** Opens one streaming bridge call and resolves to its socket, as `Engine.stream` does. */
+export type Open = (name: string, args: Record<string, unknown>) => Promise<Socket>;
 
 /** What the engine sends on an `ide.terminal` connection. */
 type Pushed =
@@ -74,8 +74,9 @@ export function stopped(code: string): string {
  * A VS Code pseudoterminal for the owner's shell that the engine runs under the project's
  * agent sandbox. `open` starts it over one `ide.terminal` connection; output, typing and
  * resizes travel as engine terminal frames, typing in chunks of at most `INPUT_BYTES_MAX`
- * bytes. The terminal closes when the shell ends; when the engine refuses or stops it,
- * the reason stays on screen. `close` detaches, which ends the shell.
+ * bytes, and typing before the connection opens is dropped. The terminal closes when the
+ * shell ends; when the engine refuses or stops it, the reason stays on screen. `close`
+ * detaches, which ends the shell.
  */
 export class SandboxedPty {
   readonly #wrote = new Signal<string>();
@@ -94,12 +95,21 @@ export class SandboxedPty {
   }
 
   open(initial: Size | undefined): void {
-    this.#size = clampSize(initial);
-    let socket: Socket;
-    try {
-      socket = this.#open("ide.terminal", { cols: this.#size.columns, rows: this.#size.rows });
-    } catch {
-      this.#stop("ide_capability_invalid");
+    const opened = clampSize(initial);
+    this.#size = opened;
+    this.#open("ide.terminal", { cols: opened.columns, rows: opened.rows }).then(
+      (socket) => this.#attach(socket, opened),
+      (error: unknown) => this.#stop(error instanceof Error ? error.message : "unknown"),
+    );
+  }
+
+  /**
+   * Takes the opened connection, unless the terminal closed meanwhile, and sends a resize
+   * that came before it.
+   */
+  #attach(socket: Socket, opened: Size): void {
+    if (this.#ended) {
+      socket.destroy();
       return;
     }
     this.#socket = socket;
@@ -116,6 +126,7 @@ export class SandboxedPty {
     });
     socket.on("error", () => undefined);
     socket.on("close", () => this.#stop("ide_engine_closed"));
+    if (this.#size.columns !== opened.columns || this.#size.rows !== opened.rows) this.setDimensions(this.#size);
   }
 
   handleInput(data: string): void {

@@ -108,6 +108,27 @@ fn token(path: &Path) -> [u8; 32] {
     unhex(&text).try_into().unwrap()
 }
 
+/// Swaps a capability file's token for its session token, as the extension does first,
+/// and checks the file is gone. Inputs: the owner socket and the capability path. Output:
+/// the session token.
+async fn session(socket: &Path, path: &Path) -> [u8; 32] {
+    let file = token(path);
+    let project = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        .unwrap()
+        .to_owned();
+    let body = request(&project, json!({ "name": "ide.session", "args": {} }));
+    let Some(IdeReply::Ok { data }) = exchange(socket, packet(MAGIC, 0, &file), &body).await else {
+        panic!("no session for {project}");
+    };
+    let session: [u8; 32] = unhex(data["token"].as_str().unwrap()).try_into().unwrap();
+    assert_ne!(session, file);
+    assert!(std::fs::symlink_metadata(path).is_err());
+    session
+}
+
 /// An IDE request body for one project and one call.
 fn request(project: &str, call: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&json!({ "project": project, "call": call })).unwrap()
@@ -195,7 +216,16 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
         socket,
         case.root.path().join("o00000000").join("owner.sock")
     );
-    let first = token(&path);
+    assert_eq!(
+        exchange(
+            &socket,
+            packet(MAGIC, 0, &token(&path)),
+            &request("alpha", workspace())
+        )
+        .await,
+        rejected("ide_session_required")
+    );
+    let first = session(&socket, &path).await;
     let ide = packet(MAGIC, 0, &first);
     let file = case
         .root
@@ -277,7 +307,7 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
         .await,
         rejected("ide_capability_refused")
     );
-    let second = token(&issue(&case.runtime, &beta).unwrap());
+    let second = session(&socket, &issue(&case.runtime, &beta).unwrap()).await;
     assert_ne!(second, first);
     let beta_ide = packet(MAGIC, 0, &second);
     assert_eq!(
@@ -304,7 +334,7 @@ async fn ide_capability_is_dead_after_server_stop() {
     let alpha = ProjectId::new("alpha").unwrap();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
-    let first = token(&path);
+    let first = session(&socket, &path).await;
     let ide = packet(MAGIC, 0, &first);
     let mut subscriptions = Vec::new();
     for _ in 0..SUBSCRIBERS_MAX {
@@ -339,7 +369,7 @@ async fn ide_capability_is_dead_after_server_stop() {
     );
     revoke(&case.runtime, &alpha).unwrap();
     let path = issue(&case.runtime, &alpha).unwrap();
-    let second = token(&path);
+    let second = session(&socket, &path).await;
     assert_ne!(second, first);
     assert_eq!(
         exchange(&socket, ide, &request("alpha", workspace())).await,
@@ -362,6 +392,67 @@ async fn ide_capability_is_dead_after_server_stop() {
         issue(&case.runtime, &alpha).err().unwrap().0,
         "ide_unavailable"
     );
+}
+
+/// The capability file's token admits only `ide.session`, which swaps it once for a
+/// session token and removes the file, so a process that reads the file later, or tries a
+/// second session, gets nothing. A file someone replaced is kept, and its grant is dead.
+#[tokio::test]
+async fn ide_session_takes_the_capability_file_once() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let file = packet(MAGIC, 0, &token(&path));
+    let calls = [
+        workspace(),
+        json!({ "name": "ide.events", "args": {} }),
+        json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
+    ];
+    for call in &calls {
+        assert_eq!(
+            exchange(&socket, file, &request("alpha", call.clone())).await,
+            rejected("ide_session_required"),
+            "{call}"
+        );
+    }
+    let taken = json!({ "name": "ide.session", "args": {} });
+    assert_eq!(
+        exchange(&socket, file, &request("beta", taken.clone())).await,
+        rejected("ide_project_refused")
+    );
+    assert!(path.is_file());
+    let first = session(&socket, &path).await;
+    assert_eq!(
+        exchange(&socket, file, &request("alpha", taken.clone())).await,
+        rejected("ide_capability_refused")
+    );
+    let ide = packet(MAGIC, 0, &first);
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", taken.clone())).await,
+        rejected("ide_session_taken")
+    );
+    assert!(matches!(
+        exchange(&socket, ide, &request("alpha", workspace())).await,
+        Some(IdeReply::Ok { .. })
+    ));
+    let beta = ProjectId::new("beta").unwrap();
+    let replaced = issue(&case.runtime, &beta).unwrap();
+    let beta_file = packet(MAGIC, 0, &token(&replaced));
+    let other = replaced.with_file_name("other");
+    std::fs::write(&other, "x").unwrap();
+    std::fs::rename(&other, &replaced).unwrap();
+    assert_eq!(
+        exchange(&socket, beta_file, &request("beta", taken)).await,
+        rejected("ide_capability_replaced_preserved")
+    );
+    assert_eq!(std::fs::read_to_string(&replaced).unwrap(), "x");
+    assert_eq!(
+        exchange(&socket, beta_file, &request("beta", workspace())).await,
+        rejected("ide_capability_refused")
+    );
+    std::fs::remove_file(&replaced).unwrap();
+    case.stop().await;
 }
 
 /// Capabilities stop at `GRANTS_MAX` projects, and a project id that names the `ide`
@@ -399,8 +490,9 @@ async fn ide_capabilities_stop_at_their_bound() {
 }
 
 /// Every frame in the extension's fixture is exactly what the engine's own `encode_frame`
-/// makes of the same request or reply, so the TypeScript client and the engine agree byte
-/// for byte, and the fixture's handshake is the layout the engine admits.
+/// makes of the same request or reply, the session swap included, so the TypeScript
+/// client and the engine agree byte for byte, and the fixture's handshake is the layout
+/// the engine admits.
 #[test]
 fn ide_frames_match_the_extension_fixture() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
@@ -431,6 +523,26 @@ fn ide_frames_match_the_extension_fixture() {
         assert_eq!(serde_json::to_value(&reply).unwrap(), entry["value"]);
         assert_eq!(encode_frame(&reply).unwrap(), frame);
     }
+    let session = &fixture["session"];
+    let frame = unhex(session["request"]["frame"].as_str().unwrap());
+    let request: IdeRequest = serde_json::from_slice(&frame[4..]).unwrap();
+    request.validate().unwrap();
+    assert_eq!(request.call, IdeCall::Session {});
+    assert_eq!(
+        serde_json::to_value(&request).unwrap(),
+        session["request"]["value"]
+    );
+    assert_eq!(encode_frame(&request).unwrap(), frame);
+    let token: [u8; 32] = unhex(session["token"].as_str().unwrap())
+        .try_into()
+        .unwrap();
+    let reply = IdeReply::Ok {
+        data: json!({ "token": hex(&token) }),
+    };
+    assert_eq!(
+        encode_frame(&reply).unwrap(),
+        unhex(session["reply"]["frame"].as_str().unwrap())
+    );
 }
 
 /// The extension's Sandboxed terminal fixture is exactly what the engine encodes: the
@@ -641,8 +753,8 @@ async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStr
 }
 
 /// The Sandboxed terminal runs in a pane the engine itself starts, outside the IDE
-/// server's sandbox, under the project's agent profile: typed input runs, the project's
-/// own IDE capability cannot be read, at most `TERMINALS_MAX` run at once, a detached
+/// server's sandbox, under the project's agent profile: typed input runs, an IDE
+/// capability file cannot be read, at most `TERMINALS_MAX` run at once, a detached
 /// terminal's pane ends, and revoking the capability ends the rest.
 #[cfg(target_os = "macos")]
 #[tokio::test]
@@ -652,8 +764,9 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let alpha = ProjectId::new("alpha").unwrap();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
-    let secret = std::fs::read_to_string(&path).unwrap();
-    let ide = packet(MAGIC, 0, &token(&path));
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let unread = issue(&case.runtime, &ProjectId::new("beta").unwrap()).unwrap();
+    let secret = std::fs::read_to_string(&unread).unwrap();
     let body = request(
         "alpha",
         json!({ "name": "ide.terminal", "args": { "cols": 100, "rows": 30 } }),
@@ -668,7 +781,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let host = case.runtime.terminal().unwrap();
     assert!(host.alive().unwrap().contains(&name));
     output_until(&mut stream, None).await;
-    let typed = format!("cat '{}'; echo ide-$((40+2))\r", path.display());
+    let typed = format!("cat '{}'; echo ide-$((40+2))\r", unread.display());
     control(
         &mut stream,
         &TerminalRequest::Input {
@@ -721,8 +834,9 @@ async fn sandboxed_terminal_is_refused_where_the_sandbox_is_not_qualified() {
         "alpha",
         json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24 } }),
     );
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
     assert_eq!(
-        exchange(&socket, packet(MAGIC, 0, &token(&path)), &body).await,
+        exchange(&socket, ide, &body).await,
         rejected("ide_terminal_unavailable")
     );
     assert!(!case.root.path().join("ide-shell").exists());

@@ -14,7 +14,15 @@ const MAGIC = Buffer.from("CAI1", "latin1");
 const TOKEN_BYTES = 32;
 const REQUEST_TIME_MS = 30_000;
 const RECONNECT_MS = 2_000;
-const FINAL_CODES = new Set(["ide_capability_refused", "ide_capability_revoked", "ide_project_refused"]);
+const HEX_TOKEN = /^[0-9a-f]{64}$/;
+const FINAL_CODES = new Set([
+    "ide_capability_refused",
+    "ide_capability_revoked",
+    "ide_project_refused",
+    "ide_session_missing",
+    "ide_session_required",
+    "ide_session_taken",
+]);
 const CHANGES = ["workspace_changed", "change_sets_changed", "agents_changed", "memories_changed"];
 function encodeFrame(value) {
     const body = Buffer.from(JSON.stringify(value), "utf8");
@@ -56,7 +64,7 @@ function handshake(token) {
 }
 function readCapability(path) {
     const text = (0, node_fs_1.readFileSync)(path, "utf8");
-    if (!/^[0-9a-f]{64}$/.test(text))
+    if (!HEX_TOKEN.test(text))
         throw new Error("ide_capability_invalid");
     return Buffer.from(text, "hex");
 }
@@ -64,23 +72,65 @@ class Engine {
     project;
     #socket;
     #capability;
+    #store;
     #handlers = new Map();
+    #session;
+    #taking = false;
+    #subscribed = false;
     #subscription;
     #retry;
     #closed = false;
-    constructor(socket, capability) {
+    constructor(socket, capability, store) {
         this.#socket = socket;
         this.#capability = capability;
+        this.#store = store;
         this.project = (0, node_path_1.basename)((0, node_path_1.dirname)(capability));
     }
-    static fromEnv(env) {
+    static fromEnv(env, store) {
         const capability = env[exports.CAPABILITY_ENV];
         const socket = env[exports.SOCKET_ENV];
-        return capability && socket ? new Engine(socket, capability) : undefined;
+        return capability && socket ? new Engine(socket, capability, store) : undefined;
     }
     request(name, args = {}) {
+        return this.#token().then((token) => this.#exchange(token, name, args));
+    }
+    stream(name, args) {
+        return this.#token().then((token) => this.#dial(token, name, args));
+    }
+    #token() {
+        if (this.#session === undefined || (!this.#taking && (0, node_fs_1.existsSync)(this.#capability))) {
+            this.#taking = true;
+            const session = this.#take().finally(() => {
+                this.#taking = false;
+            });
+            session.catch(() => {
+                if (this.#session === session)
+                    this.#session = undefined;
+            });
+            this.#session = session;
+        }
+        return this.#session;
+    }
+    async #take() {
+        const key = `crazyagent.session.${this.project}`;
+        if (!(0, node_fs_1.existsSync)(this.#capability)) {
+            const stored = await this.#store?.get(key);
+            if (stored === undefined || !HEX_TOKEN.test(stored))
+                throw new Error("ide_session_missing");
+            return Buffer.from(stored, "hex");
+        }
+        const reply = await this.#exchange(readCapability(this.#capability), "ide.session", {});
+        if (reply.kind === "rejected")
+            throw new Error(reply.code);
+        const token = reply.kind === "ok" ? reply.data?.token : undefined;
+        if (typeof token !== "string" || !HEX_TOKEN.test(token))
+            throw new Error("ide_session_invalid");
+        await this.#store?.store(key, token);
+        return Buffer.from(token, "hex");
+    }
+    #exchange(token, name, args) {
         return new Promise((resolve, reject) => {
-            const socket = this.#connect(name, args);
+            const socket = this.#dial(token, name, args);
             const reader = new FrameReader();
             const timer = setTimeout(() => socket.destroy(new Error("ide_request_timeout")), REQUEST_TIME_MS);
             socket.on("data", (chunk) => {
@@ -111,12 +161,11 @@ class Engine {
         const listener = handler;
         handlers.add(listener);
         this.#handlers.set(name, handlers);
-        if (this.#subscription === undefined && this.#retry === undefined)
+        if (!this.#subscribed) {
+            this.#subscribed = true;
             this.#subscribe();
+        }
         return { dispose: () => handlers.delete(listener) };
-    }
-    stream(name, args) {
-        return this.#connect(name, args);
     }
     dispose() {
         this.#closed = true;
@@ -124,8 +173,8 @@ class Engine {
         this.#retry = undefined;
         this.#subscription?.destroy();
     }
-    #connect(name, args) {
-        const packet = handshake(readCapability(this.#capability));
+    #dial(token, name, args) {
+        const packet = handshake(token);
         const frame = encodeFrame({ project: this.project, call: { name, args } });
         const socket = (0, node_net_1.createConnection)(this.#socket);
         socket.write(packet);
@@ -136,12 +185,15 @@ class Engine {
         if (this.#closed)
             return;
         this.#retry = undefined;
-        let socket;
-        try {
-            socket = this.#connect("ide.events", {});
-        }
-        catch {
+        this.stream("ide.events", {}).then((socket) => this.#listen(socket), (error) => {
+            if (error instanceof Error && FINAL_CODES.has(error.message))
+                this.#closed = true;
             this.#later();
+        });
+    }
+    #listen(socket) {
+        if (this.#closed) {
+            socket.destroy();
             return;
         }
         this.#subscription = socket;

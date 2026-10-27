@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +14,7 @@ import {
   handshake,
   readCapability,
 } from "../out/engine.js";
+import { memoryStore, reading, withServer } from "./peer.mjs";
 
 const fixture = JSON.parse(readFileSync(new URL("./frames.json", import.meta.url), "utf8"));
 
@@ -92,4 +94,63 @@ test("the engine bridge comes from the launch environment and names its project"
   });
   assert.equal(engine.project, "alpha");
   engine.dispose();
+});
+
+test("the first call swaps the capability file for a session the bridge keeps", { timeout: 10_000 }, async () => {
+  const { session, requests, replies } = fixture;
+  const sessionHandshake = handshake(Buffer.from(session.token, "hex")).toString("hex");
+  await withServer(async (server, socket, capability) => {
+    let connections = 0;
+    server.on("connection", () => (connections += 1));
+    writeFileSync(capability, fixture.token, { mode: 0o600 });
+    const store = memoryStore();
+    const engine = new Engine(socket, capability, store);
+    const swapped = once(server, "connection");
+    const answered = engine.request("ide.workspace");
+    const [swap] = await swapped;
+    const swapping = reading(swap);
+    assert.equal((await swapping.take(37)).toString("hex"), fixture.handshake);
+    const called = once(server, "connection");
+    assert.equal((await swapping.frame()).toString("hex"), session.request.frame);
+    rmSync(capability);
+    swap.end(Buffer.from(session.reply.frame, "hex"));
+    const [call] = await called;
+    const calling = reading(call);
+    assert.equal((await calling.take(37)).toString("hex"), sessionHandshake);
+    assert.equal((await calling.frame()).toString("hex"), requests[0].frame);
+    call.end(Buffer.from(replies[0].frame, "hex"));
+    assert.deepEqual(await answered, replies[0].value);
+    assert.deepEqual([...store.values], [["crazyagent.session.alpha", session.token]]);
+
+    const reloaded = new Engine(socket, capability, store);
+    const again = once(server, "connection");
+    const second = reloaded.request("ide.workspace");
+    const [direct] = await again;
+    const directly = reading(direct);
+    assert.equal((await directly.take(37)).toString("hex"), sessionHandshake);
+    assert.equal((await directly.frame()).toString("hex"), requests[0].frame);
+    direct.end(Buffer.from(replies[2].frame, "hex"));
+    assert.deepEqual(await second, replies[2].value);
+    assert.equal(connections, 3);
+
+    writeFileSync(capability, fixture.token, { mode: 0o600 });
+    const late = new Engine(socket, capability, memoryStore());
+    const raced = once(server, "connection");
+    const refused = late.request("ide.workspace");
+    const [taken] = await raced;
+    const taking = reading(taken);
+    await taking.take(37);
+    assert.equal((await taking.frame()).toString("hex"), session.request.frame);
+    taken.end(encodeFrame({ kind: "rejected", code: "ide_session_taken" }));
+    await assert.rejects(refused, /ide_session_taken/);
+    assert.ok(existsSync(capability));
+
+    rmSync(capability);
+    await assert.rejects(new Engine(socket, capability, memoryStore()).request("ide.workspace"), /ide_session_missing/);
+    await assert.rejects(
+      new Engine(socket, capability, memoryStore([["crazyagent.session.alpha", "not-hex"]])).request("ide.workspace"),
+      /ide_session_missing/,
+    );
+    assert.equal(connections, 4);
+  });
 });
