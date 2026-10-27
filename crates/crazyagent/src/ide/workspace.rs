@@ -231,8 +231,8 @@ fn sections(
     Ok((sections, hidden))
 }
 
-/// Renders the workspace file: its folders in order and its settings.
-/// Inputs: the sections and settings. Output: the JSON text.
+/// Renders the workspace file: its folders in order, its settings and the keys that keep the
+/// IDE's git to each section's root. Inputs: the sections and settings. Output: the JSON text.
 fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, EngineError> {
     let folders = sections
         .iter()
@@ -249,10 +249,12 @@ fn render(sections: &[Section], settings: &WorkspaceSettings) -> Result<String, 
         .iter()
         .map(|glob| (glob.clone(), serde_json::Value::Bool(true)))
         .collect();
-    let body = serde_json::json!({
-        "folders": folders,
-        "settings": { "files.readonlyInclude": readonly },
-    });
+    let mut keys = super::git::workspace();
+    keys.insert(
+        "files.readonlyInclude".into(),
+        serde_json::Value::Object(readonly),
+    );
+    let body = serde_json::json!({ "folders": folders, "settings": keys });
     serde_json::to_string_pretty(&body).map_err(unavailable)
 }
 
