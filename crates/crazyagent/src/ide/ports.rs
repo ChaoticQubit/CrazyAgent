@@ -8,13 +8,14 @@ pub const FILE: &str = "port";
 
 const FILE_BYTES_MAX: u64 = 32;
 
-/// The two loopback ports one project's IDE uses: the server's and the webview host's. The
-/// browser keeps the IDE's layout and open editors per origin, and the origin holds the
-/// port, so each project keeps its ports across restarts.
+/// The two loopback ports one project's IDE uses: the server's own and the engine proxy's
+/// in front of it, which the desktop opens. The browser keeps the IDE's layout and open
+/// editors per origin, and the origin holds the proxy port, so each project keeps its ports
+/// across restarts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ports {
     pub server: u16,
-    pub webview: u16,
+    pub proxy: u16,
 }
 
 /// Reads the ports a project recorded. Input: the project's IDE folder. Output: the ports
@@ -26,18 +27,18 @@ pub fn recorded(folder: &Path) -> Option<Ports> {
         return None;
     }
     let text = fs::read_to_string(&path).ok()?;
-    let (server, webview) = text.strip_suffix('\n')?.split_once(' ')?;
+    let (server, proxy) = text.strip_suffix('\n')?.split_once(' ')?;
     let ports = Ports {
         server: server.parse::<u16>().ok().filter(|port| *port != 0)?,
-        webview: webview.parse::<u16>().ok().filter(|port| *port != 0)?,
+        proxy: proxy.parse::<u16>().ok().filter(|port| *port != 0)?,
     };
-    (ports.server != ports.webview).then_some(ports)
+    (ports.server != ports.proxy).then_some(ports)
 }
 
 /// Records a project's ports, replacing the file whole so a reader never sees half of it.
 /// Inputs: the project's private IDE folder and two distinct nonzero ports. Output: done.
 pub fn record(folder: &Path, ports: Ports) -> io::Result<()> {
-    assert!(ports.server != 0 && ports.webview != 0 && ports.server != ports.webview);
+    assert!(ports.server != 0 && ports.proxy != 0 && ports.server != ports.proxy);
     let staged = folder.join(format!("{FILE}.new"));
     if let Err(error) = fs::remove_file(&staged)
         && error.kind() != io::ErrorKind::NotFound
@@ -49,7 +50,7 @@ pub fn record(folder: &Path, ports: Ports) -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(&staged)?;
-    file.write_all(format!("{} {}\n", ports.server, ports.webview).as_bytes())?;
+    file.write_all(format!("{} {}\n", ports.server, ports.proxy).as_bytes())?;
     file.sync_all()?;
     fs::rename(&staged, folder.join(FILE))?;
     assert_eq!(recorded(folder), Some(ports));

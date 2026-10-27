@@ -115,11 +115,13 @@ async fn ide_server_listens_only_on_loopback() {
     let info = servers.open(&project, &cached_build()).await.unwrap();
     let group = servers.group(&project).unwrap();
     assert_eq!(info.url, format!("http://127.0.0.1:{}/", info.port));
+    assert_ne!(info.port, info.server_port);
     let addresses = group_listeners(group);
     assert!(
-        addresses.contains(&format!("127.0.0.1:{}", info.port)),
+        addresses.contains(&format!("127.0.0.1:{}", info.server_port)),
         "{addresses:?}"
     );
+    assert!(!addresses.contains(&format!("127.0.0.1:{}", info.port)));
     assert!(
         addresses
             .iter()
@@ -127,16 +129,17 @@ async fn ide_server_listens_only_on_loopback() {
         "{addresses:?}"
     );
     assert_eq!(
-        listeners(info.webview_port).unwrap(),
+        listeners(info.port).unwrap(),
         vec![(
             std::process::id() as i32,
-            format!("127.0.0.1:{}", info.webview_port)
+            format!("127.0.0.1:{}", info.port)
         )]
     );
     assert_eq!(servers.open(&project, &cached_build()).await.unwrap(), info);
     assert_eq!(servers.group(&project), Some(group));
     servers.stop_all().await;
     gone(group).await;
+    assert!(listeners(info.server_port).unwrap().is_empty());
     assert!(listeners(info.port).unwrap().is_empty());
 }
 
@@ -149,12 +152,39 @@ async fn request_without_the_token_is_refused() {
     let host = format!("127.0.0.1:{}", info.port);
     let token = fs::read_to_string(&info.token_path).unwrap();
     let wrong = "0".repeat(token.len());
-    let none = get(info.port, &host, "/", None).await;
-    assert!(status(&none).contains(" 403 "), "{}", status(&none));
-    let forged = get(info.port, &host, "/", Some(&format!("vscode-tkn={wrong}"))).await;
-    assert!(status(&forged).contains(" 403 "), "{}", status(&forged));
+    for port in [info.port, info.server_port] {
+        let host = format!("127.0.0.1:{port}");
+        let none = get(port, &host, "/", None).await;
+        assert!(status(&none).contains(" 403 "), "{port}: {}", status(&none));
+        let forged = get(port, &host, "/", Some(&format!("vscode-tkn={wrong}"))).await;
+        assert!(
+            status(&forged).contains(" 403 "),
+            "{port}: {}",
+            status(&forged)
+        );
+        let queried = get(port, &host, &format!("/?tkn={wrong}"), None).await;
+        assert!(
+            status(&queried).contains(" 403 "),
+            "{port}: {}",
+            status(&queried)
+        );
+    }
+    let short = get(
+        info.port,
+        &host,
+        "/",
+        Some(&format!("vscode-tkn={}", &token[1..])),
+    )
+    .await;
+    assert!(status(&short).contains(" 403 "), "{}", status(&short));
     let owner = get(info.port, &host, "/", Some(&format!("vscode-tkn={token}"))).await;
     assert!(status(&owner).contains(" 200 "), "{}", status(&owner));
+    let cookie = get(info.port, &host, &format!("/?tkn={token}"), None).await;
+    assert!(status(&cookie).contains(" 302 "), "{}", status(&cookie));
+    assert!(cookie.contains(&format!("vscode-tkn={token}")));
+    let other = format!("evil.example:{}", info.port);
+    let rebound = get(info.port, &other, "/", Some(&format!("vscode-tkn={token}"))).await;
+    assert!(status(&rebound).contains(" 403 "), "{}", status(&rebound));
     servers.stop_all().await;
 }
 
@@ -297,39 +327,40 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let servers = Servers::new(data.path(), IDLE_LIMIT);
     let first = servers.open(&project, &build).await.unwrap();
     let folder = servers.project_folder(&project).unwrap();
-    assert_ne!(first.port, first.webview_port);
+    assert_ne!(first.port, first.server_port);
     assert_eq!(
         ports::recorded(&folder),
         Some(Ports {
-            server: first.port,
-            webview: first.webview_port
+            server: first.server_port,
+            proxy: first.port
         })
     );
     assert!(servers.stop(&project).await);
     let again = servers.open(&project, &build).await.unwrap();
     assert_eq!(
-        (again.port, again.webview_port),
-        (first.port, first.webview_port)
+        (again.port, again.server_port),
+        (first.port, first.server_port)
     );
     assert!(servers.stop(&project).await);
     drop(servers);
 
-    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.port)).unwrap();
+    let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = Servers::new(data.path(), IDLE_LIMIT);
     let moved = restarted.open(&project, &build).await.unwrap();
-    assert_ne!(moved.port, first.port);
-    assert_eq!(moved.webview_port, first.webview_port);
+    assert_ne!(moved.server_port, first.server_port);
+    assert_eq!(moved.port, first.port);
     assert_eq!(
         ports::recorded(&folder),
         Some(Ports {
-            server: moved.port,
-            webview: moved.webview_port
+            server: moved.server_port,
+            proxy: moved.port
         })
     );
     drop(held);
     assert!(restarted.stop(&project).await);
     let kept = restarted.open(&project, &build).await.unwrap();
-    assert_eq!(kept.port, moved.port);
+    assert_eq!(kept.server_port, moved.server_port);
+    assert_eq!(kept.port, first.port);
     restarted.stop_all().await;
 }
 
@@ -397,6 +428,7 @@ async fn no_ide_server_process_survives_engine_stop() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert!(listeners(info.server_port).unwrap().is_empty());
     assert!(listeners(info.port).unwrap().is_empty());
     assert!(!info.token_path.exists());
     drop(stop);
@@ -457,99 +489,201 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .is_some()
     );
     gone(old_group).await;
-    assert_eq!((info.port, info.webview_port), (old.port, old.webview_port));
+    assert_eq!((info.port, info.server_port), (old.port, old.server_port));
     assert_ne!(fs::read_to_string(&info.token_path).unwrap(), old_token);
     assert_ne!(servers.group(&project), Some(old_group));
     servers.stop_all().await;
 }
 
 #[tokio::test]
-async fn webview_host_serves_only_the_pre_folder_to_loopback_hosts() {
+async fn the_server_log_never_holds_the_token() {
     let data = scratch();
-    let pre = data.path().join("pre");
-    fs::create_dir(&pre).unwrap();
-    fs::write(pre.join("index.html"), "<!doctype html><p>host</p>").unwrap();
-    fs::write(
-        pre.join("service-worker.js"),
-        "self.addEventListener('fetch', () => {});",
-    )
-    .unwrap();
-    fs::create_dir(pre.join("nested")).unwrap();
-    fs::write(data.path().join("secret.txt"), "engine secret").unwrap();
-    std::os::unix::fs::symlink(data.path().join("secret.txt"), pre.join("link.html")).unwrap();
-    let (listener, port) = webview::bind(None).await.unwrap();
-    let host = tokio::spawn(webview::serve(listener, pre.clone(), port));
-    assert_eq!(
-        webview::template(port),
-        format!("http://{{{{uuid}}}}.localhost:{port}/")
-    );
-    assert_eq!(
-        listeners(port).unwrap(),
-        vec![(std::process::id() as i32, format!("127.0.0.1:{port}"))]
-    );
-    let page = get(
-        port,
-        &format!("abc123.localhost:{port}"),
-        "/index.html?id=1",
-        None,
-    )
-    .await;
-    assert!(status(&page).contains(" 200 "), "{page}");
-    assert!(page.contains("Content-Type: text/html; charset=utf-8\r\n"));
-    assert!(page.ends_with("\r\n\r\n<!doctype html><p>host</p>"));
-    let worker = get(
-        port,
-        &format!("127.0.0.1:{port}"),
-        "//service-worker.js",
-        None,
-    )
-    .await;
-    assert!(status(&worker).contains(" 200 "), "{worker}");
-    assert!(worker.contains("Content-Type: text/javascript; charset=utf-8\r\n"));
-    let head = request(
-        port,
-        &format!("HEAD /index.html HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"),
-    )
-    .await;
-    assert!(status(&head).contains(" 200 "), "{head}");
-    assert!(head.ends_with("\r\n\r\n"));
-    for (host_name, path, code) in [
-        (format!("evil.example:{port}"), "/index.html", " 403 "),
-        (
-            format!("abc123.localhost:{}", port.wrapping_add(1)),
-            "/index.html",
-            " 403 ",
-        ),
-        (format!("ABC.LOCALHOST:{port}"), "/index.html", " 200 "),
-        (format!("a.b.localhost:{port}"), "/index.html", " 403 "),
-        (format!("127.0.0.1:{port}"), "/../secret.txt", " 404 "),
-        (format!("127.0.0.1:{port}"), "/%2e%2e/secret.txt", " 404 "),
-        (format!("127.0.0.1:{port}"), "/link.html", " 404 "),
-        (format!("127.0.0.1:{port}"), "/nested", " 404 "),
-        (format!("127.0.0.1:{port}"), "/.hidden", " 404 "),
-        (format!("127.0.0.1:{port}"), "/missing.js", " 404 "),
-    ] {
-        let reply = get(port, &host_name, path, None).await;
-        assert!(status(&reply).contains(code), "{host_name} {path}: {reply}");
-        assert!(!reply.contains("engine secret"));
+    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let project = project("log");
+    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let token = fs::read_to_string(&info.token_path).unwrap();
+    let log = servers.project_folder(&project).unwrap().join(LOG);
+    assert_eq!(mode(&log), 0o600);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut text = fs::read_to_string(&log).unwrap();
+    while !text.contains("Web UI available") {
+        assert!(
+            Instant::now() < deadline,
+            "the server never printed its URL: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        text = fs::read_to_string(&log).unwrap();
     }
-    let posted = request(
-        port,
-        &format!(
-            "POST /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 0\r\n\r\n"
-        ),
+    let printed = text
+        .lines()
+        .find(|line| line.contains("Web UI available"))
+        .unwrap();
+    assert!(
+        printed.contains(&format!("tkn={}", output::REDACTED)),
+        "{printed}"
+    );
+    let host = format!("127.0.0.1:{}", info.port);
+    let cookie = format!("{}={token}", proxy::COOKIE);
+    let page = get(info.port, &host, &format!("/?tkn={token}"), None).await;
+    assert!(status(&page).contains(" 302 "), "{}", status(&page));
+    let page = get(info.port, &host, "/", Some(&cookie)).await;
+    assert!(status(&page).contains(" 200 "), "{}", status(&page));
+    servers.stop_all().await;
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(!text.is_empty());
+    assert!(text.lines().all(|line| !line.contains(&token)), "{text}");
+    assert!(!text.contains(&token[..token::TOKEN_BYTES]));
+}
+
+#[tokio::test]
+async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_policy() {
+    let data = scratch();
+    let build = cached_build();
+    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let project = project("page");
+    let info = servers.open(&project, &build).await.unwrap();
+    let token = fs::read_to_string(&info.token_path).unwrap();
+    let cookie = format!("{}={token}", proxy::COOKIE);
+    let port = info.port;
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}")] {
+        let page = get(port, &host, "/", Some(&cookie)).await;
+        assert!(status(&page).contains(" 200 "), "{}", status(&page));
+        let (head, body) = page.split_once("\r\n\r\n").unwrap();
+        let header = |name: &str| {
+            head.split("\r\n").find_map(|line| {
+                line.split_once(':')
+                    .filter(|(known, _)| known.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+        };
+        assert_eq!(header("content-length"), Some(body.len().to_string()));
+        assert_eq!(header("connection").as_deref(), Some("close"));
+        let policy = header("content-security-policy").unwrap();
+        let directives: Vec<&str> = policy
+            .split(';')
+            .map(str::trim)
+            .filter(|directive| !directive.is_empty())
+            .collect();
+        for (name, expected) in [
+            (
+                "frame-src",
+                format!("frame-src 'self' http://*.localhost:{port} data:"),
+            ),
+            ("img-src", "img-src 'self' data: blob:".to_owned()),
+            ("connect-src", format!("connect-src 'self' ws://{host}")),
+        ] {
+            let named: Vec<&&str> = directives
+                .iter()
+                .filter(|directive| directive.split(' ').next() == Some(name))
+                .collect();
+            assert_eq!(named, vec![&expected.as_str()], "{policy}");
+        }
+        for kept in [
+            "default-src 'self'",
+            "child-src 'self'",
+            "worker-src 'self' data: blob:",
+        ] {
+            assert!(directives.contains(&kept), "{kept}: {policy}");
+        }
+        assert!(
+            directives
+                .iter()
+                .any(|directive| directive.starts_with("script-src 'self' 'unsafe-eval'")),
+            "{policy}"
+        );
+        assert_eq!(
+            body.matches("vscode-workbench-web-configuration").count(),
+            1
+        );
+        assert!(
+            body.contains(&format!(
+                "&quot;webviewEndpoint&quot;:&quot;{}&quot;",
+                proxy::template(port)
+            )),
+            "{body}"
+        );
+        assert!(body.contains("&quot;configurationDefaults&quot;:{"));
+        for member in [
+            "&quot;workbench.startupEditor&quot;:&quot;none&quot;",
+            "&quot;workbench.welcomePage.extraAnnouncements&quot;:false",
+            "&quot;task.allowAutomaticTasks&quot;:&quot;off&quot;",
+        ] {
+            assert!(body.contains(member), "{member}");
+        }
+    }
+    let direct = get(
+        info.server_port,
+        &format!("127.0.0.1:{}", info.server_port),
+        "/",
+        Some(&cookie),
     )
     .await;
-    assert!(status(&posted).contains(" 405 "), "{posted}");
-    let twice = request(
-        port,
-        &format!(
-            "GET /index.html HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nHost: evil.example:{port}\r\n\r\n"
-        ),
-    )
-    .await;
-    assert!(status(&twice).contains(" 403 "), "{twice}");
-    host.abort();
-    let _ = host.await;
-    assert!(listeners(port).unwrap().is_empty());
+    assert!(status(&direct).contains(" 200 "), "{}", status(&direct));
+    assert!(!direct.contains("webviewEndpoint"));
+    assert!(direct.contains("connect-src 'self' ws: wss: https:;"));
+
+    let webview = format!("0123456789abcdefghijklmnopqrstuv0123456789abcdefghij.localhost:{port}");
+    let pre = build.join(proxy::PRE);
+    for (name, kind) in proxy::PRE_FILES {
+        let reply = get(port, &webview, &format!("/{name}?id=1&swVersion=4"), None).await;
+        assert!(
+            status(&reply).contains(" 200 "),
+            "{name}: {}",
+            status(&reply)
+        );
+        assert!(reply.contains(&format!("Content-Type: {kind}\r\n")));
+        let file = fs::read_to_string(pre.join(name)).unwrap();
+        assert!(reply.ends_with(&format!("\r\n\r\n{file}")), "{name}");
+    }
+    for path in ["/", "/host.js", "/out/server-main.js", "/version"] {
+        let reply = get(port, &webview, path, Some(&cookie)).await;
+        assert!(
+            status(&reply).contains(" 404 "),
+            "{path}: {}",
+            status(&reply)
+        );
+    }
+    servers.stop_all().await;
+}
+
+#[tokio::test]
+async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
+    let data = scratch();
+    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let project = project("socket");
+    let info = servers.open(&project, &cached_build()).await.unwrap();
+    let token = fs::read_to_string(&info.token_path).unwrap();
+    let host = format!("127.0.0.1:{}", info.port);
+    let upgrade = |cookie: &str| {
+        format!(
+            "GET /?reconnectionToken=8f1d3c3e-2b7a-4e55-9d63-5a0b3c1e7f21&reconnection=false&skipWebSocketFrames=false HTTP/1.1\r\nHost: {host}\r\nOrigin: http://{host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{cookie}\r\n"
+        )
+    };
+    let refused = request(info.port, &upgrade("")).await;
+    assert!(status(&refused).contains(" 403 "), "{refused}");
+    let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", info.port))
+        .await
+        .unwrap();
+    stream
+        .write_all(upgrade(&format!("Cookie: {}={token}\r\n", proxy::COOKIE)).as_bytes())
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !head.ends_with(b"\r\n\r\n") {
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 1, "{head:?}");
+            head.push(byte[0]);
+        }
+    })
+    .await
+    .unwrap();
+    let head = String::from_utf8(head).unwrap();
+    assert!(
+        head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"),
+        "{head}"
+    );
+    assert!(head.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
+    drop(stream);
+    servers.stop_all().await;
 }

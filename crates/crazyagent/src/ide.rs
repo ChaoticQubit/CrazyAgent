@@ -4,10 +4,12 @@ pub const FOLDER: &str = "ide";
 
 pub mod env;
 #[cfg(unix)]
+pub mod output;
+#[cfg(unix)]
 pub mod ports;
+#[cfg(unix)]
+pub mod proxy;
 #[cfg(unix)]
 pub mod server;
 #[cfg(unix)]
 pub mod token;
-#[cfg(unix)]
-pub mod webview;
