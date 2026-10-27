@@ -1,3 +1,4 @@
+use super::skill_detail::{file_size, skill_body};
 use super::*;
 use crate::plugins::{Scope, SecretView};
 use crate::tui::client::OwnerEvent;
@@ -202,6 +203,7 @@ fn remove_asks_first() {
     let mut ctx = plugin_ctx(80, 24);
     let mut screen = Plugins::with(skills, servers);
     screen.key(&Key::Enter, &mut ctx);
+    screen.key(&Key::Right, &mut ctx);
     screen.key(&Key::Right, &mut ctx);
     screen.key(&Key::Enter, &mut ctx);
     assert_eq!(screen.modal(&ctx).unwrap().0.title, "Remove");
@@ -689,4 +691,151 @@ fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
         })
     ));
     back(page.key(&Key::Esc, &mut ctx));
+}
+
+fn texts(lines: &[Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+fn detail(enabled: bool) -> crate::skills::SkillDetail {
+    let mut skill = skill("frontend-design", enabled);
+    skill.source = "/Users/mira/Skills/frontend-design".into();
+    crate::skills::SkillDetail {
+        skill,
+        text: "---\nname: frontend-design\ndescription: How to do frontend-design work.\n---\n\n# Steps\n\n- Read the brief\n- Run `npm run build`\n".into(),
+        files: vec![
+            crate::skills::SkillFile {
+                path: "SKILL.md".into(),
+                bytes: 812,
+            },
+            crate::skills::SkillFile {
+                path: "references/tokens.md".into(),
+                bytes: 4300,
+            },
+        ],
+        files_more: 2,
+    }
+}
+
+#[test]
+fn a_skill_details_first_action_opens_its_full_skill_md() {
+    let (skills, servers) = lists();
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = Plugins::with(skills, servers);
+    screen.key(&Key::Enter, &mut ctx);
+    let (modal, _) = screen.modal(&ctx).unwrap();
+    assert!(
+        texts(&modal.body).last().unwrap().contains("Read SKILL.md"),
+        "{:?}",
+        texts(&modal.body)
+    );
+    let flow = screen.key(&Key::Enter, &mut ctx);
+    let Flow::Replace(mut next) = flow else {
+        panic!("the skill page replaces the list");
+    };
+    assert_eq!(
+        next.crumbs(),
+        ["Settings", "Plugins and skills", "frontend-design"]
+    );
+    assert!(screen.modal(&ctx).is_none());
+    assert_eq!(ctx.queued(), 0);
+    next.shown(&mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::SkillDetail { ref id } if id == "skill-frontend-design")
+        ),
+        other => panic!("a skill read expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_skill_page_renders_skill_md_and_files_and_switches_the_skill() {
+    let ctx = plugin_ctx(80, 24);
+    let page = SkillDetailPage::with(detail(true));
+    let lines = texts(&page.lines(70, &ctx));
+    assert!(
+        lines[0].starts_with("frontend-design  On for every project"),
+        "{lines:?}"
+    );
+    assert!(lines.contains(&"How to do frontend-design work.".to_owned()));
+    assert!(
+        lines.contains(&"From ~/Skills/frontend-design".to_owned()),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|line| line == "Steps"), "{lines:?}");
+    assert!(lines.iter().any(|line| line.contains("Read the brief")));
+    assert!(lines.iter().any(|line| line.contains("npm run build")));
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("name: frontend-design"))
+    );
+    assert!(lines.contains(&"Files  4".to_owned()));
+    assert!(lines.contains(&"references/tokens.md  4.2 KB".to_owned()));
+    assert!(lines.contains(&"SKILL.md  812 B".to_owned()));
+    assert!(lines.contains(&"And 2 more".to_owned()));
+
+    let mut ctx = plugin_ctx(80, 24);
+    let mut page = SkillDetailPage::with(detail(true));
+    page.key(&Key::Char(' '), &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(
+            matches!(*job, SettingsJob::Plugin(PluginChange::SetSkill { ref id, enabled: false }) if id == "skill-frontend-design")
+        ),
+        other => panic!("a switch expected, got {other:?}"),
+    }
+    page.key(&Key::Char(' '), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one change at a time");
+    page.arrive(&changed(None), &mut ctx);
+    assert_eq!(ctx.message().unwrap().lead, "frontend-design is off.");
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::SkillDetail { .. })),
+        "the skill reloads"
+    );
+    let read = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::SkillDetail(Ok(detail(false))),
+    ))));
+    page.arrive(&read, &mut ctx);
+    assert!(texts(&page.lines(70, &ctx))[0].starts_with("frontend-design  Off"));
+    let Flow::Replace(back) = page.key(&Key::Esc, &mut ctx) else {
+        panic!("Esc goes back to the list");
+    };
+    assert_eq!(back.crumbs(), ["Settings", "Plugins and skills"]);
+}
+
+#[test]
+fn the_skill_page_scrolls_inside_the_window_and_says_why_it_failed() {
+    let mut long = detail(true);
+    long.text = format!("---\nname: a\n---\n{}", "- step\n".repeat(120));
+    let mut shell = Shell::with(plugin_ctx(80, 24), Box::new(SkillDetailPage::with(long)));
+    let first = render(&mut shell, 80, 24);
+    assert_eq!(first.len(), 24);
+    assert!(first.iter().any(|row| row.contains("frontend-design  On")));
+    let mut ctx = plugin_ctx(80, 24);
+    let mut page = SkillDetailPage::new("skill-x".into(), "notes".into());
+    page.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
+    let failed = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::SkillDetail(Err("skill_not_found".into())),
+    ))));
+    page.arrive(&failed, &mut ctx);
+    let lines = texts(&page.lines(70, &ctx));
+    assert_eq!(lines[2], plugin_plain("skill_not_found"));
+    page.key(&Key::Char('r'), &mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
+    assert_eq!(skill_body("---\nname: a\n---\n\nBody"), "Body");
+    assert_eq!(skill_body("No header\n---\n"), "No header\n---\n");
+    assert_eq!(skill_body("---\nopen"), "---\nopen");
+    assert_eq!(
+        [0, 1023, 1024, 4300, 1_048_576].map(file_size),
+        ["0 B", "1023 B", "1.0 KB", "4.2 KB", "1.0 MB"]
+    );
 }
