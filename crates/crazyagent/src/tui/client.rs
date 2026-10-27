@@ -2363,7 +2363,7 @@ mod creation_recovery_tests {
             .find(|path| path.exists())
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
             silent.push(
                 crate::spawn_gate::connect_unix(&owner_socket)
                     .await

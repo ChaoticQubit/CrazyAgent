@@ -62,6 +62,7 @@ pub(in crate::tui) struct ProjectChanges {
     loaded: bool,
     not_ready: bool,
     cursor: usize,
+    selected: Option<ChangeSetId>,
     diff: Option<Diff>,
     asking: Option<Ask>,
     target: Option<(ChangeSetId, String)>,
@@ -84,6 +85,7 @@ impl ProjectChanges {
             loaded: false,
             not_ready: false,
             cursor: 0,
+            selected: None,
             diff: None,
             asking: None,
             target: None,
@@ -226,8 +228,20 @@ impl ProjectChanges {
         self.clamp();
     }
 
+    /// Keeps the highlight on the change set the owner chose, not on its place in the list,
+    /// since each read can reorder the sets: on the set a question was asked about while it
+    /// is open, else on the selected set, else on the nearest place. Then drops a question
+    /// whose set is gone. Input: the view. Output: none.
     fn clamp(&mut self) {
-        self.cursor = self.cursor.min(self.sets.len().saturating_sub(1));
+        let anchor = match (&self.asking, &self.target) {
+            (Some(_), Some((id, _))) => Some(id),
+            _ => self.selected.as_ref(),
+        };
+        let anchored = anchor.and_then(|id| self.sets.iter().position(|set| &set.id == id));
+        if let Some(index) = anchored {
+            self.cursor = index;
+        }
+        self.select(self.cursor);
         let target_listed = self
             .target
             .as_ref()
@@ -236,6 +250,13 @@ impl ProjectChanges {
             self.asking = None;
         }
         assert!(self.sets.is_empty() || self.cursor < self.sets.len());
+    }
+
+    /// Moves the highlight to a place in the list and remembers the set there by its id.
+    /// Input: the place, bounded to the list. Output: none.
+    fn select(&mut self, index: usize) {
+        self.cursor = index.min(self.sets.len().saturating_sub(1));
+        self.selected = self.sets.get(self.cursor).map(|set| set.id.clone());
     }
 
     fn chosen(&self) -> Option<&ChangeSetView> {
@@ -337,8 +358,8 @@ impl ProjectChanges {
 
     fn list_key(&mut self, code: KeyCode) -> bool {
         match code {
-            KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = self.cursor.saturating_add(1),
+            KeyCode::Up => self.select(self.cursor.saturating_sub(1)),
+            KeyCode::Down => self.select(self.cursor.saturating_add(1)),
             KeyCode::Enter => {
                 let Some(set) = self.sets.get(self.cursor) else {
                     return true;
