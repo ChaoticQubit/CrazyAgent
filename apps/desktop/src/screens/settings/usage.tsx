@@ -34,14 +34,22 @@ export interface UsageNames {
   accounts: Map<string, string>;
 }
 
-/** Where a range starts: the viewer's local midnight today, six or twenty-nine days before
- * it so the range holds whole local days, or null for all time. Inputs: the range and now.
- * Output: milliseconds since the epoch, or null. */
+/** Where a range starts: midnight today at the viewer's offset now, the one fixed offset the
+ * engine cuts every day with, six or twenty-nine days before it so the range holds whole
+ * engine days even across a daylight saving change, or null for all time. Inputs: the range
+ * and now. Output: milliseconds since the epoch, or null. */
 export function rangeStart(range: UsageRange, now: Date): number | null {
   if (range === "all") return null;
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  start.setDate(start.getDate() - (range === "today" ? 0 : range === "7d" ? 6 : 29));
-  return start.getTime();
+  const shift = offsetMinutes(now) * MINUTE;
+  const today = Math.floor((now.getTime() + shift) / DAY) * DAY - shift;
+  return today - (range === "today" ? 0 : range === "7d" ? 6 : 29) * DAY;
+}
+
+/** A By day row's date as the engine cut it: the day's start moved by the same fixed offset
+ * and read in UTC, so a day before a daylight saving change keeps its own date. Inputs: the
+ * day's start in milliseconds and the offset in minutes east of UTC. Output: the label. */
+export function dayLabel(dayMs: number, offset: number): string {
+  return new Date(dayMs + offset * MINUTE).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
 }
 
 /** The viewer's offset east of UTC in minutes, as the engine cuts local days. Input: now. */
@@ -190,13 +198,13 @@ function LinesTable({ rows, name }: { rows: LinesRow[]; name: (key: string) => s
   </Panel>;
 }
 
-function DaysTable({ days }: { days: DayTokens[] }) {
+function DaysTable({ days, offset }: { days: DayTokens[]; offset: number }) {
   if (days.length === 0) return null;
   return <Panel title="By day" padded={false}>
     <div className="pj-table-wrap usage-table"><table className="pj-table">
       <thead><tr><th scope="col">Day</th><th scope="col">Tokens</th><th scope="col">In</th><th scope="col">Out</th><th scope="col">Cache read</th></tr></thead>
       <tbody>{days.map((day) => <tr key={day.day_ms}>
-        <th scope="row">{new Date(day.day_ms).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</th>
+        <th scope="row">{dayLabel(day.day_ms, offset)}</th>
         <td>{compactCount(totalTokens(day.tokens))}</td>
         <td>{compactCount(day.tokens.input)}</td>
         <td>{compactCount(day.tokens.output)}</td>
@@ -318,7 +326,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
       <UsageTable title="By pool" rows={value.pools} name={pool} nowMs={nowMs} />
       <UsageTable title="By account" rows={value.accounts} name={account} nowMs={nowMs} />
       <UsageTable title="By agent" rows={value.agents} name={(key) => agentLabel(key, project)} nowMs={nowMs} />
-      <DaysTable days={value.days} />
+      <DaysTable days={value.days} offset={offsetMinutes(new Date(nowMs))} />
       <LinesTable rows={value.lines} name={project} />
     </>}
   </div>;
