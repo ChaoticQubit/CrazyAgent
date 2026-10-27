@@ -386,6 +386,7 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
+        crate::recovery::capture(&connection, None)?;
         let now = now_ms();
         connection
             .execute_batch(&format!(
@@ -976,6 +977,7 @@ impl TeamRuntime {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
+        crate::recovery::capture(&tx, Some(now))?;
         for id in ids {
             tx.execute(
                 "UPDATE team_tasks SET status='queued', agent=NULL WHERE agent=?1 AND status='running' AND cancel_requested=0",
@@ -4615,6 +4617,12 @@ pub fn start_for_engine(
         Some(host) => runtime.with_terminal(host).map_err(|e| e.0)?,
         None => runtime,
     };
+    let root = state
+        .parent()
+        .expect("the team state is in the runtime folder");
+    if let Err(problem) = crate::recovery::scan(root) {
+        eprintln!("recovery: {}", bound_text(&problem.0, 300));
+    }
     let runtime = runtime.with_events(super::events::HANDLERS);
     Ok(TeamService::start(runtime, Duration::from_millis(250)))
 }

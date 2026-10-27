@@ -34,6 +34,7 @@ pub mod projects_home;
 pub mod protocol;
 pub mod qualification;
 pub mod rcli_host;
+pub mod recovery;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
