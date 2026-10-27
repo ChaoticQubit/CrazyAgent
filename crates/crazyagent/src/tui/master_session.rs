@@ -2219,21 +2219,29 @@ fn input_cursor(
 
 /// Wall time a default master turn asks for: ten minutes, before capacity clipping.
 const MASTER_TURN_WALL_MS: u64 = 600_000;
+/// The harness output one master turn may read in all. Codex keeps about 1 MiB of a
+/// command's output and sends it twice, as deltas and in the finished item, so 64 MiB, the
+/// default capacity, holds a turn of about thirty such commands.
+const MASTER_TURN_OUTPUT_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Default allowance for one master turn: the unit budget with ten minutes of wall time,
-/// clipped to the tightest configured capacity so a slow local model can finish a reply.
+/// Default allowance for one master turn: the unit budget with ten minutes of wall time and
+/// 64 MiB of harness output, each clipped to the tightest configured capacity so a slow local
+/// model or a turn of large command results can finish a reply.
 /// Input: the global, project and task capacities. Output: a budget that fits all three.
 fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
-    let ceiling = capacities
-        .iter()
-        .map(|capacity| capacity.wall_time_ms)
-        .min()
-        .unwrap_or(0);
+    let ceiling =
+        |dimension: fn(&ResourceBudget) -> u64| capacities.iter().map(dimension).min().unwrap_or(0);
     let budget = ResourceBudget {
-        wall_time_ms: MASTER_TURN_WALL_MS.min(ceiling).max(1),
+        wall_time_ms: MASTER_TURN_WALL_MS
+            .min(ceiling(|capacity| capacity.wall_time_ms))
+            .max(1),
+        output_bytes: MASTER_TURN_OUTPUT_BYTES
+            .min(ceiling(|capacity| capacity.output_bytes))
+            .max(1),
         ..ResourceBudget::unit()
     };
     assert!(budget.wall_time_ms <= MASTER_TURN_WALL_MS);
+    assert!(budget.output_bytes <= MASTER_TURN_OUTPUT_BYTES);
     budget
 }
 
@@ -2347,6 +2355,7 @@ mod default_budget_tests {
         state.defaults();
         let mut expected = ResourceBudget::unit();
         expected.wall_time_ms = 120_000;
+        expected.output_bytes = 2_097_152;
         assert_eq!(
             state.forms[index].values,
             budget_values(&expected).map(|value| value.to_string()),
@@ -2546,6 +2555,34 @@ pools = [
         };
         let clipped = default_master_budget(&[roomy.clone(), tight.clone(), roomy]);
         assert_eq!(clipped.wall_time_ms, 90_000);
+        assert!(clipped.fits(&tight));
+    }
+
+    #[test]
+    fn default_master_budget_holds_a_turn_of_large_command_results_within_policy() {
+        let policy = crate::routing::RoutingPolicy::default();
+        let budget = default_master_budget(&[
+            policy.global_capacity.clone(),
+            policy.project_capacity.clone(),
+            policy.task_capacity.clone(),
+        ]);
+        let command = 2 * 1_049_335;
+        assert!(budget.output_bytes >= 16 * command);
+        assert_eq!(budget.output_bytes, MASTER_TURN_OUTPUT_BYTES);
+        assert!(budget.fits(&policy.task_capacity));
+        assert_eq!(budget.validate(), Ok(()));
+        let tight = ResourceBudget {
+            output_bytes: 4_194_304,
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
+        let roomy = ResourceBudget {
+            output_bytes: 1 << 40,
+            wall_time_ms: 86_400_000,
+            ..ResourceBudget::unit()
+        };
+        let clipped = default_master_budget(&[roomy.clone(), roomy, tight.clone()]);
+        assert_eq!(clipped.output_bytes, 4_194_304);
         assert!(clipped.fits(&tight));
     }
 }

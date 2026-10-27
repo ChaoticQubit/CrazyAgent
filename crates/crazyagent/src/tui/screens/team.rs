@@ -25,6 +25,7 @@ const TREE_MIN: u16 = 30;
 const TREE_MAX: u16 = 44;
 const BOX_MIN: u16 = 8;
 const ENDED: &str = "terminal_ended";
+const STOPPED: &str = "agent_stopped";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -262,7 +263,7 @@ impl Team {
                 agent: attached.agent.clone(),
             });
         }
-        attached.closed = Some(ENDED.into());
+        attached.closed = Some(STOPPED.into());
         self.focus = Focus::Tree;
     }
 
@@ -763,9 +764,10 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
 }
 
 /// Says whether a terminal code means the agent's terminal ended for good.
-/// Input: a Closed or Rejected code. Output: true for an ended or unknown pane.
+/// Input: a Closed or Rejected code. Output: true for an ended run, a stopped agent or an
+/// unknown pane.
 fn dead(code: &str) -> bool {
-    matches!(code, ENDED | "terminal_agent_unknown")
+    matches!(code, ENDED | STOPPED | "terminal_agent_unknown")
 }
 
 /// Says whether a terminal code means the engine connection dropped, so the
@@ -790,6 +792,7 @@ fn closed_words(code: &str) -> (&'static str, &'static str) {
             "Not ready yet.",
             "This engine cannot stream agent terminals yet.",
         ),
+        ENDED => ("This run finished.", "Its last screen stays here."),
         code if dead(code) => ("This agent has stopped.", "Its terminal is closed."),
         code if lost(code) => (
             "Lost the engine connection.",

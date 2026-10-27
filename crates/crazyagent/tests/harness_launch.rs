@@ -470,17 +470,23 @@ fn written_pid(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
         .and_then(rustix::process::Pid::from_raw)
 }
 
-#[test]
-fn stopping_a_headless_agent_stops_what_its_shells_detached() {
+/// Starts a stand-in Claude Code harness running `script` headless under a tools-off project
+/// sandbox in a private folder, once it has run outside the sandbox so its first exec is
+/// done. Takes the folder prefix and the script. Returns the folder, the project the script
+/// works in, its executable and the session.
+fn sandboxed_stand_in(
+    prefix: &str,
+    script: &str,
+) -> (tempfile::TempDir, PathBuf, PathBuf, Session) {
     use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 
-    let root = private_dir("crazyagent-detached-agent-");
+    let root = private_dir(prefix);
     let project = private_folder(root.path(), "project");
     let home = private_folder(root.path(), "home");
     let tmp = private_folder(root.path(), "tmp");
     let bin = private_folder(root.path(), "bin");
     let harness = bin.join("claude");
-    std::fs::write(&harness, DETACHING_AGENT).unwrap();
+    std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
     let first = crazyagent::spawn_gate::status(
         std::process::Command::new(&harness)
@@ -506,7 +512,7 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
     .unwrap();
     let session = Session::start(LaunchRequest {
         harness: "claude-code".into(),
-        executable: harness,
+        executable: harness.clone(),
         working_dir: project.clone(),
         account: AccountBinding::Subscription { home },
         model: None,
@@ -515,6 +521,52 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
         limits: LaunchLimits::default(),
     })
     .unwrap();
+    (root, project, harness, session)
+}
+
+/// Kills, by id, the warden of every running agent of this user started from `harness`: the
+/// child the session shim forked keeps the shim's command line naming the harness after the
+/// shim itself became the harness. Takes the executable, unique to this test. Returns the
+/// wardens killed, so a caller that expects exactly one can check.
+fn kill_wardens_of(harness: &Path) -> Vec<i32> {
+    let listing = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-A", "-ww", "-o", "pid=,uid=,command="])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(listing.status.success());
+    let user = rustix::process::getuid().as_raw().to_string();
+    let own = std::process::id();
+    let named = format!(" -- {}", harness.display());
+    let text = String::from_utf8_lossy(&listing.stdout);
+    let wardens: Vec<i32> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid: i32 = fields.next()?.parse().ok()?;
+            let owner = fields.next()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            (owner == user
+                && pid as u32 != own
+                && command.starts_with("/usr/bin/perl -mPOSIX -e setpgrp(0,")
+                && command.contains(&named))
+            .then_some(pid)
+        })
+        .collect();
+    for warden in &wardens {
+        let pid = rustix::process::Pid::from_raw(*warden).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    }
+    wardens
+}
+
+#[test]
+fn stopping_a_headless_agent_stops_what_its_shells_detached() {
+    let (_root, project, _harness, session) =
+        sandboxed_stand_in("crazyagent-detached-agent-", DETACHING_AGENT);
     let deadline = Instant::now() + Duration::from_secs(10);
     let (leader, detached) = loop {
         if let (Some(leader), Some(session), Some(orphan)) = (
@@ -531,7 +583,7 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
         assert_ne!(rustix::process::getpgid(Some(process)), Ok(leader));
         assert_eq!(rustix::process::test_kill_process(process), Ok(()));
     }
-    session.stop();
+    session.stop().unwrap();
     let deadline = Instant::now() + Duration::from_secs(1);
     let survivors = loop {
         let survivors: Vec<_> = [leader]
@@ -550,6 +602,34 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
         let _ = rustix::process::kill_process(*process, rustix::process::Signal::KILL);
     }
     assert!(survivors.is_empty(), "{survivors:?} survived the agent");
+}
+
+#[test]
+fn stopping_a_headless_agent_whose_warden_was_killed_reports_cleanup_uncertain() {
+    let (_root, project, harness, session) =
+        sandboxed_stand_in("crazyagent-wardenless-agent-", DETACHING_AGENT);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let detached = loop {
+        if let Some(detached) = written_pid(&project, "descendant.pid") {
+            break detached;
+        }
+        assert!(Instant::now() < deadline, "stand-in agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let killed = kill_wardens_of(&harness);
+    assert_eq!(
+        killed.len(),
+        1,
+        "one warden per run, killed by id: {killed:?}"
+    );
+    let stopped = session.stop().map_err(|problem| problem.0);
+    let outlived = rustix::process::test_kill_process(detached) == Ok(());
+    let _ = rustix::process::kill_process(detached, rustix::process::Signal::KILL);
+    assert_eq!(stopped, Err("harness_cleanup_uncertain".to_owned()));
+    assert!(
+        outlived,
+        "with its warden killed the detached process outlives the group"
+    );
 }
 
 fn group_alive(group: u32) -> bool {
@@ -589,7 +669,7 @@ fn live_codex_and_claude_reply_from_the_local_model_and_stop_their_process_group
             "{harness}: {events:?}"
         );
         assert!(!text.trim().is_empty(), "{harness}: {events:?}");
-        session.stop();
+        session.stop().unwrap();
         assert!(!group_alive(group), "{harness} process group survived stop");
     }
 }
@@ -637,7 +717,7 @@ fn live_interrupt_stops_a_running_turn_through_the_harness_protocol() {
             seen.contains(&LaunchEvent::TurnFinished { success: false }),
             "{harness}: {seen:?}"
         );
-        session.stop();
+        session.stop().unwrap();
     }
 }
 
@@ -674,6 +754,6 @@ fn live_tools_on_turn_completes_inside_the_project_sandbox() {
             events.contains(&LaunchEvent::TurnFinished { success: true }),
             "{harness}: {events:?}"
         );
-        session.stop();
+        session.stop().unwrap();
     }
 }

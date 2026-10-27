@@ -7,13 +7,18 @@ use crazyagent::research::accounts::AccountPick;
 use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
 use crazyagent::research::runner::{ResearchAccount, ResearchLimits, ResearchRunner};
 use crazyagent::research::service::{ResearchService, progress};
-use research_support::{EngineRuntime, codex, hanging_endpoint, processes_with};
+use research_support::codex;
+#[cfg(target_os = "macos")]
+use research_support::{EngineRuntime, hanging_endpoint, processes_with};
+#[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
 fn ollama() -> AccountPick {
     AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
@@ -35,6 +40,7 @@ fn wait_for(deadline: Duration, mut done: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     let runtime = EngineRuntime::with_projects(&[(
@@ -126,6 +132,7 @@ fn the_service_waits_for_a_pool_then_runs_research_and_reports_progress() {
     assert!(report.starts_with("# Market research\n"));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
     const MID_RUN: &str = "the test fails while the service's research agent runs";
@@ -181,6 +188,7 @@ fn a_service_dropped_by_a_panic_mid_run_leaves_no_agent_process() {
     assert_eq!(job.attempts, 0);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
     let runtime = EngineRuntime::with_projects(&[("project-b", "A site for a flower shop.")]);

@@ -23,6 +23,7 @@ const MASTER_READ_ATTEMPTS: u32 = 4;
 mod account_profile;
 pub(super) mod accounts;
 pub(super) mod app_setup;
+pub(super) mod changes;
 mod claude_code;
 pub(super) mod intake;
 mod project_setup;
@@ -53,6 +54,7 @@ enum Job {
     Settings(Box<settings::SettingsJob>),
     TeamGraph(Box<ProjectId>),
     Intake(Box<intake::IntakeJob>),
+    Changes(Box<changes::ChangesQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -167,6 +169,7 @@ pub(super) enum OwnerEvent {
         result: Result<Box<crate::team::TeamGraph>, String>,
     },
     Intake(Box<intake::IntakeEvent>),
+    Changes(Box<changes::ChangesEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -608,6 +611,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Intake(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Changes(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.changes(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => changes::ChangesEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Changes(Box::new(event)),
                                 })
                                 .is_err()
                             {

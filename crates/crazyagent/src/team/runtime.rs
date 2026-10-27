@@ -2627,7 +2627,8 @@ fn next_turn(
 
 /// Serves turns on an agent whose harness keeps running between them. At the end it stops
 /// the agent, or, when the engine quits with the agent kept, stops the running turn and
-/// leaves the pane running for the next engine.
+/// leaves the pane running for the next engine. A stop its warden did not confirm ends the
+/// agent with that problem.
 fn serve(
     mut session: AgentSession,
     orders: &Receiver<Order>,
@@ -2667,12 +2668,18 @@ fn serve(
     if problem.is_none() && leave.load(Ordering::SeqCst) {
         let _ = session.interrupt();
         session.leave();
-    } else {
-        let _ = session.stop();
+    } else if let Err(uncertain) = session.stop() {
+        problem = Some(with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(&uncertain.0),
+        ));
     }
     problem
 }
 
+/// Serves turns on an agent of a signed-in account, starting its harness for each turn with
+/// the account's credential copy and lease, both released once the turn's harness stops. A
+/// stop its warden did not confirm keeps both for the engine's life and ends the agent.
 fn per_turn(
     plan: &Plan,
     home: &Path,
@@ -2725,14 +2732,27 @@ fn per_turn(
             pane: None,
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
-        let _ = session.stop();
-        drop(credential);
-        drop(profile);
-        let reusable = matches!(
-            end,
-            TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
-        );
-        let closed = (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()));
+        let stopped = session.stop();
+        let reusable = stopped.is_ok()
+            && matches!(
+                end,
+                TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+            );
+        let closed = match stopped {
+            Ok(_) => {
+                drop(credential);
+                drop(profile);
+                (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
+            }
+            Err(uncertain) => {
+                credential.retain();
+                std::mem::forget(profile);
+                Some(with_code(
+                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                    Some(&uncertain.0),
+                ))
+            }
+        };
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }
@@ -2883,6 +2903,7 @@ fn run_code(error: &RunError) -> &str {
         RunError::Invalid(_) => "setup_refused",
         RunError::Jobs(_) => "research_jobs_failed",
         RunError::Busy => "account_busy",
+        RunError::Uncertain(code) => code,
     }
 }
 

@@ -4,16 +4,24 @@ mod research_support;
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::OwnerClientKind;
-use crazyagent::research::jobs::{ResearchJobs, ResearchStatus};
+use crazyagent::research::jobs::ResearchJobs;
+#[cfg(target_os = "macos")]
+use crazyagent::research::jobs::ResearchStatus;
 use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, installed};
-use research_support::{claude, codex, counted_hanging_endpoint, processes_with};
+use research_support::{claude, codex};
+#[cfg(target_os = "macos")]
+use research_support::{counted_hanging_endpoint, processes_with};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "macos")]
 use std::panic::{AssertUnwindSafe, catch_unwind, panic_any};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -21,14 +29,20 @@ use std::time::{Duration, Instant};
 const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"anthropic-account\", \"local-account\"]\n\n[[model_access.connections]]\nid = \"anthropic-connection\"\nprovider = \"anthropic-compatible\"\nharness = \"claude\"\nprotocol = \"anthropic-messages\"\naccount_ref = \"anthropic-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434\" }\nmodel = { id = \"qwen2.5:7b\", author = \"anthropic-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.connections]]\nid = \"local-connection\"\nprovider = \"openai-compatible\"\nharness = \"rcli\"\nprotocol = \"openai-chat\"\naccount_ref = \"local-account\"\nendpoint = { kind = \"http\", url = \"http://127.0.0.1:11434/v1\" }\nmodel = { id = \"qwen2.5:7b\", author = \"openai-compatible\" }\nauth = { method = \"none\" }\n\n[[model_access.pools]]\nid = \"local-pool\"\nmembers = [\"local-connection\", \"anthropic-connection\"]\nprojects = [\"project-cafe\"]\nroles = [\"project_leader\"]\nfallback_allowed = false\n";
 
 const ENGINE_STOP_WAIT: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
 const AGENT_END_WAIT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
 const MODEL: &str = "qwen2.5:7b";
+#[cfg(target_os = "macos")]
 const OLLAMA: &str = "127.0.0.1:11434";
+#[cfg(target_os = "macos")]
 const OLLAMA_TIME: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
 const OLLAMA_TAGS_BYTES_MAX: u64 = 1024 * 1024;
 
 /// Fails the test with the command that fixes it unless the local Ollama serves the pool
 /// model. Input: none; reads the model list from Ollama's `/api/tags`. Output: none.
+#[cfg(target_os = "macos")]
 fn require_model() {
     assert_eq!(
         CATALOG
@@ -250,6 +264,7 @@ fn runtime(name: &str, catalog: &str) -> PathBuf {
     runtime
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database() {
     require_model();
@@ -357,6 +372,7 @@ fn the_engine_runs_queued_research_on_each_job_harness_from_the_engine_database(
     fs::remove_dir_all(home(&runtime)).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     const MID_RUN: &str = "the test fails while the engine's research agent runs";
@@ -403,6 +419,7 @@ fn a_test_that_panics_while_the_engine_runs_research_leaves_no_agent_process() {
     fs::remove_dir_all(home(&runtime)).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn killing_the_engine_ends_its_research_agents() {
     let (port, _endpoint, requests) = counted_hanging_endpoint();

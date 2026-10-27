@@ -62,7 +62,8 @@ pub fn check_stdio(
 /// runs `initialize` and `tools/list`, then stops its whole process group and, through the
 /// warden a boundary command gets, every process left in its sandbox. Inputs: the
 /// command with its arguments, environment and folder set, and the time bound. Output:
-/// the tool names, or a plain rejection code.
+/// the tool names, or a plain rejection code, `server_cleanup_uncertain` when the warden
+/// did not confirm the sandbox empty.
 #[cfg(unix)]
 pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String>, &'static str> {
     process
@@ -82,7 +83,8 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
         _ => {
             stop(pid);
             let _ = child.wait();
-            crate::sandbox::warden::fire_reported(warden, "server_check");
+            crate::sandbox::warden::fire_reported(warden, "server_check")
+                .map_err(|_| "server_cleanup_uncertain")?;
             return Err("server_cant_start");
         }
     };
@@ -97,7 +99,8 @@ pub fn check_command(mut process: Command, limit: Duration) -> Result<Vec<String
     stop(pid);
     let _ = child.kill();
     let _ = child.wait();
-    crate::sandbox::warden::fire_reported(warden, "server_check");
+    crate::sandbox::warden::fire_reported(warden, "server_check")
+        .map_err(|_| "server_cleanup_uncertain")?;
     result
 }
 

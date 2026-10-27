@@ -70,6 +70,18 @@ pub(crate) struct AgentCredential {
     keeper: Option<Keeper>,
 }
 
+impl AgentCredential {
+    /// Leaves the copy in the agent's home for an agent whose processes may still run, as
+    /// when its sandbox could not be confirmed empty: stops the keeper, so no renewed token
+    /// reaches the copy, and keeps the copy and the home's descriptor for the engine's life.
+    /// Takes the credential. Returns nothing.
+    pub(crate) fn retain(mut self) {
+        drop(self.keeper.take());
+        assert!(self.keeper.is_none());
+        std::mem::forget(self);
+    }
+}
+
 impl Drop for AgentCredential {
     /// Stops the keeper, then removes the copy beneath the agent home's descriptor.
     /// Input: the credential being dropped. Output: none; a copy already gone is fine.

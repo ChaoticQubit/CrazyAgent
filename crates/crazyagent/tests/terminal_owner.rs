@@ -7,7 +7,7 @@ use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -174,9 +174,45 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
         .unwrap();
 }
 
+/// Counts the tmux processes whose command line names `socket`: the server on it and any
+/// client still connected. Input: the server's socket path. Output: the count.
+fn servers(socket: &Path) -> usize {
+    let listed = crazyagent::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-A", "-o", "args="])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "{listed:?}");
+    let socket = socket.to_str().unwrap();
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter(|line| line.contains("tmux") && line.contains(socket))
+        .count()
+}
+
+/// Waits up to ten seconds for no tmux process to name `socket`. Input: the socket path.
+/// Output: whether none is left.
+async fn gone(socket: &Path) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while servers(socket) > 0 {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    true
+}
+
+/// A team sub-agent's terminal on an in-process engine in a temporary folder. Fields drop
+/// in declaration order, so the server guard ends the tmux server while its socket still
+/// exists and only then is the folder holding that socket deleted.
 struct SubAgent {
-    root: tempfile::TempDir,
     _server: Server,
+    root: tempfile::TempDir,
     service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
     controller: OwnerController,
@@ -238,6 +274,10 @@ impl SubAgent {
             .await
             .unwrap()
         };
+        assert!(
+            servers(&server.socket) > 0,
+            "the sub-agent runs on the engine's tmux server"
+        );
         let controller = OwnerController::attach(
             root.path(),
             OwnerClientKind::Desktop,
@@ -246,8 +286,8 @@ impl SubAgent {
         .await
         .unwrap();
         Self {
-            root,
             _server: server,
+            root,
             service,
             _stop: stop,
             controller,
@@ -269,6 +309,7 @@ impl SubAgent {
     }
 
     async fn stop(self) {
+        let socket = self._server.socket.clone();
         let Self {
             mut service,
             controller,
@@ -281,11 +322,35 @@ impl SubAgent {
             .unwrap()
             .unwrap();
         drop(controller);
+        let terminal = service
+            .owner_runtime()
+            .and_then(|runtime| runtime.terminal().ok())
+            .expect("the engine runs a terminal host");
         tokio::time::timeout(Duration::from_secs(10), service.shutdown())
             .await
             .unwrap()
             .unwrap();
+        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            gone(&socket).await,
+            "a stopped engine with no team agent left ends its tmux server while its folder remains"
+        );
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_engine_dropped_without_a_stop_leaves_no_tmux_server() {
+    let sub = SubAgent::start().await;
+    let socket = sub._server.socket.clone();
+    assert!(servers(&socket) > 0);
+    drop(sub);
+    assert!(
+        gone(&socket).await,
+        "an engine that never stops cleanly leaves no tmux server once its test ends"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

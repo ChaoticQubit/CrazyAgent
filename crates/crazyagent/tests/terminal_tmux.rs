@@ -5,7 +5,7 @@ use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
-    VIEWER_BUFFER_BYTES_MAX, plain_reason, quit,
+    VIEWER_BUFFER_BYTES_MAX, plain_reason, platform, quit,
 };
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
@@ -1022,6 +1022,68 @@ fn engine_process_with_planted_variables_spawns_a_pane() {
         ],
     );
     host.spawn(&AgentId::team(9).unwrap(), &command).unwrap();
+}
+
+#[test]
+fn an_agent_between_runs_shows_its_last_screen_labeled_finished_until_it_runs_again() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let _server = Server {
+        tmux,
+        socket: root.path().join(FOLDER).join(SOCKET),
+    };
+    let (ready, host) = platform(root.path());
+    assert!(ready);
+    let agent = AgentId::team(7).unwrap();
+    let run = |text: &str| {
+        shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                &format!("printf '{text}\\n'; exec sleep 600"),
+            ],
+        )
+    };
+
+    host.spawn(&agent, &run("first run output")).unwrap();
+    let mut live = host.attach(&agent).unwrap();
+    let mut seen = live.screen.clone();
+    assert!(read_until(&mut live, &mut seen, b"first run output"));
+    drop(live);
+    host.kill(&agent).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+
+    let mut last = host.attach(&agent).unwrap();
+    assert_eq!((last.cols, last.rows), (80, 24));
+    assert!(
+        contains(&last.screen, b"first run output") && contains(&last.screen, b"Finished at "),
+        "{}",
+        String::from_utf8_lossy(&last.screen)
+    );
+    assert!(
+        ended(&mut last),
+        "a finished run's screen takes no more output"
+    );
+    assert_eq!(
+        host.input(&agent, b"x").unwrap_err().0,
+        "terminal_agent_unknown"
+    );
+    assert_eq!(host.kill(&agent).unwrap_err().0, "terminal_agent_unknown");
+
+    host.spawn(&agent, &run("second run output")).unwrap();
+    let mut live = host.attach(&agent).unwrap();
+    assert_eq!((live.cols, live.rows), (80, 24));
+    let mut seen = live.screen.clone();
+    assert!(read_until(&mut live, &mut seen, b"second run output"));
+    assert!(
+        !contains(&seen, b"Finished at ") && !contains(&seen, b"first run output"),
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+    host.kill(&agent).unwrap();
+    assert!(ended(&mut live));
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
     ApprovalKind, CodexProtocol, Event, FRAME_BYTES_MAX, ProtocolError, State, TurnStatus, WireId,
 };
@@ -216,7 +217,7 @@ fn decoder_enforces_frame_chunk_and_event_bounds() {
     let mut protocol = CodexProtocol::new();
     assert!(
         protocol
-            .receive(&vec![b' '; FRAME_BYTES_MAX])
+            .receive(&vec![b' '; LINE_BYTES_MAX])
             .unwrap()
             .is_empty()
     );
@@ -224,7 +225,7 @@ fn decoder_enforces_frame_chunk_and_event_bounds() {
     assert_eq!(protocol.state(), State::Failed);
     let mut protocol = CodexProtocol::new();
     assert_eq!(
-        protocol.receive(&vec![b' '; FRAME_BYTES_MAX + 1]),
+        protocol.receive(&vec![b' '; LINE_BYTES_MAX + 2]),
         Err(ProtocolError::FrameTooLarge)
     );
     let mut protocol = initialized();

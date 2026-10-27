@@ -1,6 +1,6 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Agents
 ────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ⧉ Context   ☰ Settings
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
 ────────────────────────────────━━━━━━━━────────────────────────────────────────
   Agents  3 waiting
   This project has no pool. Pick a pool to start.
