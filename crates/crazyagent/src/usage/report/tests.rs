@@ -509,3 +509,20 @@ fn rcli_counted_from_host_frames_is_reported_and_never_marked_unreported() {
         "a counted RCLI master is never labelled not reported; a readerless agent still is"
     );
 }
+
+#[test]
+fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    crate::usage::health::record_panic(&db, crate::usage::health::UsageStep::Poll, 7).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT).unwrap();
+    assert_eq!(report.health.len(), 1);
+    let mut older = serde_json::to_value(&report).unwrap();
+    older.as_object_mut().unwrap().remove("health");
+    let read: UsageReport = serde_json::from_value(older).unwrap();
+    assert!(read.health.is_empty());
+    assert_eq!(
+        serde_json::to_value(&report.health).unwrap(),
+        serde_json::json!([{"step": "poll", "panics": 1, "last_ms": 7}])
+    );
+}

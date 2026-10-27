@@ -92,6 +92,7 @@ fn report() -> UsageReport {
         agent_lines: Vec::new(),
         limits: vec![limits(Some("usage_rate_limited"))],
         not_reported_by: Vec::new(),
+        health: Vec::new(),
     }
 }
 
@@ -409,4 +410,53 @@ fn a_harness_without_a_reader_reads_as_not_reported_never_as_zero() {
     ] {
         assert!(all.contains(wanted), "{wanted:?} in\n{all}");
     }
+}
+
+#[test]
+fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time() {
+    let ctx = ctx(100, 40);
+    let healthy = text(&summary(
+        &report(),
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(!healthy.contains("internal error"), "{healthy}");
+    let degraded = UsageReport {
+        health: vec![
+            StepHealth {
+                step: UsageStep::Poll,
+                panics: 1,
+                last_ms: NOW - 30_000,
+            },
+            StepHealth {
+                step: UsageStep::Team,
+                panics: 3,
+                last_ms: NOW - 4 * MINUTE,
+            },
+        ],
+        ..report()
+    };
+    let lines = text(&summary(
+        &degraded,
+        UsageRange::Today,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    assert_eq!(
+        lines[2],
+        "Checking account limits hit an internal error once since the engine started, last just now. CrazyAgent keeps retrying; limits shown may be out of date."
+    );
+    assert_eq!(
+        lines[3],
+        "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent token totals may be low."
+    );
+    assert_eq!(lines[5], "Account limits");
 }

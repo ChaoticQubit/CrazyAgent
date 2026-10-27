@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod capture;
+pub mod health;
 pub mod poll;
 pub mod report;
 pub mod service;
@@ -199,6 +200,7 @@ pub fn initialize(db: &Connection) -> Result<(), EngineError> {
         }
     }
     db.execute_batch(capture::SCHEMA).map_err(storage)?;
+    db.execute_batch(health::SCHEMA).map_err(storage)?;
     db.execute_batch(report::SCHEMA).map_err(storage)
 }
 

@@ -1,4 +1,5 @@
 use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
+use super::health::{UsageStep, clear, record_panic};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
 use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
@@ -122,7 +123,8 @@ pub fn pool_of(
 }
 
 /// One engine's usage upkeep: it counts what every team agent and research run's records
-/// gained and polls every signed-in subscription account's limits.
+/// gained and polls every signed-in subscription account's limits. `doing` names the part
+/// of the step running now, so a panic is counted against it.
 pub struct Usage {
     db: Connection,
     team: PathBuf,
@@ -132,11 +134,13 @@ pub struct Usage {
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     polls: u64,
+    doing: UsageStep,
 }
 
 impl Usage {
-    /// Opens the upkeep for an engine database. Inputs: the database, the team state folder,
-    /// the live access and the harness executables by harness id. Output: the upkeep.
+    /// Opens the upkeep for an engine database and forgets the step panics a previous engine
+    /// run counted. Inputs: the database, the team state folder, the live access and the
+    /// harness executables by harness id. Output: the upkeep.
     pub fn open(
         database: &Path,
         team: &Path,
@@ -148,6 +152,7 @@ impl Usage {
             .filter(|root| root.is_absolute())
             .ok_or_else(|| failure("usage_unavailable"))?;
         let db = super::open(root)?;
+        clear(&db)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(storage)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -165,6 +170,7 @@ impl Usage {
             ),
             polled_ms: None,
             polls: 0,
+            doing: UsageStep::Poll,
         })
     }
 
@@ -181,6 +187,7 @@ impl Usage {
     /// readings meet a poll as fresh as the step allows. Output: done, or the store's
     /// failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
+        self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
         let due = match self.polled_ms {
@@ -193,7 +200,9 @@ impl Usage {
             self.polled_ms = Some(now_ms);
             self.poll_all(&access, now_ms)?;
         }
+        self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
+        self.doing = UsageStep::Runs;
         scan_runs(
             &self.db,
             |project, account| pool_of(&access, project, account),
@@ -397,6 +406,23 @@ fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
     }
 }
 
+/// Runs one upkeep step under `guarded` and counts a panic against the step kind that was
+/// running, so the usage pages can say counting is degraded. Inputs: the upkeep, the step
+/// and the time. Output: the step's problem code, none when it succeeded.
+fn counted_step(
+    usage: &mut Usage,
+    step: impl FnOnce(&mut Usage) -> Result<(), EngineError>,
+    now_ms: i64,
+) -> Option<String> {
+    let problem = guarded(|| step(usage));
+    if problem.as_deref() == Some(STEP_PANICKED)
+        && let Err(fault) = record_panic(&usage.db, usage.doing, now_ms)
+    {
+        eprintln!("usage: {}", fault.0);
+    }
+    problem
+}
+
 /// The upkeep thread's log and pace. A problem code is logged when it first appears. A
 /// step that panics again right after a panic is counted, not logged, and the wait before
 /// the next step doubles up to `PANIC_PAUSE_MAX`. The default panic hook still reports
@@ -471,7 +497,9 @@ pub fn start_for_engine(
         .spawn(move || {
             let mut pace = Pace::default();
             while !flag.load(Ordering::SeqCst) {
-                let (lines, pause) = pace.after(guarded(|| usage.step(now_ms())));
+                let now = now_ms();
+                let (lines, pause) =
+                    pace.after(counted_step(&mut usage, |usage| usage.step(now), now));
                 for line in lines {
                     eprintln!("{line}");
                 }

@@ -1,4 +1,5 @@
 use super::capture::{Attribution, Format, Tokens};
+use super::health::{StepHealth, health};
 use super::{AccountLimits, all_limits, failure, storage};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -78,7 +79,8 @@ pub struct AgentLinesRow {
 
 /// The usage page's numbers for one range: app totals, the largest projects, pools,
 /// accounts and agents, tokens per local day, lines changed per project, every account's
-/// limits, and the harnesses that ran in the range without reporting usage.
+/// limits, the harnesses that ran in the range without reporting usage, and each usage
+/// step kind that panicked since the engine started.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageReport {
@@ -95,6 +97,8 @@ pub struct UsageReport {
     pub limits: Vec<AccountLimits>,
     #[serde(default)]
     pub not_reported_by: Vec<String>,
+    #[serde(default)]
+    pub health: Vec<StepHealth>,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -446,6 +450,7 @@ pub fn report(
         agent_lines: agent_lines(db, project, since)?,
         limits,
         not_reported_by: unreported_harnesses(db, project, since)?,
+        health: health(db)?,
     };
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);

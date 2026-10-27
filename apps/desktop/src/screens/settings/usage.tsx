@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { accountRanking, listAccounts, poolSummaries, type Result } from "../../api";
 import {
   loadUsage, pollFailure, refreshUsage, setManualReset, usageNotReady, usageRefusal,
-  type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type Tokens, type UsageReport, type UsageRow, type WindowKind,
+  type AccountLimits, type DayTokens, type LimitWindow, type LinesRow, type StepHealth, type Tokens, type UsageReport, type UsageRow, type WindowKind,
 } from "../../api-usage";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, TextField } from "../../ui";
@@ -98,6 +98,20 @@ export function agoText(atMs: number, nowMs: number): string {
   if (passed < HOUR) return `${Math.floor(passed / MINUTE)} min ago`;
   if (passed < DAY) return `${Math.floor(passed / HOUR)} h ago`;
   return `${Math.floor(passed / DAY)} d ago`;
+}
+
+const STEP_WORDS: Record<StepHealth["step"], [string, string]> = {
+  poll: ["Checking account limits", "limits shown may be out of date"],
+  team: ["Counting agent tokens", "agent token totals may be low"],
+  runs: ["Counting research run tokens", "research token totals may be low"],
+};
+
+/** One plain sentence for a usage step kind that panicked since the engine started.
+ * Inputs: the step's health and now. Output: the sentence. */
+export function healthText(health: StepHealth, nowMs: number): string {
+  const [what, missing] = STEP_WORDS[health.step];
+  const times = health.panics === 1 ? "once" : `${health.panics} times`;
+  return `${what} hit an internal error ${times} since the engine started, last ${agoText(health.last_ms, nowMs)}. CrazyAgent keeps retrying; ${missing}.`;
 }
 
 /** Where and when an account's limits were last read, and whether the last check failed.
@@ -325,6 +339,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
     <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
     {head}
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {(value.health ?? []).map((item) => <Notice key={item.step}>{healthText(item, nowMs)}</Notice>)}
     <Totals report={value} />
     <Panel title="Account limits">
       {value.limits.length === 0

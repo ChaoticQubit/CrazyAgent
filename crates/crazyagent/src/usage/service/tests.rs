@@ -237,3 +237,54 @@ fn a_step_that_keeps_panicking_is_logged_once_and_waits_longer_each_time() {
     }
     assert_eq!(pace.after(panicked()).1, PANIC_PAUSE_MAX);
 }
+
+#[test]
+fn a_panicking_step_is_counted_against_its_kind_and_a_new_engine_run_forgets_it() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);",
+    )
+    .unwrap();
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    for at in [NOW, NOW + 5_000] {
+        let problem = counted_step(
+            &mut usage,
+            |usage| {
+                usage.doing = UsageStep::Team;
+                panic!("a team scan broke an invariant");
+            },
+            at,
+        );
+        assert_eq!(problem.as_deref(), Some("usage_step_panicked"));
+    }
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 10_000), NOW + 10_000),
+        None
+    );
+    assert_eq!(
+        usage.doing,
+        UsageStep::Runs,
+        "a whole step ends in its last part"
+    );
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000).unwrap();
+    assert_eq!(
+        report.health,
+        [crate::usage::health::StepHealth {
+            step: UsageStep::Team,
+            panics: 2,
+            last_ms: NOW + 5_000,
+        }],
+        "a later step that succeeds keeps the count for this engine run"
+    );
+    drop(usage);
+    Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    assert!(
+        crate::usage::health::health(&db).unwrap().is_empty(),
+        "a new engine run starts with no counted panics"
+    );
+}

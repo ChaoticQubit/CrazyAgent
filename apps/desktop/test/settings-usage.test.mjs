@@ -225,3 +225,17 @@ test("a harness without a reader reads as usage not reported, never as zero", ()
   const older = text(render({ report: { kind: "ok", value: report() } }));
   assert.doesNotMatch(older, /not reported/, "a report from an engine without the field shows plain counts");
 });
+
+test("a usage step that panicked shows one plain warning with its count and last time", () => {
+  assert.doesNotMatch(text(render()), /internal error/u);
+  const shown = text(render({ report: { kind: "ok", value: report({ health: [
+    { step: "poll", panics: 1, last_ms: NOW - 30_000 },
+    { step: "runs", panics: 4, last_ms: NOW - 3 * HOUR },
+  ] }) } }));
+  assert.match(shown, /Checking account limits hit an internal error once since the engine started, last just now\. CrazyAgent keeps retrying; limits shown may be out of date\./u);
+  assert.match(shown, /Counting research run tokens hit an internal error 4 times since the engine started, last 3 h ago\. CrazyAgent keeps retrying; research token totals may be low\./u);
+  assert.equal(
+    usage.healthText({ step: "team", panics: 2, last_ms: NOW - 5 * MINUTE }, NOW),
+    "Counting agent tokens hit an internal error 2 times since the engine started, last 5 min ago. CrazyAgent keeps retrying; agent token totals may be low.",
+  );
+});
