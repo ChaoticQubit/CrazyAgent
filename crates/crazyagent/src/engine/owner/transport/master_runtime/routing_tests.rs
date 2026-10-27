@@ -2791,3 +2791,124 @@ async fn a_master_with_tools_off_refuses_ask_agent_to_update_and_keeps_its_chang
     assert_eq!(notes, "Written by the master.\n");
     assert_eq!(turns.len(), 1, "{turns:?}");
 }
+
+/// Records synthetic usage through the usage store the poll writes and owner account
+/// plans into the scheduling table, through a writable engine connection.
+/// Takes the case, limits rows of connection, weekly used and weekly reset, and plans of
+/// connection, reserve and pin.
+fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8, Option<&str>)]) {
+    let db = Connection::open_with_flags(
+        case.root.path().join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    crate::usage::initialize(&db).unwrap();
+    for (connection, weekly, resets) in limits {
+        crate::usage::record_observation(
+            &db,
+            &reference(connection),
+            &crate::usage::Observation {
+                plan: None,
+                five_hour: Some(crate::usage::LimitWindow {
+                    used_percent: 10.0,
+                    resets_at_ms: None,
+                }),
+                weekly: Some(crate::usage::LimitWindow {
+                    used_percent: *weekly,
+                    resets_at_ms: Some(*resets),
+                }),
+            },
+            crate::usage::LimitSource::Poll,
+            clock_ms(),
+        )
+        .unwrap();
+    }
+    for (connection, reserve, pin) in plans {
+        db.execute(
+            "INSERT INTO account_plans(connection,rank,reserve_percent,pin) VALUES (?1,NULL,?2,?3)",
+            params![connection, reserve, pin],
+        )
+        .unwrap();
+    }
+}
+
+fn clock_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_master_turn_starts_on_the_account_whose_weekly_window_resets_first_and_still_fails_over()
+{
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let now = clock_ms();
+    schedule_rows(
+        &case,
+        &[
+            ("claude-a", 30.0, now + 72 * 3_600_000),
+            ("claude-b", 30.0, now + 3_600_000),
+        ],
+        &[],
+    );
+    let first = case.prepared(&case.turn.id).await;
+    assert_eq!(first.attempt.connection.id, reference("claude-b"));
+    case.fail(
+        &case.turn.id,
+        &first.attempt.request.id,
+        MasterReason::RateLimited,
+    )
+    .await;
+    drop(first);
+    assert!(case.paused_until("claude-b").is_some());
+    let second = case.submit("Summarize what we discussed so far.").await;
+    let next = case.prepared(&second).await;
+    assert_eq!(next.attempt.connection.id, reference("claude-a"));
+    assert!(next.text.ends_with("Summarize what we discussed so far."));
+    drop(next);
+    case.finish().await;
+}
+
+#[tokio::test]
+async fn a_reserve_and_a_never_use_pin_block_the_master_turn_naming_each_account() {
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.sign_in("claude-b", true).await;
+    let now = clock_ms();
+    schedule_rows(
+        &case,
+        &[("claude-b", 95.0, now + 3_600_000)],
+        &[("claude-a", 0, Some("never_use")), ("claude-b", 10, None)],
+    );
+    let result = case
+        .command(MasterRuntimeCommand::Prepare {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+        .await
+        .unwrap();
+    let MasterRuntimeResult::Turn(blocked) = result else {
+        panic!("a pool the schedule leaves empty must not prepare a turn");
+    };
+    assert_eq!(blocked.phase, MasterTurnPhase::Blocked);
+    assert_eq!(blocked.reason, Some(MasterReason::ScopeRevoked));
+    assert_eq!(blocked.cause.as_deref(), Some("account_never_use"));
+    let named: Vec<(&str, Option<MasterReason>)> = blocked
+        .accounts
+        .iter()
+        .map(|account| (account.connection.as_str(), account.reason))
+        .collect();
+    assert!(named.contains(&("claude-a", Some(MasterReason::ScopeRevoked))));
+    assert!(named.contains(&("claude-b", Some(MasterReason::QuotaExhausted))));
+    assert_eq!(case.paused_until("claude-b"), None);
+    case.finish().await;
+}

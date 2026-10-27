@@ -121,6 +121,7 @@ pub enum Section {
     Plugins,
     Memory,
     Profile,
+    Process,
 }
 
 /// One glyph set: Unicode, or ASCII of the same width so layouts never shift.
@@ -130,7 +131,7 @@ pub enum Section {
 pub struct Glyphs {
     pub ascii: bool,
     status: [&'static str; 9],
-    sections: [&'static str; 6],
+    sections: [&'static str; 7],
     providers: [&'static str; 8],
     pub hline: &'static str,
     pub vline: &'static str,
@@ -155,7 +156,7 @@ pub struct Glyphs {
 pub static UNICODE: Glyphs = Glyphs {
     ascii: false,
     status: ["✓", "✗", "!", "▸", "◌", "⊘", "◧", "?", "✧"],
-    sections: ["@", "⊞", "❯", "✦", "⁂", "◉"],
+    sections: ["@", "⊞", "❯", "✦", "⁂", "◉", "§"],
     providers: ["⬡", "⬡", "✻", "✻", "⇄", "⌁", "⌂", "•"],
     hline: "─",
     vline: "│",
@@ -180,7 +181,7 @@ pub static UNICODE: Glyphs = Glyphs {
 pub static ASCII: Glyphs = Glyphs {
     ascii: true,
     status: ["+", "x", "!", ">", "o", "-", "~", "?", "*"],
-    sections: ["@", "#", "$", "&", "*", "o"],
+    sections: ["@", "#", "$", "&", "*", "o", "%"],
     providers: ["O", "O", "C", "A", "R", "U", "L", "*"],
     hline: "-",
     vline: "|",

@@ -10,10 +10,12 @@ import { ContextTab } from "./context";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
+import { ProcessEditor } from "../process";
 import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
 import "./projects.css";
 
@@ -23,6 +25,7 @@ export const TABS = [
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "context", label: "Context", icon: "folder-open" },
+  { id: "process", label: "Process", icon: "list-checks" },
   { id: "settings", label: "Settings", icon: "settings" },
 ] as const satisfies readonly { id: string; label: string; icon: IconName }[];
 
@@ -191,10 +194,11 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
-      {active === "conversation" && <MasterArea data={data} />}
+      {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
+      {active === "process" && <ProcessEditor scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}
     </div>
     {!session && <div className="pj-toast-region" aria-live="polite">{toast && <p className="toast" role="status">{displayText(toast)}</p>}</div>}

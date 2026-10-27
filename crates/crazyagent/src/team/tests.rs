@@ -258,29 +258,52 @@ fn work_spreads_across_pool_members_and_skips_paused_accounts() {
     let mut paused = BTreeSet::new();
     let busy_a = |c: &CredentialRef| usize::from(c.as_str() == "local-a");
     assert_eq!(
-        pick_account(&accounts, &|_| 0, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-b"
     );
     paused.insert(reference("local-b"));
     assert_eq!(
-        pick_account(&accounts, &busy_a, &paused)
-            .unwrap()
-            .connection
-            .as_str(),
+        pick_account(
+            &accounts,
+            &busy_a,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .unwrap()
+        .connection
+        .as_str(),
         "local-a"
     );
     paused.insert(reference("local-a"));
-    assert!(pick_account(&accounts, &|_| 0, &paused).is_none());
+    assert!(
+        pick_account(
+            &accounts,
+            &|_| 0,
+            &paused,
+            &crate::scheduling::Choice::default()
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -2379,9 +2402,19 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     );
     for agent in &live.agents {
         assert_eq!(agent.role, AgentRole::Sub);
-        assert_eq!(agent.label, format!("Sub-agent {}", agent.id));
+        let name = names::name(&connection, agent.id).unwrap();
+        assert!(name.is_some(), "{agent:?}");
+        assert_eq!(
+            agent.label,
+            names::label(AgentRole::Sub, agent.id, name.as_ref())
+        );
         assert!(agent.account.is_some(), "{agent:?}");
     }
+    let labels: std::collections::HashMap<i64, String> = live
+        .agents
+        .iter()
+        .map(|agent| (agent.id, agent.label.clone()))
+        .collect();
 
     let shape = [ids[0], ids[1], ids[2], ids[3], ids[2]];
     for (index, agent) in shape.iter().enumerate() {
@@ -2412,7 +2445,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         .collect();
     assert_eq!(nodes.len(), 4, "{live:#?}");
     for (node, id) in nodes.iter().zip(&ids) {
-        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert_eq!(node.label, labels[id]);
         assert!(node.status.is_some_and(AgentStatus::live), "{node:?}");
         assert_eq!(
             node.terminal,
@@ -2451,7 +2484,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         "stopped sub-agents stay listed: {stopped:#?}"
     );
     for (node, id) in nodes.iter().zip(&ids) {
-        assert_eq!(node.label, format!("Sub-agent {id}"));
+        assert_eq!(node.label, labels[id]);
         assert_eq!(node.status, Some(AgentStatus::Stopped));
         assert_eq!(node.status_label.as_deref(), Some("Stopped"));
         assert_eq!(node.terminal, None);

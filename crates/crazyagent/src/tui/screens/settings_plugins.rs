@@ -826,6 +826,7 @@ impl Screen for Plugins {
             hint("m", "Add MCP server"),
             hint("Space", "On or off"),
             hint("Enter", "Details"),
+            hint("i", "Import"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
         ]
@@ -838,6 +839,7 @@ impl Screen for Plugins {
         let count = self.count();
         match key {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
+            Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
             Key::Char('m') => return Flow::Replace(Box::new(AddPlugin::server())),
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
@@ -1895,7 +1897,9 @@ impl Screen for EditServer {
     }
 }
 
+mod import_page;
 mod skill_detail;
+pub use import_page::ImportSkillsPage;
 pub use skill_detail::SkillDetailPage;
 
 #[cfg(test)]
