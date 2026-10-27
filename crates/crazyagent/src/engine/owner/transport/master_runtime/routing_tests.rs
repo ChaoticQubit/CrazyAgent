@@ -2792,9 +2792,9 @@ async fn a_master_with_tools_off_refuses_ask_agent_to_update_and_keeps_its_chang
     assert_eq!(turns.len(), 1, "{turns:?}");
 }
 
-/// Writes synthetic usage rows into the `account_limits` shape the usage poll keeps and
-/// owner account plans into the scheduling table, through a writable engine connection.
-/// Takes the case, limits rows of account, weekly used and weekly reset, and plans of
+/// Records synthetic usage through the usage store the poll writes and owner account
+/// plans into the scheduling table, through a writable engine connection.
+/// Takes the case, limits rows of connection, weekly used and weekly reset, and plans of
 /// connection, reserve and pin.
 fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8, Option<&str>)]) {
     let db = Connection::open_with_flags(
@@ -2803,20 +2803,24 @@ fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8
     )
     .unwrap();
     db.busy_timeout(Duration::from_secs(5)).unwrap();
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS account_limits (
-            account_ref TEXT PRIMARY KEY,
-            five_hour_percent REAL,
-            five_hour_resets_ms INTEGER,
-            weekly_percent REAL,
-            weekly_resets_ms INTEGER
-        )",
-    )
-    .unwrap();
-    for (account, weekly, resets) in limits {
-        db.execute(
-            "INSERT INTO account_limits VALUES (?1,10.0,NULL,?2,?3)",
-            params![account, weekly, resets],
+    crate::usage::initialize(&db).unwrap();
+    for (connection, weekly, resets) in limits {
+        crate::usage::record_observation(
+            &db,
+            &reference(connection),
+            &crate::usage::Observation {
+                plan: None,
+                five_hour: Some(crate::usage::LimitWindow {
+                    used_percent: 10.0,
+                    resets_at_ms: None,
+                }),
+                weekly: Some(crate::usage::LimitWindow {
+                    used_percent: *weekly,
+                    resets_at_ms: Some(*resets),
+                }),
+            },
+            crate::usage::LimitSource::Poll,
+            clock_ms(),
         )
         .unwrap();
     }
@@ -2849,8 +2853,8 @@ async fn a_master_turn_starts_on_the_account_whose_weekly_window_resets_first_an
     schedule_rows(
         &case,
         &[
-            ("claude-account-a", 30.0, now + 72 * 3_600_000),
-            ("claude-account-b", 30.0, now + 3_600_000),
+            ("claude-a", 30.0, now + 72 * 3_600_000),
+            ("claude-b", 30.0, now + 3_600_000),
         ],
         &[],
     );
@@ -2880,7 +2884,7 @@ async fn a_reserve_and_a_never_use_pin_block_the_master_turn_naming_each_account
     let now = clock_ms();
     schedule_rows(
         &case,
-        &[("claude-account-b", 95.0, now + 3_600_000)],
+        &[("claude-b", 95.0, now + 3_600_000)],
         &[("claude-a", 0, Some("never_use")), ("claude-b", 10, None)],
     );
     let result = case

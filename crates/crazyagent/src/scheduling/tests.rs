@@ -71,36 +71,32 @@ fn plan(connection: &mut Connection, access: &ModelAccess, id: &str, plan: Accou
     assert_eq!(outcome, Outcome::Applied);
 }
 
-/// One synthetic limits row: account, 5-hour used and reset, weekly used and reset.
+/// One synthetic limits row: connection, 5-hour used and reset, weekly used and reset.
 type LimitsRow<'a> = (&'a str, f64, Option<i64>, f64, Option<i64>);
 
-/// Writes synthetic limits rows into the `account_limits` shape the usage poll keeps.
+/// Records synthetic limits through the usage store the poll writes.
 /// Takes the connection and the rows.
 fn limits(connection: &Connection, rows: &[LimitsRow<'_>]) {
-    connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS account_limits (
-                account_ref TEXT PRIMARY KEY,
-                five_hour_percent REAL,
-                five_hour_resets_ms INTEGER,
-                weekly_percent REAL,
-                weekly_resets_ms INTEGER
-            )",
+    crate::usage::initialize(connection).unwrap();
+    for (id, five, five_resets, weekly, weekly_resets) in rows {
+        crate::usage::record_observation(
+            connection,
+            &reference(id),
+            &crate::usage::Observation {
+                plan: None,
+                five_hour: Some(LimitWindow {
+                    used_percent: *five,
+                    resets_at_ms: *five_resets,
+                }),
+                weekly: Some(LimitWindow {
+                    used_percent: *weekly,
+                    resets_at_ms: *weekly_resets,
+                }),
+            },
+            crate::usage::LimitSource::Poll,
+            NOW_MS,
         )
         .unwrap();
-    for (id, five, five_resets, weekly, weekly_resets) in rows {
-        connection
-            .execute(
-                "INSERT INTO account_limits VALUES (?1,?2,?3,?4,?5)",
-                params![
-                    format!("{id}-account"),
-                    five,
-                    five_resets,
-                    weekly,
-                    weekly_resets
-                ],
-            )
-            .unwrap();
     }
 }
 
@@ -472,28 +468,35 @@ fn without_limits_or_ranks_the_current_account_then_the_least_loaded_comes_first
 }
 
 #[test]
-fn limits_read_as_unknown_without_the_table_and_clamp_out_of_range_percents() {
+fn limits_come_from_the_usage_store_with_the_owners_manual_reset_applied() {
     let (_directory, connection) = database();
-    assert_eq!(
-        stored_limits(&connection, &reference("a-account")).unwrap(),
-        None
+    let access = access(&["a", "b"]);
+    assert!(read(&connection, &access).limits.is_empty());
+    crate::usage::initialize(&connection).unwrap();
+    assert!(read(&connection, &access).limits.is_empty());
+    limits(
+        &connection,
+        &[
+            ("a", 10.0, None, 50.0, Some(NOW_MS + 5 * HOUR_MS)),
+            ("b", 10.0, None, 50.0, Some(NOW_MS + 2 * HOUR_MS)),
+        ],
     );
-    limits(&connection, &[("a", 140.0, None, -3.0, Some(NOW_MS))]);
+    let list = candidates(&["a", "b"]);
+    assert_eq!(ordered(&read(&connection, &access), &list), ["b", "a"]);
+    crate::usage::set_reset_override(
+        &connection,
+        &reference("a"),
+        crate::usage::WindowKind::Weekly,
+        Some(NOW_MS + HOUR_MS),
+    )
+    .unwrap();
+    let choice = read(&connection, &access);
     assert_eq!(
-        stored_limits(&connection, &reference("a-account")).unwrap(),
-        Some(AccountLimits {
-            five_hour: Some(LimitWindow {
-                used_percent: 100.0,
-                resets_ms: None
-            }),
-            weekly: Some(LimitWindow {
-                used_percent: 0.0,
-                resets_ms: Some(NOW_MS)
-            }),
+        choice.limits[&reference("a")].weekly_at(NOW_MS),
+        Some(LimitWindow {
+            used_percent: 50.0,
+            resets_at_ms: Some(NOW_MS + HOUR_MS),
         })
     );
-    assert_eq!(
-        stored_limits(&connection, &reference("b-account")).unwrap(),
-        None
-    );
+    assert_eq!(ordered(&choice, &list), ["a", "b"]);
 }

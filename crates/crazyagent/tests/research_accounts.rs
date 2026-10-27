@@ -7,6 +7,7 @@ use crazyagent::protocol::CredentialRef;
 use crazyagent::research::accounts::{AccountPick, pick_account, pick_scheduled, pick_unpaused};
 use crazyagent::research::runner::ResearchAccount;
 use crazyagent::scheduling::{AccountPlan, Choice, Pin, ScheduleChange};
+use crazyagent::usage;
 use sha2::Digest;
 use std::os::unix::fs::PermissionsExt;
 
@@ -452,13 +453,30 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
     let directory = tempfile::tempdir().unwrap();
     let mut db = rusqlite::Connection::open(directory.path().join("engine.db")).unwrap();
     crazyagent::scheduling::initialize(&db).unwrap();
-    db.execute_batch(
-        "CREATE TABLE account_limits (account_ref TEXT PRIMARY KEY, five_hour_percent REAL,
-         five_hour_resets_ms INTEGER, weekly_percent REAL, weekly_resets_ms INTEGER);
-         INSERT INTO account_limits VALUES ('codex-account', 5.0, NULL, 95.0, 9000);
-         INSERT INTO account_limits VALUES ('local-account', 5.0, NULL, 10.0, 5000);",
-    )
-    .unwrap();
+    usage::initialize(&db).unwrap();
+    for (connection, weekly, resets) in [
+        ("codex-connection", 95.0, 9000),
+        ("local-connection", 10.0, 5000),
+    ] {
+        usage::record_observation(
+            &db,
+            &CredentialRef::new(connection).unwrap(),
+            &usage::Observation {
+                plan: None,
+                five_hour: Some(usage::LimitWindow {
+                    used_percent: 5.0,
+                    resets_at_ms: None,
+                }),
+                weekly: Some(usage::LimitWindow {
+                    used_percent: weekly,
+                    resets_at_ms: Some(resets),
+                }),
+            },
+            usage::LimitSource::Poll,
+            1_000,
+        )
+        .unwrap();
+    }
     let pool = CredentialRef::new("mixed-pool").unwrap();
     let choice = |db: &rusqlite::Connection| {
         Choice::read(db, &access, Some("project-a"), &[&pool], 1_000).unwrap()

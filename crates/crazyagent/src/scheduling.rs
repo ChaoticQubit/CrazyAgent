@@ -1,7 +1,8 @@
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use crate::usage::{AccountLimits, LimitWindow};
+use rusqlite::{Connection, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -449,62 +450,6 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
     Ok(schedule)
 }
 
-/// One usage window of an account: the percent used and when it resets, in ms since the
-/// epoch, when known.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct LimitWindow {
-    pub used_percent: f64,
-    pub resets_ms: Option<i64>,
-}
-
-/// The latest known usage of one account: its 5-hour and weekly windows.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct AccountLimits {
-    pub five_hour: Option<LimitWindow>,
-    pub weekly: Option<LimitWindow>,
-}
-
-/// Reads the stored limits of one account from the `account_limits` table the usage poll
-/// keeps (w-usage contract). Takes the engine connection and the account. Returns none
-/// when the table or the row is missing; a percent that is not a number reads as unknown.
-pub fn stored_limits(
-    connection: &Connection,
-    account: &CredentialRef,
-) -> Result<Option<AccountLimits>, EngineError> {
-    if !table_exists(connection, "account_limits")? {
-        return Ok(None);
-    }
-    let row = connection
-        .query_row(
-            "SELECT five_hour_percent,five_hour_resets_ms,weekly_percent,weekly_resets_ms
-             FROM account_limits WHERE account_ref=?1",
-            [account.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, Option<f64>>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<f64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(error)?;
-    let window = |used: Option<f64>, resets_ms: Option<i64>| {
-        used.filter(|used| used.is_finite())
-            .map(|used| LimitWindow {
-                used_percent: used.clamp(0.0, 100.0),
-                resets_ms,
-            })
-    };
-    Ok(
-        row.map(|(five, five_resets, weekly, weekly_resets)| AccountLimits {
-            five_hour: window(five, five_resets),
-            weekly: window(weekly, weekly_resets),
-        }),
-    )
-}
-
 /// Why the schedule leaves an account out of the accounts that can take work now, with
 /// the reset time that ends it when known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,8 +510,8 @@ pub struct Choice {
 
 impl Choice {
     /// Reads the choice for work of `project` on `pools`: the stored schedule, the
-    /// strategy that applies and the limits of every member of those pools, keyed by
-    /// connection. Takes the engine connection, model access, project, pools and clock.
+    /// strategy that applies and the usage limits of every member of those pools, keyed
+    /// by connection. Takes the engine connection, model access, project, pools and clock.
     pub fn read(
         connection: &Connection,
         access: &ModelAccess,
@@ -576,19 +521,18 @@ impl Choice {
     ) -> Result<Self, EngineError> {
         let schedule = load(connection)?;
         let strategy = schedule.strategy_for(project, pools);
-        let members: BTreeSet<&CredentialRef> = access
-            .pools
-            .iter()
-            .filter(|pool| pools.contains(&&pool.id))
-            .flat_map(|pool| pool.members.iter())
-            .collect();
         let mut limits = BTreeMap::new();
-        for member in members {
-            let Some(known) = access.connections.iter().find(|c| &c.id == member) else {
-                continue;
-            };
-            if let Some(found) = stored_limits(connection, &known.account_ref)? {
-                limits.insert(member.clone(), found);
+        if table_exists(connection, "account_limits")? {
+            let members: BTreeSet<&CredentialRef> = access
+                .pools
+                .iter()
+                .filter(|pool| pools.contains(&&pool.id))
+                .flat_map(|pool| pool.members.iter())
+                .collect();
+            for member in members {
+                if let Some(found) = crate::usage::limits(connection, member)? {
+                    limits.insert(member.clone(), found);
+                }
             }
         }
         Ok(Self {
@@ -601,8 +545,8 @@ impl Choice {
 
     /// Orders candidates by this choice. `use_last` accounts go after the rest; a
     /// `never_use` pin, a full 5-hour window or weekly use at or above 100 minus the
-    /// reserve leaves an account out. A window whose reset time has passed counts as
-    /// reset. Ties fall to rank, then the current account, then fewer live agents, then
+    /// reserve leaves an account out. Each window is read as it stands now, with the
+    /// owner's manual reset applied and a passed reset counted as reset. Ties fall to rank, then the current account, then fewer live agents, then
     /// the caller's order. Takes the candidates in pool order. Returns the order.
     pub fn order(&self, candidates: &[Candidate]) -> Order {
         let mut ready = Vec::new();
@@ -626,21 +570,11 @@ impl Choice {
         Order { ready, excluded }
     }
 
-    fn window(&self, window: Option<LimitWindow>) -> Option<LimitWindow> {
-        window.map(|window| match window.resets_ms {
-            Some(resets_ms) if resets_ms <= self.now_ms => LimitWindow {
-                used_percent: 0.0,
-                resets_ms: None,
-            },
-            _ => window,
-        })
-    }
-
     fn windows(&self, candidate: &Candidate) -> (Option<LimitWindow>, Option<LimitWindow>) {
         let limits = self.limits.get(&candidate.connection);
         (
-            self.window(limits.and_then(|limits| limits.five_hour)),
-            self.window(limits.and_then(|limits| limits.weekly)),
+            limits.and_then(|limits| limits.five_hour_at(self.now_ms)),
+            limits.and_then(|limits| limits.weekly_at(self.now_ms)),
         )
     }
 
@@ -652,14 +586,14 @@ impl Choice {
         let (five_hour, weekly) = self.windows(candidate);
         if let Some(window) = five_hour.filter(|window| window.used_percent >= 100.0) {
             return Some(Excluded::FiveHourCap {
-                resets_ms: window.resets_ms,
+                resets_ms: window.resets_at_ms,
             });
         }
         let ceiling = f64::from(100 - plan.reserve_percent);
         weekly
             .filter(|window| window.used_percent >= ceiling)
             .map(|window| Excluded::WeeklyReserve {
-                resets_ms: window.resets_ms,
+                resets_ms: window.resets_at_ms,
             })
     }
 
@@ -670,7 +604,7 @@ impl Choice {
             window.map_or(0, |window| (window.used_percent * 10.0).round() as i64)
         };
         let primary = match self.strategy {
-            Strategy::UseItOrLoseIt => match weekly.and_then(|window| window.resets_ms) {
+            Strategy::UseItOrLoseIt => match weekly.and_then(|window| window.resets_at_ms) {
                 Some(resets_ms) => (false, resets_ms, 0),
                 None => (true, 0, 0),
             },
