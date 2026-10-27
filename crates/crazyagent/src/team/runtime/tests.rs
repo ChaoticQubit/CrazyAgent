@@ -2028,6 +2028,100 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
     team.shutdown().unwrap();
 }
 
+const LIMITED_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  [ "$line" = "limit" ] && printf '{"type":"event_msg","payload":{"type":"error","message":"You have hit your usage limit."}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// A live master whose turn hits its account's usage limit stops, and the same master row
+/// starts again in its own worktree on another pool account while the limited one rests,
+/// with the live switch still on.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
+    let mut fixture = Fixture::new(1);
+    let mut second = fixture.access.connections[0].clone();
+    second.id = reference("local-b");
+    fixture.access.connections.push(second);
+    fixture.access.pools[0].members.push(reference("local-b"));
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIMITED_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let account = |f: &Fixture, id: i64| -> String {
+        f.connection
+            .query_row(
+                "SELECT connection FROM team_agents WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    let first = account(&fixture, master);
+    let other = if first == ENDPOINT {
+        "local-b"
+    } else {
+        ENDPOINT
+    };
+
+    host.input(&AgentId::team(master).unwrap(), b"limit\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the rate-limited master starts again on the other pool account and is briefed",
+        |f| {
+            account(f, master) == other
+                && live_turns(&f.connection) == (3, false)
+                && host.alive().unwrap() == names(&[master])
+        },
+    );
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "the same master row"
+    );
+    let rested: Vec<String> = fixture
+        .connection
+        .prepare("SELECT connection FROM team_paused_accounts")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(rested, [first]);
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert!(
+        !fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master was turned off")),
+        "a rate limit does not turn the live master off"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
