@@ -208,7 +208,10 @@ async fn desktop_owner_drops_a_change_the_engine_never_recorded() {
         assert!(!dropped.pending);
         assert!(case.bridge.pending_intent()?.is_none());
         assert_eq!(
-            case.bridge.drop_intent().err().map(|error| error.to_string()),
+            case.bridge
+                .drop_intent()
+                .err()
+                .map(|error| error.to_string()),
             Some("no_pending_intent".to_owned())
         );
         case.sqlite("DROP TRIGGER lb9_abort;")?;
@@ -243,11 +246,17 @@ async fn desktop_owner_cannot_drop_a_change_whose_send_may_have_landed() {
     assert_eq!(retried.outcome, ActionOutcome::Uncertain);
     assert!(retried.pending);
     assert_eq!(
-        case.bridge.drop_intent().err().map(|error| error.to_string()),
+        case.bridge
+            .drop_intent()
+            .err()
+            .map(|error| error.to_string()),
         Some("change_may_be_recorded".to_owned())
     );
     assert_eq!(
-        case.bridge.pending_intent().unwrap().map(|intent| intent.kind),
+        case.bridge
+            .pending_intent()
+            .unwrap()
+            .map(|intent| intent.kind),
         Some("owner_profile")
     );
 }

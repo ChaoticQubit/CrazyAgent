@@ -625,7 +625,9 @@ impl NativeBridge {
     /// Output: true while a kept change may still be recorded or is unsent.
     pub(crate) fn blocked(&mut self) -> bool {
         if let Some(controller) = self.controller.as_mut()
-            && controller.pending().is_some_and(|pending| pending.unrecorded())
+            && controller
+                .pending()
+                .is_some_and(|pending| pending.unrecorded())
         {
             let dropped = controller.discard_refused();
             assert!(dropped.is_ok(), "an unrecorded change can be dropped");

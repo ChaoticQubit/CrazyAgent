@@ -163,7 +163,10 @@ fn resolve_line(conflicts: &[String]) -> String {
         line.push_str(&format!(" and {more} more"));
     }
     line.push('.');
-    assert!(line.len() <= crate::team::NOTE_BYTES_MAX, "resolve_line_bounds");
+    assert!(
+        line.len() <= crate::team::NOTE_BYTES_MAX,
+        "resolve_line_bounds"
+    );
     line
 }
 

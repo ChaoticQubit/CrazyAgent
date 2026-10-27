@@ -2581,10 +2581,7 @@ impl Fixture {
 async fn asking_a_master_to_update_starts_its_resolve_turn_at_once_with_a_line_the_owner_sees() {
     let (case, pending, worktree) = conflicting_case().await;
     let entries = case.entries();
-    case.owner
-        .update_changes(pending.id.clone())
-        .await
-        .unwrap();
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
     let mut started = case.turns().await;
     started.sort_by_key(|turn| turn.ordinal);
     let merged = fs::read_to_string(worktree.join("NOTES.md")).unwrap();
@@ -2597,7 +2594,9 @@ async fn asking_a_master_to_update_starts_its_resolve_turn_at_once_with_a_line_t
     assert_eq!(request.change_set, pending.id);
     assert_eq!(request.line, RESOLVE_LINE);
     assert!(
-        request.text.contains("CrazyAgent merged it into your worktree"),
+        request
+            .text
+            .contains("CrazyAgent merged it into your worktree"),
         "{}",
         request.text
     );
@@ -2605,7 +2604,10 @@ async fn asking_a_master_to_update_starts_its_resolve_turn_at_once_with_a_line_t
     assert_eq!(resolve.ordinal, started[0].ordinal + 1);
     assert!(started[0].engine_request.is_none());
     assert!(merged.contains("<<<<<<<"), "{merged}");
-    assert_eq!(after, entries, "the engine's request is not an owner message");
+    assert_eq!(
+        after, entries,
+        "the engine's request is not an owner message"
+    );
     assert_eq!(settled[1].id, resolve.id);
     assert_eq!(settled[1].engine_request.as_ref(), Some(request));
     assert_eq!(settled[1].phase, MasterTurnPhase::Failed);
@@ -2619,10 +2621,7 @@ async fn asking_a_master_to_update_starts_its_resolve_turn_at_once_with_a_line_t
 async fn an_update_asked_while_the_master_works_starts_its_resolve_turn_right_after() {
     let (case, pending, _) = conflicting_case().await;
     let second = case.submit("Keep going.").await;
-    case.owner
-        .update_changes(pending.id.clone())
-        .await
-        .unwrap();
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
     let waiting = case.turns().await;
     let updating = case.change_sets().await;
     let runtime = OwnerRuntimeHandle {
@@ -2660,10 +2659,7 @@ async fn an_update_asked_while_the_master_works_starts_its_resolve_turn_right_af
 async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line() {
     let (case, pending, _) = conflicting_case().await;
     let second = case.submit("Keep going.").await;
-    case.owner
-        .update_changes(pending.id.clone())
-        .await
-        .unwrap();
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
     let busy = case
         .runtime()
         .start_waiting_resolve(&case.session.project_id, &case.session.session_id)
@@ -2720,15 +2716,16 @@ async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line
 #[tokio::test]
 async fn an_engine_turn_whose_change_set_was_changed_after_it_was_recorded_is_refused() {
     let (case, pending, _) = conflicting_case().await;
-    case.owner
-        .update_changes(pending.id.clone())
-        .await
-        .unwrap();
+    case.owner.update_changes(pending.id.clone()).await.unwrap();
     let settled = case.settled_turns(2).await;
     let resolve = settled[1].id.clone();
     let other = format!(
         "{}{}",
-        if pending.id.as_str().starts_with('0') { '1' } else { '0' },
+        if pending.id.as_str().starts_with('0') {
+            '1'
+        } else {
+            '0'
+        },
         &pending.id.as_str()[1..]
     );
     let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
