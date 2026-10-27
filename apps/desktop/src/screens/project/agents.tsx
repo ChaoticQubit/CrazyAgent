@@ -8,6 +8,7 @@ import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
 import { accountName, changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { AgentUsageCard } from "./usage";
 import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
@@ -115,6 +116,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     <TeamGraphView projectId={data.id} harness={(id) => harnessName(harnesses, id)} account={(id) => accountName(named, id)} />
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
+    <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {
       const row = researchRow(job, data.now);

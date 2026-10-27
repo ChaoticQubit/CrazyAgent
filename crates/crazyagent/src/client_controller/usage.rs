@@ -1,4 +1,5 @@
 use super::*;
+use crate::protocol::ProjectId;
 use crate::usage::report::UsageReport;
 
 impl OwnerController {
@@ -8,16 +9,18 @@ impl OwnerController {
             .ok_or_else(|| EngineError("controller_disconnected".into()))
     }
 
-    /// Reads the usage summary for the range starting at `since_ms`, None for all time.
-    /// Inputs: the range start and the viewer's offset east of UTC in minutes. Output:
-    /// totals, groups, local days, lines changed and every account's limits.
+    /// Reads the usage summary for one project, None for every project, over the range
+    /// starting at `since_ms`, None for all time. Inputs: the project, the range start and
+    /// the viewer's offset east of UTC in minutes. Output: totals, groups, local days, lines
+    /// changed per project and per agent, and every account's limits.
     pub async fn usage_report(
         &self,
+        project: Option<ProjectId>,
         since_ms: Option<i64>,
         offset_minutes: i32,
     ) -> Result<UsageReport, EngineError> {
         self.usage_client()?
-            .usage_report(since_ms, offset_minutes)
+            .usage_report(project, since_ms, offset_minutes)
             .await
     }
 
