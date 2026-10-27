@@ -107,8 +107,8 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
  * installs entries, and reads again every few seconds while a tool is checked or setup installs. */
 export function PackSettings() {
   const session = useAppSession();
-  const [loaded, reload] = useLoad(loadSetupStatus);
-  const [listed] = useLoad(() => listSkills());
+  const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
+  const [listed] = useLoad(() => listSkills(), [undefined], "skills");
   const [fresh, setFresh] = useState<SetupStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [ask, setAsk] = useState<PackAsk | null>(null);

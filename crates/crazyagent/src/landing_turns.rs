@@ -54,9 +54,9 @@ const RESOLVE_PROMPT_BYTES_MAX: usize = crate::team::TASK_PROMPT_BYTES_MAX;
 
 /// Starts the work that resolves an update, right after `landing::update` merged the
 /// owner's branch into the agent's worktree: a team agent gets it through
-/// `team::admit_resolve`, and a conversation master gets the prompt with its next
-/// tools-on turn. Inputs: the store and the change set. Output: Ok once started or left
-/// for the master's next turn, or a plain refusal.
+/// `team::admit_resolve`, and the set stops showing as waiting for its agent. A
+/// conversation master gets the prompt from the owner runtime. Inputs: the store and the
+/// change set. Output: Ok once started or left to the owner runtime, or a plain refusal.
 pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     let project = set_project(db, id)?;
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
@@ -66,33 +66,73 @@ pub(crate) fn start_resolve(db: &Connection, id: &ChangeSetId) -> Result<(), Eng
     if set.agent.kind == AgentKind::Master {
         return Ok(());
     }
-    let agent: i64 = set
-        .agent
-        .id
-        .parse()
-        .map_err(|_| refused("team_agent_not_found"))?;
+    let agent = team_agent(&set)?;
     let prompt = fitted(&landing::resolve_task_prompt(db, id)?);
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     crate::team::admit_resolve(&tx, &project, agent, &prompt, crate::team::now_ms())?
         .map_err(refused)?;
-    tx.commit().map_err(storage)
+    tx.commit().map_err(storage)?;
+    landing::resolve_handed_over(db, id)
 }
 
-/// Merges the owner's branch into an agent's worktree for Ask agent to update and starts
-/// a team agent's resolve work; a conversation master is first checked to be open with
-/// tools on, so a refusal changes nothing, and its resolve turn is started by the owner
-/// runtime after this returns. Inputs: the store and the change set. Output: Ok, or the
-/// refusal.
-pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+/// Ask agent to update: checks that the agent can take the resolve work, then merges the
+/// owner's branch into its worktree and starts that work. A refused check changes
+/// nothing. Once merged, a resolve that does not start leaves the set merged and waiting
+/// for its agent rather than failing the update; asking again for a waiting set only
+/// starts the resolve. A master's resolve turn is started by the owner runtime after
+/// this returns. Inputs: the store and the change set. Output: true when this call
+/// merged, or the refusal.
+pub(crate) fn update(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let set = view(db, id)?.ok_or_else(|| refused("changes_not_found"))?;
+    let again = set.state == ChangeState::Updating && set.waiting;
     if set.agent.kind == AgentKind::Master {
         let session =
             SessionId::new(set.agent.id.clone()).map_err(|_| refused("changes_master_closed"))?;
         crate::storage::master_resolve_ready(db, &session)?.map_err(refused)?;
-        return landing::update(db, id);
+        if !again {
+            landing::update(db, id)?;
+        }
+        return Ok(!again);
     }
+    if again {
+        start_resolve(db, id)?;
+        return Ok(false);
+    }
+    resolve_ready(db, &set_project(db, id)?, &set)?;
     landing::update(db, id)?;
-    start_resolve(db, id)
+    if let Err(problem) = start_resolve(db, id) {
+        eprintln!("resolve_not_started_after_update cause={}", problem.0);
+    }
+    Ok(true)
+}
+
+/// Checks, before any merge, that a team agent can take its resolve work: the admission
+/// `start_resolve` makes, run with a stand-in prompt in a transaction that is rolled
+/// back. A stopped agent passes, since its pinned resolve task starts it again. Inputs:
+/// the store, the project and the change set. Output: Ok, or the plain refusal.
+fn resolve_ready(
+    db: &Connection,
+    project: &ProjectId,
+    set: &landing::ChangeSetView,
+) -> Result<(), EngineError> {
+    let agent = team_agent(set)?;
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    let admitted = crate::team::admit_resolve(
+        &tx,
+        project,
+        agent,
+        "Resolve the update.\n",
+        crate::team::now_ms(),
+    )?;
+    tx.rollback().map_err(storage)?;
+    admitted.map_err(refused)
+}
+
+fn team_agent(set: &landing::ChangeSetView) -> Result<i64, EngineError> {
+    set.agent
+        .id
+        .parse()
+        .map_err(|_| refused("team_agent_not_found"))
 }
 
 /// The conversation master an updated change set belongs to, so the owner runtime can
@@ -247,6 +287,9 @@ fn refused(code: &str) -> EngineError {
 fn storage(_: rusqlite::Error) -> EngineError {
     refused("changes_unavailable")
 }
+
+#[cfg(all(test, unix))]
+mod update_tests;
 
 #[cfg(test)]
 mod tests {

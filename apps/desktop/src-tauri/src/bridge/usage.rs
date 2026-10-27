@@ -1,7 +1,7 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
-use crazyagent::protocol::CredentialRef;
+use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
@@ -32,18 +32,25 @@ impl NativeBridge {
             .map_err(usage_error)
     }
 
-    /// Reads the usage page's numbers, run without the bridge lock. Inputs: the range start
-    /// in milliseconds, None for all time, and the viewer's offset east of UTC in minutes.
-    /// Output: totals, groups, days, lines changed and every account's limits.
+    /// Reads the usage page's numbers for one project, None for every project, run without
+    /// the bridge lock. Inputs: the project id, the range start in milliseconds, None for
+    /// all time, and the viewer's offset east of UTC in minutes. Output: totals, groups,
+    /// days, lines changed and every account's limits; `usage_request_invalid` for a
+    /// project id that is not one.
     pub fn usage_report(
         &self,
+        project_id: Option<String>,
         since_ms: Option<i64>,
         offset_minutes: i32,
     ) -> Result<Unlocked<UsageReport>, BridgeError> {
+        let project = project_id
+            .map(ProjectId::new)
+            .transpose()
+            .map_err(|_| failure("usage_request_invalid"))?;
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
             client
-                .usage_report(since_ms, offset_minutes)
+                .usage_report(project, since_ms, offset_minutes)
                 .await
                 .map_err(usage_error)
         }))

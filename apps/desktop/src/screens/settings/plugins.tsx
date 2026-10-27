@@ -231,7 +231,7 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
 }) {
   const session = useAppSession();
   const openLink = useLinkOpener(session.showToast);
-  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId]);
+  const [detail, reload] = useLoad(() => skillDetail(id, projectId), [id, projectId], "skill-detail");
   const [failure, setFailure] = useState("");
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
@@ -616,8 +616,8 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
   const [section, setSection] = useState<"skills" | "servers">("skills");
-  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId]);
-  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId]);
+  const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
+  const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
