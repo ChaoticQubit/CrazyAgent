@@ -1,4 +1,13 @@
 use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
+use crate::config::EffectiveConfig;
+use crate::engine::EngineError;
+use crate::memory::library::{
+    AgentMemory, AgentWrite, NOTE_BYTES_MAX, agent_memories, agent_remember,
+};
+use crate::protocol::{ProjectId, RequestId};
+use crate::storage::versioned::LastWriter;
+use crate::terminal::AgentId;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
@@ -30,6 +39,8 @@ pub const ANSWER_TOOL: &str = "answer";
 pub const STATUS_TOOL: &str = "status";
 pub const CHANGES_TOOL: &str = "changes";
 pub const ESCALATE_TOOL: &str = "escalate";
+pub const MEMORIES_TOOL: &str = "memories";
+pub const REMEMBER_TOOL: &str = "remember";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -54,6 +65,11 @@ const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
     "Not sent: the engine did not take the call within a minute, so nothing was done.";
 const NOT_ANSWERED: &str = "The engine took the call but did not answer within a minute. Check status() before trying again.";
+const MEMORY_INVALID: &str = "Not saved: give one plain memory of up to 2000 bytes and, to change a memory, both its id and the version you read from memories().";
+const MEMORY_UNWIRED: &str = "Not saved: this engine does not take memories from its master yet.";
+const NO_MEMORIES: &str = "This project has no memories yet. Suggest one with remember().";
+const MEMORIES_HEADER: &str = "This project's memories. To change a suggested one, call remember() with its id and the version shown:";
+const MEMORIES_MORE_BYTES: usize = 64;
 
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
@@ -62,7 +78,9 @@ const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
 /// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
-/// and `escalate` raises an app notification for a decision only the owner makes.
+/// `escalate` raises an app notification for a decision only the owner makes, `memories`
+/// reads the project's memories with their versions and `remember` suggests one or changes
+/// a suggestion at the version it names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -83,6 +101,12 @@ pub enum Call {
     Changes,
     Escalate {
         text: String,
+    },
+    Memories,
+    Remember {
+        text: String,
+        memory: Option<String>,
+        version: Option<u64>,
     },
 }
 
@@ -260,6 +284,25 @@ fn live_tools() -> Value {
             "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
         },
+        {
+            "name": MEMORIES_TOOL,
+            "description": "Read this project's memories, each with its id, its version and whether the owner reviewed it.",
+            "inputSchema": none,
+        },
+        {
+            "name": REMEMBER_TOOL,
+            "description": "Suggest a memory the owner keeps or rejects, or change a suggested one by naming its id and the version you read. A change to an older version is refused as stale: read memories() again and redo it on the current text. Agents never change a memory the owner reviewed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The memory, in plain words, up to 2000 bytes."},
+                    "memory": {"type": "string", "description": "The id of the suggested memory to change, from memories()."},
+                    "version": {"type": "integer", "minimum": 1, "description": "The version of that memory you read, from memories()."},
+                },
+                "required": ["text"],
+                "additionalProperties": false,
+            },
+        },
     ]})
 }
 
@@ -340,7 +383,41 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(ESCALATE_INVALID),
         },
+        MEMORIES_TOOL => Ok(Call::Memories),
+        REMEMBER_TOOL => remember_call(arguments).ok_or(MEMORY_INVALID),
         _ => return None,
+    })
+}
+
+fn remember_call(arguments: Option<&Value>) -> Option<Call> {
+    let field = |key: &str| {
+        arguments
+            .and_then(|arguments| arguments.get(key))
+            .filter(|value| !value.is_null())
+    };
+    let text = field("text")?
+        .as_str()
+        .filter(|text| super::text_valid(text, NOTE_BYTES_MAX))?;
+    let memory = match field("memory") {
+        None => None,
+        Some(memory) => Some(
+            memory
+                .as_str()
+                .filter(|memory| RequestId::new(*memory).is_ok())?
+                .to_owned(),
+        ),
+    };
+    let version = match field("version") {
+        None => None,
+        Some(version) => Some(version.as_u64().filter(|version| *version >= 1)?),
+    };
+    if memory.is_some() != version.is_some() {
+        return None;
+    }
+    Some(Call::Remember {
+        text: text.trim().to_owned(),
+        memory,
+        version,
     })
 }
 
@@ -361,12 +438,204 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
+        Call::Memories => (MEMORIES_TOOL, json!({})),
+        Call::Remember {
+            text,
+            memory,
+            version,
+        } => (
+            REMEMBER_TOOL,
+            json!({"text": text, "memory": memory, "version": version}),
+        ),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {
         return Err(LIVE_INVALID);
     }
     Ok(call)
+}
+
+/// Answers a live master's `memories` call with the project's memories, each with the id
+/// and version a change names, within `REPLY_TEXT_MAX`. Takes the engine database and the
+/// project. Returns the text the master reads and whether it is an error.
+pub fn answer_memories(connection: &mut Connection, project: &ProjectId) -> (String, bool) {
+    let listed = connection
+        .transaction()
+        .map_err(|problem| EngineError(problem.to_string()))
+        .and_then(|tx| agent_memories(&tx, project));
+    match listed {
+        Ok(memories) => (memories_text(&memories), false),
+        Err(problem) => (
+            format!(
+                "The memories could not be read ({}).",
+                super::bound_text(&problem.0, 120)
+            ),
+            true,
+        ),
+    }
+}
+
+/// Answers a live master's `remember` call: saves a suggestion, or the next version of one
+/// when the call names the version the master read, in one immediate transaction that
+/// commits only a saved write. A stale write tells the master to re-read and redo with the
+/// current version; agents can never force one. Takes the engine database, the project, the
+/// engine settings (none when the engine gave none), the memory and version read and the
+/// text. Returns the text the master reads and whether it is an error.
+pub fn answer_remember(
+    connection: &mut Connection,
+    project: &ProjectId,
+    config: Option<&EffectiveConfig>,
+    memory: Option<&str>,
+    version: Option<u64>,
+    text: &str,
+) -> (String, bool) {
+    let Some(config) = config else {
+        return (MEMORY_UNWIRED.to_owned(), true);
+    };
+    let read = match (memory.map(RequestId::new), version) {
+        (None, None) => None,
+        (Some(Ok(memory)), Some(version)) if version >= 1 => Some((memory, version)),
+        _ => return (MEMORY_INVALID.to_owned(), true),
+    };
+    let written = remember_once(connection, project, config, read.as_ref(), text);
+    match written {
+        Ok(written) => remembered_text(&written),
+        Err(problem) => (
+            format!(
+                "Not saved: the memory could not be written ({}).",
+                super::bound_text(&problem.0, 120)
+            ),
+            true,
+        ),
+    }
+}
+
+fn remember_once(
+    connection: &mut Connection,
+    project: &ProjectId,
+    config: &EffectiveConfig,
+    read: Option<&(RequestId, u64)>,
+    text: &str,
+) -> Result<AgentWrite, EngineError> {
+    let failed = |problem: rusqlite::Error| EngineError(problem.to_string());
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(failed)?;
+    let master: Option<i64> = tx
+        .query_row(
+            "SELECT agent FROM team_live_masters WHERE project=?1 AND live=1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)?
+        .flatten();
+    let Some(agent) = master.and_then(|master| AgentId::team(master).ok()) else {
+        return Ok(AgentWrite::Refused {
+            code: "memory_agent_missing".into(),
+        });
+    };
+    let revision: i64 = tx
+        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(failed)?;
+    let revision = u64::try_from(revision).map_err(|problem| EngineError(problem.to_string()))?;
+    let written = agent_remember(
+        &tx,
+        config,
+        project,
+        &agent,
+        read.map(|(memory, version)| (memory, *version)),
+        text,
+        revision,
+    )?;
+    if matches!(written, AgentWrite::Saved { .. }) {
+        tx.commit().map_err(failed)?;
+    }
+    Ok(written)
+}
+
+fn memories_text(memories: &[AgentMemory]) -> String {
+    if memories.is_empty() {
+        return NO_MEMORIES.to_owned();
+    }
+    let mut text = MEMORIES_HEADER.to_owned();
+    for (shown, memory) in memories.iter().enumerate() {
+        let line = format!(
+            "\n- {} version {} ({}): {}",
+            memory.id.as_str(),
+            memory.version,
+            if memory.reviewed {
+                "reviewed by the owner"
+            } else {
+                "suggested"
+            },
+            memory.text
+        );
+        if text.len() + line.len() + MEMORIES_MORE_BYTES > REPLY_TEXT_MAX {
+            text.push_str(&format!("\n{} more not shown.", memories.len() - shown));
+            break;
+        }
+        text.push_str(&line);
+    }
+    assert!(text.len() <= REPLY_TEXT_MAX);
+    text
+}
+
+fn remembered_text(written: &AgentWrite) -> (String, bool) {
+    match written {
+        AgentWrite::Saved { id, version } => (
+            format!(
+                "Saved memory {} at version {version} as a suggestion the owner keeps or rejects. Name version {version} to change it.",
+                id.as_str()
+            ),
+            false,
+        ),
+        AgentWrite::Stale { id, stale } => (
+            format!(
+                "Stale: re-read and redo. Memory {} is at version {} now, changed by {} since version {} you read. Call memories(), then redo your change on the current text naming version {}.",
+                id.as_str(),
+                stale.current,
+                writer_text(&stale.writer),
+                stale.version,
+                stale.current
+            ),
+            true,
+        ),
+        AgentWrite::Reviewed { id, version } => (
+            format!(
+                "Not saved: the owner reviewed memory {} at version {version}, and agents do not change a memory the owner reviewed. Suggest a new memory with remember() if it still matters.",
+                id.as_str()
+            ),
+            true,
+        ),
+        AgentWrite::Refused { code } => (
+            format!(
+                "Not saved: {}.",
+                match code.as_str() {
+                    "memory_missing" =>
+                        "this project has no memory with that id; read the ids with memories()",
+                    "memory_duplicate" => "you already suggested this memory",
+                    "memory_text_invalid" => "give one plain memory of up to 2000 bytes",
+                    "memory_source_removed" => "the owner removed what this memory came from",
+                    "memory_agent_missing" => "only this project's live master saves memories",
+                    "knowledge_record_capacity" =>
+                        "the project's memory is full until the owner reviews it",
+                    other => other,
+                }
+            ),
+            true,
+        ),
+    }
+}
+
+fn writer_text(writer: &LastWriter) -> String {
+    match writer {
+        LastWriter::Owner => "the owner".to_owned(),
+        LastWriter::Agent(agent) => format!("agent {}", agent.as_str()),
+        LastWriter::Nobody => "another writer".to_owned(),
+    }
 }
 
 fn agent_name_valid(agent: &str) -> bool {
@@ -868,3 +1137,7 @@ pub fn clear(drop: &Path) {
 #[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "tool/stale_tests.rs"]
+mod stale_tests;

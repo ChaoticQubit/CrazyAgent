@@ -296,6 +296,10 @@ struct Worker {
 /// Reads the live model access on every tick; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 
+/// Reads the engine settings when a live master's memory call needs them; none means the
+/// settings could not be read.
+pub type ConfigSource = Box<dyn Fn() -> Option<crate::config::EffectiveConfig> + Send>;
+
 /// Runs each project's team: the master on the team plan's master harness and
 /// sub-agents on its sub-harnesses, each in the project sandbox, sub-agents in
 /// their own git worktrees. The engine admits every task; agents only propose.
@@ -305,6 +309,7 @@ pub struct TeamRuntime {
     state: PathBuf,
     executables: BTreeMap<&'static str, PathBuf>,
     access: AccessSource,
+    config: Option<ConfigSource>,
     limits: TeamLimits,
     workers: BTreeMap<i64, Worker>,
     custody: Result<NativeProfileCustody, EngineError>,
@@ -413,6 +418,7 @@ impl TeamRuntime {
             state: state.to_path_buf(),
             executables,
             access,
+            config: None,
             limits,
             workers: BTreeMap::new(),
             custody,
@@ -432,6 +438,14 @@ impl TeamRuntime {
     /// Takes the register of the same engine database. Returns the runtime.
     pub fn with_agents(mut self, agents: Arc<Agents>) -> Self {
         self.agents = Some(agents);
+        self
+    }
+
+    /// Gives a live master's `memories` and `remember` tools the engine settings, read only
+    /// when such a call arrives. Takes the source. Returns the runtime; without it those
+    /// calls answer that memories are not available.
+    pub fn with_config(mut self, config: ConfigSource) -> Self {
+        self.config = Some(config);
         self
     }
 
@@ -1801,6 +1815,7 @@ impl TeamRuntime {
             landing: &self.root,
             events: self.events.as_ref(),
             host: self.terminal.as_deref(),
+            config: self.config.as_ref(),
         };
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
     }
@@ -4589,6 +4604,9 @@ pub fn start_for_engine(
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;
     let (global, project) = (global.to_path_buf(), project.to_path_buf());
+    let (settings_global, settings_project) = (global.clone(), project.clone());
+    let config: ConfigSource =
+        Box::new(move || crate::config::resolve_config(&settings_global, &settings_project).ok());
     let access: AccessSource = Box::new(move || {
         crate::config::resolve_config(&global, &project)
             .ok()?
@@ -4603,7 +4621,8 @@ pub fn start_for_engine(
         TeamLimits::default(),
     )
     .map_err(|e| e.0)?
-    .with_events(super::master::EVENTS);
+    .with_events(super::master::EVENTS)
+    .with_config(config);
     let runtime = match engine {
         Some(engine) => runtime.with_delegation_tool(engine).map_err(|e| e.0)?,
         None => runtime,
