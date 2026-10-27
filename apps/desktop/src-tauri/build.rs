@@ -148,6 +148,8 @@ fn main() {
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
+        "desktop_finished_agents",
+        "desktop_remove_finished_agents",
         "desktop_pick_folder",
         "desktop_pick_documents",
         "desktop_open_link",

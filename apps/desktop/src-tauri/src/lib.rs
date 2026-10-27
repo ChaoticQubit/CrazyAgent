@@ -38,6 +38,7 @@ use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
+use crazyagent::team::cleanup::FinishedAgent;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::report::UsageReport;
@@ -1795,6 +1796,31 @@ async fn desktop_usage_set_reset(
 }
 
 #[tauri::command]
+async fn desktop_finished_agents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<FinishedAgent>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.finished_agents(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_remove_finished_agents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    agents: Vec<i64>,
+) -> Result<Vec<i64>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .remove_finished_agents(project_id, agents)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_changes(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2293,6 +2319,8 @@ pub fn run() {
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,
+            desktop_finished_agents,
+            desktop_remove_finished_agents,
             desktop_pick_folder,
             desktop_pick_documents,
             desktop_open_link,

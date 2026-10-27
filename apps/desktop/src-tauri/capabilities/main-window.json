@@ -144,6 +144,8 @@
     "allow-desktop-usage-report",
     "allow-desktop-usage-refresh",
     "allow-desktop-usage-set-reset",
+    "allow-desktop-finished-agents",
+    "allow-desktop-remove-finished-agents",
     "allow-desktop-change-diff",
     "allow-desktop-accept-change",
     "allow-desktop-discard-change",

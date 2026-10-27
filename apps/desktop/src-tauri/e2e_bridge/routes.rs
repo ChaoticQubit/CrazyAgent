@@ -1529,6 +1529,33 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
             routed(result)
         }
+        "desktop_finished_agents" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.finished_agents(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_remove_finished_agents" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                agents: Vec<i64>,
+            }
+            let Args { project_id, agents } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .remove_finished_agents(project_id, agents)?; call.await }.await;
+            routed(result)
+        }
         "desktop_changes" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
