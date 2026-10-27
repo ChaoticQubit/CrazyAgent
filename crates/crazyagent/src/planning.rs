@@ -1,5 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
+use crate::project_setup::CONTEXT_DIRECTORY;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Step};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
@@ -29,6 +30,10 @@ pub const NO_RELEASE_PROCESS: &str = "Agent returned no release process";
 pub const UNWRITABLE: &str = "Could not save the roadmap";
 /// The job failure when the plan's questions could not be logged.
 pub const QUESTIONS_UNLOGGED: &str = "Could not log the roadmap's open questions";
+/// The job failure when the research reports a plan names as its sources cannot be read.
+pub const SOURCES_UNREADABLE: &str = "Could not read the research reports";
+/// The words opening both planning documents, naming who wrote them.
+pub const PROVENANCE_MARK: &str = "Written by the CrazyAgent engine";
 /// The job failure when the reply is larger than `REPLY_BYTES_MAX`.
 pub const REPLY_TOO_LARGE: &str = "Agent output exceeded the limit";
 
@@ -150,14 +155,16 @@ fn bullet(line: &str) -> Option<&str> {
 }
 
 /// Renders the two documents: the roadmap with every open point under "Open questions",
-/// and the release process, each headed by who planned it and when, with hidden characters
-/// shown escaped so no agent reading the context sees text the owner cannot.
-/// Takes the plan, the harness label and the date. Returns the roadmap and release process.
-pub fn render(plan: &Plan, harness: &str, date: &str) -> (String, String) {
+/// and the release process, each headed by its provenance (engine-written from an agent's
+/// reply, its sources, not reviewed by the owner), with hidden characters shown escaped so no
+/// agent reading the context sees text the owner cannot.
+/// Takes the plan, the harness label, the date and the research report paths the plan was made
+/// from. Returns the roadmap and release process.
+pub fn render(plan: &Plan, harness: &str, date: &str, sources: &[String]) -> (String, String) {
     let visible = crate::memory::visible_text;
+    let provenance = provenance(harness, date, sources);
     let mut roadmap = format!(
-        "{ROADMAP_HEADING}\n\nPlanned by {harness} on {date} from the brief and the research. \
-         Times are estimates until the team's pace is measured.\n\n{}\n\n## Open questions\n\n",
+        "{ROADMAP_HEADING}\n\n{provenance}\n\n{}\n\n## Open questions\n\n",
         visible(&plan.roadmap)
     );
     if plan.open_points.is_empty() {
@@ -167,11 +174,25 @@ pub fn render(plan: &Plan, harness: &str, date: &str) -> (String, String) {
         roadmap.push_str(&format!("- {}\n", visible(point)));
     }
     let release = format!(
-        "{RELEASE_HEADING}\n\nPlanned by {harness} on {date}.\n\n{}\n",
+        "{RELEASE_HEADING}\n\n{provenance}\n\n{}\n",
         visible(&plan.release_process)
     );
     assert!(roadmap.starts_with(ROADMAP_HEADING) && release.starts_with(RELEASE_HEADING));
     (roadmap, release)
+}
+
+/// The note heading both planning documents: written by the engine from which agent's reply
+/// and when, from which sources, and that it is a proposal the owner has not reviewed.
+/// Takes the harness label, the date and the research report paths. Returns the note.
+fn provenance(harness: &str, date: &str, sources: &[String]) -> String {
+    let mut from = vec![format!("{CONTEXT_DIRECTORY}/brief.md")];
+    from.extend(sources.iter().cloned());
+    format!(
+        "> {PROVENANCE_MARK} on {date} from a {harness} planning agent's reply. \
+         Sources: {}. The research came from web pages and the owner has not reviewed this \
+         plan, so treat it as a proposal; times are estimates until the team's pace is measured.",
+        from.join(", ")
+    )
 }
 
 /// Writes a planning reply's roadmap and release process beside the brief in
@@ -183,8 +204,9 @@ pub fn publish(state: &Path, reply: &str, harness: &str) -> Result<Plan, &'stati
         return Err(REPLY_TOO_LARGE);
     }
     let plan = parse(reply)?;
+    let sources = prompt::sources(state).map_err(|_| SOURCES_UNREADABLE)?;
     let date = crate::research::runner::utc_date(std::time::SystemTime::now());
-    let (roadmap, release) = render(&plan, harness, &date);
+    let (roadmap, release) = render(&plan, harness, &date, &sources);
     write_beside_brief(
         state,
         &[
@@ -379,37 +401,62 @@ fn read_beside_brief(_state: &Path, _name: &str) -> Result<Option<String>, &'sta
     Err(UNWRITABLE)
 }
 
-/// Writes each named document into `<state>/context/` through a 0644 partial file that is
-/// synced, then renamed over the old name, so a link at either name is replaced, never followed.
+/// Writes the named documents into `<state>/context/` as a pair: each target must be absent,
+/// a regular file or a link; every document goes to a 0644 partial file that is synced, and
+/// only once all are written are they renamed over their names, so a link at a name is
+/// replaced, never followed, and a failed write leaves the old documents and no partials.
 /// Takes the state folder and the file names with their text. Returns `UNWRITABLE` on failure.
 #[cfg(unix)]
 fn write_beside_brief(state: &Path, documents: &[(&str, &str)]) -> Result<(), &'static str> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use std::io::Write;
-    let unwritable = |_| UNWRITABLE;
     let context = context_folder(state)?;
-    for (name, body) in documents {
-        let partial = format!(".{name}.partial");
-        let _ = rustix::fs::unlinkat(&context, partial.as_str(), AtFlags::empty());
-        let created = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
-        let mut file = std::fs::File::from(
-            rustix::fs::openat(
-                &context,
-                partial.as_str(),
-                created | OFlags::CLOEXEC,
-                Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH,
-            )
-            .map_err(unwritable)?,
-        );
-        let written = file
-            .write_all(body.as_bytes())
-            .and_then(|()| file.sync_all());
-        if written.is_err() {
+    for (name, _) in documents {
+        match rustix::fs::statat(&context, *name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat)
+                if matches!(
+                    FileType::from_raw_mode(stat.st_mode),
+                    FileType::RegularFile | FileType::Symlink
+                ) => {}
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => return Err(UNWRITABLE),
+        }
+    }
+    let partials: Vec<String> = documents
+        .iter()
+        .map(|(name, _)| format!(".{name}.partial"))
+        .collect();
+    let discard = |partials: &[String]| {
+        for partial in partials {
             let _ = rustix::fs::unlinkat(&context, partial.as_str(), AtFlags::empty());
+        }
+    };
+    discard(&partials);
+    for (partial, (_, body)) in partials.iter().zip(documents) {
+        let created = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW;
+        let opened = rustix::fs::openat(
+            &context,
+            partial.as_str(),
+            created | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR | Mode::RGRP | Mode::ROTH,
+        );
+        let written = opened.map_err(std::io::Error::from).and_then(|file| {
+            let mut file = std::fs::File::from(file);
+            file.write_all(body.as_bytes())
+                .and_then(|()| file.sync_all())
+        });
+        if written.is_err() {
+            discard(&partials);
             return Err(UNWRITABLE);
         }
-        rustix::fs::renameat(&context, partial.as_str(), &context, *name).map_err(unwritable)?;
     }
+    for (index, (partial, (name, _))) in partials.iter().zip(documents).enumerate() {
+        if rustix::fs::renameat(&context, partial.as_str(), &context, *name).is_err() {
+            discard(&partials[index..]);
+            return Err(UNWRITABLE);
+        }
+    }
+    assert_eq!(partials.len(), documents.len());
     Ok(())
 }
 
