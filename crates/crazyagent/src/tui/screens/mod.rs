@@ -13,6 +13,7 @@ pub(in crate::tui) mod new_project_view;
 pub mod onboarding;
 pub mod profile_form;
 pub(in crate::tui) mod project;
+pub(in crate::tui) mod project_activity;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
