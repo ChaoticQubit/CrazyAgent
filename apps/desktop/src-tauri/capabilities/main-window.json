@@ -74,6 +74,7 @@
     "allow-desktop-set-pack-entry",
     "allow-desktop-remove-pack-entry",
     "allow-desktop-project-memories",
+    "allow-desktop-ide-asks",
     "allow-desktop-review-memory",
     "allow-desktop-memories",
     "allow-desktop-memory",

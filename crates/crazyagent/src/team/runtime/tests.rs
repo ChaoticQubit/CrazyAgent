@@ -6,6 +6,8 @@ use crate::config::{
 
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 
+use crate::ledger;
+
 use crate::project_setup::{HarnessSlot, TeamPlan};
 
 use crate::team::status;
@@ -2600,4 +2602,462 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert_eq!(again.shutdown().unwrap(), names(&[master]));
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
+}
+
+const RECORDING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"id":"recorded-%s","cwd":"%s"}}\n' "$$" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  [ "$line" = "/exit" ] && exit 0
+  typed=$(printf '%s' "$line" | /usr/bin/tr -cd '[:alnum:] .,:')
+  printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$typed" >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+const INTERRUPTED: &str = "Ship the release notes";
+
+fn reopen(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
+    let access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", fixture.base.join("bin").join("codex"))]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_terminal(host.clone())
+    .unwrap()
+}
+
+/// Starts a recording live master, lets its briefing turn end and stops the engine with
+/// the master's pane left running, as a closing engine does. Returns the master's id.
+fn left_live_master(fixture: &Fixture, host: &Arc<dyn Host>) -> i64 {
+    let mut team = live_runtime(fixture, host, RECORDING_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    master
+}
+
+/// Leaves what an engine killed while sending one owner message leaves behind: the message
+/// marked sent and the ledger intent recorded before the send. Returns the message id.
+fn interrupted_message(fixture: &Fixture, agent: i64) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,'owner',?2,'sent',1)",
+            params![PROJECT, INTERRUPTED],
+        )
+        .unwrap();
+    let message = fixture.connection.last_insert_rowid();
+    ledger::initialize(&fixture.connection).unwrap();
+    assert!(
+        delivery::intend(
+            &fixture.connection,
+            Busy::Message(message),
+            agent,
+            INTERRUPTED,
+            None
+        )
+        .unwrap()
+    );
+    message
+}
+
+/// Counts the typed lines holding `text` in every Codex rollout under the fixture's folder,
+/// skipping folders the running agents remove while it reads.
+fn typed_count(fixture: &Fixture, text: &str) -> usize {
+    let mut folders = vec![fixture.base.clone()];
+    let mut count = 0;
+    while let Some(folder) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                folders.push(path);
+            } else if kind.is_file() && entry.file_name().to_string_lossy().starts_with("rollout-")
+            {
+                count += std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|line| line.contains(r#""role":"user""#) && line.contains(text))
+                    .count();
+            }
+        }
+    }
+    count
+}
+
+fn message_state(fixture: &Fixture, message: i64) -> String {
+    fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn outcomes(fixture: &Fixture, kind: &str, key: &str) -> Vec<Option<String>> {
+    fixture
+        .connection
+        .prepare("SELECT outcome FROM ledger_actions WHERE kind=?1 AND action_key=?2 ORDER BY id")
+        .unwrap()
+        .query_map([kind, key], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn pending_keys(fixture: &Fixture, kind: ledger::ActionKind) -> Vec<String> {
+    ledger::pending(&fixture.connection, kind)
+        .unwrap()
+        .into_iter()
+        .map(|action| action.key)
+        .collect()
+}
+
+fn nothing_pending(fixture: &Fixture) -> bool {
+    ledger::pending(&fixture.connection, ledger::ActionKind::Message)
+        .unwrap()
+        .is_empty()
+        && ledger::pending(&fixture.connection, ledger::ActionKind::Dispatch)
+            .unwrap()
+            .is_empty()
+}
+
+/// An engine killed right after it typed a message into the live master leaves the message
+/// marked sent; the next engine finds it in the master's own record, marks it answered with
+/// a note, and never types it again into the master it takes over.
+#[cfg(target_os = "macos")]
+#[test]
+fn message_interrupted_after_send_is_not_sent_again() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = left_live_master(&fixture, &host);
+    let message = interrupted_message(&fixture, master);
+    host.input(
+        &AgentId::team(master).unwrap(),
+        format!("{INTERRUPTED}\r").as_bytes(),
+    )
+    .unwrap();
+    let deadline = Instant::now() + WAIT;
+    while typed_count(&fixture, INTERRUPTED) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the master's record never showed the message"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let mut again = reopen(&fixture, &host);
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert!(fixture.note(delivery::DELIVERED_NOTE));
+    assert!(!fixture.note(delivery::UNKNOWN_NOTE));
+    assert_eq!(
+        outcomes(&fixture, "message", &format!("team-message/{message}")),
+        [Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    fixture.until(
+        &mut again,
+        "the next engine takes the live master over",
+        |f| f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master),
+    );
+    idle_ticks(&mut again);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+/// An engine killed after it recorded its intent but before it typed the message leaves
+/// the master's record without it; the next engine closes that intent as failed and types
+/// the message exactly once into the master it takes over.
+#[cfg(target_os = "macos")]
+#[test]
+fn message_interrupted_before_send_is_sent_once() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = left_live_master(&fixture, &host);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    let mut again = reopen(&fixture, &host);
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("failed".to_owned())]
+    );
+    assert_eq!(message_state(&fixture, message), "pending");
+    fixture.until(&mut again, "the message is typed into the master", |f| {
+        typed_count(f, INTERRUPTED) == 1
+    });
+    fixture.until(&mut again, "the master's turn on it is counted", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    idle_ticks(&mut again);
+    assert_eq!(
+        typed_count(&fixture, INTERRUPTED),
+        1,
+        "the message reached the master once"
+    );
+    assert_eq!(message_state(&fixture, message), "answered");
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("failed".to_owned()), Some("done".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+    assert!(!fixture.note(delivery::DELIVERED_NOTE));
+    assert!(!fixture.note(delivery::UNKNOWN_NOTE));
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+/// A message whose master left no session record cannot be told delivered or not; the next
+/// engine fails the message with a note and never types it, and its intent stays pending
+/// for the owner across starts until the owner dismisses it (DEC-098 addendum 4).
+#[test]
+fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let message = interrupted_message(&fixture, master);
+    let key = format!("team-message/{message}");
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [None],
+        "an unknown intent stays open for the owner"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()],
+        "the recovery banner reads it from pending()"
+    );
+
+    drop(fixture.runtime());
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(
+        noted(&fixture, delivery::UNKNOWN_NOTE),
+        1,
+        "a second start says it once and types nothing"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Message),
+        [key.clone()]
+    );
+
+    let open = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
+        .unwrap()
+        .expect("the unknown intent is still open");
+    ledger::finish(&fixture.connection, open.id, ledger::Outcome::Unknown).unwrap();
+    drop(fixture.runtime());
+    assert_eq!(
+        outcomes(&fixture, "message", &key),
+        [Some("unknown".to_owned())],
+        "the owner's dismissal closes it"
+    );
+    assert!(nothing_pending(&fixture));
+    assert_eq!(message_state(&fixture, message), "failed");
+    assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
+}
+
+/// A task whose sub-agent left no session record cannot be told handed over or not; the
+/// next engine fails it once with a plain reason and never hands it out again, and its
+/// intent stays pending for the owner across starts.
+#[test]
+fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let prompt = "Write the changelog";
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+            params![PROJECT, prompt, sub],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    ledger::initialize(&fixture.connection).unwrap();
+    assert!(delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap());
+    let key = format!("team-task/{task}");
+    let row = |fixture: &Fixture| -> (String, Option<i64>, Option<String>, Option<i64>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,error,finished_ms FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap()
+    };
+
+    drop(fixture.runtime());
+    let failed = row(&fixture);
+    assert_eq!(
+        (failed.0.as_str(), failed.1, failed.2.as_deref()),
+        ("failed", Some(sub), Some(delivery::UNKNOWN_TASK))
+    );
+    assert_eq!(outcomes(&fixture, "dispatch", &key), [None]);
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [key.clone()]
+    );
+
+    drop(fixture.runtime());
+    assert_eq!(
+        row(&fixture),
+        failed,
+        "a second start fails it no second time"
+    );
+    assert_eq!(
+        pending_keys(&fixture, ledger::ActionKind::Dispatch),
+        [key.clone()]
+    );
+}
+
+/// Unknown deliveries the owner has not dismissed stay pending up to `UNKNOWN_KEPT` of each
+/// kind; a start closes the oldest beyond that as unknown, so undismissed ones never fill
+/// the ledger that every delivery and agent start shares.
+#[test]
+fn a_start_keeps_the_newest_unknown_deliveries_of_each_kind_and_closes_older_ones() {
+    let fixture = Fixture::new(1);
+    ledger::initialize(&fixture.connection).unwrap();
+    let kinds = [
+        (ledger::ActionKind::Message, "message", "team-message"),
+        (ledger::ActionKind::Dispatch, "dispatch", "team-task"),
+    ];
+    let keys = |prefix: &str| -> Vec<String> {
+        (0..=delivery::UNKNOWN_KEPT)
+            .map(|n| format!("{prefix}/{}", 900_000 + n))
+            .collect()
+    };
+    for (kind, _, prefix) in kinds {
+        for key in keys(prefix) {
+            ledger::begin(&fixture.connection, kind, &key, "{}").unwrap();
+        }
+    }
+
+    for _ in 0..2 {
+        drop(fixture.runtime());
+        for (kind, name, prefix) in kinds {
+            let all = keys(prefix);
+            assert_eq!(
+                pending_keys(&fixture, kind),
+                all[1..],
+                "the newest {} stay pending",
+                delivery::UNKNOWN_KEPT
+            );
+            assert_eq!(
+                outcomes(&fixture, name, &all[0]),
+                [Some("unknown".to_owned())],
+                "the oldest is closed as unknown"
+            );
+        }
+    }
+}
+
+/// A task its sub-agent's record shows was handed over is never handed out again after a
+/// restart: it fails with a plain reason. A task the record lacks waits to be handed out.
+#[test]
+fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_waits() {
+    let fixture = Fixture::new(1);
+    let sub = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let file = fixture.base.join(format!("session-{sub}.jsonl"));
+    std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
+    let record = PaneRecord::new(
+        &Transcript::ClaudeSession { file: file.clone() },
+        &fixture.base,
+        SystemTime::now(),
+        4242,
+        None,
+    )
+    .unwrap();
+    fixture.keep(sub, &record);
+    let mut tasks = Vec::new();
+    for prompt in ["Write the changelog", "Tag the release"] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,created_ms,started_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,1,1,1)",
+                params![PROJECT, prompt, sub],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        ledger::initialize(&fixture.connection).unwrap();
+        assert!(
+            delivery::intend(&fixture.connection, Busy::Task(task), sub, prompt, None).unwrap()
+        );
+        tasks.push(task);
+    }
+    let typed = r#"{"type":"user","message":{"content":"You are a sub-agent of the project \"Panes\".\nYour task: Write the changelog"}}"#;
+    let mut kept = std::fs::read_to_string(&file).unwrap();
+    kept.push_str(typed);
+    kept.push('\n');
+    std::fs::write(&file, kept).unwrap();
+
+    drop(fixture.runtime());
+    let task = |id: i64| -> (String, Option<i64>, Option<String>) {
+        fixture
+            .connection
+            .query_row(
+                "SELECT status,agent,error FROM team_tasks WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        task(tasks[0]),
+        (
+            "failed".to_owned(),
+            Some(sub),
+            Some(delivery::DELIVERED_TASK.to_owned())
+        ),
+        "the handed-over task is not handed out again"
+    );
+    assert_eq!(task(tasks[1]), ("queued".to_owned(), None, None));
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[0])),
+        [Some("done".to_owned())]
+    );
+    assert_eq!(
+        outcomes(&fixture, "dispatch", &format!("team-task/{}", tasks[1])),
+        [Some("failed".to_owned())]
+    );
+    assert!(nothing_pending(&fixture), "no intent is left open");
+
+    drop(fixture.runtime());
+    assert_eq!(task(tasks[0]).0, "failed");
+    assert_eq!(task(tasks[1]).0, "queued");
 }

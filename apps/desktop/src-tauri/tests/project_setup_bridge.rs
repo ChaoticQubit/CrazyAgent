@@ -27,6 +27,7 @@ const COMMANDS: [&str; 19] = [
     "desktop_project_read_paths",
     "desktop_set_project_read_paths",
     "desktop_project_memories",
+    "desktop_ide_asks",
     "desktop_review_memory",
     "desktop_update_project_setup",
     "desktop_remove_project",

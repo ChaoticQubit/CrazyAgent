@@ -582,6 +582,10 @@ export function projectMemories(id: string, after: string | null = null): Promis
   return invoke<MemoryItem[]>("desktop_project_memories", { id, after });
 }
 
+export function ideAsks(id: string): Promise<MemoryItem[]> {
+  return invoke<MemoryItem[]>("desktop_ide_asks", { id });
+}
+
 export function reviewMemory(
   id: string,
   memory: string,

@@ -1,3 +1,4 @@
+use crate::planning::AFTER_RESEARCH;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::fmt;
 use std::path::Path;
@@ -187,7 +188,8 @@ impl ResearchJobs {
     }
 
     /// Atomically moves the oldest queued job of `project` to running for
-    /// `claimer`, unless `running_max` jobs of that project already run.
+    /// `claimer`, unless `running_max` jobs of that project already run; a
+    /// roadmap planning job waits until the project's other jobs end.
     pub fn claim(
         &self,
         project: &str,
@@ -233,6 +235,7 @@ impl ResearchJobs {
                      WHERE id = (SELECT id FROM research_jobs
                                  WHERE project = ?1 AND status = 'queued'
                                    AND (?5 IS NULL OR harness = ?5)
+                                   AND {AFTER_RESEARCH}
                                  ORDER BY id LIMIT 1)
                        AND (SELECT count(*) FROM research_jobs
                             WHERE project = ?1 AND status = 'running') < ?4
@@ -416,12 +419,13 @@ impl ResearchJobs {
     }
 
     /// Each project and harness pair with queued or waiting research, in
-    /// order, at most 1000.
+    /// order, at most 1000; a planning job still waiting for research is left out.
     pub fn work(&self) -> Result<Vec<(String, String)>, JobError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare(&format!(
             "SELECT DISTINCT project, harness FROM research_jobs
-             WHERE status IN ('queued', 'needs_pool') ORDER BY project, harness LIMIT 1000",
-        )?;
+             WHERE status IN ('queued', 'needs_pool') AND {AFTER_RESEARCH}
+             ORDER BY project, harness LIMIT 1000"
+        ))?;
         let work = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))

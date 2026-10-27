@@ -34,6 +34,13 @@ const HOUR_MS: i64 = 3_600_000;
 const ESCALATED: &str =
     "The owner has been notified. Wait for their answer here and do not decide this yourself.";
 const ESCALATIONS_FULL: &str = "Not sent: the owner already has 10 questions from this project within the hour. Wait for their answers here.";
+const NO_MASTER: &str =
+    "Not asked: the engine has no live master of this project on record. Try again in a moment.";
+const QUESTIONS_FULL: &str = "Not asked: 32 questions of this project are still open. Wait for the owner's answers before asking more.";
+const ASK_REFUSED: &str = "Not asked: give one plain question of up to 2000 bytes, with at most 4 distinct one-line options.";
+const RECORD_REFUSED: &str =
+    "Not recorded: give the question id and the owner's answer, plain text up to 2000 bytes.";
+const _: () = assert!(crate::questions::OPEN_PER_PROJECT_MAX == 32);
 const _: () = assert!(ESCALATIONS_PER_HOUR_MAX == 10);
 const _: () = assert!(ESCALATIONS_PER_HOUR_MAX < super::events::NOTIFICATIONS_PER_PROJECT_MAX);
 
@@ -735,7 +742,8 @@ fn keys(bytes: &[u8]) -> (bool, bool) {
 /// Answers the calls a live master's team server left in its mailbox, at most
 /// `CALLS_PER_TICK_MAX` per call, each checked again before it takes effect: `delegate`
 /// admits the task at once, `message`, `answer` and `status` go to the team event handlers,
-/// `changes` lists the pending change sets and `escalate` notifies the owner. Takes the
+/// `changes` lists the pending change sets, `escalate` notifies the owner and `ask_owner`
+/// logs a question for the owner or records a chat answer. Takes the
 /// engine database, what the answers need and the mailbox. Returns how many calls were
 /// answered, or a SQLite failure.
 pub fn serve_calls(
@@ -801,7 +809,102 @@ fn answer(
         },
         Call::Changes => changes(answering),
         Call::Escalate { text } => escalate(connection, project, &text)?,
+        Call::AskOwner {
+            question,
+            options,
+            recommended,
+            context,
+        } => {
+            let ask = crate::questions::Ask {
+                question,
+                options,
+                recommended,
+                context,
+            };
+            ask_owner(connection, project, &ask)?
+        }
+        Call::RecordAnswer { id, answer } => record_answer(connection, project, id, &answer)?,
     })
+}
+
+/// Logs a live master's question for the owner, who is notified; the answer reaches the
+/// master once as an owner message. Takes the database, the master's project and the
+/// question. Returns the sentence the master reads, or a SQLite failure.
+fn ask_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    ask: &crate::questions::Ask,
+) -> Result<(String, bool), EngineError> {
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    Ok(
+        match crate::questions::ask(connection, project, master, ask, now_ms()) {
+            Ok(Ok(id)) => (
+                format!(
+                    "Question {id} is logged and the owner is notified. Their answer or dismissal comes to you once as a message from the owner, so do not ask it again. If the owner answers you in chat first, record it with ask_owner using only id {id} and their answer."
+                ),
+                false,
+            ),
+            Ok(Err("questions_full")) => (QUESTIONS_FULL.to_owned(), true),
+            Ok(Err(_)) => (ASK_REFUSED.to_owned(), true),
+            Err(problem) => (unlogged(&problem), true),
+        },
+    )
+}
+
+/// Records the answer the owner gave a live master in chat to one logged question. Takes
+/// the database, the master's project, the question id and the answer. Returns the
+/// sentence the master reads, or a SQLite failure.
+fn record_answer(
+    connection: &Connection,
+    project: &ProjectId,
+    id: i64,
+    answer: &str,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::Refusal;
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    Ok(
+        match crate::questions::record(connection, project, master, id, answer, now_ms()) {
+            Ok(Ok(())) => (
+                format!("Recorded the owner's answer to question {id}."),
+                false,
+            ),
+            Ok(Err(Refusal::Stale(_))) => (
+                format!("Not recorded: question {id} is already answered or dismissed."),
+                true,
+            ),
+            Ok(Err(Refusal::Code("question_missing"))) => (
+                format!("Not recorded: this project has no question {id}."),
+                true,
+            ),
+            Ok(Err(Refusal::Code(_))) => (RECORD_REFUSED.to_owned(), true),
+            Err(problem) => (unlogged(&problem), true),
+        },
+    )
+}
+
+/// Reads the team agent id of a project's live master. Takes the database and project.
+/// Returns the id, none when no live master is on record, or a SQLite failure.
+fn live_master(connection: &Connection, project: &ProjectId) -> Result<Option<i64>, EngineError> {
+    connection
+        .query_row(
+            "SELECT agent FROM team_live_masters WHERE project=?1",
+            [project.as_str()],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map(Option::flatten)
+        .map_err(state)
+}
+
+fn unlogged(problem: &EngineError) -> String {
+    format!(
+        "The questions log could not be written ({}). Try again in a moment.",
+        super::bound_text(&problem.0, 120)
+    )
 }
 
 fn delegate(

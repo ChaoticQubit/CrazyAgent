@@ -355,6 +355,19 @@ impl OwnerController {
         }
     }
 
+    /// Lists the memories the project's IDE asked the owner to approve that still wait at
+    /// the asked version, oldest ask first. Takes the project id. Returns the entries; the
+    /// owner approves each through `review_memory` with Keep.
+    pub async fn ide_asks(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<KnowledgeEntry>, EngineError> {
+        match self.read(OwnerRead::IdeAsks { project_id }).await?.data {
+            OwnerData::IdeAsks { entries } => Ok(entries),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.
     /// Takes the project id, entry id, the version shown, the decision and the client generation.
     /// Returns the actual owner response; a stale version is a plain rejection.

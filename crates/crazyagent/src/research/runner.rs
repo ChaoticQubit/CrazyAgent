@@ -10,6 +10,7 @@ use crate::harnesses::launch::{
 };
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
+use crate::project_setup::ResearchKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
@@ -261,7 +262,8 @@ impl From<io::Error> for RunError {
 
 /// Claims queued research jobs and runs each one as a sandboxed Codex or
 /// Claude Code agent in its own git worktree under the project folder, then
-/// writes the agent's report to `context/research/<kind>.md`.
+/// writes the agent's report to `context/research/<kind>.md`, or a roadmap
+/// planning reply to `context/roadmap.md` and `context/release-process.md`.
 pub struct ResearchRunner {
     database: PathBuf,
     state: PathBuf,
@@ -557,7 +559,10 @@ impl ResearchRunner {
                         return Ok(run(status, None, Some(group)));
                     }
                 };
-                let relative = format!("context/research/{}.md", job.kind);
+                let relative = ResearchKind::parse(&job.kind).map_or_else(
+                    || format!("context/research/{}.md", job.kind),
+                    ResearchKind::report_path,
+                );
                 jobs.finish(&job, &relative)?;
                 Ok(run(ResearchStatus::Done, Some(report), Some(group)))
             }
@@ -1147,6 +1152,13 @@ impl ResearchRunner {
         let body = body.trim();
         if body.is_empty() {
             return Err("Agent returned no report");
+        }
+        if job.kind == ResearchKind::RoadmapPlanning.name() {
+            let state = crate::projects_home::state_folder(root);
+            let plan = crate::planning::publish(&state, body, harness.label())?;
+            crate::planning::raise(self.database(), &job.project, &plan)
+                .map_err(|_| crate::planning::QUESTIONS_UNLOGGED)?;
+            return Ok(state.join(crate::planning::ROADMAP));
         }
         let report = render_report(&kind_label(&job.kind), harness.label(), body);
         write_report(root, &job.kind, &report).map_err(|_| "Could not save the research report")
@@ -2437,6 +2449,10 @@ fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
 }
 
 fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
+    if kind == ResearchKind::RoadmapPlanning.name() {
+        let state = crate::projects_home::state_folder(root);
+        return Ok(crate::planning::prompt::prompt(&state)?);
+    }
     let context = crate::projects_home::state_folder(root).join("context");
     let brief = match read_bounded(&context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
@@ -2490,6 +2506,7 @@ pub fn kind_label(kind: &str) -> String {
         "design_research" => "Design research".into(),
         "front_end_design" => "Front-end design".into(),
         "tech_stack_research" => "Tech stack research".into(),
+        "roadmap_planning" => ResearchKind::RoadmapPlanning.label().into(),
         other => {
             let words = other.replace(['_', '-'], " ");
             let mut chars = words.chars();
