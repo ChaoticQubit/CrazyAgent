@@ -1336,6 +1336,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
         .map_err(error)?;
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
+    ensure_submodule_stores(repository, &metadata)?;
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
     let lease = |args: &[&str]| {
         let mut full = vec![
@@ -1367,6 +1368,30 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
     assert!(record.directory.is_some());
+    Ok(())
+}
+
+/// Creates the two submodule-store folders a later sandbox profile denies writes to, so
+/// every platform guards an existing folder rather than the `.git` root or the lease admin
+/// folder: the repository's common `.git/modules` and this lease's admin `modules`. Both are
+/// owner-owned, mode 0700, and the call is idempotent, so a store a sibling lease already
+/// made is left in place. On Windows the boundary turns a present folder into a deny on the
+/// folder itself while the parent keeps "add entries" (`index.lock`), where a missing folder
+/// would instead deny "add entries" on the parent. Inputs: the repository and the lease
+/// admin git dir. Output: success, or the refusal code.
+#[cfg(unix)]
+fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), EngineError> {
+    let common = repository.join(".git").join("modules");
+    let private = admin.join("modules");
+    for store in [&common, &private] {
+        match std::fs::create_dir(store) {
+            Ok(()) => std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o700))
+                .map_err(error)?,
+            Err(problem) if problem.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(problem) => return Err(error(problem)),
+        }
+    }
+    assert!(common.is_dir() && private.is_dir());
     Ok(())
 }
 
@@ -2075,6 +2100,23 @@ mod tests {
             git(&repository, args).unwrap();
         }
         repository
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn submodule_stores_are_created_private_and_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        ensure_submodule_stores(&repository, &admin).unwrap();
+        for store in [repository.join(".git/modules"), admin.join("modules")] {
+            let metadata = std::fs::metadata(&store).unwrap();
+            assert!(metadata.is_dir(), "{} is not a folder", store.display());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+        ensure_submodule_stores(&repository, &admin).unwrap();
     }
 
     #[test]
