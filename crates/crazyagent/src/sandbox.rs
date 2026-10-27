@@ -1224,20 +1224,23 @@ impl Sandbox for InstalledSandbox {
 }
 
 impl Checkout {
-    /// The Seatbelt rules that let a confined agent add git objects but never change the
-    /// ones the owner and the other agents share: no write in `info/` or `pack/`, no move
-    /// of the store or a fan-out folder, and no rewrite, removal, replacement or hard link
-    /// of an object file. Git still creates new objects by link or rename. Seatbelt regexes
-    /// take no `{n}` counts, so the hex digits repeat. Input: the checkout. Output: the
-    /// rule text.
+    /// The Seatbelt rules that keep a confined agent from adding to or changing the git
+    /// objects the owner and the other agents share: no write in `info/` or `pack/`, no
+    /// new, moved or removed fan-out folder, no new object file by any route (create,
+    /// rename or link) and no rewrite, removal or replacement of one, and no symlink
+    /// anywhere in the store. Git reads a loose object before a packed one without checking
+    /// its bytes, so any object an agent could add would stand in for the owner's own;
+    /// object writes are the engine's, at turn end. Seatbelt regexes take no `{n}` counts,
+    /// so the hex digits repeat. Input: the checkout. Output: the rule text.
     fn object_denies(&self) -> String {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();
         let pattern = seatbelt_pattern(&self.objects);
         let text = format!(
-            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n"
+            "(deny file-write*\n  (subpath \"{objects}/info\")\n  (subpath \"{objects}/pack\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n"
         );
-        assert!(text.matches("(regex #\"^/").count() == 2);
+        assert!(text.matches("(regex #\"^/").count() == 4);
+        assert!(text.contains("(vnode-type SYMLINK)"));
         text
     }
 }

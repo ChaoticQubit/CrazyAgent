@@ -1609,3 +1609,126 @@ fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     assert_eq!(again, first);
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
+
+impl Case {
+    /// Writes a loose object file under `id` holding the bytes of another object, as a
+    /// confined agent could once plant one: git keeps an existing object instead of writing
+    /// its own and reads a loose object without checking its bytes. Inputs: the id to plant
+    /// and the text whose object bytes it gets. Output: none; the file is in place.
+    fn plant(&self, id: &str, text: &str) {
+        let source = self._tmp.path().join("planted.txt");
+        std::fs::write(&source, text).unwrap();
+        let other = self.owner(&["hash-object", "-w", source.to_str().unwrap()]);
+        let objects = self.repo.join(".git").join("objects");
+        let other = other.trim();
+        let bytes = std::fs::read(objects.join(&other[..2]).join(&other[2..])).unwrap();
+        let target = objects.join(&id[..2]).join(&id[2..]);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        if target.exists() {
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::fs::write(&target, bytes).unwrap();
+        assert_ne!(id, other);
+    }
+
+    /// The id git gives a text as a blob, without storing it. Input: the text. Output: the id.
+    fn blob_id(&self, text: &str) -> String {
+        let source = self._tmp.path().join("predicted.txt");
+        std::fs::write(&source, text).unwrap();
+        self.owner(&["hash-object", source.to_str().unwrap()])
+            .trim()
+            .to_owned()
+    }
+}
+
+#[test]
+fn an_agent_head_naming_another_branch_is_refused_and_moves_no_branch() {
+    let case = Case::new();
+    case.start();
+    let tip = case.tip();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let head_file = case.workspace.git_dir.join("HEAD");
+    let detached = std::fs::read_to_string(&head_file).unwrap();
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "More".into(),
+    };
+    std::fs::write(&head_file, "ref: refs/heads/main\n").unwrap();
+    case.edit("evil.txt", "evil\n");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(refused(update(&case.db, &id)), "changes_workspace_invalid");
+    assert_eq!(case.tip(), tip, "the owner's branch moved without Accept");
+    std::fs::remove_file(&head_file).unwrap();
+    std::os::unix::fs::symlink(case.repo.join(".git").join("HEAD"), &head_file).unwrap();
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(case.tip(), tip);
+    std::fs::remove_file(&head_file).unwrap();
+    std::fs::write(&head_file, &detached).unwrap();
+    std::fs::remove_file(case.workspace.worktree.join("evil.txt")).unwrap();
+    assert_eq!(case.agent_head(), head);
+    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
+    case.edit("lease.txt", "lease\n");
+    let leased = record_turn_end(&case.db, &case.workspace, &turn)
+        .unwrap()
+        .unwrap();
+    assert_eq!(leased, id);
+    let moved = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"]);
+    assert_eq!(moved.trim(), case.view(&id).head);
+    assert_ne!(moved.trim(), head);
+    assert_eq!(case.tip(), tip, "a lease turn end moved the owner's branch");
+    assert_eq!(
+        std::fs::read_to_string(&head_file).unwrap(),
+        "ref: refs/heads/crazyagent/agent-1\n"
+    );
+}
+
+#[test]
+fn accept_and_update_refuse_an_object_whose_bytes_do_not_match_its_id() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let blob = case.blob_id("one\ntwo\nthree\nfour\n");
+    let before = case.checkout();
+    case.plant(&blob, "one\ntwo\nthree\nfour\nunreviewed\n");
+    assert_eq!(refused(case.accept(&id)), "changes_workspace_invalid");
+    assert_eq!(case.checkout(), before, "a refused Accept wrote");
+    assert_eq!(refused(update(&case.db, &id)), "changes_workspace_invalid");
+    assert_eq!(case.checkout(), before);
+}
+
+#[test]
+fn accept_refuses_a_merge_whose_predicted_object_was_planted_first() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "ONE\ntwo\nthree\n", "Owner edit");
+    let merged = case.blob_id("ONE\ntwo\nthree\nfour\n");
+    case.plant(&merged, "ONE\ntwo\nthree\nfour\nunreviewed\n");
+    let before = case.checkout();
+    assert_eq!(refused(case.accept(&id)), "changes_workspace_invalid");
+    assert_eq!(case.checkout(), before, "a refused Accept wrote");
+    assert_eq!(case.tip(), tip);
+    let planted = case
+        .repo
+        .join(".git/objects")
+        .join(&merged[..2])
+        .join(&merged[2..]);
+    std::fs::remove_file(planted).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "ONE\ntwo\nthree\nfour\n"
+    );
+}
