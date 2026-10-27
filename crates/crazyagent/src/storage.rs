@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod account_profile;
 pub(crate) mod accounts;
-mod harness_groups;
+pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]

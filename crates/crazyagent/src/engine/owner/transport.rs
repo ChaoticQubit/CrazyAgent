@@ -472,6 +472,8 @@ struct Authority {
     deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    #[cfg(unix)]
+    ide: crate::ide::server::Servers,
 }
 
 impl Authority {
@@ -877,6 +879,15 @@ pub struct OwnerRuntimeHandle {
     authority: Arc<Authority>,
 }
 
+#[cfg(unix)]
+impl OwnerRuntimeHandle {
+    /// The engine's IDE servers, one per open project, all stopped when the owner server
+    /// stops. Output: the register.
+    pub fn ide(&self) -> &crate::ide::server::Servers {
+        &self.authority.ide
+    }
+}
+
 impl OwnerRuntimeHandle {
     pub async fn prepare_native_profile(
         &self,
@@ -1168,6 +1179,12 @@ impl OwnerServer {
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
+            let ide = crate::ide::server::Servers::new(
+                root.path
+                    .parent()
+                    .ok_or_else(|| failure("owner_root_unavailable"))?,
+                crate::ide::server::IDLE_LIMIT,
+            );
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1181,6 +1198,7 @@ impl OwnerServer {
                 deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                ide,
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1373,6 +1391,8 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         upkeep.abort();
+        #[cfg(unix)]
+        self.authority.ide.stop_all().await;
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }
