@@ -632,6 +632,18 @@ test("a long task prompt shows its first line, cut to fit a row", () => {
   assert.equal(research.firstLine(""), "");
 });
 
+test("the Agents tab counts working team agents and running research like the project card", async () => {
+  const agents = await import("../src/screens/project/agents.tsx");
+  const team = { project_id: "p-1", keep_warm: false, paused: false, min_agents: 0, max_agents: 5, harnesses: [], messages: [], plan: [],
+    agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
+    tasks: [teamTask(10, "running", { agent: 2 }), teamTask(11, "running", { agent: 3 })] };
+  const data = { ...tabData([job("running", { started_ms: 1_000 })]), setup: { kind: "ok", value: { team: { max_agents: 5 } } },
+    assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
+  const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));
+  assert.match(markup, /3 agents working\. Work: 2 accounts\./);
+  assert.doesNotMatch(markup, /1 of 5 agents running/);
+});
+
 test("the Agents tab labels research and asks the engine for the live team", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data: tabData([job("running", { started_ms: 1_000 })]) }));

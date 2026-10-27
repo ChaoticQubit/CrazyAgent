@@ -12,6 +12,7 @@ import type { ResearchRow } from "./research";
 import { TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
 import { TeamControls } from "../team/controls";
+import { cardActivity } from "../dashboard";
 import { Badge, NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ConfirmDialog, Icon, Segmented, type Tone } from "../../ui";
@@ -68,7 +69,6 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const [busy, setBusy] = useState<number | null>(null);
   const waits = stopping !== null && stopping.status !== "running";
   const jobs = valueOf(data.research)?.jobs ?? [];
-  const setup = valueOf(data.setup);
   const harnesses = valueOf(data.harnesses);
   const [loadedAccounts] = useLoad(listAccounts, []);
   const named = loadedAccounts.kind === "ok" ? loadedAccounts.value : [];
@@ -79,6 +79,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const teamValue = team.result?.kind === "ok" ? team.result.value : { agents: [], tasks: [] };
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
+  const working = cardActivity(team.result, data.research).agents;
 
   function settle(result: Result<IntentReceipt>, done: string, missing: string) {
     setBusy(null);
@@ -105,7 +106,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
       <Segmented label="Show" value={filter} onValue={setFilter}
         options={[{ value: "running", label: `Running (${running.length + teamCount("running")})` }, { value: "all", label: `All (${jobs.length + teamCount("all")})` }]} />
       <span className="pj-secondary">{data.assigned
-        ? `${jobs.filter((job) => job.status === "running").length} of ${setup?.team.max_agents ?? "?"} agents running. ${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
+        ? `${working ? `${working}. ` : ""}${displayText(poolName(data.assigned.pool))}: ${accounts} ${accounts === 1 ? "account" : "accounts"}.`
         : "No pool. Pick a pool to start."}</span>
     </div>
     {data.research?.kind === "not_ready" && <NotReady what="live agent status isn't in this build." />}
