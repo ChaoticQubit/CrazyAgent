@@ -178,6 +178,9 @@ impl Names {
 }
 
 fn shown<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str {
+    if key.is_empty() {
+        return "Unattributed";
+    }
     names.get(key).map_or(key, String::as_str)
 }
 

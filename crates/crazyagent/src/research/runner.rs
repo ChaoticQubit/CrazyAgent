@@ -67,7 +67,7 @@ const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
 const PANE_EVENTS_MAX: usize = 200_000;
-const CLAUDE_ARGUMENTS: [&str; 9] = [
+const CLAUDE_ARGUMENTS: [&str; 8] = [
     "--print",
     "--output-format",
     "text",
@@ -76,7 +76,6 @@ const CLAUDE_ARGUMENTS: [&str; 9] = [
     "",
     "--settings",
     "{\"disableAllHooks\":true}",
-    "--no-session-persistence",
 ];
 
 /// Bounds every research run obeys.
@@ -667,29 +666,31 @@ impl ResearchRunner {
         })
     }
 
-    /// Registers a job agent's home with the usage store, so its tokens count against the
-    /// project and account; a run on an endpoint account, or a store that cannot be
-    /// written, goes uncounted and the run still starts. Inputs: the home, the project,
-    /// the account and the run name.
+    /// Registers an agent's home with the usage store, so its tokens count against the
+    /// project and account; a run on an endpoint account counts under no account, and a
+    /// store that cannot be written leaves the run uncounted while it still starts.
+    /// Inputs: the home, the run kind, the project, the account and the agent key.
     fn register_usage(
         &self,
         home: &Path,
-        project: &ProjectId,
+        kind: crate::usage::capture::RunKind,
+        project: Option<&ProjectId>,
         account: &ResearchAccount,
-        name: &str,
+        agent: &str,
     ) {
-        let (ResearchAccount::ManagedCodex { connection, .. }
-        | ResearchAccount::ManagedClaude { connection, .. }) = account
-        else {
-            return;
-        };
         let attribution = crate::usage::capture::Attribution {
-            kind: crate::usage::capture::RunKind::Research,
-            project: project.clone(),
+            kind,
+            project: project.cloned(),
             pool: None,
-            account: connection.id.clone(),
-            agent: format!("research-{name}"),
-            harness: connection.harness.as_str().to_owned(),
+            account: match account {
+                ResearchAccount::ManagedCodex { connection, .. }
+                | ResearchAccount::ManagedClaude { connection, .. } => Some(connection.id.clone()),
+                ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => {
+                    None
+                }
+            },
+            agent: agent.to_owned(),
+            harness: account.harness().id().to_owned(),
         };
         let registered = self
             .database
@@ -727,7 +728,13 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
-        self.register_usage(&home, &project, account, &name);
+        self.register_usage(
+            &home,
+            crate::usage::capture::RunKind::Research,
+            Some(&project),
+            account,
+            &format!("research-{name}"),
+        );
         let harness = account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -1126,9 +1133,12 @@ impl ResearchRunner {
 
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
-/// sandbox profile, `prompt` goes to it on stdin, `wall_time` bounds it.
+/// sandbox profile, `agent` and `project` name whose usage its tokens count
+/// as, `prompt` goes to it on stdin, `wall_time` bounds it.
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
+    pub agent: &'a str,
+    pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
     pub folder: &'a Path,
     #[cfg(unix)]
@@ -1197,6 +1207,13 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
+        self.register_usage(
+            &home,
+            crate::usage::capture::RunKind::Research,
+            run.project,
+            run.account,
+            run.agent,
+        );
         let harness = run.account.harness();
         let executable = match harness {
             ResearchHarness::Codex => self
@@ -2644,6 +2661,62 @@ mod tests {
         CredentialRef::new(value).unwrap()
     }
 
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_counts_under_its_project_even_on_an_endpoint_account() {
+        let root = engine_root();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let run = ReadOnlyRun {
+            name: "onboard-m-alpha-1",
+            agent: "onboarding",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Map this repository.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+        };
+        assert!(matches!(
+            runner.run_read_only(&run, &|| false),
+            Err(RunError::Invalid(_))
+        ));
+        let db = crate::usage::open(root.database.parent().unwrap()).unwrap();
+        let row: (String, String, String, String, String) = db
+            .query_row(
+                "SELECT home,project,account,agent,harness FROM usage_runs",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let home = root.state.join("agents/onboard-m-alpha-1/home");
+        assert_eq!(row.0, home.to_string_lossy());
+        assert_eq!(
+            (
+                row.1.as_str(),
+                row.2.as_str(),
+                row.3.as_str(),
+                row.4.as_str()
+            ),
+            ("alpha", "", "onboarding", "codex")
+        );
+    }
+
     fn host() -> HostStamp {
         HostStamp {
             db_instance: "a".repeat(64),
@@ -3505,6 +3578,8 @@ mod windows_tests {
         };
         let run = ReadOnlyRun {
             name: "onboard-m-windows",
+            agent: "onboarding",
+            project: None,
             account: &account,
             wall_time: Duration::from_secs(5),
         };

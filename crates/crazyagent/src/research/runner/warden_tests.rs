@@ -77,6 +77,8 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
     runner.run_read_only(
         &ReadOnlyRun {
             name: "onboarding-warden",
+            agent: "onboarding",
+            project: None,
             folder: &folder,
             prompt: "Describe this repository.",
             account: &account,
