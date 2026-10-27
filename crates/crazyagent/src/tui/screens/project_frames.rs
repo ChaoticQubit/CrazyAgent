@@ -77,6 +77,10 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_memories(project, after)
                 .await
                 .map(SetupView::Memories),
+            SetupQuery::ReadPaths { project } => controller
+                .project_read_paths(project)
+                .await
+                .map(SetupView::ReadPaths),
             other => panic!("unexpected read {other:?}"),
         };
         screen.apply(&query, result.map_err(|error| error.0));

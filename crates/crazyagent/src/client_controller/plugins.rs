@@ -4,6 +4,7 @@ use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView}
 use crate::protocol::ProjectId;
 
 const PAGES_MAX: usize = 64;
+const DETAIL_PAGES_MAX: usize = 320;
 
 impl OwnerController {
     fn plugins_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -33,6 +34,49 @@ impl OwnerController {
         Err(EngineError("plugins_page_invalid".into()))
     }
 
+    /// Reads one skill's whole detail for its detail view, following the engine's pages of
+    /// SKILL.md. Inputs: the skill id and the project whose switch to show, or none for
+    /// global settings. Output: the skill, its full SKILL.md text and its files, or
+    /// `skill_page_invalid` when the pages do not join up.
+    pub async fn skill_detail(
+        &self,
+        id: String,
+        project: Option<ProjectId>,
+    ) -> Result<crate::skills::SkillDetail, EngineError> {
+        let client = self.plugins_client()?;
+        let invalid = || EngineError("skill_page_invalid".into());
+        let first = client.skill_page(id.clone(), project.clone(), 0).await?;
+        let mut next = first.next;
+        let mut detail = crate::skills::SkillDetail {
+            skill: first.skill,
+            text: first.text,
+            files: first.files,
+            files_more: first.files_more,
+        };
+        for _ in 0..DETAIL_PAGES_MAX {
+            let Some(offset) = next else {
+                assert!(detail.text.len() <= crate::skills::TEXT_BYTES_MAX);
+                return Ok(detail);
+            };
+            if offset as usize != detail.text.len() {
+                return Err(invalid());
+            }
+            let page = client
+                .skill_page(id.clone(), project.clone(), offset)
+                .await?;
+            if page.skill.id != detail.skill.id
+                || page.text.is_empty()
+                || !page.files.is_empty()
+                || detail.text.len() + page.text.len() > crate::skills::TEXT_BYTES_MAX
+            {
+                return Err(invalid());
+            }
+            detail.text.push_str(&page.text);
+            next = page.next;
+        }
+        Err(invalid())
+    }
+
     /// Lists every MCP server for global settings or one project's settings.
     /// Output: servers with how they run, plain status, saved secret names and tools.
     pub async fn plugin_servers(
@@ -57,6 +101,33 @@ impl OwnerController {
     /// Adds a skill from a folder the owner picked. Inputs: scope and the absolute folder.
     pub async fn add_skill(&self, scope: Scope, folder: String) -> Result<SkillView, EngineError> {
         self.plugins_client()?.add_skill(scope, folder).await
+    }
+
+    /// Looks for skills in the owner's Claude Code and Codex skills folders, only when asked.
+    /// Output: each skill found with its state against the app's skills.
+    pub async fn skill_import_scan(
+        &self,
+    ) -> Result<crate::skills::import::ImportList, EngineError> {
+        self.plugins_client()?.skill_import_scan().await
+    }
+
+    /// Imports the skills the owner ticked, one at a time, so one failure leaves the rest.
+    /// Input: each ticked folder with the id to replace for a skill whose files differ.
+    /// Output: each folder with its imported skill or the plain problem code, in order.
+    pub async fn import_skills(
+        &self,
+        picks: Vec<(String, Option<String>)>,
+    ) -> Result<Vec<(String, Result<crate::skills::import::Imported, String>)>, EngineError> {
+        let client = self.plugins_client()?;
+        let mut done = Vec::with_capacity(picks.len());
+        for (folder, replace) in picks {
+            let result = client
+                .import_skill(folder.clone(), replace)
+                .await
+                .map_err(|problem| problem.0);
+            done.push((folder, result));
+        }
+        Ok(done)
     }
 
     /// Turns a skill on or off where it was added. Inputs: skill id and the new state.

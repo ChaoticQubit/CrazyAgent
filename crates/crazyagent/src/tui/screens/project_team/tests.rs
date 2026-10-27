@@ -70,6 +70,8 @@ fn agent(
         created_ms: NOW - 20 * MINUTE,
         heartbeat_ms: NOW,
         stopped_ms: None,
+        persona: None,
+        handle: None,
     }
 }
 
@@ -295,6 +297,36 @@ fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
     assert!(
         rows.iter()
             .any(|row| row.contains("Agent         Sub-agent 2"))
+    );
+}
+
+#[test]
+fn a_named_sub_agent_shows_its_persona_and_role_in_the_list_panel_and_graph() {
+    let mut status = team();
+    status.agents[1].persona = Some("Ada".into());
+    status.agents[1].handle = Some("charts".into());
+    status.agents[1].label = "Ada (@charts)".into();
+    let graph = crate::team::graph(&status);
+    let named = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
+    assert_eq!(named.label, "Ada (@charts)");
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let rows = frame(&view, 120, 36);
+    assert!(find(&rows, "Ada (@charts)").contains("Working  Build the charts component"));
+    view.key(press(KeyCode::Down));
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Ada (@charts) \u{b7} Claude Code \u{b7} working")),
+        "{}",
+        rows.join("\n")
+    );
+    assert_eq!(view.key(press(KeyCode::Tab)), TeamReply::Handled);
+    let rows = frame(&view, 120, 36);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Agent         Ada (@charts)"))
     );
 }
 

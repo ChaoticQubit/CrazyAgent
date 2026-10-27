@@ -930,6 +930,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
@@ -1456,6 +1457,15 @@ fn execute(
             crate::project_setup::execute(tx, config, action, revision)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
+        Command::AccountSchedule { change } => crate::scheduling::apply(
+            tx,
+            config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap_or(&crate::config::ModelAccess::default()),
+            change,
+        ),
         Command::Team { action } => crate::team::execute(
             tx,
             &config.settings.model_access.clone().unwrap_or_default(),
@@ -2383,6 +2393,14 @@ fn owner_read(
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
         },
+        OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?
@@ -2442,6 +2460,9 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
+        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
+            schedule: crate::scheduling::load(&tx)?,
+        },
         OwnerRead::Page {
             view,
             cursor,

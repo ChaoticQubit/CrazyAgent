@@ -1,7 +1,7 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
-    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, now_ms,
+    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
     parse_delegations, pick_account, tool,
 };
 use crate::agents::{
@@ -13,7 +13,7 @@ use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord};
 use crate::launch_context::AgentContext;
@@ -22,6 +22,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -122,6 +123,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
 }
@@ -136,6 +138,7 @@ impl Plan {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: Some(self.sandbox_profile.clone()),
+            git_identity: self.git_identity.clone(),
             limits: self.limits,
         }
     }
@@ -197,6 +200,9 @@ enum Report {
     },
     Progress {
         bytes: usize,
+    },
+    Usage {
+        tokens: crate::usage::capture::Tokens,
     },
     Finished {
         text: String,
@@ -1109,11 +1115,39 @@ impl TeamRuntime {
                 "Sign in to an account in this project's pool to run {harness}"
             ));
         }
-        pick_account(&accounts, &|c: &CredentialRef| self.load(c), paused)
-            .cloned()
-            .ok_or_else(|| {
-                "Every account in this project's pool is resting after a rate limit".into()
+        let pools: Vec<&CredentialRef> = access
+            .pools
+            .iter()
+            .filter(|pool| {
+                pool.projects
+                    .iter()
+                    .any(|id| id.as_str() == project.as_str())
             })
+            .map(|pool| &pool.id)
+            .collect();
+        let choice = crate::scheduling::Choice::read(
+            &self.connection,
+            access,
+            Some(project.as_str()),
+            &pools,
+            super::now_ms(),
+        )
+        .map_err(|_| "Could not read the account scheduling settings".to_owned())?;
+        if let Some(account) = pick_account(
+            &accounts,
+            &|c: &CredentialRef| self.load(c),
+            paused,
+            &choice,
+        ) {
+            return Ok(account.clone());
+        }
+        if accounts
+            .iter()
+            .any(|account| !paused.contains(&account.connection))
+        {
+            return Err("Every account in this project's pool is at its usage limit, held in reserve or set to Never use".into());
+        }
+        Err("Every account in this project's pool is resting after a rate limit".into())
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed
@@ -1629,6 +1663,7 @@ impl TeamRuntime {
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            names::assign_task_role(&self.connection, project, agent, task)?;
             self.mark_agent(agent, AgentStatus::Working, Some(task))?;
         }
         Ok(())
@@ -1755,6 +1790,9 @@ impl TeamRuntime {
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
         assert!(id > 0);
+        if role == AgentRole::Sub {
+            names::assign_persona(&self.connection, &stored.project_id, id)?;
+        }
         self.launch(stored, id, role, harness, tools, account, again, None)
     }
 
@@ -1799,6 +1837,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the sub-agent is not stopped".into()));
         }
+        names::assign_persona(&self.connection, &stored.project_id, id)?;
         let kept = [repository, worktree, git_dir];
         self.launch(
             stored,
@@ -1885,6 +1924,25 @@ impl TeamRuntime {
                 params![id, stored.project_id.as_str(), landing[0], landing[1], landing[2]],
             )
             .map_err(error)?;
+        if kept.is_none() {
+            let paths = landing.each_ref().map(Path::new);
+            let started = crate::landing::open(&self.root).and_then(|db| {
+                crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2])
+            });
+            if let Err(problem) = started {
+                let problem = with_code(
+                    "the agent worktree's starting commit could not be recorded",
+                    Some(&problem.0),
+                );
+                self.connection
+                    .execute(
+                        "UPDATE team_agents SET status='failed', error=?2, stopped_ms=?3 WHERE id=?1",
+                        params![id, bound_text(&problem, 400), now_ms()],
+                    )
+                    .map_err(error)?;
+                return Ok(Err(problem));
+            }
+        }
         let hosted = match self.host(stored, id, role, &plan.harness, &account.connection, again) {
             Ok(hosted) => hosted,
             Err(problem) => {
@@ -2029,10 +2087,22 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let homes = ToolHomes::owner().map_err(sandboxed)?;
+        let scratch = toolchains::make_tmp(&home)
+            .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes)
+            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
+        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))
+            .and_then(|sandbox| sandbox.allow_scratch(&scratch))
+            .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
+            .map_err(sandboxed)?;
         let install = executable
             .canonicalize()
             .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
@@ -2094,6 +2164,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
         };
@@ -2218,6 +2289,36 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Counts the usage a piped agent's harness reported for a turn under the agent's
+    /// project, account and agent row; a store that cannot be written leaves the turn
+    /// uncounted and logs only the failure code. Inputs: the agent id and the tokens.
+    fn count_usage(&self, id: i64, tokens: crate::usage::capture::Tokens) {
+        let worker = &self.workers[&id];
+        let attribution = crate::usage::service::team_attribution(
+            id,
+            worker.project.as_str(),
+            worker.role == AgentRole::Master,
+            &worker.harness,
+            Some(worker.connection.as_str()),
+            &(self.access)().unwrap_or_default(),
+        );
+        let counted = crate::usage::initialize(&self.connection).and_then(|()| {
+            crate::usage::capture::count_reported(
+                &self.connection,
+                &attribution,
+                tokens,
+                "headless",
+                now_ms(),
+            )
+        });
+        if let Err(problem) = counted {
+            eprintln!(
+                "team usage not counted: {}",
+                crate::usage::service::failure_code(&problem)
+            );
+        }
+    }
+
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
@@ -2261,6 +2362,10 @@ impl TeamRuntime {
                         params![id, now_ms()],
                     )
                     .map_err(error)?;
+                Ok(false)
+            }
+            Report::Usage { tokens } => {
+                self.count_usage(id, tokens);
                 Ok(false)
             }
             Report::Finished { text, end, cause } => {
@@ -2316,6 +2421,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -2447,7 +2553,12 @@ impl TeamRuntime {
         let label = if AgentRole::parse(&role) == Some(AgentRole::Master) {
             format!("Team master ({harness})")
         } else {
-            format!("Sub-agent {id} ({harness})")
+            let name = names::name(&self.connection, id)?;
+            format!(
+                "{} \u{b7} {}",
+                names::label(AgentRole::Sub, id, name.as_ref()),
+                names::harness_name(&harness)
+            )
         };
         let workspace = crate::landing::Workspace {
             project: project.clone(),
@@ -2656,7 +2767,10 @@ impl TeamRuntime {
         }
         let mut delegations = proposed;
         for line in parse_delegations(text) {
-            if !delegations.contains(&line) {
+            if !delegations
+                .iter()
+                .any(|seen| seen.harness == line.harness && seen.prompt == line.prompt)
+            {
                 delegations.push(line);
             }
         }
@@ -2674,7 +2788,7 @@ impl TeamRuntime {
             return tx.commit().map_err(error);
         }
         for delegation in &delegations {
-            if let Err(code) = admit(
+            match admit(
                 &tx,
                 &access,
                 &stored,
@@ -2684,11 +2798,16 @@ impl TeamRuntime {
                 Some(reply),
                 now,
             )? {
-                refused.push(format!(
+                Ok(task) => {
+                    if let Some(role) = &delegation.role {
+                        names::set_task_role(&tx, project, task, role)?;
+                    }
+                }
+                Err(code) => refused.push(format!(
                     "- {}: {}",
                     bound_text(&delegation.prompt, 200),
                     refusal(code)
-                ));
+                )),
             }
         }
         if !refused.is_empty() {
@@ -3114,6 +3233,16 @@ fn full_stop(line: String) -> String {
     }
 }
 
+/// The owner's git identity for an agent's own commits in a project: the project
+/// repository's `user.name` and `user.email` as the owner's git reads them, with the
+/// owner's home from the engine's `HOME`. Input: the project root. Output: the
+/// identity, or None when the owner set none, so git keeps its own default.
+fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let (name, email) = crate::landing::owner_git_identity(root, &home).ok()?;
+    GitIdentity::new(name, email).ok()
+}
+
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
 /// so the engine's later commits never rely on what the agent may write: a folder directly
 /// in the project's `.git/worktrees` whose `gitdir` file names this worktree. Inputs: the
@@ -3249,6 +3378,9 @@ fn turn(
                 text.push_str(&part);
             }
             Ok(Some(LaunchEvent::TurnError { rate_limited })) => limited |= rate_limited,
+            Ok(Some(LaunchEvent::Usage { tokens })) => {
+                let _ = reports.send(Report::Usage { tokens });
+            }
             Ok(Some(LaunchEvent::Interrupted)) => interrupted = true,
             Ok(Some(LaunchEvent::TurnFinished { success })) => {
                 break if success {

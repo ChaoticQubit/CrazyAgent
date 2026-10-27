@@ -18,9 +18,12 @@ mod intake;
 mod memory;
 mod owner_setup;
 mod plugins;
+mod process;
 mod project_setup;
+mod scheduling;
 mod setup;
 mod team;
+mod usage;
 pub use account_profile::PendingAccountProfile;
 
 impl OwnerController {

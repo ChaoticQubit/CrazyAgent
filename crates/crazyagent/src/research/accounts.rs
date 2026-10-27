@@ -5,6 +5,7 @@ use crate::config::{
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::protocol::CredentialRef;
+use crate::scheduling::{Candidate, Choice};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,6 +68,27 @@ pub fn pick_unpaused(
     signed_in: impl Fn(&ModelConnection) -> bool,
     paused_until: impl Fn(&CredentialRef) -> Option<i64>,
 ) -> AccountPick {
+    pick_scheduled(
+        access,
+        project,
+        harness,
+        signed_in,
+        paused_until,
+        &Choice::default(),
+    )
+}
+
+/// Picks like [`pick_unpaused`] in the order the owner's schedule gives (DEC-096 item
+/// 8): an account the schedule leaves out is skipped, and one held until a known reset
+/// counts as paused until then. Takes the same inputs plus the scheduling choice.
+pub fn pick_scheduled(
+    access: &ModelAccess,
+    project: &str,
+    harness: &str,
+    signed_in: impl Fn(&ModelConnection) -> bool,
+    paused_until: impl Fn(&CredentialRef) -> Option<i64>,
+    choice: &Choice,
+) -> AccountPick {
     let assigned: Vec<_> = access
         .pools
         .iter()
@@ -81,34 +103,54 @@ pub fn pick_unpaused(
         harness,
         &signed_in,
         &paused_until,
+        choice,
     )
 }
 
-/// Picks the first of `members` that `harness` can use and that is not paused, in
-/// order. Takes the model access, the members, the harness id, the signed-in check for
-/// managed connections and the pause lookup. Returns the account, else
-/// [`AccountPick::Paused`] with the earliest end when only paused members fit, else
-/// [`AccountPick::NoUsableAccount`].
+/// Picks the first of `members` that `harness` can use and that is not paused, in the
+/// schedule's order. Takes the model access, the members in pool order, the harness id,
+/// the signed-in check for managed connections, the pause lookup and the scheduling
+/// choice. Returns the account, else [`AccountPick::Paused`] with the earliest end when
+/// only paused or held members fit, else [`AccountPick::NoUsableAccount`].
 fn members_pick<'a>(
     access: &ModelAccess,
     members: impl IntoIterator<Item = &'a CredentialRef>,
     harness: &str,
     signed_in: &impl Fn(&ModelConnection) -> bool,
     paused_until: &impl Fn(&CredentialRef) -> Option<i64>,
+    choice: &Choice,
 ) -> AccountPick {
-    let mut waiting = AccountPick::NoUsableAccount;
+    let mut fitting = Vec::new();
     for member in members {
         let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
             continue;
         };
-        let Some(account) = usable(connection, harness, signed_in) else {
-            continue;
-        };
+        if let Some(account) = usable(connection, harness, signed_in) {
+            fitting.push((connection, account));
+        }
+    }
+    let candidates: Vec<Candidate> = fitting
+        .iter()
+        .map(|(connection, _)| Candidate {
+            connection: connection.id.clone(),
+            load: 0,
+            current: false,
+        })
+        .collect();
+    let order = choice.order(&candidates);
+    let mut waiting = AccountPick::NoUsableAccount;
+    for (_, why) in &order.excluded {
+        if let Some(until_ms) = why.until_ms() {
+            waiting = earlier(waiting, until_ms);
+        }
+    }
+    for index in order.ready {
+        let (connection, account) = &fitting[index];
         match paused_until(&connection.id) {
             None => {
                 return AccountPick::Account {
                     connection: connection.id.clone(),
-                    account: Box::new(account),
+                    account: Box::new(account.clone()),
                 };
             }
             Some(until_ms) => waiting = earlier(waiting, until_ms),
@@ -245,7 +287,24 @@ impl SettingsResolver {
         }
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
-        let pick = pick_unpaused(
+        let pools: Vec<&CredentialRef> = access
+            .pools
+            .iter()
+            .filter(|pool| pool.projects.iter().any(|id| id.as_str() == project))
+            .map(|pool| &pool.id)
+            .collect();
+        let choice = match database.as_ref() {
+            Some(database) => Choice::read(
+                database,
+                &access,
+                Some(project),
+                &pools,
+                crate::team::now_ms(),
+            )
+            .ok()?,
+            None => Choice::default(),
+        };
+        let pick = pick_scheduled(
             &access,
             project,
             harness,
@@ -263,6 +322,7 @@ impl SettingsResolver {
                     .and_then(|database| crate::team::paused_until(database, connection).ok())
                     .flatten()
             },
+            &choice,
         );
         Some((folder, pick))
     }
@@ -284,6 +344,15 @@ impl SettingsResolver {
             return AccountPick::NeedsPool;
         };
         let database = self.engine();
+        let choice = match database.as_ref() {
+            Some(database) => {
+                match Choice::read(database, &access, None, &[pool], crate::team::now_ms()) {
+                    Ok(choice) => choice,
+                    Err(_) => return AccountPick::NeedsPool,
+                }
+            }
+            None => Choice::default(),
+        };
         let signed_in = |connection: &ModelConnection| {
             database
                 .as_ref()
@@ -306,6 +375,7 @@ impl SettingsResolver {
                 harness.id(),
                 &signed_in,
                 &paused_until,
+                &choice,
             ) {
                 pick @ AccountPick::Account { .. } => {
                     assert!(

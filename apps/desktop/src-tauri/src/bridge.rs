@@ -29,10 +29,13 @@ pub mod open;
 mod owner_setup;
 pub mod picker;
 mod plugins;
+mod process;
 pub mod project_setup;
 mod queue;
+mod scheduling;
 mod team;
 pub mod terminal;
+mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
 pub use model_access::{ModelAccessDetail, ModelAccessPage};
@@ -498,9 +501,15 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectReadPaths { project_id, .. } => (
+                "project_read_paths",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::Team { action } => {
                 ("team", Some(action.project().as_str().to_owned()), None)
             }
+            OwnerMutation::AccountSchedule { .. } => ("account_schedule", None, None),
             OwnerMutation::UpdateProjectSetup { project_id, .. } => (
                 "project_setup_update",
                 Some(project_id.as_str().to_owned()),

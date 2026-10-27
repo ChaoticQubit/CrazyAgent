@@ -22,7 +22,9 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::process::PROCESS_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
+pub use transport::usage::USAGE_CODES;
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };
@@ -145,8 +147,15 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         path: String,
     },
+    SetProjectReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
     Team {
         action: crate::team::TeamAction,
+    },
+    AccountSchedule {
+        change: crate::scheduling::ScheduleChange,
     },
     UpdateProjectSetup {
         project_id: ProjectId,
@@ -305,10 +314,24 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
+            Self::SetProjectReadPaths { project_id, paths } => {
+                let action = crate::project_setup::SetupAction::SetReadPaths {
+                    project_id: project_id.clone(),
+                    paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
             Self::Team { action } => {
                 action.validate()?;
                 Command::Team {
                     action: action.clone(),
+                }
+            }
+            Self::AccountSchedule { change } => {
+                change.validate()?;
+                Command::AccountSchedule {
+                    change: change.clone(),
                 }
             }
             Self::UpdateProjectSetup {
@@ -551,6 +574,9 @@ pub enum OwnerRead {
     ProjectSetup {
         project_id: ProjectId,
     },
+    ProjectReadPaths {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -597,6 +623,7 @@ pub enum OwnerRead {
     PoolSummaries {
         offset: u8,
     },
+    AccountSchedule,
     Page {
         view: OwnerView,
         cursor: Option<OwnerPageCursor>,
@@ -652,6 +679,7 @@ impl OwnerRead {
             | Self::ConversationHistory { .. }
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
+            | Self::ProjectReadPaths { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -663,7 +691,8 @@ impl OwnerRead {
             | Self::Onboarding { .. }
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
-            | Self::PoolSummaries { .. } => return Ok(None),
+            | Self::PoolSummaries { .. }
+            | Self::AccountSchedule => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
                 return Ok(None);
@@ -990,6 +1019,10 @@ pub enum OwnerData {
         project_id: ProjectId,
         setup: Option<Box<crate::project_setup::StoredSetup>>,
     },
+    ProjectReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
     ResearchJobs {
         project_id: ProjectId,
         jobs: Vec<crate::project_setup::ResearchJob>,
@@ -1041,6 +1074,9 @@ pub enum OwnerData {
     PoolSummaries {
         pools: Vec<crate::pools::PoolSummary>,
         next_offset: Option<u8>,
+    },
+    AccountSchedule {
+        schedule: crate::scheduling::Schedule,
     },
     Page {
         items: Vec<OwnerSummary>,

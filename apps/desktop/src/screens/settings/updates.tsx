@@ -194,8 +194,8 @@ export function useUpdateWatch(announce: (message: string) => void) {
  * and installs only on the owner's click, restarts, and installs the command line tool. */
 export function UpdatesSettings() {
   const session = useAppSession();
-  const [settings, reload] = useLoad(loadUpdateSettings);
-  const [engine, reloadEngine] = useLoad(engineVersions);
+  const [settings, reload] = useLoad(loadUpdateSettings, [], "update-settings");
+  const [engine, reloadEngine] = useLoad(engineVersions, [], "engine-versions");
   const [engineRestart, restartEngineNow] = useEngineRestart(() => {
     reloadEngine();
     session.showToast("The engine restarted.");

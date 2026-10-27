@@ -159,6 +159,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) cwd: PathBuf,
     pub(crate) worktree_lease: RequestId,
     pub(crate) lease: WorktreeLease,
+    pub(crate) agent_project: crate::agent_home::AgentProject,
 }
 
 impl PreparedMasterTurn {
@@ -1671,16 +1672,75 @@ fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) 
 }
 
 /// Lists the members a turn may try, in order: the one configured RCLI profile, or the
-/// native pool members. Inputs: the settings and the session. Output: each member with
-/// its settings gap and whether the owner chose it, or the RCLI configuration code.
+/// native pool members in the owner's schedule order. Inputs: the transaction, settings
+/// and session. Output: each member with its settings or schedule gap and whether the
+/// owner chose it, or the RCLI configuration code.
 fn candidates<'a>(
+    tx: &Transaction<'_>,
     config: &'a EffectiveConfig,
     session: &MasterSessionView,
 ) -> Result<Vec<Member<'a>>, EngineError> {
     if session.selection.backend == MasterBackend::Rcli {
         return Ok(vec![(configured_connection(config, session)?, None, true)]);
     }
-    Ok(master_members(config, session))
+    scheduled(tx, config, session, master_members(config, session))
+}
+
+/// Orders a native master's pool members by the owner's schedule (DEC-096 item 8): the
+/// strategy order with the owner's chosen member first among equals, then each member
+/// the schedule leaves out, with a gap naming why so a blocked turn lists it.
+/// Inputs: the transaction, settings, session and the members in pool order.
+/// Output: every member exactly once in the order a turn tries them.
+fn scheduled<'a>(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    session: &MasterSessionView,
+    members: Vec<Member<'a>>,
+) -> Result<Vec<Member<'a>>, EngineError> {
+    let Some(access) = config.settings.model_access.as_ref() else {
+        return Ok(members);
+    };
+    let choice = crate::scheduling::Choice::read(
+        tx,
+        access,
+        Some(session.project_id.as_str()),
+        &[&session.selection.pool_ref],
+        signed(now_ms()?)?,
+    )?;
+    let candidates: Vec<_> = members
+        .iter()
+        .map(|(connection, _, chosen)| crate::scheduling::Candidate {
+            connection: connection.id.clone(),
+            load: 0,
+            current: *chosen,
+        })
+        .collect();
+    let order = choice.order(&candidates);
+    let mut slots: Vec<Option<Member<'a>>> = members.into_iter().map(Some).collect();
+    let mut ordered = Vec::with_capacity(slots.len());
+    for index in order.ready {
+        ordered.push(
+            slots[index]
+                .take()
+                .ok_or_else(|| error("master_schedule_order"))?,
+        );
+    }
+    for (index, why) in order.excluded {
+        let (connection, gap, chosen) = slots[index]
+            .take()
+            .ok_or_else(|| error("master_schedule_order"))?;
+        let reason = match why {
+            crate::scheduling::Excluded::NeverUse => MasterReason::ScopeRevoked,
+            _ => MasterReason::QuotaExhausted,
+        };
+        ordered.push((
+            connection,
+            gap.or_else(|| Some((reason, why.code().to_owned()))),
+            chosen,
+        ));
+    }
+    assert_eq!(ordered.len(), candidates.len());
+    Ok(ordered)
 }
 
 /// The target and route a turn's attempt uses on one member: the owner's selection for
@@ -2331,6 +2391,8 @@ fn bundle(
                 .map_err(|problem| EngineError(problem.0))?
         }
     };
+    let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
+        .map_err(|problem| EngineError(problem.0))?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: turn_message(tx, &session, turn)?,
@@ -2343,6 +2405,7 @@ fn bundle(
         cwd: PathBuf::from(&record.lease.path),
         worktree_lease: record.worktree_lease,
         lease: record.lease,
+        agent_project,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -2445,7 +2508,7 @@ fn prepare_turn(
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
     let mut gaps = Vec::new();
-    for (member, gap, chosen) in candidates(config, session)? {
+    for (member, gap, chosen) in candidates(tx, config, session)? {
         let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
             Ok(auth) => auth,
             Err(gap) => {
@@ -2777,7 +2840,7 @@ fn provision_bootstrap(
     }
     let mut gaps = Vec::new();
     let mut ready = None;
-    for (member, gap, chosen) in candidates(config, &session)? {
+    for (member, gap, chosen) in candidates(&tx, config, &session)? {
         match member_auth(&tx, config, host, &session, custody, member, gap)? {
             Ok(auth) => {
                 ready = Some(auth);
@@ -5753,10 +5816,12 @@ fallback_allowed = false
             crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             },
             crate::team::Delegation {
                 harness: Some("claude-code".into()),
                 prompt: "Check the tests".into(),
+                role: None,
             },
         ];
         case.reply_with("I handed the README to a sub-agent.", delegations, 2)
@@ -5807,6 +5872,7 @@ fallback_allowed = false
             vec![crate::team::Delegation {
                 harness: None,
                 prompt: "Write the README".into(),
+                role: None,
             }],
             1,
         )

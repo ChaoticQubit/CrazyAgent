@@ -901,6 +901,7 @@ impl Screen for Home {
             Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
             Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
             Key::Char('m') => Flow::Open(Place::Settings(SettingsSection::Memory)),
+            Key::Char('u') => Flow::Open(Place::Usage),
             Key::Char('r') if matches!(ctx.store.projects, Load::Failed(_)) => {
                 ctx.request(Request::Projects);
                 Flow::Handled

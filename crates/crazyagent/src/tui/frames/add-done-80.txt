@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Settings  /  Accounts  /  Add account  /  Done           
 ────────────────────────────────────────────────────────────────────────────────
-  @ Accounts  ⊞ Pools  ❯ Harnesses  ✦ Plugins and skills  ⁂ Memory  ◉ Profile   
-──━━━━━━━━━━────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+──━━━━━━━━──────────────────────────────────────────────────────────────────────
   ✓ Signed in                                                                   
                                                                                 
   Signed in as mira@studio-kiln.dev (ChatGPT Pro).                              

@@ -208,6 +208,7 @@ enum Picked {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Action {
+    Read,
     Approve,
     NotNow,
     Toggle,
@@ -307,7 +308,9 @@ impl Plugins {
 
     fn actions(&self) -> Vec<Action> {
         match self.picked() {
-            Some(Picked::Skill(_)) => vec![Action::Toggle, Action::Remove, Action::Close],
+            Some(Picked::Skill(_)) => {
+                vec![Action::Read, Action::Toggle, Action::Remove, Action::Close]
+            }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let mut actions = Vec::new();
@@ -332,6 +335,7 @@ impl Plugins {
             None => false,
         };
         match action {
+            Action::Read => "Read SKILL.md",
             Action::Approve => "Approve",
             Action::NotNow => "Not now",
             Action::Toggle if on => "Turn off",
@@ -789,6 +793,14 @@ impl Plugins {
                 }
                 Key::Enter => {
                     let action = self.actions().get(focus).copied().unwrap_or(Action::Close);
+                    if let (Action::Read, Some(Picked::Skill(index))) = (action, self.picked()) {
+                        self.open = Open::None;
+                        let skill = &self.skills[index];
+                        return Flow::Replace(Box::new(SkillDetailPage::new(
+                            skill.id.clone(),
+                            skill.name.clone(),
+                        )));
+                    }
                     if let (Action::Edit, Some(Picked::Server(index))) = (action, self.picked()) {
                         self.open = Open::None;
                         let server = self.servers[index].clone();
@@ -814,6 +826,7 @@ impl Screen for Plugins {
             hint("m", "Add MCP server"),
             hint("Space", "On or off"),
             hint("Enter", "Details"),
+            hint("i", "Import"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
         ]
@@ -826,6 +839,7 @@ impl Screen for Plugins {
         let count = self.count();
         match key {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
+            Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
             Key::Char('m') => return Flow::Replace(Box::new(AddPlugin::server())),
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
@@ -1882,6 +1896,11 @@ impl Screen for EditServer {
         Some(place_of(self.project.as_ref()))
     }
 }
+
+mod import_page;
+mod skill_detail;
+pub use import_page::ImportSkillsPage;
+pub use skill_detail::SkillDetailPage;
 
 #[cfg(test)]
 mod tests;

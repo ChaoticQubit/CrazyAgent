@@ -6,6 +6,8 @@ use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use crate::sandbox::toolchains::{self, ToolHomes};
+use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -92,7 +94,7 @@ const CLAUDE_COMMON: [&str; 12] = [
     "--setting-sources",
     "",
     "--settings",
-    "{\"disableAllHooks\":true}",
+    "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
     "--no-session-persistence",
 ];
 
@@ -199,8 +201,9 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile and limits.
-/// Every launch is refused unless a sandbox profile is given.
+/// account, optional model, tools switch, the project sandbox profile, the owner's git
+/// identity for the agent's own commits and limits. Every launch is refused unless a
+/// sandbox profile is given.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -210,7 +213,47 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     pub tools: bool,
     pub sandbox_profile: Option<PathBuf>,
+    pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+}
+
+const GIT_IDENTITY_BYTES_MAX: usize = 256;
+
+/// The git author and committer an agent's own commits carry: the owner's `user.name`
+/// and `user.email`, each non-empty, at most 256 bytes and free of control characters
+/// and angle brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitIdentity {
+    name: String,
+    email: String,
+}
+
+impl GitIdentity {
+    /// Checks an identity. Inputs: the name and email. Output: the identity, or
+    /// `launch_git_identity_invalid`.
+    pub fn new(name: String, email: String) -> Result<Self, LaunchError> {
+        let valid = |value: &str| {
+            !value.trim().is_empty()
+                && value.len() <= GIT_IDENTITY_BYTES_MAX
+                && !value
+                    .chars()
+                    .any(|c| c.is_control() || c == '<' || c == '>')
+        };
+        if !valid(&name) || !valid(&email) {
+            return Err(failure("launch_git_identity_invalid"));
+        }
+        Ok(Self { name, email })
+    }
+
+    /// The variables that make git author and commit as this identity.
+    pub(crate) fn variables(&self) -> [(&'static str, &str); 4] {
+        [
+            ("GIT_AUTHOR_NAME", &self.name),
+            ("GIT_AUTHOR_EMAIL", &self.email),
+            ("GIT_COMMITTER_NAME", &self.name),
+            ("GIT_COMMITTER_EMAIL", &self.email),
+        ]
+    }
 }
 
 /// One event in the stream every launch adapter produces, whatever the harness.
@@ -223,6 +266,7 @@ pub enum LaunchEvent {
     ApprovalDenied,
     Interrupted,
     TurnFinished { success: bool },
+    Usage { tokens: Tokens },
     TurnError { rate_limited: bool },
     Exited { code: Option<i32> },
     LateOutput { lines: u64 },
@@ -377,21 +421,37 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = if request.tools {
-        TOOLS_ON_PATH
+        toolchains::agent_path(&homes, TOOLS_ON_PATH)
     } else {
-        TOOLS_OFF_PATH
+        TOOLS_OFF_PATH.to_owned()
     };
+    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tools = if request.tools {
+        toolchains::agent_env(home, &homes)
+    } else {
+        Vec::new()
+    };
+    let mut base = vec![
+        ("HOME", home.as_os_str()),
+        ("TMPDIR", tmp.as_os_str()),
+        ("PATH", OsStr::new(&path)),
+        ("LANG", OsStr::new("C")),
+        ("LC_ALL", OsStr::new("C")),
+    ];
+    base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
+    if let Some(identity) = &request.git_identity {
+        base.extend(
+            identity
+                .variables()
+                .map(|(name, value)| (name, OsStr::new(value))),
+        );
+    }
     let mut command = crate::sandbox::agent_command(
         profile,
         &request.executable,
-        &[
-            ("HOME", home.as_os_str()),
-            ("TMPDIR", home.as_os_str()),
-            ("PATH", OsStr::new(path)),
-            ("LANG", OsStr::new("C")),
-            ("LC_ALL", OsStr::new("C")),
-        ],
+        &base,
         environment
             .iter()
             .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
@@ -934,8 +994,12 @@ impl Driver {
                                     status: RateLimitStatus::Rejected,
                                     ..
                                 } => events.push(LaunchEvent::TurnError { rate_limited: true }),
-                                EventKind::TurnFinished { outcome, .. } => {
+                                EventKind::TurnFinished { outcome, usage, .. } => {
                                     *interrupt = None;
+                                    let tokens = Tokens::reported(&usage);
+                                    if !tokens.is_empty() {
+                                        events.push(LaunchEvent::Usage { tokens });
+                                    }
                                     events.push(LaunchEvent::TurnFinished {
                                         success: outcome == TurnOutcome::Success,
                                     });

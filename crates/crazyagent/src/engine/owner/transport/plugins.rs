@@ -10,6 +10,9 @@ const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
 const CHECK_FOLDER: &str = "mcp-checks";
+const IMPORT_FOLDER: &str = "skill-imports";
+const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +21,11 @@ enum Action {
     Skills {
         project: Option<ProjectId>,
         offset: u16,
+    },
+    SkillDetail {
+        id: String,
+        project: Option<ProjectId>,
+        offset: u32,
     },
     Servers {
         project: Option<ProjectId>,
@@ -29,6 +37,11 @@ enum Action {
     AddSkill {
         scope: Scope,
         folder: String,
+    },
+    ImportScan,
+    ImportSkill {
+        folder: String,
+        replace: Option<String>,
     },
     SetSkill {
         id: String,
@@ -102,13 +115,34 @@ pub struct ServerPage {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Skills { page: SkillPage },
-    Servers { page: ServerPage },
-    Skill { skill: SkillView },
-    Server { server: ServerView },
+    Skills {
+        page: SkillPage,
+    },
+    SkillDetail {
+        page: crate::skills::SkillPage,
+    },
+    Servers {
+        page: ServerPage,
+    },
+    Skill {
+        skill: SkillView,
+    },
+    ImportScan {
+        list: crate::skills::import::ImportList,
+    },
+    Imported {
+        imported: crate::skills::import::Imported,
+    },
+    Server {
+        server: ServerView,
+    },
     Done,
-    Effective { plugins: EffectivePlugins },
-    Rejected { code: String },
+    Effective {
+        plugins: EffectivePlugins,
+    },
+    Rejected {
+        code: String,
+    },
 }
 
 fn unknown() -> EngineError {
@@ -133,6 +167,7 @@ impl Action {
     fn validate(&self) -> Result<(), EngineError> {
         let id = match self {
             Self::Server { id }
+            | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
             | Self::RemoveSkill { id }
             | Self::UpdateServer { id, .. }
@@ -149,9 +184,14 @@ impl Action {
             return Err(failure("plugin_not_found"));
         }
         match self {
-            Self::AddSkill { folder, .. } if !valid_folder(folder) => {
+            Self::AddSkill { folder, .. } | Self::ImportSkill { folder, .. }
+                if !valid_folder(folder) =>
+            {
                 Err(failure("skill_folder_not_found"))
             }
+            Self::ImportSkill {
+                replace: Some(id), ..
+            } if !valid_id(id) => Err(failure("plugin_not_found")),
             Self::AddServer { name, spec, .. } => {
                 crate::plugins::validate_server_name(name)?;
                 spec.validate()
@@ -183,6 +223,34 @@ impl OwnerClient {
         }
     }
 
+    /// Reads one page of a skill's detail view. Inputs: the skill id, a project to include
+    /// that project's switch (or none for global settings) and the SKILL.md byte offset, 0
+    /// first and then each page's `next`. Output: the skill, that part of its SKILL.md, the
+    /// next offset and on the first page its files; `skill_not_found` for a skill the project
+    /// does not see.
+    pub async fn skill_page(
+        &self,
+        id: String,
+        project: Option<ProjectId>,
+        offset: u32,
+    ) -> Result<crate::skills::SkillPage, EngineError> {
+        match self
+            .plugins_exchange(
+                Action::SkillDetail {
+                    id,
+                    project,
+                    offset,
+                },
+                None,
+                self.timeout,
+            )
+            .await?
+        {
+            Reply::SkillDetail { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Reads one page of MCP servers, with the same inputs as `plugin_skills`.
     /// Output: servers with how they run, plain status, secrets as saved names and tools.
     pub async fn plugin_servers(
@@ -208,6 +276,43 @@ impl OwnerClient {
     /// store. Inputs: global or project scope and the absolute folder path. Output: the skill.
     pub async fn add_skill(&self, scope: Scope, folder: String) -> Result<SkillView, EngineError> {
         self.skill_reply(Action::AddSkill { scope, folder }).await
+    }
+
+    /// Looks for skills in the owner's `~/.claude/skills` and `~/.codex/skills` folders,
+    /// read only now. Output: each skill found with its name, one-line description, folder
+    /// and whether the app already has it, the same or with different files.
+    pub async fn skill_import_scan(
+        &self,
+    ) -> Result<crate::skills::import::ImportList, EngineError> {
+        match self
+            .plugins_exchange(Action::ImportScan, None, self.timeout.max(IMPORT_TIMEOUT))
+            .await?
+        {
+            Reply::ImportScan { list } => Ok(list),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Imports one found skill into the app's skills for every project, turned on, leaving
+    /// out dotfiles and credential-like files and never changing the source. Inputs: the
+    /// absolute folder and, for a skill the app has with different files, its id to replace
+    /// in place keeping its project switches. Output: the skill and the paths left out.
+    pub async fn import_skill(
+        &self,
+        folder: String,
+        replace: Option<String>,
+    ) -> Result<crate::skills::import::Imported, EngineError> {
+        match self
+            .plugins_exchange(
+                Action::ImportSkill { folder, replace },
+                None,
+                self.timeout.max(IMPORT_TIMEOUT),
+            )
+            .await?
+        {
+            Reply::Imported { imported } => Ok(imported),
+            _ => Err(unknown()),
+        }
     }
 
     /// Turns a skill on or off where it was added. Inputs: skill id and the new state.
@@ -550,6 +655,29 @@ async fn handle(
                 page: SkillPage { skills, next },
             }
         }
+        Action::SkillDetail {
+            id,
+            project,
+            offset,
+        } => {
+            let ResultValue::Skill(skill) = actor(engine, Command::Skill { id, project }).await?
+            else {
+                return Err(unknown());
+            };
+            let store = engine_root(authority)?.join(crate::storage::plugins::STORE);
+            let folder = PathBuf::from(&skill.view.folder);
+            let inside = folder.starts_with(&store)
+                && !folder
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir));
+            if !inside {
+                return Err(failure("plugin_store_unsafe"));
+            }
+            let page = tokio::task::spawn_blocking(move || crate::skills::page(skill.view, offset))
+                .await
+                .map_err(|_| unknown())??;
+            Reply::SkillDetail { page }
+        }
         Action::Servers { project, offset } => {
             let ResultValue::Servers(servers, next) =
                 actor(engine, Command::Servers { project, offset }).await?
@@ -574,6 +702,61 @@ async fn handle(
                 return Err(unknown());
             };
             Reply::Skill { skill: skill.view }
+        }
+        Action::ImportScan => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute())
+                .ok_or_else(|| failure("skill_import_home_unknown"))?;
+            let mut added = Vec::new();
+            let mut offset = 0;
+            for page in 0.. {
+                assert!(page < CATALOG_PAGES_MAX, "the global skill list is bounded");
+                let ResultValue::Skills(skills, next) = actor(
+                    engine,
+                    Command::Skills {
+                        project: None,
+                        offset,
+                    },
+                )
+                .await?
+                else {
+                    return Err(unknown());
+                };
+                added.extend(skills);
+                match next {
+                    Some(next) => offset = next,
+                    None => break,
+                }
+            }
+            let root = engine_root(authority)?;
+            let list = tokio::task::spawn_blocking(move || {
+                let scratch = crate::storage::plugins::store_folder(&root, &[IMPORT_FOLDER])?;
+                crate::skills::import::scan(&home, &added, &scratch)
+            })
+            .await
+            .map_err(|_| unknown())??;
+            Reply::ImportScan { list }
+        }
+        Action::ImportSkill { folder, replace } => {
+            let ResultValue::Imported(skill, skipped, total) = actor(
+                engine,
+                Command::ImportSkill {
+                    source: folder,
+                    replace,
+                },
+            )
+            .await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Imported {
+                imported: crate::skills::import::Imported {
+                    skill: skill.view,
+                    skipped,
+                    skipped_total: u32::try_from(total).map_err(|_| unknown())?,
+                },
+            }
         }
         Action::SetSkill { id, enabled } => {
             let ResultValue::Skill(skill) =

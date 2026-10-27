@@ -136,12 +136,17 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::TeamChange { .. } => "team change",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
+                        SetupQuery::ReadPaths { .. } => "read paths",
                     });
                     connection.project_setup(query).unwrap();
                 }
                 Request::Changes(query) => {
                     sent.push("changes");
                     connection.changes(*query).unwrap();
+                }
+                Request::TeamGraph { project } => {
+                    sent.push("team graph");
+                    connection.team_graph(project).unwrap();
                 }
                 other => panic!("project pages never send {other:?}"),
             }
@@ -524,6 +529,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                     | Request::PoolProjects
                     | Request::Master(_)
                     | Request::Changes(_)
+                    | Request::TeamGraph { .. }
                     | Request::Setup(
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
