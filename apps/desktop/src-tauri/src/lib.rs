@@ -36,6 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::scheduling::{Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::{TeamGraph, TeamStatus};
 use crazyagent::terminal::TerminalRequest;
@@ -579,6 +580,31 @@ async fn desktop_remember_research(
 }
 
 #[tauri::command]
+async fn desktop_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_read_paths(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_read_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paths: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_read_paths(&id, paths, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_delete_project_context(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -713,6 +739,22 @@ async fn desktop_team_wake_rule(
     lock(&state)
         .await?
         .team_wake_rule(target, rule, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_rename(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    handle: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_rename(&id, agent, handle, generation)
         .await
 }
 
@@ -1384,6 +1426,29 @@ async fn desktop_pool_summaries(
 }
 
 #[tauri::command]
+async fn desktop_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Schedule, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.account_schedule().await
+}
+
+#[tauri::command]
+async fn desktop_set_account_schedule(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    change: ScheduleChange,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_account_schedule(change, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_account_catalog(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1495,6 +1560,37 @@ async fn desktop_set_skill_enabled(
 ) -> Result<SkillView, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.set_skill_enabled(id, enabled).await
+}
+
+#[tauri::command]
+async fn desktop_skill_detail(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    project_id: Option<String>,
+) -> Result<crazyagent::skills::SkillDetail, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_detail(id, project_id).await
+}
+
+#[tauri::command]
+async fn desktop_skill_import_scan(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.skill_import_scan().await
+}
+
+#[tauri::command]
+async fn desktop_import_skill(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    folder: String,
+    replace: Option<String>,
+) -> Result<crazyagent::skills::import::Imported, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.import_skill(folder, replace).await
 }
 
 #[tauri::command]
@@ -1761,9 +1857,12 @@ async fn desktop_accept_change(
     state: State<'_, NativeState>,
     id: String,
     expected_head: String,
+    message: Option<String>,
 ) -> Result<AcceptOutcome, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.accept_change(id, expected_head)?;
+    let call = lock(&state)
+        .await?
+        .accept_change(id, expected_head, message)?;
     call.await
 }
 
@@ -1798,6 +1897,49 @@ async fn desktop_update_change(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.update_change(id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_process_text(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.process_text(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_process_text(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    text: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.save_process_text(project_id, text)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_import_global_instructions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.import_global_instructions()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_default_process(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<String, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.default_process()?;
     call.await
 }
 
@@ -2057,6 +2199,8 @@ pub fn run() {
             desktop_save_research_to_memory,
             desktop_add_project_documents,
             desktop_delete_project_context,
+            desktop_project_read_paths,
+            desktop_set_project_read_paths,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
@@ -2064,6 +2208,7 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_pause,
             desktop_team_hand_off,
+            desktop_team_rename,
             desktop_team_graph,
             desktop_team_events,
             desktop_team_wake_rule,
@@ -2139,6 +2284,8 @@ pub fn run() {
             desktop_owner_profile,
             desktop_save_owner_profile,
             desktop_pool_summaries,
+            desktop_account_schedule,
+            desktop_set_account_schedule,
             desktop_account_catalog,
             desktop_list_accounts,
             desktop_add_account,
@@ -2151,6 +2298,9 @@ pub fn run() {
             desktop_add_skill,
             desktop_set_skill_enabled,
             desktop_remove_skill,
+            desktop_skill_detail,
+            desktop_skill_import_scan,
+            desktop_import_skill,
             desktop_add_mcp_server,
             desktop_update_mcp_server,
             desktop_approve_mcp_server,
@@ -2173,6 +2323,10 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_process_text,
+            desktop_save_process_text,
+            desktop_import_global_instructions,
+            desktop_default_process,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

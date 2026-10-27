@@ -15,6 +15,7 @@ fn claude_driver() -> Driver {
         model: None,
         tools: false,
         sandbox_profile: None,
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     let (mut driver, startup) = Driver::new(&request).unwrap();
@@ -210,6 +211,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
             model: None,
             tools: true,
             sandbox_profile: Some(profile),
+            git_identity: None,
             limits: LaunchLimits::default(),
         },
         work,
@@ -415,6 +417,7 @@ fn codex_driver_in_a_turn() -> Driver {
         model: None,
         tools: false,
         sandbox_profile: None,
+        git_identity: None,
         limits: LaunchLimits::default(),
     };
     let (mut driver, startup) = Driver::new(&request).unwrap();
@@ -484,5 +487,96 @@ fn a_team_codex_agent_interrupts_a_codex_native_sub_agent_and_finishes_its_turn(
         events
             .iter()
             .any(|event| matches!(event, LaunchEvent::TurnFinished { success: true }))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_off() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+    let directory = tempfile::Builder::new()
+        .prefix("ca-identity-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [repo, owner, home, work] = ["repo", "owner", "home", "work"].map(|name| base.join(name));
+    for folder in [&repo, &owner, &home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(
+        owner.join(".gitconfig"),
+        "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
+    )
+    .unwrap();
+    let initialized = crate::spawn_gate::status(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("HOME", &owner)
+            .args(["init", "-q", "--template="])
+            .arg(&repo),
+    )
+    .unwrap();
+    assert!(initialized.success());
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let (name, email) = crate::landing::owner_git_identity(&repo, &owner).unwrap();
+    assert!(super::GitIdentity::new("Bad <name>".into(), email.clone()).is_err());
+    assert!(super::GitIdentity::new(name.clone(), "two\nlines".into()).is_err());
+    assert!(super::GitIdentity::new(" ".into(), email.clone()).is_err());
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: work.clone(),
+        account: AccountBinding::Subscription { home },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        git_identity: Some(super::GitIdentity::new(name, email).unwrap()),
+        limits: LaunchLimits::default(),
+    };
+    let command = super::command(&request).unwrap();
+    let arguments: Vec<String> = command
+        .get_args()
+        .map(|argument| argument.to_str().unwrap().to_owned())
+        .collect();
+    let at = arguments
+        .iter()
+        .position(|argument| argument == "--settings")
+        .unwrap();
+    let settings: Value = serde_json::from_str(&arguments[at + 1]).unwrap();
+    assert_eq!(settings["attribution"], json!({"commit": "", "pr": ""}));
+    assert_eq!(settings["includeCoAuthoredBy"], json!(false));
+    let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = command
+        .get_envs()
+        .filter_map(|(name, value)| Some((name.to_owned(), value?.to_owned())))
+        .collect();
+    let git = |args: &[&str]| -> String {
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .envs(env.iter().map(|(name, value)| (name, value)))
+                .current_dir(&work)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q", "--template="]);
+    std::fs::write(work.join("file.txt"), "agent work\n").unwrap();
+    git(&["add", "file.txt"]);
+    git(&["commit", "-q", "-m", "Agent work"]);
+    assert_eq!(
+        git(&["log", "-1", "--format=%an|%ae|%cn|%ce"]),
+        "Repo Owner|owner@example.invalid|Repo Owner|owner@example.invalid\n"
     );
 }

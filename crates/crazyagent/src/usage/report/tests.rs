@@ -42,9 +42,9 @@ fn who(
 ) -> Attribution {
     Attribution {
         kind,
-        project: crate::protocol::ProjectId::new(project).unwrap(),
+        project: Some(crate::protocol::ProjectId::new(project).unwrap()),
         pool: pool.map(|pool| CredentialRef::new(pool).unwrap()),
-        account: CredentialRef::new(account).unwrap(),
+        account: Some(CredentialRef::new(account).unwrap()),
         agent: agent.into(),
         harness: "claude-code".into(),
     }
@@ -213,4 +213,39 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         report(&db, Some(MIDNIGHT + 1), 0, MIDNIGHT).unwrap_err().0,
         "usage_request_invalid"
     );
+}
+
+#[test]
+fn runs_tied_to_no_project_or_account_show_as_unattributed_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    append(&home.path().join("projects/f/u.jsonl"), &line("u", 9, 2));
+    let lost = Attribution {
+        kind: RunKind::Research,
+        project: None,
+        pool: None,
+        account: None,
+        agent: "onboarding".into(),
+        harness: "claude-code".into(),
+    };
+    scan_home(&db, home.path(), Format::Claude, &lost, MIDNIGHT).unwrap();
+    let all = report(&db, None, 0, MIDNIGHT + HOUR).unwrap();
+    assert_eq!(all.total.input, 9);
+    assert_eq!(
+        all.projects
+            .iter()
+            .map(|r| (r.key.as_str(), r.tokens.input))
+            .collect::<Vec<_>>(),
+        vec![("", 9)]
+    );
+    assert_eq!(
+        all.accounts
+            .iter()
+            .map(|r| (r.key.as_str(), r.tokens.input))
+            .collect::<Vec<_>>(),
+        vec![("", 9)]
+    );
+    assert!(all.pools.is_empty());
+    assert_eq!(all.agents[0].key, "onboarding");
 }

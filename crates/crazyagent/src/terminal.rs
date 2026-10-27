@@ -135,7 +135,9 @@ pub struct PaneRef {
 }
 
 /// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
-/// `screen` redraws the whole current screen in a fresh terminal of `cols` by `rows`.
+/// `history`, written first, puts the terminal's earlier rows into a fresh view's scrollback
+/// and is empty when the host keeps none; `screen` then redraws the whole current screen in a
+/// fresh terminal of `cols` by `rows`.
 /// `next` gives each later output chunk in order and none once the terminal ends.
 /// A viewer that falls more than `VIEWER_BUFFER_BYTES_MAX` behind loses the oldest output and
 /// reads one `buffer::skipped_marker` chunk in its place.
@@ -144,6 +146,7 @@ pub struct TerminalStream {
     pub agent: AgentId,
     pub cols: u16,
     pub rows: u16,
+    pub history: Vec<u8>,
     pub screen: Vec<u8>,
     pub(crate) chunks: buffer::Chunks,
 }

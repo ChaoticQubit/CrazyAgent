@@ -311,6 +311,7 @@ fn send(
         }
         Request::Intake(job) => connection.intake(*job),
         Request::Changes(query) => connection.changes(*query),
+        Request::Process(query) => connection.process(*query),
         Request::Reconnect => connection.reconnect(),
     };
     result.map_err(TuiError)

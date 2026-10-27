@@ -503,10 +503,12 @@ fn one_line(text: &str, max: usize) -> String {
     bound_text(&joined, max)
 }
 
-/// Names an agent the way events and the master address it until persona names land.
-/// Takes the harness and the team agent id. Returns `<harness>-<id>`.
-pub fn label(harness: &str, agent: i64) -> String {
-    format!("{harness}-{agent}")
+/// Names a sub-agent the way events, the master and every client show it: "Ada
+/// (@onboarding-fix)", "Ada" before its first job, or "Sub-agent 7" without a kept name.
+/// Takes the connection and the team agent id. Returns the label.
+pub fn label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
+    let name = super::names::name(connection, agent)?;
+    Ok(super::names::label(AgentRole::Sub, agent, name.as_ref()))
 }
 
 /// Records one event about a project's sub-agent in the queue for the master: the text
@@ -735,19 +737,40 @@ pub fn questions(
         .map_err(error)
 }
 
-/// Finds the project's sub-agent a master names: `<harness>-<id>` as events show it,
-/// `team-<id>` or the bare id. Takes the connection, the project and the name.
+const SUB_AGENT_PREFIX: &str = "Sub-agent ";
+
+/// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
+/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`.
+/// Takes the connection, the project and the name.
 /// Returns the team agent id, or none for an unknown name, another project's agent or a master.
 pub fn resolve(
     connection: &Connection,
     project: &ProjectId,
     name: &str,
 ) -> Result<Option<i64>, EngineError> {
-    let name = name.trim().trim_start_matches('@');
-    let (prefix, digits) = match name.rsplit_once('-') {
-        Some((prefix, digits)) => (Some(prefix), digits),
-        None => (None, name),
-    };
+    let name = name.trim();
+    if let Some(agent) = super::names::resolve(connection, project, name)? {
+        let sub: bool = connection
+            .query_row(
+                "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if sub {
+            return Ok(Some(agent));
+        }
+    }
+    let name = name.trim_start_matches('@');
+    let numbered = name
+        .get(..SUB_AGENT_PREFIX.len())
+        .filter(|head| head.eq_ignore_ascii_case(SUB_AGENT_PREFIX))
+        .map(|_| &name[SUB_AGENT_PREFIX.len()..]);
+    let (prefix, digits) =
+        match numbered.map_or_else(|| name.rsplit_once('-'), |digits| Some(("team", digits))) {
+            Some((prefix, digits)) => (Some(prefix), digits),
+            None => (None, name),
+        };
     let Ok(agent) = digits.parse::<i64>() else {
         return Ok(None);
     };
@@ -916,18 +939,6 @@ pub fn seen(
         .map_err(error)
 }
 
-fn agent_label(connection: &Connection, agent: i64) -> Result<String, EngineError> {
-    let harness: Option<String> = connection
-        .query_row(
-            "SELECT harness FROM team_agents WHERE id=?1",
-            [agent],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    Ok(label(harness.as_deref().unwrap_or("agent"), agent))
-}
-
 fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamEvent> {
     let kind: String = row.get(3)?;
     let state: String = row.get(5)?;
@@ -938,7 +949,7 @@ fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Resu
     Ok(TeamEvent {
         id: row.get(0)?,
         agent,
-        label: agent_label(connection, agent).unwrap_or_else(|_| label("agent", agent)),
+        label: label(connection, agent).map_err(|_| invalid("agent"))?,
         task: row.get(2)?,
         kind: EventKind::parse(&kind).ok_or_else(|| invalid("kind"))?,
         text: row.get(4)?,
@@ -998,22 +1009,22 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
-    let agents = rows
-        .into_iter()
-        .filter_map(|(agent, harness, status, task, prompt)| {
-            let status = AgentStatus::parse(&status)?;
-            Some(AgentLine {
-                agent,
-                label: label(&harness, agent),
-                harness,
-                status,
-                status_label: status.label().to_owned(),
-                task,
-                task_prompt: prompt.map(|prompt| one_line(&prompt, TASK_EXCERPT_BYTES_MAX)),
-                waiting: waiting.get(&agent).cloned(),
-            })
-        })
-        .collect();
+    let mut agents = Vec::with_capacity(rows.len());
+    for (agent, harness, status, task, prompt) in rows {
+        let Some(status) = AgentStatus::parse(&status) else {
+            continue;
+        };
+        agents.push(AgentLine {
+            agent,
+            label: label(connection, agent)?,
+            harness,
+            status,
+            status_label: status.label().to_owned(),
+            task,
+            task_prompt: prompt.map(|prompt| one_line(&prompt, TASK_EXCERPT_BYTES_MAX)),
+            waiting: waiting.get(&agent).cloned(),
+        });
+    }
     let paused: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM team_event_pauses WHERE project=?1)",
@@ -1360,7 +1371,7 @@ fn pause(
     let whose = if agent == 0 {
         format!("project {}", project.as_str())
     } else {
-        agent_label(tx, agent)?
+        label(tx, agent)?
     };
     let text = format!(
         "Auto-wake of the master for {whose} paused after {cap} wakes in the last hour. Events wait in the queue until the hour rolls over or you raise the limit."

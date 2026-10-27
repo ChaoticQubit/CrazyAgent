@@ -6,6 +6,7 @@ import {
   Button, CapacityMeter, ConfirmDialog, EmptyState, LoadError, Menu, Notice, NotReady, Panel, ProviderMark, SearchField, Select, Skeleton,
   StatusBadge, TextField, WindowedList, navigate, Checkbox,
 } from "../../ui";
+import { AccountChoice } from "./account-choice";
 import { andList } from "./account-drawer";
 import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
@@ -327,6 +328,7 @@ export function Pools({ creating }: { creating: boolean }) {
     {refusal && <Notice tone="danger" alert><span className="grow">{refusal}</span></Notice>}
     <PoolsView pools={pools} onNew={() => setEditing({})} onEdit={(pool) => setEditing({ id: pool.id, opened: { name: pool.name, members: pool.members.map((member) => member.id) } })}
       onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} />
+    {pools.kind === "ok" && pools.value.length > 0 && <AccountChoice pools={pools} accounts={accounts} />}
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
       {copy?.body}

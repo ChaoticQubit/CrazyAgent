@@ -68,8 +68,20 @@ pub(in crate::tui) enum SettingsJob {
     ProjectPlugins {
         project: ProjectId,
     },
+    SkillDetail {
+        id: String,
+    },
+    ImportScan,
+    ImportSkills {
+        picks: Vec<(String, Option<String>)>,
+    },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
+    Schedule,
+    SetSchedule {
+        change: crate::scheduling::ScheduleChange,
+        generation: u64,
+    },
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -144,8 +156,13 @@ impl std::fmt::Debug for SettingsJob {
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
             Self::ProjectPlugins { .. } => "ProjectPlugins",
+            Self::SkillDetail { .. } => "SkillDetail",
+            Self::ImportScan => "ImportScan",
+            Self::ImportSkills { .. } => "ImportSkills",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
+            Self::Schedule => "Schedule",
+            Self::SetSchedule { .. } => "SetSchedule",
         })
     }
 }
@@ -226,6 +243,10 @@ impl std::fmt::Debug for SignInView {
 }
 
 /// The engine's reply to one Settings job.
+/// Each ticked folder with its imported skill or the plain problem code, in order.
+pub(in crate::tui) type ImportOutcomes =
+    Vec<(String, Result<crate::skills::import::Imported, String>)>;
+
 /// Input: produced on the owner worker. Output: read by the settings screens.
 pub(in crate::tui) enum SettingsEvent {
     Accounts(Result<AccountsReply, String>),
@@ -242,8 +263,13 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
+    SkillDetail(Result<crate::skills::SkillDetail, String>),
+    ImportScan(Result<crate::skills::import::ImportList, String>),
+    Imported(Result<ImportOutcomes, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
+    Schedule(Result<crate::scheduling::Schedule, String>),
+    ScheduleSet(Result<(), String>),
 }
 
 impl SettingsEvent {
@@ -270,8 +296,13 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
+            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
+            SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
+            SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
+            SettingsJob::Schedule => Self::Schedule(Err(problem)),
+            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
         }
     }
 }
@@ -410,10 +441,61 @@ impl NativeOwner {
                 project.clone(),
                 self.plugins(Some(project), lost).await,
             ),
+            SettingsJob::SkillDetail { id } => {
+                SettingsEvent::SkillDetail(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_detail(id, None)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ImportScan => {
+                SettingsEvent::ImportScan(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .skill_import_scan()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ImportSkills { picks } => {
+                SettingsEvent::Imported(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .import_skills(picks)
+                        .await
+                        .map(|done| {
+                            done.into_iter()
+                                .map(|(folder, result)| {
+                                    (folder, result.map_err(|code| bounded_problem(&code)))
+                                })
+                                .collect()
+                        })
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
+            SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
+                Ok(controller) => controller
+                    .account_schedule()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::SetSchedule { change, generation } => {
+                SettingsEvent::ScheduleSet(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.set_account_schedule(change, generation).await,
+                        "account_schedule_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::AddMemory {
                 scope,
                 text,
@@ -1544,6 +1626,22 @@ mod tests {
         };
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].on_here, None, "Settings shows no project switch");
+        assert_eq!(skills[0].line, "Teaches release notes.");
+        match native
+            .settings(SettingsJob::SkillDetail {
+                id: skills[0].id.clone(),
+            })
+            .await
+        {
+            SettingsEvent::SkillDetail(Ok(detail)) => {
+                assert_eq!(detail.skill.id, skills[0].id);
+                assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
+                let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
+                assert_eq!(files, vec!["SKILL.md"]);
+            }
+            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            _ => panic!("a skill detail reply required"),
+        }
 
         let switched = native
             .settings(SettingsJob::Plugin(PluginChange::Switch {
@@ -1561,6 +1659,33 @@ mod tests {
                 .await,
         );
         assert_eq!(here, vec![("release-notes".to_owned(), Some(false))]);
+
+        let found = root.path().join("home/.claude/skills/zeta");
+        std::fs::create_dir_all(&found).unwrap();
+        std::fs::write(
+            found.join("SKILL.md"),
+            "---\nname: zeta\ndescription: Zeta steps.\n---\n",
+        )
+        .unwrap();
+        std::fs::write(found.join("deploy.pem"), "dummy").unwrap();
+        let folder = found.display().to_string();
+        match native
+            .settings(SettingsJob::ImportSkills {
+                picks: vec![(folder.clone(), None), (folder.clone(), None)],
+            })
+            .await
+        {
+            SettingsEvent::Imported(Ok(done)) => {
+                assert_eq!(done.len(), 2);
+                let first = done[0].1.as_ref().unwrap();
+                assert_eq!(first.skill.name, "zeta");
+                assert!(first.skill.enabled);
+                assert_eq!(first.skipped, vec!["deploy.pem"]);
+                assert_eq!(done[1].1.as_ref().unwrap_err(), "skill_name_taken");
+            }
+            SettingsEvent::Imported(Err(code)) => panic!("import failed: {code}"),
+            _ => panic!("an import reply required"),
+        }
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

@@ -74,19 +74,24 @@ fn tokens(row: &rusqlite::Row<'_>, first: usize) -> rusqlite::Result<Tokens> {
     })
 }
 
-fn rows(db: &Connection, column: &str, since_ms: i64) -> Result<Vec<UsageRow>, EngineError> {
+fn rows(
+    db: &Connection,
+    column: &str,
+    unattributed: bool,
+    since_ms: i64,
+) -> Result<Vec<UsageRow>, EngineError> {
     let mut statement = db
         .prepare(&format!(
             "SELECT {column},SUM(input),SUM(output),SUM(cache_read),SUM(cache_write),\
                 COUNT(DISTINCT agent||'/'||session),MAX(hour_ms)
-             FROM usage_tokens WHERE hour_ms>=?1 AND {column}<>''
+             FROM usage_tokens WHERE hour_ms>=?1 AND (?3 OR {column}<>'')
              GROUP BY {column}
              ORDER BY SUM(input)+SUM(output)+SUM(cache_read)+SUM(cache_write) DESC, {column}
              LIMIT ?2"
         ))
         .map_err(storage)?;
     statement
-        .query_map(params![since_ms, ROWS_MAX as i64], |row| {
+        .query_map(params![since_ms, ROWS_MAX as i64, unattributed], |row| {
             Ok(UsageRow {
                 key: row.get(0)?,
                 tokens: tokens(row, 1)?,
@@ -189,10 +194,10 @@ pub fn report(
         since_ms,
         total,
         runs,
-        projects: rows(db, "project", since)?,
-        pools: rows(db, "pool", since)?,
-        accounts: rows(db, "account", since)?,
-        agents: rows(db, "agent", since)?,
+        projects: rows(db, "project", true, since)?,
+        pools: rows(db, "pool", false, since)?,
+        accounts: rows(db, "account", true, since)?,
+        agents: rows(db, "agent", false, since)?,
         days,
         lines: lines(db, since)?,
         limits,

@@ -59,18 +59,20 @@ impl NativeBridge {
     }
 
     /// Lands a change set on the owner's checked-out branch, run without the bridge lock.
-    /// Inputs: the change set id and the head the owner reviewed. Output: the landed
-    /// commit and branch, or the conflicting files.
+    /// Inputs: the change set id, the head the owner reviewed and the owner's edited
+    /// message, None for the proposed one. Output: the landed commit and branch, or the
+    /// conflicting files.
     pub fn accept_change(
         &self,
         id: String,
         expected_head: String,
+        message: Option<String>,
     ) -> Result<Unlocked<AcceptOutcome>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
             client
-                .accept_changes(id, expected_head)
+                .accept_changes(id, expected_head, message)
                 .await
                 .map_err(changes_error)
         }))

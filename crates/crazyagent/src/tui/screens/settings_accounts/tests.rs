@@ -99,8 +99,8 @@ pub(crate) fn check(name: &str, actual: &[String], swaps: &[(&str, &str)], rows:
 }
 
 pub(crate) const STRIP: (&str, &str) = (
-    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
-    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   ⁂ Memory 41   ◉ Profile",
+    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses 2 of 9   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
+    "@ Accounts 240   ⊞ Pools 3   ❯ Harnesses   ✦ Plugins and skills   § Process   ⁂ Memory 41   ◉ Profile",
 );
 
 fn id(text: &str) -> CredentialRef {

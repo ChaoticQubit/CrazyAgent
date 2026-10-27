@@ -160,12 +160,12 @@ fn a_question_on_a_real_sub_agent_screen_is_recorded_once_and_its_typed_answer_r
     assert_eq!(event.text, asked);
     assert_eq!(event.task, Some(5));
     assert_eq!(event.state, EventState::Queued);
-    assert_eq!(event.label, format!("codex-{agent}"));
+    assert_eq!(event.label, format!("Sub-agent {agent}"));
     let shown = status(&fixture.connection, &project()).unwrap();
     assert_eq!(shown.agents.len(), 1);
     assert_eq!(shown.agents[0].waiting.as_deref(), Some(asked));
     assert!(shown.text().contains(&format!(
-        "codex-{agent} (codex): Working, waiting on: {asked}"
+        "Sub-agent {agent} (codex): Working, waiting on: {asked}"
     )));
 
     assert_eq!(
@@ -355,6 +355,8 @@ fn a_task_end_records_finished_failed_or_question_and_master_delegations_are_car
         assert!(task_ended(&fixture.connection, task, 20).unwrap().is_some());
     }
     for task in [cancelled, queued, 9999] {
+        format!("Sub-agent {live}"),
+        format!("sub-agent {live}"),
         assert_eq!(task_ended(&fixture.connection, task, 20).unwrap(), None);
     }
     assert!(waiting(&fixture.connection, &project()).unwrap().is_empty());
@@ -377,6 +379,18 @@ fn a_task_end_records_finished_failed_or_question_and_master_delegations_are_car
                 EventKind::Question,
                 "Built the page. Should I also add tests?".to_owned(),
                 EventState::Queued,
+    let persona =
+        super::super::names::assign_persona(&fixture.connection, &project(), live).unwrap();
+    assert_eq!(label(&fixture.connection, live).unwrap(), persona);
+    assert_eq!(
+        resolve(&fixture.connection, &project(), &persona.to_lowercase()).unwrap(),
+        Some(live)
+    );
+    assert_eq!(
+        resolve(&fixture.connection, &project(), "@master").unwrap(),
+        None,
+        "the master is not a sub-agent to send to"
+    );
                 Some(asks)
             ),
             (
@@ -557,7 +571,7 @@ fn queued_events_wake_a_free_master_in_the_order_they_happened() {
     assert_eq!(
         wakes(connection),
         [format!(
-            "[team] codex-{ada} asks: Proceed? | 1. Yes | 2. No [task 3]\n[team] claude-code-{bo} finished: Built the page. [task 4]\n[team] codex-{ada} has changes ready: Edits wait in Changes."
+            "[team] Sub-agent {ada} asks: Proceed? | 1. Yes | 2. No [task 3]\n[team] Sub-agent {bo} finished: Built the page. [task 4]\n[team] Sub-agent {ada} has changes ready: Edits wait in Changes."
         )]
     );
     assert_eq!(
@@ -573,7 +587,7 @@ fn queued_events_wake_a_free_master_in_the_order_they_happened() {
     assert!(deliver_by_message(connection, &project(), true, 103).unwrap());
     assert_eq!(
         wakes(connection).last().unwrap(),
-        &format!("[team] claude-code-{bo} failed: Tests failed. [task 5]")
+        &format!("[team] Sub-agent {bo} failed: Tests failed. [task 5]")
     );
     answer_all(connection);
     assert!(!deliver_by_message(connection, &project(), true, 104).unwrap());
@@ -628,7 +642,7 @@ fn with_no_live_master_only_a_question_starts_one() {
     assert_eq!(
         wakes(connection),
         [format!(
-            "[team] codex-{ada} finished: Done.\n[team] codex-{ada} asks: Proceed?"
+            "[team] Sub-agent {ada} finished: Done.\n[team] Sub-agent {ada} asks: Proceed?"
         )]
     );
 }
@@ -845,7 +859,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     assert!(deliver_by_message(connection, &project(), true, 14).unwrap());
     assert_eq!(
         wakes(connection).last().unwrap(),
-        &format!("[team] codex-{bo} finished: Done."),
+        &format!("[team] Sub-agent {bo} finished: Done."),
         "an agent at its own cap waits while the others still wake the master"
     );
     let told = notifications(connection, Some(&project()), 10).unwrap();
@@ -853,7 +867,7 @@ fn wake_rules_resolve_from_the_agent_up_to_the_shipped_default() {
     assert!(
         told[0]
             .text
-            .contains(&format!("codex-{ada} paused after 1 wakes"))
+            .contains(&format!("Sub-agent {ada} paused after 1 wakes"))
     );
     answer_all(connection);
     add(ada, EventKind::Question, 15);

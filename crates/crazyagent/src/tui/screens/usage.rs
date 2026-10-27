@@ -178,6 +178,9 @@ impl Names {
 }
 
 fn shown<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str {
+    if key.is_empty() {
+        return "Unattributed";
+    }
     names.get(key).map_or(key, String::as_str)
 }
 
@@ -296,9 +299,10 @@ pub fn summary(
     let theme = &ctx.theme;
     let total = &report.total;
     let prompt = total.input + total.cache_read + total.cache_write;
-    let cache = (total.cache_read * 100 + prompt / 2)
-        .checked_div(prompt)
-        .map_or_else(|| "none".to_owned(), |percent| format!("{percent}%"));
+    let cache = match (total.cache_read * 100 + prompt / 2).checked_div(prompt) {
+        Some(share) => format!("{share}%"),
+        None => "none".into(),
+    };
     let (added, removed) = report.lines.iter().fold((0, 0), |(added, removed), row| {
         (added + row.added, removed + row.removed)
     });

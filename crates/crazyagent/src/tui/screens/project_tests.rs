@@ -78,6 +78,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::ReadPaths { project } => SetupView::ReadPaths(
+            controller
+                .project_read_paths(project)
+                .await
+                .map_err(problem)?,
+        ),
         SetupQuery::ReviewMemory {
             project,
             entry_id,
@@ -616,6 +622,27 @@ fn tabs_input_and_escape_follow_the_design_keys() {
 }
 
 #[test]
+fn in_the_master_input_shift_enter_and_ctrl_j_add_a_line_and_enter_never_does() {
+    let mut screen = ProjectScreen::new(ProjectId::new("keys").unwrap(), "Keys".into(), None);
+    screen.open(Tab::Conversation);
+    assert!(screen.typing);
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.key(shifted(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('b'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+        ProjectReply::Handled
+    );
+    assert_eq!(screen.input.value(), "a\nb\n");
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.input.value(),
+        "a\nb\n",
+        "Enter is the send key, never a new line; with no pool nothing is sent"
+    );
+}
+
+#[test]
 fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
     let project = ProjectId::new("order").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Order".into(), None);
@@ -1113,6 +1140,58 @@ fn after_a_stopped_master_turn_the_help_names_the_keys_the_tab_takes() {
         drawn.help
     );
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Ignored);
+}
+
+#[test]
+fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_team() {
+    let project = ProjectId::new("tidepool").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.team = crate::tui::ctx::Load::Ready(Box::new(crate::team::TeamGraph {
+        project_id: project,
+        nodes: vec![crate::team::GraphNode {
+            id: "team-1".into(),
+            kind: crate::team::NodeKind::Agent,
+            parent: Some("group-codex".into()),
+            label: "Ada (@onboarding-fix)".into(),
+            harness: "codex".into(),
+            status: Some(crate::team::AgentStatus::Working),
+            status_label: None,
+            account: None,
+            agents: None,
+            terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
+            questions: None,
+        }],
+        edges: Vec::new(),
+    }));
+    screen.open(Tab::Conversation);
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 140, 24, &look);
+    assert!(screen.typing, "the Conversation tab opens on its input");
+    assert!(drawn.rows.iter().all(|row| row.width() == 140));
+    let panel = 2 + 136 - 32;
+    let column = |needle: &str| {
+        drawn.rows.iter().find_map(|row| {
+            let text = row.text();
+            text.find(needle).map(|at| text[..at].chars().count())
+        })
+    };
+    assert_eq!(column("Team"), Some(panel), "{}", text(&drawn.rows));
+    assert_eq!(column("\u{25b8} Ada (@onboarding-fix)"), Some(panel));
+    assert_eq!(column("  Codex, Working"), Some(panel));
+    assert!(
+        !drawn.help.contains(&("t", "Team")),
+        "t types while the input has the keys"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "t");
+
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    let drawn = project_screen(&mut screen, 140, 24, &look);
+    assert!(drawn.help.contains(&("t", "Team")), "{:?}", drawn.help);
+    assert_eq!(screen.key(key(KeyCode::Char('t'))), ProjectReply::Team);
+
+    let narrow = text(&project_screen(&mut screen, 90, 24, &look).rows);
+    assert!(!narrow.contains("Ada (@onboarding-fix)"), "{narrow}");
 }
 
 #[test]
@@ -1745,4 +1824,119 @@ async fn failed_and_empty_reads_settle_back_off_and_say_why() {
         settle(&mut fresh, &mut controller, later + REFRESH_MS).await,
         ["setup"]
     );
+}
+
+#[test]
+fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() {
+    let look = Look::plain();
+    let project = ProjectId::new("folders").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('f'))), ProjectReply::Handled);
+    assert!(screen.folders.is_none());
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the read-only folders. Try again.")
+    );
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Folders   Loading...   f Edit read-only folders"),
+        "{shown}"
+    );
+
+    let mut read = None;
+    for now in 20..26 {
+        let query = screen.next_query(now).unwrap();
+        if matches!(query, SetupQuery::ReadPaths { .. }) {
+            read = Some(query);
+            break;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    let read = read.expect("the Settings tab reads the read-only folders");
+    assert_eq!(
+        read,
+        SetupQuery::ReadPaths {
+            project: project.clone()
+        }
+    );
+    screen.apply(
+        &read,
+        Ok(SetupView::ReadPaths(vec!["/Users/owner/shared".into()])),
+    );
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Folders   /Users/owner/shared   f Edit read-only folders"),
+        "{shown}"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Char('f'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.folders.as_ref().unwrap().input.value(),
+        "/Users/owner/shared"
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("Read-only folders"));
+    assert_eq!(drawn.help, [("Enter", "Save folders"), ("Esc", "Cancel")]);
+    assert!(drawn.cursor.is_some());
+    assert_eq!(screen.paste(" : relative : "), ProjectReply::Handled);
+    let save = SetupAction::SetReadPaths {
+        project_id: project.clone(),
+        paths: vec!["/Users/owner/shared".into(), "relative".into()],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save.clone()))
+    );
+    assert!(screen.folders.as_ref().unwrap().busy);
+    let change = SetupQuery::Change {
+        action: save,
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "read_path_not_absolute".into(),
+        })),
+    );
+    let folders = screen.folders.as_ref().unwrap();
+    assert!(!folders.busy);
+    assert_eq!(
+        folders.error.as_deref(),
+        Some("Type the full path of each folder, starting with /.")
+    );
+    assert_eq!(
+        screen.read_paths, None,
+        "a refused change reads the folders again"
+    );
+
+    screen.folders.as_mut().unwrap().input.set("");
+    let clear = SetupAction::SetReadPaths {
+        project_id: project.clone(),
+        paths: vec![],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(clear.clone()))
+    );
+    screen.apply(
+        &SetupQuery::Change {
+            action: clear,
+            generation: 3,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert!(screen.folders.is_none());
+    assert_eq!(screen.read_paths, None);
+
+    screen.read_paths = Some(vec![]);
+    screen.key(key(KeyCode::Char('f')));
+    screen.paste(&format!("/{}", "d".repeat(1100)));
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.folders.as_ref().unwrap().error.as_deref(),
+        Some("Share at most 8 folders, each one plain path of up to 1024 characters.")
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.folders.is_none());
 }

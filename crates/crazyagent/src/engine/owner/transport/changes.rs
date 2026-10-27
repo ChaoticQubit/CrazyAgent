@@ -1,9 +1,11 @@
 use super::*;
-use crate::landing::{self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX};
+use crate::landing::{
+    self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX, MESSAGE_BYTES_MAX,
+};
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
 
-const REQUEST_BYTES_MAX: usize = 1024;
+const REQUEST_BYTES_MAX: usize = 1024 + 4 * MESSAGE_BYTES_MAX;
 pub(super) const CHANGES_TIMEOUT: Duration = Duration::from_secs(120);
 const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -21,6 +23,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",
+    "changes_message_invalid",
     "changes_not_found",
     "changes_outcome_unknown",
     "changes_owner_dirty",
@@ -62,6 +65,8 @@ enum Action {
     Accept {
         id: ChangeSetId,
         expected_head: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     Discard {
         id: ChangeSetId,
@@ -111,6 +116,10 @@ impl Action {
             {
                 Err(failure("changes_stale"))
             }
+            Self::Accept {
+                message: Some(message),
+                ..
+            } if message.len() > 2 * MESSAGE_BYTES_MAX => Err(failure("changes_message_invalid")),
             _ => Ok(()),
         }
     }
@@ -136,14 +145,20 @@ impl OwnerClient {
     }
 
     /// Lands a change set as one squash commit on the owner's checked-out branch.
-    /// Inputs: the change set and the head the owner reviewed. Output: the landed commit
-    /// and branch, or the files it conflicts on.
+    /// Inputs: the change set, the head the owner reviewed and the owner's edited
+    /// message, None for the proposed one. Output: the landed commit and branch, or the
+    /// files it conflicts on.
     pub async fn accept_changes(
         &self,
         id: ChangeSetId,
         expected_head: String,
+        message: Option<String>,
     ) -> Result<AcceptOutcome, EngineError> {
-        let action = Action::Accept { id, expected_head };
+        let action = Action::Accept {
+            id,
+            expected_head,
+            message,
+        };
         match self.changes_exchange(action).await? {
             Reply::Accepted { outcome } => Ok(outcome),
             _ => Err(unknown()),
@@ -297,12 +312,16 @@ async fn handle(
             Action::Diff { id, page } => Reply::Diff {
                 diff: landing::diff(&db, &id, page)?,
             },
-            Action::Accept { id, expected_head } => {
+            Action::Accept {
+                id,
+                expected_head,
+                message,
+            } => {
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .ok_or_else(|| failure("changes_owner_identity_missing"))?;
                 Reply::Accepted {
-                    outcome: landing::accept(&db, &home, &id, &expected_head)?,
+                    outcome: landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
                 }
             }
             Action::Discard { id, expected_head } => Reply::Discarded {

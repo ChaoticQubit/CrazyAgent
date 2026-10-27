@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 pub mod direct;
 pub mod events;
 pub mod graph;
+pub mod names;
 pub mod runtime;
 pub mod tool;
 
@@ -372,6 +373,11 @@ pub enum TeamAction {
         project_id: ProjectId,
         upto: i64,
     },
+    Rename {
+        project_id: ProjectId,
+        agent: i64,
+        handle: String,
+    },
 }
 
 impl TeamAction {
@@ -423,6 +429,12 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::Rename { agent, handle, .. } => {
+                if *agent <= 0 || handle.len() > names::HANDLE_CHARS_MAX + 1 {
+                    return Err(failure("team_handle_invalid"));
+                }
+                Ok(())
+            }
             Self::KeepWarm { .. } | Self::Pause { .. } | Self::Resume { .. } => Ok(()),
         }
     }
@@ -445,6 +457,7 @@ impl TeamAction {
                 events::RuleTarget::Project { project_id }
                 | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
             },
+            Self::Rename { project_id, .. } => Some(project_id),
         }
     }
 }
@@ -570,27 +583,43 @@ pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &st
     Accounts::Usable(usable)
 }
 
-/// Picks the least loaded usable account that is not paused for a rate limit.
-/// Takes the usable accounts in pool order, live agents per connection and paused connections.
-/// Returns the chosen account, or none when every account is paused.
+/// Picks the usable account the owner's schedule puts first among those not paused for a
+/// rate limit; with no limits or ranks that is the least loaded, then pool order.
+/// Takes the usable accounts in pool order, live agents per connection, paused connections
+/// and the scheduling choice. Returns the chosen account, or none when every account is
+/// paused or left out by the schedule.
 pub fn pick_account<'a>(
     accounts: &'a [TeamAccount],
     load: &dyn Fn(&CredentialRef) -> usize,
     paused: &BTreeSet<CredentialRef>,
+    choice: &crate::scheduling::Choice,
 ) -> Option<&'a TeamAccount> {
-    accounts
+    let open: Vec<&TeamAccount> = accounts
         .iter()
         .filter(|account| !paused.contains(&account.connection))
-        .enumerate()
-        .min_by_key(|(order, account)| (load(&account.connection), *order))
-        .map(|(_, account)| account)
+        .collect();
+    let candidates: Vec<crate::scheduling::Candidate> = open
+        .iter()
+        .map(|account| crate::scheduling::Candidate {
+            connection: account.connection.clone(),
+            load: load(&account.connection),
+            current: false,
+        })
+        .collect();
+    choice
+        .order(&candidates)
+        .ready
+        .first()
+        .map(|index| open[*index])
 }
 
-/// One task the master asked for in its reply.
+/// One task the master asked for in its reply, with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     pub harness: Option<String>,
     pub prompt: String,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 /// Reads delegation lines from a master reply: `DELEGATE: task` or `DELEGATE harness: task`.
@@ -639,6 +668,7 @@ fn delegation(target: &str, task: &str) -> Option<Delegation> {
     Some(Delegation {
         harness: (!target.is_empty()).then_some(target),
         prompt: task.to_owned(),
+        role: None,
     })
 }
 
@@ -746,6 +776,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         )
         .map_err(error)?;
     events::initialize(connection)?;
+    names::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1245,6 +1276,12 @@ pub fn execute(
                 },
             )
         }
+        TeamAction::Rename { agent, handle, .. } => {
+            Ok(match names::rename(tx, project, *agent, handle)? {
+                Ok(_) => Outcome::Applied,
+                Err(code) => rejected(code),
+            })
+        }
     }
 }
 
@@ -1343,6 +1380,10 @@ pub struct TeamAgent {
     pub created_ms: i64,
     pub heartbeat_ms: i64,
     pub stopped_ms: Option<i64>,
+    #[serde(default)]
+    pub persona: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1423,12 +1464,18 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
     let role: String = row.get(1)?;
     let status: String = row.get(6)?;
     let status = AgentStatus::parse(&status).ok_or_else(|| invalid_row("status"))?;
-    let id = row.get(0)?;
+    let id: i64 = row.get(0)?;
     let role = AgentRole::parse(&role).ok_or_else(|| invalid_row("role"))?;
+    let persona: Option<String> = row.get(14)?;
+    let handle: Option<String> = row.get(15)?;
+    let kept = persona.clone().map(|persona| names::AgentName {
+        persona,
+        handle: handle.clone(),
+    });
     Ok(TeamAgent {
         id,
         role,
-        label: role.agent_label(id),
+        label: names::label(role, id, kept.as_ref()),
         harness: row.get(2)?,
         tools: row.get(3)?,
         account: row.get(4)?,
@@ -1442,10 +1489,12 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         created_ms: row.get(11)?,
         heartbeat_ms: row.get(12)?,
         stopped_ms: row.get(13)?,
+        persona,
+        handle,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents

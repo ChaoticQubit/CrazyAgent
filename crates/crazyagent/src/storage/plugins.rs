@@ -33,6 +33,10 @@ pub(crate) enum Command {
         scope: Scope,
         source: String,
     },
+    ImportSkill {
+        source: String,
+        replace: Option<String>,
+    },
     SetSkill {
         id: String,
         enabled: bool,
@@ -89,6 +93,10 @@ pub(crate) enum Command {
         project: Option<ProjectId>,
         offset: u16,
     },
+    Skill {
+        id: String,
+        project: Option<ProjectId>,
+    },
     Servers {
         project: Option<ProjectId>,
         offset: u16,
@@ -108,6 +116,7 @@ pub(crate) struct SkillChange {
 
 pub(crate) enum ResultValue {
     Skill(Box<SkillChange>),
+    Imported(Box<SkillChange>, Vec<String>, usize),
     SkillRemoved(PathBuf),
     Server(Box<ServerView>),
     Removed(Vec<String>),
@@ -516,6 +525,7 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         id: record.id.clone(),
         name: record.name.clone(),
         description: record.description.clone(),
+        line: crate::skills::one_line(&record.description),
         scope: record.scope.clone(),
         scope_label: record.scope.label().into(),
         enabled: record.enabled,
@@ -614,7 +624,8 @@ fn add_skill(
     root: &Path,
     scope: Scope,
     source: String,
-) -> Result<SkillRecord, EngineError> {
+    rules: &skill_folder::Rules,
+) -> Result<(SkillRecord, skill_folder::SkillMeta), EngineError> {
     require_scope(tx, &scope)?;
     let key = scope_key(&scope);
     if count(tx, "skill", &key)? >= SKILLS_PER_SCOPE_MAX {
@@ -634,7 +645,7 @@ fn add_skill(
     let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
     let parent = store_folder(root, &parts)?;
     let staging = parent.join(format!(".{id}"));
-    let meta = skill_folder::copy(Path::new(&source), &staging).map_err(error)?;
+    let meta = skill_folder::copy_with(Path::new(&source), &staging, rules).map_err(error)?;
     let result = (|| {
         if name_taken(tx, "skill", &key, &meta.name)? {
             return Err(error("skill_name_taken"));
@@ -667,7 +678,62 @@ fn add_skill(
     if result.is_err() {
         remove_folder(&staging);
     }
-    result
+    result.map(|record| (record, meta))
+}
+
+fn replace_skill(
+    tx: &Transaction<'_>,
+    root: &Path,
+    id: &str,
+    source: String,
+) -> Result<(SkillRecord, skill_folder::SkillMeta), EngineError> {
+    let mut record: SkillRecord = load(tx, "skill", id)?;
+    if record.scope != Scope::Global {
+        return Err(error("skill_not_found"));
+    }
+    let parent = store_folder(root, &["skills", "global"])?;
+    let folder = root.join(&record.folder);
+    if folder.parent() != Some(parent.as_path()) {
+        return Err(error("plugin_store_unsafe"));
+    }
+    let staging = parent.join(format!(".{}", new_id("skill")?));
+    let meta = skill_folder::copy_with(Path::new(&source), &staging, &skill_folder::IMPORTED)
+        .map_err(error)?;
+    let old = parent.join(format!(".{}-old", record.id));
+    let result = (|| {
+        if meta.name != record.name {
+            return Err(error("skill_import_name_changed"));
+        }
+        if std::fs::symlink_metadata(&old).is_ok() {
+            return Err(error("plugin_store_unavailable"));
+        }
+        std::fs::rename(&folder, &old).map_err(|_| error("plugin_store_unavailable"))?;
+        if std::fs::rename(&staging, &folder).is_err() {
+            let _ = std::fs::rename(&old, &folder);
+            return Err(error("plugin_store_unavailable"));
+        }
+        record.description = meta.description.clone();
+        record.source = source.clone();
+        record.enabled = true;
+        if let Err(problem) = save(
+            tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        ) {
+            remove_folder(&folder);
+            let _ = std::fs::rename(&old, &folder);
+            return Err(problem);
+        }
+        remove_folder(&old);
+        Ok(())
+    })();
+    if result.is_err() {
+        remove_folder(&staging);
+    }
+    result.map(|()| (record, meta))
 }
 
 fn add_server(
@@ -849,7 +915,9 @@ pub(crate) fn execute(
     let value = run(&tx, root, command)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
-        (ResultValue::Skill(skill), Err(problem)) if skill.added => {
+        (ResultValue::Skill(skill) | ResultValue::Imported(skill, ..), Err(problem))
+            if skill.added =>
+        {
             remove_folder(Path::new(&skill.view.folder));
             Err(problem)
         }
@@ -869,11 +937,26 @@ pub(super) fn run(
 ) -> Result<ResultValue, EngineError> {
     Ok(match command {
         Command::AddSkill { scope, source } => {
-            let record = add_skill(tx, root, scope, source)?;
+            let (record, _) = add_skill(tx, root, scope, source, &skill_folder::PICKED)?;
             ResultValue::Skill(Box::new(SkillChange {
                 view: skill_view(&record, root, None),
                 added: true,
             }))
+        }
+        Command::ImportSkill { source, replace } => {
+            let added = replace.is_none();
+            let (record, meta) = match replace {
+                None => add_skill(tx, root, Scope::Global, source, &skill_folder::IMPORTED)?,
+                Some(id) => replace_skill(tx, root, &id, source)?,
+            };
+            ResultValue::Imported(
+                Box::new(SkillChange {
+                    view: skill_view(&record, root, None),
+                    added,
+                }),
+                meta.skipped,
+                meta.skipped_total,
+            )
         }
         Command::SetSkill { id, enabled } => {
             let mut record: SkillRecord = load(tx, "skill", &id)?;
@@ -1048,6 +1131,21 @@ pub(super) fn run(
                 .collect();
             let (views, next) = page(views, offset)?;
             ResultValue::Skills(views, next)
+        }
+        Command::Skill { id, project } => {
+            let record: SkillRecord = load(tx, "skill", &id)?;
+            if !visible(&record.scope, project.as_ref()) {
+                return Err(error("skill_not_found"));
+            }
+            let off = match &project {
+                Some(project) => switched_off(tx, project)?,
+                None => Vec::new(),
+            };
+            let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
+            ResultValue::Skill(Box::new(SkillChange {
+                view: skill_view(&record, root, here),
+                added: false,
+            }))
         }
         Command::Servers { project, offset } => {
             let off = match &project {

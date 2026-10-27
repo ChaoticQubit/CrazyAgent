@@ -51,6 +51,7 @@ fn a_request_without_a_trusted_connection_answers_for_its_own_query() {
     let query = ChangesQuery::Accept {
         id: id(),
         expected_head: "a".repeat(40),
+        message: "Add a file".into(),
     };
     let event = ChangesEvent::unavailable(query.clone());
     assert_eq!(event.query, query);
@@ -193,6 +194,7 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
         .changes(ChangesQuery::Accept {
             id: first.clone(),
             expected_head: set.head.clone(),
+            message: "Land the fourth line\n\nEdited before accepting".into(),
         })
         .await;
     let Ok(ChangesView::Accepted(AcceptOutcome::Landed { branch, .. })) = event.result else {
@@ -204,6 +206,10 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
         "one\ntwo\nthree\nfour\n"
     );
     assert_eq!(owner(&["log", "-1", "--format=%an"]).trim(), "Repo Owner");
+    assert_eq!(
+        owner(&["log", "-1", "--format=%B"]).trim_end(),
+        "Land the fourth line\n\nEdited before accepting"
+    );
 
     std::fs::write(worktree.join("README"), "uno\ntwo\nthree\nfour\n").unwrap();
     let second = crate::landing::record_turn_end(&db, &workspace, &turn("Say one in Italian"))
@@ -224,6 +230,7 @@ async fn the_tui_lists_diffs_discards_restores_accepts_and_updates_a_real_change
         .changes(ChangesQuery::Accept {
             id: second.clone(),
             expected_head: set.head,
+            message: set.message,
         })
         .await;
     assert_eq!(

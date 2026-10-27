@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillView, TeamGraph, TerminalMessage } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectPage, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillView } from "./engine-client";
+export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -41,6 +41,11 @@ const COPY: Record<string, string> = {
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
   pool_exists: "A pool with this name already exists.",
   pool_not_found: "This pool no longer exists.",
+  account_rank_invalid: "Use a rank from 1 to 999, or leave it empty.",
+  account_reserve_invalid: "Use a reserve from 0 to 99 percent.",
+  account_schedule_invalid: "Use a rank from 1 to 999 and a reserve from 0 to 99 percent.",
+  account_schedule_full: "Too many saved account choices. Clear some you no longer need, then try again.",
+  connection_not_found: "This account no longer exists. Refresh and try again.",
   approved_accounts_limit: "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
   allowed_destinations_limit: "Up to 64 sign-ins and model endpoints can be allowed. Remove a connection you no longer use, then try again.",
   model_access_duplicate: "This already exists.",
@@ -105,6 +110,16 @@ const COPY: Record<string, string> = {
   knowledge_version_conflict: "This memory changed. Reload it and try again.",
   knowledge_source_revoked: "The research this came from was deleted.",
   invalid_knowledge_text: "Write the memory as plain text, up to 4096 bytes, without hidden or direction-changing characters.",
+  read_path_not_absolute: "Type the full path of a folder, starting with /.",
+  read_path_missing: "That folder doesn't exist on this computer.",
+  read_path_not_folder: "That path is a file. Add a folder.",
+  read_path_holds_home: "Agents can't read your whole home folder. Add a folder inside it.",
+  read_path_credentials: "That folder holds or sits in a credential location, such as .ssh or .aws, so agents can never read it.",
+  read_path_engine_data: "That folder holds CrazyAgent's own data, so agents can never read it.",
+  read_path_refused: "That folder can't be shared with agents. Pick another folder.",
+  read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
+  read_paths_too_many: "A project can share at most 8 extra folders.",
+  read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -276,6 +291,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   research_memory: "saving research to memory",
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
+  project_read_paths: "saving extra folders agents can read",
+  account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
@@ -492,6 +509,40 @@ export function poolSummaries(): Promise<Result<PoolSummary[]>> {
   return call<PoolSummary[]>("desktop_pool_summaries");
 }
 
+export type AccountStrategy = "use_it_or_lose_it" | "manual_rank" | "balanced";
+export type AccountPin = "never_use" | "use_last";
+
+export interface AccountPlan {
+  rank: number | null;
+  reserve_percent: number;
+  pin: AccountPin | null;
+}
+
+export interface AccountSchedule {
+  strategy: AccountStrategy;
+  pools: { id: string; strategy: AccountStrategy }[];
+  projects: { id: string; strategy: AccountStrategy }[];
+  accounts: { connection: string; plan: AccountPlan }[];
+}
+
+export type ScheduleChange =
+  | { kind: "app_strategy"; strategy: AccountStrategy }
+  | { kind: "pool_strategy"; pool: string; strategy: AccountStrategy | null }
+  | { kind: "project_strategy"; project: string; strategy: AccountStrategy | null }
+  | { kind: "account"; connection: string; plan: AccountPlan };
+
+/** Reads how pools choose accounts: the app strategy, pool strategies, project overrides
+ * and each account's rank, reserve and pin. Output: the schedule. */
+export function accountSchedule(): Promise<Result<AccountSchedule>> {
+  return call<AccountSchedule>("desktop_account_schedule");
+}
+
+/** Saves one account choice change. Input: the change. Output: ok once the engine applied
+ * it, or a plain error. */
+export function setAccountSchedule(scheduleChange: ScheduleChange): Promise<Result<void>> {
+  return change("desktop_set_account_schedule", { change: scheduleChange, generation: nextGeneration() });
+}
+
 function poolId(): string {
   const bytes = new Uint8Array(10);
   crypto.getRandomValues(bytes);
@@ -603,6 +654,26 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill for its detail view: the skill with the project's switch when a project
+ * is given, its full SKILL.md text and its files. Inputs: skill id and optional project id.
+ * Output: the detail, or the engine's refusal such as a removed skill. */
+export function skillDetail(id: string, projectId?: string): Promise<Result<SkillDetail>> {
+  return call<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
+}
+
+/** Looks for skills in the owner's `~/.claude/skills` and `~/.codex/skills`, read only when
+ * the owner asks. Output: each skill found with its state against the app's skills. */
+export function skillImportScan(): Promise<Result<ImportList>> {
+  return call<ImportList>("desktop_skill_import_scan", {});
+}
+
+/** Imports one ticked skill into the app's skills, turned on for every project, leaving out
+ * dotfiles and credential-like files. Inputs: the found folder and, for a skill whose files
+ * differ, the added skill's id to replace. Output: the skill and the paths left out. */
+export function importSkill(folder: string, replace: string | null): Promise<Result<ImportedSkill>> {
+  return call<ImportedSkill>("desktop_import_skill", { folder, replace });
 }
 
 /** Reads MCP servers for global settings (no project) or one project's settings.
