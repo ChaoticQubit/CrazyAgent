@@ -501,7 +501,7 @@ fn master_wire_types_are_closed_snake_case_without_producer_actions() {
     ] {
         assert_eq!(serde_json::to_value(backend).unwrap(), json!(name));
     }
-    for phase in ["configured", "closing", "closed"] {
+    for phase in ["configured", "parked", "closing", "closed"] {
         let value: MasterSessionPhase = serde_json::from_value(json!(phase)).unwrap();
         assert_eq!(serde_json::to_value(value).unwrap(), json!(phase));
     }
@@ -980,7 +980,7 @@ async fn master_close_keeps_a_blocked_turn_and_its_reason_without_fabricating_a_
     blocked(&ended, &session, "turn", MasterReason::RuntimeUnavailable);
     f.close(&owner, "close", &session).await;
     let closed = f.session(&owner, "p").await.unwrap();
-    assert_eq!(closed.phase, MasterSessionPhase::Closed);
+    assert_eq!(closed.phase, MasterSessionPhase::Parked);
     assert_eq!(closed.current_turn, None);
     assert_eq!(f.page(&owner, &session).await.turns, vec![ended]);
     rejected(

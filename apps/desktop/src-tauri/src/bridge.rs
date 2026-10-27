@@ -595,6 +595,10 @@ impl NativeBridge {
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::NewSession {
+                    project_id, ..
+                }
+                | crazyagent::master_session::MasterOwnerAction::Resume { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
