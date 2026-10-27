@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "vite";
 import { withPage } from "../browser.mjs";
-import { LIB, ROUTES, render } from "./bridge-routes.mjs";
+import { LIB, ROUTES, commands, plan, render } from "./bridge-routes.mjs";
 import { INTERNALS, POLL_MS, STEP_MS, closedPort, owner, required, serveApp, start, stop, value } from "./e2e-harness.mjs";
 
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
@@ -28,7 +28,7 @@ function ownerRepo(folder) {
   git("commit", "-q", "-m", "Start the seed shop");
 }
 
-test("the owner opens a project's Changes tab on the real engine and reads its change sets", { timeout: 600000 }, async () => {
+test("the owner opens a project's Changes tab on the real engine and reads its change sets", { timeout: 600000 }, async (t) => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -100,7 +100,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         throw failure;
       }
     });
-    assert.deepEqual([...log.unrouted], [], "every command the page sent reached the bridge");
+    const native = new Set(commands(readFileSync(LIB, "utf8")).filter((command) => plan(command).skip).map((command) => command.name));
+    assert.deepEqual([...log.unrouted].filter((command) => !native.has(command)), [], "every plain command the page sent reached the bridge");
+    t.diagnostic(`native-only commands the page called and this test cannot run: ${[...log.unrouted].join(", ") || "none"}`);
     assert.deepEqual(log.invalid, [], "the bridge accepted every argument the page sent");
   } finally {
     log.closing = true;
