@@ -128,7 +128,9 @@ pub struct TurnEnd {
 
 /// One change set as the owner's Changes view shows it. `checked` is false in V1: no
 /// CrazyAgent check ran. `conflicts` names the files the last Accept conflicted on.
-/// `message` is the commit message an Accept proposes for the owner to edit.
+/// `message` is the commit message an Accept proposes for the owner to edit. `waiting` is
+/// true while an updating change set is merged but its agent was not yet handed the work
+/// that resolves it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -148,6 +150,8 @@ pub struct ChangeSetView {
     pub conflicts: Vec<String>,
     #[serde(default)]
     pub message: String,
+    #[serde(default)]
+    pub waiting: bool,
 }
 
 /// How a file changed between a change set's base and head.
@@ -403,6 +407,19 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
     return owner::update(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
+        Err(unavailable())
+    }
+}
+
+/// Notes that an updating change set's agent was handed the work that resolves it; until
+/// then the set shows as merged and waiting for its agent. Inputs: the store and the
+/// change set. Output: Ok, also when the set is no longer updating.
+pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return flow::resolve_handed_over(db, id);
     #[cfg(not(unix))]
     {
         let _ = (db, id);

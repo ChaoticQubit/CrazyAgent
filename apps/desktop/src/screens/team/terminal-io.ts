@@ -19,6 +19,21 @@ export function encodeTyped(data: string): Uint8Array {
   return encoder.encode(data);
 }
 
+/** The newline key both Claude Code and Codex read as a new line in the message being typed,
+ * in every terminal: Ctrl+J. */
+export const NEW_LINE = "\n";
+
+/** What a key press means before xterm sees it. Shift+Enter is a new line in the agent's
+ * message rather than a second Enter, so its keydown types `NEW_LINE` and every event of it
+ * is kept from xterm; any other key goes to xterm unchanged. Input: the key event's type,
+ * key and modifiers. Output: the text to type and false to keep it from xterm, nothing to
+ * type and false, or nothing to type and true. */
+export function keyOverride(event: { type: string; key: string; shiftKey: boolean; altKey: boolean; ctrlKey: boolean; metaKey: boolean }): { typed: string | null; xterm: boolean } {
+  const shiftEnter = event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
+  if (!shiftEnter) return { typed: null, xterm: true };
+  return { typed: event.type === "keydown" ? NEW_LINE : null, xterm: false };
+}
+
 /** Encodes xterm's binary event, one byte per character code, such as some mouse reports.
  * Input: the binary string. Output: the bytes, each code kept to its low eight bits. */
 export function encodeBinary(data: string): Uint8Array {

@@ -764,6 +764,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "model_access_edit_bounds" => {
             Some("This change is too large to save at once. Make it in smaller steps.")
         }
+        "team_master_no_terminal" => Some(
+            "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
+        ),
         _ => None,
     }
 }
