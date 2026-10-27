@@ -1735,13 +1735,28 @@ async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() 
         &Place::Project {
             id: notes.clone(),
             name: "Notes CLI".into(),
-            tab: ProjectTab::Conversation,
+            tab: ProjectTab::Settings,
         },
         &mut ctx,
     );
     let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    for _ in 0..4 {
+        shell.key(Key::ShiftLeft);
+    }
     let sent = pump(&mut shell, &mut connection).await;
     assert!(!sent.contains(&"project files"), "{sent:?}");
+    let shown = render(&mut shell, 80, 24);
+    assert!(
+        shown.contains("Home  /  Notes CLI  /  Conversation")
+            && !shown.contains("This project has no pool"),
+        "{shown}"
+    );
     for typed in "ask @pl".chars() {
         shell.key(Key::Char(typed));
     }
