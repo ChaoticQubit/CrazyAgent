@@ -3,6 +3,7 @@ use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod buffer;
 mod kept;
@@ -23,6 +24,7 @@ pub const VIEWERS_MAX: usize = 8;
 pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
 pub const SCROLLBACK_LINES: u32 = 5000;
 pub const PANES_PER_PROJECT_MAX: usize = crate::config::POOL_MEMBERS_MAX;
+pub const PASTE_SETTLE: Duration = Duration::from_millis(200);
 
 const _: () = assert!(PROMPT_BYTES_MAX == crate::team::DIRECT_INPUT_BYTES_MAX);
 const _: () = assert!(CHUNK_BYTES_MAX * 4 + 256 < crate::protocol::FRAME_BYTES_MAX);
@@ -360,6 +362,24 @@ pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
     };
     assert!(!keys.contains('\n'));
     Some(keys.into_bytes())
+}
+
+/// Types one prompt into an agent's app as one submission: a paste when the app turned
+/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
+/// the text. Returns whether it was typed; blank or oversized text types nothing.
+pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
+    let bracketed = host.input_live(agent)?;
+    let Some(keys) = prompt_keys(text, bracketed) else {
+        return Ok(false);
+    };
+    for chunk in keys.chunks(INPUT_BYTES_MAX) {
+        host.input(agent, chunk)?;
+    }
+    if bracketed {
+        std::thread::sleep(PASTE_SETTLE);
+    }
+    host.input(agent, b"\r")?;
+    Ok(true)
 }
 
 /// What the engine sends on an owner terminal connection.

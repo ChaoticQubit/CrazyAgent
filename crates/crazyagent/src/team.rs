@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod direct;
+pub mod events;
 pub mod graph;
 pub mod master;
 pub mod names;
@@ -374,6 +375,14 @@ pub enum TeamAction {
         agent: i64,
         handle: String,
     },
+    Wake {
+        target: events::RuleTarget,
+        rule: Option<events::WakeRule>,
+    },
+    Seen {
+        project_id: ProjectId,
+        upto: i64,
+    },
 }
 
 impl TeamAction {
@@ -416,6 +425,21 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::Wake { target, rule } => {
+                if rule.is_some_and(|rule| rule.hourly_cap > events::HOURLY_CAP_MAX) {
+                    return Err(failure("team_wake_cap_invalid"));
+                }
+                if matches!(target, events::RuleTarget::Agent { agent, .. } if *agent <= 0) {
+                    return Err(failure("team_agent_not_found"));
+                }
+                Ok(())
+            }
+            Self::Seen { upto, .. } => {
+                if *upto <= 0 {
+                    return Err(failure("team_notification_missing"));
+                }
+                Ok(())
+            }
             Self::KeepWarm { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
@@ -425,8 +449,8 @@ impl TeamAction {
 
     /// Names the project the action is for.
     /// Takes the action.
-    /// Returns its project id.
-    pub fn project(&self) -> &ProjectId {
+    /// Returns its project id, or none for the app-wide wake rule.
+    pub fn project(&self) -> Option<&ProjectId> {
         match self {
             Self::Message { project_id, .. }
             | Self::Delegate { project_id, .. }
@@ -436,7 +460,13 @@ impl TeamAction {
             | Self::Pause { project_id }
             | Self::Resume { project_id }
             | Self::HandOff { project_id, .. }
-            | Self::Rename { project_id, .. } => project_id,
+            | Self::Rename { project_id, .. }
+            | Self::Seen { project_id, .. } => Some(project_id),
+            Self::Wake { target, .. } => match target {
+                events::RuleTarget::App => None,
+                events::RuleTarget::Project { project_id }
+                | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
+            },
         }
     }
 }
@@ -756,6 +786,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)?;
     names::initialize(connection)?;
     master::initialize(connection)?;
+    events::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1134,12 +1165,19 @@ pub fn execute(
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
-    let project = action.project();
+    let Some(project) = action.project() else {
+        return wake(tx, action);
+    };
     let Some(stored) = crate::project_setup::load_setup(tx, project)? else {
         return Ok(rejected("project_setup_missing"));
     };
     let now = now_ms();
     match action {
+        TeamAction::Wake { .. } => wake(tx, action),
+        TeamAction::Seen { upto, .. } => {
+            events::seen(tx, Some(project), *upto, now)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::Message { text, .. } => Ok(
             match append_message(
                 tx,
@@ -1265,6 +1303,16 @@ pub fn execute(
             })
         }
     }
+}
+
+fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
+    let TeamAction::Wake { target, rule } = action else {
+        unreachable!("only a wake rule action has no project");
+    };
+    Ok(match events::set_rule(tx, target, rule.as_ref())? {
+        Ok(()) => Outcome::Applied,
+        Err(code) => rejected(code),
+    })
 }
 
 fn master_reply(
@@ -1425,6 +1473,7 @@ pub struct TeamStatus {
     pub tasks: Vec<TeamTask>,
     pub messages: Vec<TeamMessage>,
     pub plan: Vec<PlanStep>,
+    pub events: events::EventsView,
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -1658,6 +1707,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         tasks,
         messages,
         plan: steps,
+        events: events::view(connection, project)?,
     })
 }
 

@@ -726,6 +726,68 @@ export interface TeamStatus {
   tasks: TeamTask[];
   messages: TeamMessage[];
   plan: TeamPlanStep[];
+  events: TeamEventsView;
+}
+
+export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried";
+export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
+
+export interface TeamEvent {
+  id: number;
+  agent: number;
+  label: string;
+  task: number | null;
+  kind: TeamEventKind;
+  text: string;
+  state: TeamEventState;
+  created_ms: number;
+  delivered_ms: number | null;
+}
+
+export interface WakeRule {
+  question: boolean;
+  finished: boolean;
+  failed: boolean;
+  change_set_ready: boolean;
+  progress: boolean;
+  hourly_cap: number;
+}
+
+export type WakeRuleTarget =
+  | { level: "app" }
+  | { level: "project"; project_id: string }
+  | { level: "agent"; project_id: string; agent: number };
+
+export interface TeamNotification {
+  id: number;
+  project_id: string;
+  kind: "escalation" | "wake_paused";
+  text: string;
+  created_ms: number;
+  seen_ms: number | null;
+}
+
+export interface TeamEventsView {
+  recent: TeamEvent[];
+  waiting: { agent: number; text: string }[];
+  notifications: TeamNotification[];
+  paused: boolean;
+  questions: { agent: number; count: number }[];
+  wake: {
+    app: WakeRule | null;
+    project: WakeRule | null;
+    agents: { agent: number; rule: WakeRule }[];
+    effective: WakeRule;
+    level: WakeRuleLevel;
+  };
+}
+
+export interface AppTeamEvents {
+  rule: WakeRule | null;
+  effective: WakeRule;
+  notifications: TeamNotification[];
+  unseen: number;
 }
 
 export interface TeamPlanStep {
