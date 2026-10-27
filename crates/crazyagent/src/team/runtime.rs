@@ -3269,6 +3269,9 @@ impl TeamRuntime {
             worktree: PathBuf::from(worktree),
             git_dir: PathBuf::from(git_dir),
         };
+        let task = turn
+            .strip_prefix("task-")
+            .and_then(|task| task.parse::<i64>().ok());
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
