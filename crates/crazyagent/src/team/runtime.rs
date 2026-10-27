@@ -701,7 +701,8 @@ impl TeamRuntime {
     /// Runs one step for every project with team work: applies agent reports and the
     /// owner's stop and restart from the agent register, sends pending messages to the
     /// master, delivers finished results, starts or reuses sub-agents within the plan's
-    /// limits, stops idle or cancelled agents and ends team panes no agent owns.
+    /// limits, stops idle or cancelled agents, ends team panes no agent owns and rewrites
+    /// each followed IDE workspace whose sections changed.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.collect()?;
         self.owner_controls()?;
@@ -714,7 +715,8 @@ impl TeamRuntime {
         self.owner_controls()?;
         self.note_conversations()?;
         self.watch_questions()?;
-        self.sweep()
+        self.sweep()?;
+        crate::ide::workspace::follow(&self.connection, &self.root)
     }
 
     /// Reads each busy sub-agent's terminal for a question it waits on, at most once each

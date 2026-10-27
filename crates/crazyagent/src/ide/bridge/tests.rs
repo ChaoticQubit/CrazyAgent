@@ -19,7 +19,8 @@ struct Case {
 
 impl Case {
     /// Opens the engine and binds its owner server in an `o00000000` generation folder,
-    /// so the temporary root plays the engine root that holds `ide/`.
+    /// so the temporary root plays the engine root that holds `ide/`. Projects `alpha` and
+    /// `beta` are set up with folders under `projects/`.
     async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-ide-")
@@ -39,6 +40,13 @@ impl Case {
                 .await
                 .unwrap(),
         );
+        let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        for project in ["alpha", "beta"] {
+            let folder = root.path().join("projects").join(project);
+            std::fs::create_dir_all(&folder).unwrap();
+            crate::ide::workspace::tests::add_project(&db, project, &folder);
+        }
         let (server, runtime) = OwnerServer::bind(&generation, engine.clone(), &config)
             .await
             .unwrap();
@@ -189,13 +197,39 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
     );
     let first = token(&path);
     let ide = packet(MAGIC, 0, &first);
+    let file = case
+        .root
+        .path()
+        .join("ide")
+        .join("alpha")
+        .join("crazyagent.code-workspace");
     let answer = Some(IdeReply::Ok {
-        data: json!({
-            "path": case.root.path().join("ide").join("alpha").join("crazyagent.code-workspace")
-        }),
+        data: json!({ "path": file, "hidden": 0, "show_all": false }),
     });
     assert_eq!(
         exchange(&socket, ide, &request("alpha", workspace())).await,
+        answer
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(
+        written["folders"],
+        json!([{ "name": "Project", "path": case.root.path().join("projects").join("alpha") }])
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&file).unwrap().mode() & 0o7777,
+        0o600
+    );
+    let show_all = json!({ "name": "ide.show_all_agents", "args": { "on": true } });
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", show_all)).await,
+        Some(IdeReply::Ok {
+            data: json!({ "path": file, "hidden": 0, "show_all": true }),
+        })
+    );
+    let show_newest = json!({ "name": "ide.show_all_agents", "args": { "on": false } });
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", show_newest)).await,
         answer
     );
     assert_eq!(
