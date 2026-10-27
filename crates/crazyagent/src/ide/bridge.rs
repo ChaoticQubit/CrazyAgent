@@ -34,7 +34,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 9] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 12] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -70,6 +70,18 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 9] = [
     (
         "out/sidebar/tree.js",
         include_bytes!("../../../../apps/ide-extension/out/sidebar/tree.js"),
+    ),
+    (
+        "out/base-content.js",
+        include_bytes!("../../../../apps/ide-extension/out/base-content.js"),
+    ),
+    (
+        "out/scm-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm-model.js"),
+    ),
+    (
+        "out/scm.js",
+        include_bytes!("../../../../apps/ide-extension/out/scm.js"),
     ),
 ];
 
@@ -108,11 +120,19 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_diff")]
     ChangeDiff { id: ChangeSetId, page: u16 },
     #[serde(rename = "ide.base_blob")]
-    BaseBlob { id: ChangeSetId, path: String },
+    BaseBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
     #[serde(rename = "ide.accept")]
-    Accept { id: ChangeSetId, message: String },
+    Accept {
+        id: ChangeSetId,
+        head: String,
+        message: String,
+    },
     #[serde(rename = "ide.discard")]
-    Discard { id: ChangeSetId },
+    Discard { id: ChangeSetId, head: String },
     #[serde(rename = "ide.restore")]
     Restore { id: ChangeSetId },
     #[serde(rename = "ide.comment")]
@@ -592,8 +612,8 @@ async fn answer(
         | IdeCall::BaseBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
-        | IdeCall::Restore { .. }
-        | IdeCall::Comment { .. }
+        | IdeCall::Restore { .. } => change_call(runtime, project, call).await?,
+        IdeCall::Comment { .. }
         | IdeCall::OwnerEdit { .. }
         | IdeCall::ExtensionRequest { .. }
         | IdeCall::ExtensionDecide { .. }
@@ -601,6 +621,24 @@ async fn answer(
         IdeCall::Events {} => return Err(failure("ide_request_invalid")),
     };
     Ok(IdeReply::Ok { data })
+}
+
+/// Answers a Changes call where the engine lands change sets; elsewhere it is unavailable.
+/// Inputs: the owner runtime, the project and the call. Output: the reply data.
+async fn change_call(
+    runtime: &OwnerRuntimeHandle,
+    project: &ProjectId,
+    call: IdeCall,
+) -> Result<serde_json::Value, EngineError> {
+    #[cfg(unix)]
+    {
+        changes::answer(runtime.ide()?.root, project.clone(), call).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (runtime, project, call);
+        Err(failure("ide_request_unavailable"))
+    }
 }
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
@@ -782,5 +820,7 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
     Ok(())
 }
 
+#[cfg(unix)]
+mod changes;
 #[cfg(all(test, unix))]
 mod tests;

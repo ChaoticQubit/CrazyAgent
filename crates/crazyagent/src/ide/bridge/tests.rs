@@ -245,7 +245,15 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
         exchange(&socket, ide, &request("alpha", owner_call)).await,
         rejected("ide_request_invalid")
     );
-    let unbuilt = json!({ "name": "ide.change_sets", "args": {} });
+    let change_sets = json!({ "name": "ide.change_sets", "args": {} });
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", change_sets)).await,
+        Some(IdeReply::Ok { data: json!([]) })
+    );
+    let unbuilt = json!({
+        "name": "ide.extension_request",
+        "args": { "id": "acme.tools", "version": "1.2.3" }
+    });
     assert_eq!(
         exchange(&socket, ide, &request("alpha", unbuilt)).await,
         rejected("ide_request_unavailable")
@@ -438,12 +446,12 @@ fn ide_frames_match_the_extension_fixture() {
 fn ide_request_bounds_are_refused() {
     let id = "0123456789abcdef0123456789abcdef";
     let refused = [
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "" } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1) } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs" } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
-        json!({ "name": "ide.accept", "args": { "id": id, "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
+        json!({ "name": "ide.accept", "args": { "id": id, "head": "a".repeat(40), "message": "m".repeat(TEXT_BYTES_MAX + 1) } }),
         json!({ "name": "ide.extension_request", "args": { "id": "../evil", "version": "1.0.0" } }),
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
     ];

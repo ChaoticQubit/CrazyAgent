@@ -2,12 +2,16 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
+const base_content_js_1 = require("./base-content.js");
 const engine_js_1 = require("./engine.js");
 const agents_js_1 = require("./sidebar/agents.js");
 const changes_js_1 = require("./sidebar/changes.js");
 const context_js_1 = require("./sidebar/context.js");
 const memories_js_1 = require("./sidebar/memories.js");
+const scm_js_1 = require("./scm.js");
 const features = [
+    base_content_js_1.registerBaseContent,
+    scm_js_1.registerChanges,
     memories_js_1.sidebarMemories,
     agents_js_1.sidebarAgents,
     changes_js_1.sidebarChanges,
