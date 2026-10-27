@@ -33,8 +33,7 @@ const NAME_BYTES_MAX: usize = 256;
 const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
-const STALE_READING: &str =
-    "This project changed since you opened the form. Your edit is kept while the saved one is read.";
+const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
 const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
 
 /// Names the six tabs of a project.

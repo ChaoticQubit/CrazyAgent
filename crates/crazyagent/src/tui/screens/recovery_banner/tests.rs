@@ -149,7 +149,12 @@ fn ctrl_n_picks_which_failed_resume_or_notice_the_keys_act_on() {
                 RunShown::Failed,
                 Some("The account is unavailable."),
             ),
-            run(5, "Sub-agent 5", RunShown::Failed, Some("The harness stopped.")),
+            run(
+                5,
+                "Sub-agent 5",
+                RunShown::Failed,
+                Some("The harness stopped."),
+            ),
         ],
         notices,
         more: 0,

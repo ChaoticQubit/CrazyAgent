@@ -2244,7 +2244,10 @@ fn a_stale_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_read() {
     screen.key(key(KeyCode::Char('f')));
     let folders = screen.folders.as_ref().unwrap();
     assert_eq!(folders.input.value(), "");
-    assert_eq!(folders.error, None, "a box opened afresh carries no stale note");
+    assert_eq!(
+        folders.error, None,
+        "a box opened afresh carries no stale note"
+    );
 }
 
 fn console_screen() -> ProjectScreen {
