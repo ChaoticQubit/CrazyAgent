@@ -101,7 +101,7 @@ pub fn start(path: &Path, token: &str) -> io::Result<PipeWriter> {
     log.set_permissions(fs::Permissions::from_mode(0o600))?;
     let (reader, writer) = crate::spawn_gate::guarded(io::pipe)?;
     let token = token.to_owned();
-    std::thread::Builder::new()
+    let _detached = std::thread::Builder::new()
         .name("ide-server-log".to_owned())
         .spawn(move || copy(reader, log, &token))?;
     Ok(writer)

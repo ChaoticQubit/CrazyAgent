@@ -511,7 +511,7 @@ async fn page(mut client: TcpStream, request: &Request<'_>, site: &Site) {
         if raw.len() > PAGE_BYTES_MAX {
             return Err(io::Error::other("ide_proxy_page_too_long"));
         }
-        Ok(raw)
+        Ok::<_, io::Error>(raw)
     };
     let reply = match tokio::time::timeout(PAGE_TIME, fetched).await {
         Ok(Ok(raw)) => page_reply(&raw, site.port, host),

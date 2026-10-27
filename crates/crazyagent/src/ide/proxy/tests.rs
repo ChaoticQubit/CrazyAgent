@@ -277,8 +277,8 @@ fn malformed_heads_are_not_parsed() {
         assert!(parse(head.as_bytes()).is_none(), "{head:?}");
     }
     assert!(parse(&[0xff, b'\r', b'\n', b'\r', b'\n']).is_none());
-    let request =
-        parse(format!("GET /a?b HTTP/1.0\r\n{host}X-Tab:\tv \r\n\r\n").as_bytes()).unwrap();
+    let tabbed = format!("GET /a?b HTTP/1.0\r\n{host}X-Tab:\tv \r\n\r\n");
+    let request = parse(tabbed.as_bytes()).unwrap();
     assert_eq!(
         (request.method, request.target, request.version),
         ("GET", "/a?b", "HTTP/1.0")
