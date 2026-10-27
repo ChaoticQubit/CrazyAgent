@@ -21,6 +21,7 @@ mod account_setup;
 mod accounts;
 mod agents;
 mod changes;
+mod cleanup;
 mod harnesses;
 pub mod intake;
 pub mod master;

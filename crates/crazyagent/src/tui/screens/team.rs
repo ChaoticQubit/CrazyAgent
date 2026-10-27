@@ -23,6 +23,7 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
+mod cleanup;
 #[cfg(test)]
 mod tests;
 
@@ -118,6 +119,7 @@ pub struct Team {
     focus: Focus,
     attached: Option<Attached>,
     task: Option<i64>,
+    cleanup: cleanup::Cleanup,
     instructions: Option<Instructions>,
 }
 
@@ -139,6 +141,7 @@ impl Team {
             focus: Focus::Tree,
             attached: None,
             task: None,
+            cleanup: cleanup::Cleanup::new(),
             instructions: None,
         }
     }
@@ -712,6 +715,10 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
+            boxed(frame, area, &title, false, lines, ctx);
+            return None;
+        }
         if let Some(open) = self.instructions.as_mut() {
             let lines = instruction_lines(&open.read, limit, ctx);
             open.top = open
@@ -836,6 +843,9 @@ impl Screen for Team {
             hints.push(hint("r", "Refresh"));
             return hints;
         }
+        if self.cleanup.open() {
+            return self.cleanup.hints();
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let mut hints = vec![
             hint(&vertical, "Move"),
@@ -855,7 +865,10 @@ impl Screen for Team {
                 hints.push(hint("PgUp/PgDn", "Scroll"));
                 hints.push(hint("Esc", "Close"));
             }
-            None => hints.push(hint("Esc", "Back")),
+            None => {
+                hints.push(hint("c", "Clean up"));
+                hints.push(hint("Esc", "Back"));
+            }
         }
         hints
     }
@@ -870,6 +883,9 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if let Some(flow) = self.cleanup.key(key, &self.project, ctx) {
+            return flow;
         }
         let items = self.items(ctx.glyphs);
         match key {
@@ -922,6 +938,7 @@ impl Screen for Team {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        self.cleanup.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
