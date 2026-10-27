@@ -11,6 +11,7 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
@@ -681,11 +682,11 @@ impl ResearchRunner {
     ) -> Result<(Ending, u32, PathBuf), RunError> {
         let JobPlace {
             root,
+            project,
             context,
             name,
             worktree,
             agent,
-            ..
         } = place;
         private_directory(&agent)?;
         let home = agent.join("home");
@@ -726,10 +727,20 @@ impl ResearchRunner {
         } else {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
+        let homes = ToolHomes::owner()?;
+        let scratch = toolchains::ScopedTmp::make(&home)?;
+        toolchains::prepare_cargo_home(&home, &homes)?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }
+        let extra = jobs
+            .read_paths(&project)
+            .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))?
+            .allow_scratch(scratch.path())?
+            .allow_extra_reads(&extra)?;
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }

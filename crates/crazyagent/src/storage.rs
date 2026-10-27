@@ -2382,6 +2382,14 @@ fn owner_read(
             project_id: project_id.clone(),
             setup: crate::project_setup::load_setup(&tx, project_id)?.map(Box::new),
         },
+        OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?

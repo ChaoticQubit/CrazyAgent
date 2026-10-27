@@ -6,6 +6,7 @@ use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use crate::sandbox::toolchains::{self, ToolHomes};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -374,21 +375,30 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = if request.tools {
-        TOOLS_ON_PATH
+        toolchains::agent_path(&homes, TOOLS_ON_PATH)
     } else {
-        TOOLS_OFF_PATH
+        TOOLS_OFF_PATH.to_owned()
     };
+    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let tools = if request.tools {
+        toolchains::agent_env(home, &homes)
+    } else {
+        Vec::new()
+    };
+    let mut base = vec![
+        ("HOME", home.as_os_str()),
+        ("TMPDIR", tmp.as_os_str()),
+        ("PATH", OsStr::new(&path)),
+        ("LANG", OsStr::new("C")),
+        ("LC_ALL", OsStr::new("C")),
+    ];
+    base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
     let mut command = crate::sandbox::agent_command(
         profile,
         &request.executable,
-        &[
-            ("HOME", home.as_os_str()),
-            ("TMPDIR", home.as_os_str()),
-            ("PATH", OsStr::new(path)),
-            ("LANG", OsStr::new("C")),
-            ("LC_ALL", OsStr::new("C")),
-        ],
+        &base,
         environment
             .iter()
             .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),

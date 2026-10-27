@@ -387,6 +387,18 @@ export function promoteProjectMemory(id: string, memory: string, version: number
   return call<IntentReceipt>("desktop_promote_memory", { project: id, memory, version, generation });
 }
 
+/** Reads the extra read-only folders this project's agents get beside its toolchains.
+ * Input: project id. Output: the folders in saved order. */
+export function loadReadPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_read_paths", { id });
+}
+
+/** Replaces this project's extra read-only folders; the engine refuses unsafe ones.
+ * Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
 /** Deletes one document or research report from the project folder.
  * Inputs: project id, the path inside the folder and a generation. Output: the receipt. */
 export function deleteContextItem(id: string, path: string, generation: number): Promise<Result<IntentReceipt>> {

@@ -22,6 +22,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -2029,10 +2030,22 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let homes = ToolHomes::owner().map_err(sandboxed)?;
+        let scratch = toolchains::make_tmp(&home)
+            .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes)
+            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
+        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))
+            .and_then(|sandbox| sandbox.allow_scratch(&scratch))
+            .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
+            .map_err(sandboxed)?;
         let install = executable
             .canonicalize()
             .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
@@ -2316,6 +2329,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;

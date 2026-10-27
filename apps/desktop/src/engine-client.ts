@@ -367,7 +367,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -635,6 +635,14 @@ export function forgetMemory(project: string, memory: string, generation: number
 
 export function deleteProjectContext(id: string, path: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
+}
+
+export function projectReadPaths(id: string): Promise<string[]> {
+  return invoke<string[]>("desktop_project_read_paths", { id });
+}
+
+export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
 }
 
 export type TeamRole = "master" | "sub";

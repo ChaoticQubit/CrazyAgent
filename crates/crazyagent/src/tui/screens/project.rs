@@ -24,6 +24,7 @@ pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
 pub(in crate::tui) const REVIEW_ROWS: usize = 12;
 const MESSAGE_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 256;
+const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 
@@ -507,6 +508,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
     pub adding: Option<AddFile>,
+    pub folders: Option<AddFile>,
+    pub read_paths: Option<Vec<String>>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
     pub log: Option<JobLog>,
@@ -517,6 +520,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub offset: i64,
     jobs_read_ms: Option<i64>,
     context_read_ms: Option<i64>,
+    read_paths_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -560,6 +564,8 @@ impl ProjectScreen {
             confirm_stop: None,
             confirm_remove: false,
             adding: None,
+            folders: None,
+            read_paths: None,
             general: None,
             removed: false,
             log: None,
@@ -568,6 +574,7 @@ impl ProjectScreen {
             offset: 0,
             jobs_read_ms: None,
             context_read_ms: None,
+            read_paths_read_ms: None,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -585,6 +592,7 @@ impl ProjectScreen {
         self.confirm_stop = None;
         self.confirm_remove = false;
         self.adding = None;
+        self.folders = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
@@ -615,6 +623,11 @@ impl ProjectScreen {
             && (self.context.is_none() || matches!(self.tab, Tab::Context))
         {
             SetupQuery::Context { project }
+        } else if self.read_paths.is_none()
+            && self.tab == Tab::Settings
+            && due(self.read_paths_read_ms)
+        {
+            SetupQuery::ReadPaths { project }
         } else if due(self.memories_read_ms)
             && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
@@ -735,6 +748,7 @@ impl ProjectScreen {
                     }
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
+                    SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, .. } => {
                         if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
@@ -777,6 +791,10 @@ impl ProjectScreen {
                 self.memories = Some(memories);
                 self.memories_read_ms = Some(self.now_ms);
             }
+            SetupView::ReadPaths(paths) => {
+                self.read_paths = Some(paths);
+                self.read_paths_read_ms = Some(self.now_ms);
+            }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
                     preview.loaded = true;
@@ -817,6 +835,13 @@ impl ProjectScreen {
                 if let Some(adding) = self.adding.as_mut() {
                     adding.busy = false;
                     adding.error = reason;
+                }
+                true
+            }
+            SetupAction::SetReadPaths { .. } if self.folders.is_some() => {
+                if let Some(folders) = self.folders.as_mut() {
+                    folders.busy = false;
+                    folders.error = reason;
                 }
                 true
             }
@@ -868,6 +893,16 @@ impl ProjectScreen {
                 action: SetupAction::Remove { .. },
                 ..
             } => self.removed = applied,
+            SetupQuery::Change {
+                action: SetupAction::SetReadPaths { .. },
+                ..
+            } => {
+                self.read_paths = None;
+                self.read_paths_read_ms = None;
+                if applied {
+                    self.folders = None;
+                }
+            }
             SetupQuery::Change {
                 action: SetupAction::DeleteContext { path, .. },
                 ..
@@ -991,6 +1026,9 @@ impl ProjectScreen {
         if self.adding.is_some() {
             return self.add_key(key);
         }
+        if self.folders.is_some() {
+            return self.folders_key(key);
+        }
         if self.general.is_some() {
             return self.general_key(key);
         }
@@ -1094,6 +1132,11 @@ impl ProjectScreen {
         if let Some(adding) = self.adding.as_mut().filter(|adding| !adding.busy) {
             adding.input.insert_str(text);
             adding.error = None;
+            return ProjectReply::Handled;
+        }
+        if let Some(folders) = self.folders.as_mut().filter(|folders| !folders.busy) {
+            folders.input.insert_str(text);
+            folders.error = None;
             return ProjectReply::Handled;
         }
         if let Some(general) = self.general.as_mut().filter(|general| !general.busy) {
@@ -1619,7 +1662,69 @@ impl ProjectScreen {
                 self.confirm_remove = true;
                 ProjectReply::Handled
             }
+            KeyCode::Char('f') => {
+                match &self.read_paths {
+                    Some(paths) => {
+                        let mut input = TextInput::single(FOLDERS_BYTES_MAX);
+                        input.set(&paths.join(":"));
+                        self.folders = Some(AddFile {
+                            input,
+                            busy: false,
+                            error: None,
+                        });
+                    }
+                    None => {
+                        self.problem =
+                            Some("Still loading the read-only folders. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             _ => ProjectReply::Ignored,
+        }
+    }
+
+    /// Handles one key in the read-only folders box: Enter saves the folders typed between
+    /// colons, an empty box clears them, Esc closes it.
+    /// Takes the key event.
+    /// Returns the change to send, or what the box did with the key.
+    fn folders_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(folders) = self.folders.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.folders = None;
+                ProjectReply::Handled
+            }
+            _ if folders.busy => ProjectReply::Handled,
+            KeyCode::Enter => {
+                let paths: Vec<String> = folders
+                    .input
+                    .value()
+                    .split(':')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let action = SetupAction::SetReadPaths {
+                    project_id: self.project.clone(),
+                    paths,
+                };
+                if let Err(error) = action.validate() {
+                    folders.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                folders.busy = true;
+                folders.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+            _ => {
+                if folders.input.handle(key) {
+                    folders.error = None;
+                }
+                ProjectReply::Handled
+            }
         }
     }
 
@@ -1728,6 +1833,7 @@ impl ProjectScreen {
             self.edit.is_some(),
             self.review.is_some(),
             self.adding.is_some(),
+            self.folders.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
@@ -1741,7 +1847,7 @@ impl ProjectScreen {
         if self.adding.is_some() {
             assert_eq!(self.tab, Tab::Context);
         }
-        if self.general.is_some() || self.confirm_remove {
+        if self.general.is_some() || self.confirm_remove || self.folders.is_some() {
             assert_eq!(self.tab, Tab::Settings);
         }
         if let Some(job) = self.confirm_stop {
@@ -1807,6 +1913,20 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "This part has hidden or direction-changing characters, so it can't be saved to memory."
         }
         "context_item_protected" => "The project brief can't be deleted.",
+        "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
+        "read_path_missing" => "One of those folders doesn't exist on this computer.",
+        "read_path_not_folder" => "One of those paths is a file. Add folders only.",
+        "read_path_holds_home" => {
+            "Agents can't read your whole home folder. Add a folder inside it."
+        }
+        "read_path_credentials" => {
+            "One of those folders holds or sits in a credential location, such as .ssh or .aws."
+        }
+        "read_path_engine_data" => "One of those folders holds CrazyAgent's own data.",
+        "read_path_refused" => "One of those folders can't be shared with agents.",
+        "read_paths_too_many" | "read_paths_invalid" => {
+            "Share at most 8 folders, each one plain path of up to 1024 characters."
+        }
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {

@@ -25,6 +25,8 @@
     "allow-desktop-save-research-to-memory",
     "allow-desktop-add-project-documents",
     "allow-desktop-delete-project-context",
+    "allow-desktop-project-read-paths",
+    "allow-desktop-set-project-read-paths",
     "allow-desktop-team-status",
     "allow-desktop-team-message",
     "allow-desktop-team-delegate",
