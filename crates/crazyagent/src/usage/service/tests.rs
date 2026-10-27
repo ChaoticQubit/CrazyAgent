@@ -138,3 +138,60 @@ fn a_step_that_panics_ends_only_that_step_and_the_next_step_still_counts() {
         Some("usage_unavailable")
     );
 }
+
+#[test]
+fn a_step_that_keeps_panicking_is_logged_once_and_waits_longer_each_time() {
+    let mut pace = Pace::default();
+    let panicked = || Some(STEP_PANICKED.to_owned());
+    let unavailable = || Some("usage_unavailable".to_owned());
+    assert_eq!(pace.after(None), (Vec::new(), SCAN_EVERY));
+    assert_eq!(
+        pace.after(guarded(|| panic!("a step broke an invariant"))),
+        (
+            vec!["usage: usage_step_panicked".to_owned()],
+            SCAN_EVERY * 2
+        )
+    );
+    let pauses: Vec<Duration> = (0..10)
+        .map(|_| {
+            let (lines, pause) = pace.after(panicked());
+            assert!(lines.is_empty(), "{lines:?}");
+            pause
+        })
+        .collect();
+    assert_eq!(
+        pauses[..3],
+        [SCAN_EVERY * 4, SCAN_EVERY * 8, SCAN_EVERY * 16]
+    );
+    assert!(pauses.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(pauses.last(), Some(&PANIC_PAUSE_MAX));
+    assert_eq!(
+        pace.after(None),
+        (
+            vec!["usage: 11 steps in a row panicked before this one".to_owned()],
+            SCAN_EVERY
+        )
+    );
+
+    assert_eq!(
+        pace.after(unavailable()),
+        (vec!["usage: usage_unavailable".to_owned()], SCAN_EVERY)
+    );
+    assert_eq!(pace.after(unavailable()), (Vec::new(), SCAN_EVERY));
+    assert_eq!(
+        pace.after(panicked()),
+        (
+            vec!["usage: usage_step_panicked".to_owned()],
+            SCAN_EVERY * 2
+        )
+    );
+    assert_eq!(
+        pace.after(unavailable()),
+        (vec!["usage: usage_unavailable".to_owned()], SCAN_EVERY),
+        "one panic needs no count line"
+    );
+    for _ in 0..u32::BITS + 2 {
+        pace.after(panicked());
+    }
+    assert_eq!(pace.after(panicked()).1, PANIC_PAUSE_MAX);
+}
