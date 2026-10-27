@@ -829,6 +829,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 created_ms: 1,
                 heartbeat_ms: 1,
                 stopped_ms: Some(2),
+                persona: None,
+                handle: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]

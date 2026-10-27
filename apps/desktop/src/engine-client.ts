@@ -234,6 +234,8 @@ export function errorMessage(error: unknown): string {
     skill_name_taken: "A skill with this name already exists here.",
     skill_limit: "You can add up to 100 skills here.",
     skill_not_found: "This skill was removed.",
+    skill_text_too_large: "This SKILL.md is too large to show here.",
+    skill_page_invalid: "This skill changed while it was read. Open it again.",
     server_name_invalid: "Use 1 to 64 lowercase letters, digits, - or _ for the name.",
     server_name_taken: "An MCP server with this name already exists here.",
     server_limit: "You can add up to 50 MCP servers here.",
@@ -367,7 +369,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -637,6 +639,14 @@ export function deleteProjectContext(id: string, path: string, generation: numbe
   return invoke<IntentReceipt>("desktop_delete_project_context", { id, path, generation });
 }
 
+export function projectReadPaths(id: string): Promise<string[]> {
+  return invoke<string[]>("desktop_project_read_paths", { id });
+}
+
+export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
 export type TeamRole = "master" | "sub";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
@@ -671,6 +681,8 @@ export interface TeamAgent {
   created_ms: number;
   heartbeat_ms: number;
   stopped_ms: number | null;
+  persona?: string | null;
+  handle?: string | null;
 }
 
 export interface TeamTask {
@@ -752,6 +764,12 @@ export function teamPause(id: string, paused: boolean, generation: number): Prom
 
 export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
+}
+
+/** Renames a live sub-agent's role handle. Inputs: project id, team agent id, the new handle
+ * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
+export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.
@@ -1303,12 +1321,25 @@ export interface SkillView {
   id: string;
   name: string;
   description: string;
+  line: string;
   scope: PluginScope;
   scope_label: string;
   enabled: boolean;
   on_here: boolean | null;
   source: string;
   folder: string;
+}
+
+export interface SkillFile {
+  path: string;
+  bytes: number;
+}
+
+export interface SkillDetail {
+  skill: SkillView;
+  text: string;
+  files: SkillFile[];
+  files_more: number;
 }
 
 export interface McpServerView {
@@ -1356,6 +1387,11 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<SkillView
 /** Removes a skill and the engine's copy of its folder. */
 export function removeSkill(id: string): Promise<void> {
   return invoke<void>("desktop_remove_skill", { id });
+}
+
+/** Reads one skill with its full SKILL.md text and file list, with a project's switch when given. */
+export function skillDetail(id: string, projectId?: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>("desktop_skill_detail", { id, projectId: projectId ?? null });
 }
 
 /** Adds an MCP server that waits for approval. Secret values go to the engine and are never returned. */

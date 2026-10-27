@@ -1,7 +1,7 @@
 use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
-    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, now_ms,
+    admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
     parse_delegations, pick_account, tool,
 };
 use crate::agents::{
@@ -22,6 +22,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -1631,6 +1632,7 @@ impl TeamRuntime {
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            names::assign_task_role(&self.connection, project, agent, task)?;
             self.mark_agent(agent, AgentStatus::Working, Some(task))?;
         }
         Ok(())
@@ -1757,6 +1759,9 @@ impl TeamRuntime {
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
         assert!(id > 0);
+        if role == AgentRole::Sub {
+            names::assign_persona(&self.connection, &stored.project_id, id)?;
+        }
         self.launch(stored, id, role, harness, tools, account, again, None)
     }
 
@@ -1801,6 +1806,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the sub-agent is not stopped".into()));
         }
+        names::assign_persona(&self.connection, &stored.project_id, id)?;
         let kept = [repository, worktree, git_dir];
         self.launch(
             stored,
@@ -2050,10 +2056,22 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let homes = ToolHomes::owner().map_err(sandboxed)?;
+        let scratch = toolchains::make_tmp(&home)
+            .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        toolchains::prepare_cargo_home(&home, &homes)
+            .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
+        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        (sandbox, _) = sandbox
+            .allow_tools(&Toolchains::detect(&root, &homes))
+            .and_then(|sandbox| sandbox.allow_scratch(&scratch))
+            .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
+            .map_err(sandboxed)?;
         let install = executable
             .canonicalize()
             .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
@@ -2338,6 +2356,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -2469,7 +2488,12 @@ impl TeamRuntime {
         let label = if AgentRole::parse(&role) == Some(AgentRole::Master) {
             format!("Team master ({harness})")
         } else {
-            format!("Sub-agent {id} ({harness})")
+            let name = names::name(&self.connection, id)?;
+            format!(
+                "{} \u{b7} {}",
+                names::label(AgentRole::Sub, id, name.as_ref()),
+                names::harness_name(&harness)
+            )
         };
         let workspace = crate::landing::Workspace {
             project: project.clone(),
@@ -2678,7 +2702,10 @@ impl TeamRuntime {
         }
         let mut delegations = proposed;
         for line in parse_delegations(text) {
-            if !delegations.contains(&line) {
+            if !delegations
+                .iter()
+                .any(|seen| seen.harness == line.harness && seen.prompt == line.prompt)
+            {
                 delegations.push(line);
             }
         }
@@ -2696,7 +2723,7 @@ impl TeamRuntime {
             return tx.commit().map_err(error);
         }
         for delegation in &delegations {
-            if let Err(code) = admit(
+            match admit(
                 &tx,
                 &access,
                 &stored,
@@ -2706,11 +2733,16 @@ impl TeamRuntime {
                 Some(reply),
                 now,
             )? {
-                refused.push(format!(
+                Ok(task) => {
+                    if let Some(role) = &delegation.role {
+                        names::set_task_role(&tx, project, task, role)?;
+                    }
+                }
+                Err(code) => refused.push(format!(
                     "- {}: {}",
                     bound_text(&delegation.prompt, 200),
                     refusal(code)
-                ));
+                )),
             }
         }
         if !refused.is_empty() {

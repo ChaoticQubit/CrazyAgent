@@ -191,7 +191,9 @@ fn proposed(repo: &Repo, record: &Record, roots: &[&Path]) -> Result<String, Eng
     let printed = String::from_utf8_lossy(&printed);
     let fields: Vec<&str> = printed.split_terminator('\0').collect();
     let mut subjects = fields
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|commit| commit[0] != ENGINE.1)
         .map(|commit| subject(commit[1], roots))
         .filter(|line| !line.is_empty());
