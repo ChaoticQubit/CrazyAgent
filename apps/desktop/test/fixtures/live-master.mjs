@@ -98,6 +98,8 @@ export function shown() {
     status: document.querySelector(".cs-status")?.textContent ?? null,
     owner: [...document.querySelectorAll(".cs-owner")].map((line) => line.textContent),
     buttons: [...document.querySelectorAll("button")].map((item) => item.textContent.trim()).filter(Boolean),
+    titles: Object.fromEntries([...document.querySelectorAll("button[title]")].map((item) => [item.textContent.trim(), item.title])),
+    state: document.querySelector(".pj-console-state")?.textContent ?? null,
     text: document.getElementById("panel").textContent,
     viewport: window.innerHeight,
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,

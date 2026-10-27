@@ -19,9 +19,9 @@ function token(name: string, fallback: string): string {
   return value || fallback;
 }
 
-/** The view's xterm settings: the app's mono font and terminal colors, Option as Meta and
- * `SCROLLBACK_LINES` of scrollback for the history the engine sends on attach. Output: the
- * options for a new terminal. */
+/** The view's xterm settings: the app's mono font, the terminal tokens for every ANSI color
+ * and the scrollbar, Option as Meta and `SCROLLBACK_LINES` of scrollback for the history the
+ * engine sends on attach. Output: the options for a new terminal. */
 export function terminalOptions(): ITerminalOptions {
   return {
     cursorBlink: true,
@@ -35,6 +35,25 @@ export function terminalOptions(): ITerminalOptions {
       cursor: token("--terminal-cursor", "#ff6a45"),
       cursorAccent: token("--terminal-bg", "#161513"),
       selectionBackground: token("--terminal-selection", "rgba(255, 106, 69, 0.32)"),
+      scrollbarSliderBackground: token("--terminal-scrollbar", "rgba(238, 234, 226, 0.1)"),
+      scrollbarSliderHoverBackground: token("--terminal-scrollbar-hover", "rgba(238, 234, 226, 0.22)"),
+      scrollbarSliderActiveBackground: token("--terminal-scrollbar-hover", "rgba(238, 234, 226, 0.22)"),
+      black: token("--terminal-black", "#2a2723"),
+      red: token("--terminal-red", "#f2867e"),
+      green: token("--terminal-green", "#6cc08e"),
+      yellow: token("--terminal-yellow", "#e3b45e"),
+      blue: token("--terminal-blue", "#8fb3d9"),
+      magenta: token("--terminal-magenta", "#d4a0c8"),
+      cyan: token("--terminal-cyan", "#7fc4bd"),
+      white: token("--terminal-white", "#d8d2c6"),
+      brightBlack: token("--terminal-bright-black", "#8a8477"),
+      brightRed: token("--terminal-bright-red", "#ff9d94"),
+      brightGreen: token("--terminal-bright-green", "#8fd6aa"),
+      brightYellow: token("--terminal-bright-yellow", "#f0c77a"),
+      brightBlue: token("--terminal-bright-blue", "#a9c6e6"),
+      brightMagenta: token("--terminal-bright-magenta", "#e2b8d8"),
+      brightCyan: token("--terminal-bright-cyan", "#9dd6cf"),
+      brightWhite: token("--terminal-bright-white", "#f6f2ea"),
     },
   };
 }
@@ -133,17 +152,22 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
 }
 
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
- * key typed straight into the agent's real terminal, sized to the panel. Closing it detaches
- * the view; the agent keeps running. Inputs: the graph node, a harness name lookup and the
- * close action, when the panel can be closed. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose }: {
+ * key typed straight into the agent's real terminal, sized to the panel, with a way back to
+ * the latest output once scrolled up. Closing it detaches the view; the agent keeps running.
+ * Inputs: the graph node, a harness name lookup, the close action when the panel can be
+ * closed, and `embedded` when a console around it owns the head and typing goes to the
+ * terminal alone. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
+  embedded?: boolean;
 }) {
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
+  const latest = useRef<(() => void) | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
+  const [behind, setBehind] = useState(false);
   const [round, setRound] = useState(0);
   const name = node.terminal;
 
@@ -200,6 +224,14 @@ export function TerminalPanel({ node, harness, onClose }: {
         terminal.focus();
         return true;
       };
+      const scrolled = terminal.onScroll(() => {
+        const buffer = terminal.buffer.active;
+        setBehind(buffer.viewportY < buffer.baseY);
+      });
+      latest.current = () => {
+        terminal.scrollToBottom();
+        terminal.focus();
+      };
       const resized = terminal.onResize(() => {
         window.clearTimeout(timer);
         timer = window.setTimeout(sendSize, RESIZE_PAUSE_MS);
@@ -223,10 +255,12 @@ export function TerminalPanel({ node, harness, onClose }: {
       });
       release = () => {
         prompt.current = null;
+        latest.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
         input.dispose();
         resized.dispose();
+        scrolled.dispose();
         window.clearTimeout(timer);
         window.cancelAnimationFrame(frame);
         unsettle();
@@ -248,12 +282,12 @@ export function TerminalPanel({ node, harness, onClose }: {
     };
   }, [name, round]);
 
-  return <section className="tg-terminal" aria-label={`${node.label} terminal`}>
-    <div className="tg-terminal-head">
+  return <section className={embedded ? "tg-terminal embedded" : "tg-terminal"} aria-label={`${node.label} terminal`}>
+    {!embedded && <div className="tg-terminal-head">
       <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
       {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
       {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
-    </div>
+    </div>}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}
     {view.kind === "not_ready" && <NotReady what="Agent terminals" compact />}
     {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Connecting to the terminal...</p>}
@@ -262,7 +296,10 @@ export function TerminalPanel({ node, harness, onClose }: {
       <Button size="small" icon="refresh-cw" onClick={() => setRound((value) => value + 1)}>Open again</Button>
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} />
-    {view.kind === "live" && <p className="tg-terminal-note">{typingNote(node)}</p>}
-    {name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
+    {view.kind === "live" && <div className="tg-terminal-note">
+      <span>{embedded ? `${typingNote(node)} Enter sends, Shift+Enter adds a line.` : typingNote(node)}</span>
+      {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
+    </div>}
+    {!embedded && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
   </section>;
 }

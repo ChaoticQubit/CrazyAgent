@@ -364,6 +364,41 @@
   font-size: 12px;
 }
 
+.tg-terminal-note .btn {
+  margin-left: auto;
+}
+
+.tg-terminal-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tg-terminal.embedded {
+  border: 0;
+  border-radius: 0;
+  min-height: 0;
+}
+
+.tg-terminal.embedded .tg-terminal-screen {
+  padding: var(--space-3) var(--space-2) var(--space-2) var(--space-5);
+}
+
+.tg-terminal.embedded .tg-terminal-note {
+  min-height: 32px;
+  padding: 0 var(--space-2) 0 var(--space-5);
+  border-top: 1px solid var(--terminal-border);
+  background: var(--terminal-surface);
+  color: var(--terminal-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.tg-terminal.embedded .tg-terminal-state {
+  background: transparent;
+  color: var(--terminal-muted);
+}
+
 .tg-composer {
   display: flex;
   flex-direction: column;

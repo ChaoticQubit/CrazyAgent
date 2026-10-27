@@ -107,7 +107,7 @@ test("Earlier conversation opens the old engine-driven conversation read-only in
   assert.equal(seen.back.conversation, false);
 });
 
-test("the live master header offers Stop live master and says the master starts when the tab opens", async () => {
+test("the live master console head offers Stop live master, says the master starts when the tab opens and shows it live", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountView("running")');
     const running = await evaluate("Fixture.shown()");
@@ -116,7 +116,8 @@ test("the live master header offers Stop live master and says the master starts 
   });
   assert.ok(seen.running.buttons.includes("Stop live master"), seen.running.buttons.join(", "));
   assert.ok(!seen.running.buttons.includes("Start live master"), seen.running.buttons.join(", "));
-  assert.match(seen.running.text, /Live master starts when you open this tab\./);
+  assert.equal(seen.running.titles["Stop live master"], "Live master starts when you open this tab.");
+  assert.equal(seen.running.state, "Live");
   assert.equal(seen.stopped, true);
   assert.deepEqual(seen.switched, [false]);
 });

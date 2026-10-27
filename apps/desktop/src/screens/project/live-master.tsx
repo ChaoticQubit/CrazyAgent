@@ -39,6 +39,7 @@ export type Live =
 
 const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. Its terminal opens again once you start it.";
+const STARTS_ON_OPEN = "Live master starts when you open this tab.";
 
 /** The live master switch as the engine last told it. Inputs: the latest team status read
  * and the project shown. Output: undefined until a good read of this project arrives, since
@@ -136,42 +137,66 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   return <LiveMasterView data={data} harness={harness} live={shown} onSwitch={(next) => void turn(next)} />;
 }
 
-/** The live master area in one state: a header with the switch, then the master's terminal
- * filling the area, a line while it starts, can't or is stopped, or the earlier engine-driven
- * conversation, read-only, behind a toggle. An engine that says the master has no terminal
- * app gets today's conversation instead. Inputs: the project data, the master harness id, the
- * state and the switch action. Output: the area. */
+/** The word and tone the console head shows for one live master state. Input: the state.
+ * Output: a short word and the tone that colors it. */
+export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "warn" | "danger" } {
+  switch (live.kind) {
+    case "running": return live.node ? { word: "Live", tone: "ok" } : { word: "Opening", tone: "muted" };
+    case "starting": return { word: "Starting", tone: "muted" };
+    case "stopped": return live.problem ? { word: "Stopped", tone: "warn" } : { word: "Stopped", tone: "muted" };
+    case "refused": return { word: "Couldn't start", tone: "danger" };
+    case "not_ready": return { word: "Not in this build", tone: "muted" };
+  }
+}
+
+/** The live master area in one state: one console whose head names the master, its state
+ * and account and holds the switch, above the master's terminal filling the rest, or a line
+ * while it starts, can't or is stopped; or the earlier engine-driven conversation, read-only,
+ * behind a toggle. An engine that says the master has no terminal app gets today's
+ * conversation instead. Inputs: the project data, the master harness id, the state and the
+ * switch action. Output: the area. */
 export function LiveMasterView({ data, harness, live, onSwitch }: { data: ProjectData; harness: string; live: Live; onSwitch: (on: boolean) => void }) {
   const [earlier, setEarlier] = useState(false);
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
+  const toggle = <Button variant="quiet" size="small" icon={earlier ? "square-terminal" : "message-square"} onClick={() => setEarlier((open) => !open)}>
+    {earlier ? "Back to the live master" : "Earlier conversation"}
+  </Button>;
 
-  return <div className="pj-master-live">
+  if (earlier) return <div className="pj-master-live">
     <div className="pj-master-head">
-      <span>{earlier ? "Earlier conversation" : displayText(`Master: ${name(harness)}, ${live.kind === "stopped" ? "stopped" : "live"}`)}</span>
-      {!earlier && !off && live.kind !== "not_ready" && <span className="pj-small pj-muted pj-master-note">Live master starts when you open this tab.</span>}
-      <span className="pj-row">
-        {!earlier && live.kind !== "not_ready" && <Button variant="quiet" size="small" icon={off ? "square-terminal" : "circle-stop"} onClick={() => onSwitch(off)}>
+      <span>Earlier conversation</span>
+      <span className="pj-row">{toggle}</span>
+    </div>
+    <ConversationTab data={data} readOnly />
+  </div>;
+
+  const state = liveWord(live);
+  const account = live.kind === "running" ? live.node?.account : null;
+  return <div className="pj-master-live pj-console">
+    <div className="pj-console-head">
+      <span className="pj-console-title"><Icon name="square-terminal" size={15} />{displayText(name(harness))}</span>
+      <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
+      {account && <span className="pj-console-detail">{displayText(account)}</span>}
+      <span className="pj-console-actions">
+        {live.kind !== "not_ready" && <Button variant="quiet" size="small" icon={off ? "square-terminal" : "circle-stop"} title={off ? undefined : STARTS_ON_OPEN} onClick={() => onSwitch(off)}>
           {off ? "Start live master" : "Stop live master"}
         </Button>}
-        <Button variant="quiet" size="small" icon={earlier ? "square-terminal" : "message-square"} onClick={() => setEarlier((open) => !open)}>
-          {earlier ? "Back to the live master" : "Earlier conversation"}
-        </Button>
+        {toggle}
       </span>
     </div>
-    {earlier && <ConversationTab data={data} readOnly />}
-    {!earlier && live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
+    {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
     </div>}
-    {!earlier && live.kind === "not_ready" && <NotReady what="the live master terminal isn't in this build." />}
-    {!earlier && live.kind === "refused" && <div className="pj-note warn" role="alert">
+    {live.kind === "not_ready" && <NotReady what="the live master terminal isn't in this build." />}
+    {live.kind === "refused" && <div className="pj-note warn" role="alert">
       <p>The master terminal couldn't start. {live.copy}</p>
       <Button size="small" icon="refresh-cw" onClick={() => onSwitch(true)}>Try again</Button>
     </div>}
-    {!earlier && live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
-    {!earlier && live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Waiting for the master's terminal. It opens once the master signs in and starts.</p>}
-    {!earlier && live.kind === "running" && live.node && <TerminalPanel key={live.node.terminal ?? live.node.id} node={live.node} harness={name} />}
+    {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
+    {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Waiting for the master's terminal. It opens once the master signs in and starts.</p>}
+    {live.kind === "running" && live.node && <TerminalPanel key={live.node.terminal ?? live.node.id} node={live.node} harness={name} embedded />}
   </div>;
 }
