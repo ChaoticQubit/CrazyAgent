@@ -285,7 +285,7 @@ async fn open(
     Ok(Reply::Opened {
         server: IdeTabServer {
             url: info.url,
-            webview_port: info.webview_port,
+            webview_port: info.port,
             token_path: info.token_path,
             workspace: written.path,
         },
