@@ -790,9 +790,10 @@ impl ProjectSandbox {
 
     /// Paths inside the project folder no agent may write although the folder is writable:
     /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// and the git config with its lock file. Every platform boundary keeps these read-only,
-    /// except that Windows guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
-    pub fn protected_paths(&self) -> [PathBuf; 5] {
+    /// the git config with its lock file, and `.git/modules`, where git keeps submodule
+    /// repositories. Every platform boundary keeps these read-only, except that Windows
+    /// guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
+    pub fn protected_paths(&self) -> [PathBuf; 6] {
         let git = self.project_root.join(".git");
         [
             self.project_root.join("context"),
@@ -800,6 +801,7 @@ impl ProjectSandbox {
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
+            git.join("modules"),
         ]
     }
 
@@ -907,9 +909,10 @@ impl ProjectSandbox {
         text.push_str(")\n");
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         text.push_str(&self.git_link_denies());
+        text.push_str(&self.submodule_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
         }
@@ -986,6 +989,25 @@ impl ProjectSandbox {
             "{moves})\n{links})\n(deny file-write*\n  (regex #\"^{admin}/config\\.worktree$\"))\n"
         );
         assert!(text.matches("(regex #\"^/").count() == 5);
+        text
+    }
+
+    /// The Seatbelt rule that keeps the submodule store out of agent hands. Git keeps a
+    /// submodule's own repository, with the config and hooks a later git would run, under
+    /// `.git/modules`; no agent may write there, in the common git folder or a worktree
+    /// admin folder, so none can plant a submodule whose metadata the engine or the owner
+    /// then enters. The `.gitmodules` file and gitlinks stay writable tracked content: the
+    /// engine's own git ignores them with `--ignore-submodules` and never recurses. The
+    /// name matches in any letter case, since the project disk may be case insensitive.
+    /// Input: the policy. Output: the rule text.
+    fn submodule_denies(&self) -> String {
+        let pattern = seatbelt_pattern(&self.project_root);
+        let dot_git = "\\.[gG][iI][tT]";
+        let modules = "[mM][oO][dD][uU][lL][eE][sS]";
+        let text = format!(
+            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/worktrees/[^/]+)?/{modules}(/.*)?$\"))\n"
+        );
+        assert_eq!(text.matches("(regex #\"^/").count(), 1);
         text
     }
 

@@ -432,6 +432,89 @@ fn an_agent_cannot_move_or_redirect_the_git_metadata_the_owner_git_reads() {
     assert!(worktree.join(".git").is_file());
 }
 
+/// Checks that `script`, run under `sandbox` and `profile`, cannot create `target`: the
+/// command fails and the file is absent. Input: the sandbox, the profile, the script and
+/// the target path.
+fn write_refused(sandbox: &ProjectSandbox, profile: &Path, script: &str, target: &Path) {
+    let output = run(sandbox, profile, script);
+    assert!(!output.status.success(), "{script}");
+    assert!(!target.exists(), "{}", target.display());
+}
+
+#[test]
+fn a_sandbox_refuses_writes_to_the_submodule_store() {
+    let (case, sandbox, profile, _worktree) = git_case();
+    let git = case.project.join(".git");
+    let admin = git.join("worktrees").join("engine-one").join("modules");
+    for (script, target) in [
+        (
+            "mkdir -p .git/modules/sub && : > .git/modules/sub/config",
+            git.join("modules").join("sub").join("config"),
+        ),
+        (
+            "mkdir -p .git/MODULES/sub && : > .git/MODULES/sub/config",
+            git.join("MODULES").join("sub").join("config"),
+        ),
+        (
+            "mkdir -p .git/worktrees/engine-one/modules/sub && : > .git/worktrees/engine-one/modules/sub/config",
+            admin.join("sub").join("config"),
+        ),
+    ] {
+        write_refused(&sandbox, &profile, script, &target);
+    }
+
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&worktree)
+        .unwrap();
+    let profile = case.profiles.join("confined.sb");
+    let admin = case.project.join(".git/worktrees/one/modules");
+    write_refused(
+        &confined,
+        &profile,
+        &format!(
+            "mkdir -p {dir}/sub && : > {dir}/sub/config",
+            dir = quoted(&admin)
+        ),
+        &admin.join("sub").join("config"),
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+            quoted(&worktree)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&committed.stdout), "ok\n");
+}
+
 #[test]
 fn network_is_open_only_when_tools_are_on() {
     let case = case();
@@ -573,6 +656,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
+            git.join("modules"),
         ]
     );
     let text = sandbox.profile();

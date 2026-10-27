@@ -738,6 +738,75 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
 }
 
 #[test]
+fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let sub = worktree.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    git_in(
+        &case.home,
+        &sub,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(&case.home, &sub, &["config", "user.name", "Sub Owner"]);
+    git_in(
+        &case.home,
+        &sub,
+        &["config", "user.email", "sub@example.invalid"],
+    );
+    write(&sub.join("inner.txt"), "inner\n");
+    git_in(&case.home, &sub, &["add", "inner.txt"]);
+    git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub start"]);
+    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    let marker = case.home.join("submodule-fsmonitor-ran");
+    let fsmonitor = case.home.join("fsmonitor.sh");
+    marker_script(&fsmonitor, &marker);
+    git_in(
+        &case.home,
+        &sub,
+        &["config", "core.fsmonitor", fsmonitor.to_str().unwrap()],
+    );
+
+    git_in(
+        &case.home,
+        &worktree,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{sub_head},sub"),
+        ],
+    );
+    write(
+        &worktree.join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n",
+    );
+    git_in(&case.home, &worktree, &["add", ".gitmodules"]);
+    git_in(
+        &case.home,
+        &worktree,
+        &["commit", "-q", "-m", "Add submodule"],
+    );
+    let head = case.agent_head();
+
+    write(&sub.join("inner.txt"), "changed\n");
+    write(&sub.join("untracked.txt"), "new\n");
+
+    let agent = git::Repo::open(&case.workspace.git_dir, Some(&worktree)).unwrap();
+    assert!(
+        flow::holds_only(&agent, &head).unwrap(),
+        "a dirty submodule made the worktree look unfinished"
+    );
+    assert!(
+        !marker.exists(),
+        "engine git ran the submodule's configured fsmonitor"
+    );
+}
+
+#[test]
 fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() {
     for step in [
         owner::Step::Recorded,

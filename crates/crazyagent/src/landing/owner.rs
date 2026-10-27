@@ -195,11 +195,20 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
-/// file where the squash would write. Inputs: the checkout, its root, the tip and the
-/// squash tree. Output: Ok when Accept can write without touching the owner's work.
+/// file where the squash would write. A submodule counts by the commit it records, so no
+/// git runs inside it under config the engine did not write. Inputs: the checkout, its
+/// root, the tip and the squash tree. Output: Ok when Accept can write without touching
+/// the owner's work.
 fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result<(), EngineError> {
     if !owner.test(&["diff-index", "--cached", "--quiet", tip, "--"])?
-        || !owner.test(&["diff", "--no-ext-diff", "--no-textconv", "--quiet", "--"])?
+        || !owner.test(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=dirty",
+            "--quiet",
+            "--",
+        ])?
     {
         return Err(failure("changes_owner_dirty"));
     }

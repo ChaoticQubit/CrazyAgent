@@ -44,6 +44,7 @@ fn case() -> Case {
         &project.join("worktrees"),
         &git.join("hooks"),
         &git.join("objects"),
+        &git.join("modules"),
     ] {
         fs::create_dir_all(directory).unwrap();
     }
@@ -92,6 +93,7 @@ fn boundary_script(case: &Case) -> String {
         "echo inside > {inside} && echo home > {home} && \
          (echo x > {escape} || true) && (echo x >> {brief} || true) && \
          (echo x > {hook} || true) && (echo x > {top} || true) && \
+         (echo x > {module} || true) && \
          (echo x > {via_link} || true) && (cat {fixture} > {leak} || true)",
         inside = quoted(&worktrees.join("inside.txt")),
         home = quoted(&case.home.join("home.txt")),
@@ -99,6 +101,7 @@ fn boundary_script(case: &Case) -> String {
         brief = quoted(&case.project.join("context").join("brief.md")),
         hook = quoted(&git.join("hooks").join("pre-commit")),
         top = quoted(&case.project.join("top.txt")),
+        module = quoted(&git.join("modules").join("config")),
         via_link = quoted(&case.project.join("link").join("via-link.txt")),
         fixture = quoted(&case.outside.join("fixture.txt")),
         leak = quoted(&worktrees.join("leak.txt")),
@@ -134,6 +137,14 @@ fn assert_boundary(case: &Case, output: &Output) {
             .exists()
     );
     assert!(!case.project.join("top.txt").exists());
+    assert!(
+        !case
+            .project
+            .join(".git")
+            .join("modules")
+            .join("config")
+            .exists()
+    );
     assert!(!case.outside.join("via-link.txt").exists());
     assert!(
         !fs::read_to_string(worktrees.join("leak.txt"))
@@ -658,6 +669,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
         git.join("hooks"),
         git.join("config"),
         git.join("objects"),
+        git.join("modules"),
     ] {
         assert!(!policy.write.contains(&refused), "{}", refused.display());
     }
