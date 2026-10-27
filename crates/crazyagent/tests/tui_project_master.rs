@@ -166,8 +166,8 @@ async fn unavailable_catalog_retains_setup_fields_and_project_draft() {
             ("cpu_millis", 1000),
             ("memory_mib", 512),
             ("processes", 4),
-            ("output_bytes", 1048576),
-            ("wall_time_ms", 60000),
+            ("output_bytes", 67108864),
+            ("wall_time_ms", 600000),
             ("spend_microunits", 0),
         ] {
             assert!(screen.contains(&format!("{field}: {value}")), "{screen}");
