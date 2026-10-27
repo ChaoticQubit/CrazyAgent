@@ -179,6 +179,13 @@ pub trait Host: Send + Sync {
     /// Returns the screen and the live output after it, with nothing lost or repeated between them.
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError>;
 
+    /// Reads the visible screen of a live agent terminal without opening a viewer and
+    /// without its scrollback. Takes the name; fails like `attach` for an unknown name.
+    /// Returns the screen as `attach` draws it.
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        self.attach(agent).map(|stream| stream.screen)
+    }
+
     /// Types bytes into an agent terminal exactly as given, control keys included.
     /// Takes the name and at most `INPUT_BYTES_MAX` bytes.
     /// Returns once the host accepted them.

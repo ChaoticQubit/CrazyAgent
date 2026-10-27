@@ -730,7 +730,7 @@ export interface TeamStatus {
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
-export type TeamEventState = "queued" | "delivered" | "muted" | "carried";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped";
 export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
 
 export interface TeamEvent {
@@ -762,7 +762,7 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused";
+  kind: "escalation" | "wake_paused" | "queue_full";
   text: string;
   created_ms: number;
   seen_ms: number | null;
