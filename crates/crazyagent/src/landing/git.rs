@@ -182,6 +182,20 @@ impl Repo {
         Err(failure("changes_unavailable"))
     }
 
+    /// Opens a repository the engine is making itself, whose config only the engine wrote:
+    /// no filter listing, no owner ignore file and no version check, which the owner
+    /// repository opened before it already passed. Inputs: the git folder and the work
+    /// tree, which must exist. Output: the repository.
+    #[cfg(unix)]
+    pub(super) fn fresh(git_dir: &Path, work_tree: &Path) -> Self {
+        Self {
+            git_dir: git_dir.to_path_buf(),
+            work_tree: Some(work_tree.to_path_buf()),
+            overrides: Vec::new(),
+            excludes: None,
+        }
+    }
+
     fn check_version(&self) -> Result<(), EngineError> {
         let printed = self.capture(&["version"], 256)?;
         let text = String::from_utf8_lossy(&printed);

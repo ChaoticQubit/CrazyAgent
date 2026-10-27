@@ -908,6 +908,7 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
                 true,
                 &account,
                 false,
+                crate::agent_git::Layout::Linked,
             )
             .unwrap()
             .1
@@ -1029,7 +1030,16 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
     };
     for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
         let (_, plan, mode) = runtime
-            .prepare(&fixture.setup, id, role, "codex", true, &account, false)
+            .prepare(
+                &fixture.setup,
+                id,
+                role,
+                "codex",
+                true,
+                &account,
+                false,
+                crate::agent_git::Layout::Linked,
+            )
             .unwrap();
         let own = runtime.agent_folder(id).join("home");
         match mode {
@@ -1498,7 +1508,8 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
                 "codex",
                 true,
                 &account,
-                false
+                false,
+                crate::agent_git::Layout::Linked
             )
             .is_ok()
     );
@@ -1515,6 +1526,7 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         true,
         &account,
         false,
+        crate::agent_git::Layout::Linked,
     ) else {
         panic!("a master was prepared with a delegate engine it can write");
     };
@@ -1528,7 +1540,8 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
                 "codex",
                 true,
                 &account,
-                false
+                false,
+                crate::agent_git::Layout::Linked
             )
             .is_ok()
     );

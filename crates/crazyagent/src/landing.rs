@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
+mod clone;
+#[cfg(unix)]
 mod diff;
 #[cfg(unix)]
 mod flow;
@@ -109,7 +111,8 @@ impl From<ChangeSetId> for String {
 
 /// The agent worktree a turn or task ended in, as the engine computed it. Fields: the
 /// project, the agent, the owner's checkout root the worktree was added from, the
-/// worktree folder and its git metadata folder under the checkout's `.git/worktrees`.
+/// worktree folder and its git metadata folder: under the checkout's `.git/worktrees`
+/// for a linked worktree, `agent_git::git_dir` of the worktree for an agent's own clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub project: ProjectId,
@@ -237,6 +240,23 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     #[cfg(unix)]
     store::initialize(&db)?;
     Ok(db)
+}
+
+/// Makes an agent's own clone of the owner repository in a new worktree folder for the
+/// Own branch and Full access levels (DEC-102): its own git folder at
+/// `agent_git::git_dir`, the project's objects borrowed read-only, its branch
+/// `agent_git::branch` checked out at the owner's HEAD commit. The engine runs no git in
+/// the clone after this but the fetch that reads its branch. Inputs: the owner's
+/// checkout root and the new worktree folder. Output: Ok once checked out, else a plain
+/// `changes_*` code.
+pub fn add_agent_clone(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::add(repository, worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, worktree);
+        Err(unavailable())
+    }
 }
 
 /// Records the commit a newly added agent worktree starts from, so the change sets it

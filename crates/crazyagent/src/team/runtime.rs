@@ -4,6 +4,7 @@ use super::{
     admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
     parse_delegations, pick_account, tool,
 };
+use crate::agent_git::Layout;
 use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
 };
@@ -2375,7 +2376,25 @@ impl TeamRuntime {
         again: Option<&HostedRestart>,
         kept: Option<[String; 3]>,
     ) -> Result<Result<i64, String>, EngineError> {
-        let prepared = self.prepare(stored, id, role, harness, tools, account, kept.is_some());
+        let layout = match &kept {
+            Some([_, worktree, git_dir])
+                if Path::new(git_dir) == crate::agent_git::git_dir(Path::new(worktree)) =>
+            {
+                Layout::Clone
+            }
+            Some(_) => Layout::Linked,
+            None => self.git_layout(&stored.project_id),
+        };
+        let prepared = self.prepare(
+            stored,
+            id,
+            role,
+            harness,
+            tools,
+            account,
+            kept.is_some(),
+            layout,
+        );
         let resume = self
             .resuming
             .take()
@@ -2408,7 +2427,7 @@ impl TeamRuntime {
                     .map(|p| p.display().to_string())
             })
             .flatten();
-        let landing = match agent_git_dir(&root, &plan.working_dir) {
+        let landing = match agent_git_dir(&root, &plan.working_dir, layout) {
             Ok(landing) if kept.as_ref().is_none_or(|kept| kept == &landing) => landing,
             Ok(_) => {
                 let problem =
@@ -2557,6 +2576,16 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Where a new agent of a project keeps its git state (DEC-102): its own clone at the
+    /// Own branch and Full access levels, a linked worktree at Sandboxed or when the saved
+    /// level cannot be read (launch then refuses it). Input: the project. Output: the layout.
+    fn git_layout(&self, project: &ProjectId) -> Layout {
+        match crate::sandbox::policy::load(&self.connection, project.as_str()) {
+            Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
+            _ => Layout::Linked,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         &self,
@@ -2567,6 +2596,7 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         adopt: bool,
+        layout: Layout,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
@@ -2670,10 +2700,28 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        if !adopt {
-            add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
-                with_code("the agent worktree could not be added", Some(run_code(&e)))
-            })?;
+        match (adopt, layout) {
+            (true, _) => {}
+            (false, Layout::Linked) => {
+                add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
+                    with_code("the agent worktree could not be added", Some(run_code(&e)))
+                })?
+            }
+            (false, Layout::Clone) => {
+                let worktrees = worktree.parent().ok_or("agent worktrees folder")?;
+                std::fs::create_dir_all(worktrees).map_err(|e| {
+                    with_code(
+                        "the agent worktrees folder could not be made",
+                        Some(io_code(&e)),
+                    )
+                })?;
+                crate::landing::add_agent_clone(&root, &worktree).map_err(|e| {
+                    with_code(
+                        "the agent's own copy of the project could not be made",
+                        Some(&e.0),
+                    )
+                })?
+            }
         }
         let working_dir = worktree
             .canonicalize()
@@ -2682,9 +2730,17 @@ impl TeamRuntime {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
-        sandbox = match policy.access {
-            AgentAccess::Sandboxed => sandbox.confine_to_worktree(&working_dir),
-            AgentAccess::OwnBranch | AgentAccess::Full => sandbox.confine_to_clone(&working_dir),
+        sandbox = match (layout, policy.access) {
+            (Layout::Linked, _) => sandbox.confine_to_worktree(&working_dir),
+            (Layout::Clone, AgentAccess::Sandboxed) => {
+                return Err(with_code(
+                    "this agent started with its own branch, but the project is Sandboxed now; its changes are still in Changes",
+                    Some("agent_access_lowered"),
+                ));
+            }
+            (Layout::Clone, AgentAccess::OwnBranch | AgentAccess::Full) => {
+                sandbox.confine_to_clone(&working_dir)
+            }
         }
         .map_err(sandboxed)?;
         if let Some(engine) = self
@@ -4348,12 +4404,26 @@ fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
-/// so the engine's later commits never rely on what the agent may write: a folder directly
-/// in the project's `.git/worktrees` whose `gitdir` file names this worktree. Inputs: the
-/// project root and the worktree. Output: the root, worktree and metadata folder as text,
-/// or the plain reason.
-fn agent_git_dir(root: &Path, worktree: &Path) -> Result<[String; 3], String> {
+/// so the engine's later commits never rely on what the agent may write: for a linked
+/// worktree a folder directly in the project's `.git/worktrees` whose `gitdir` file names
+/// this worktree, for an agent's own clone the real folder `agent_git::git_dir` names.
+/// Inputs: the project root, the worktree and its layout. Output: the root, worktree and
+/// metadata folder as text, or the plain reason.
+fn agent_git_dir(root: &Path, worktree: &Path, layout: Layout) -> Result<[String; 3], String> {
     use std::io::Read;
+    if layout == Layout::Clone {
+        let git_dir = crate::agent_git::git_dir(worktree);
+        let plain = std::fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir());
+        let text = |path: &Path| path.to_str().map(str::to_owned);
+        let found = [text(root), text(worktree), text(&git_dir)];
+        return match found {
+            [Some(root), Some(worktree), Some(git_dir)] if plain => Ok([root, worktree, git_dir]),
+            _ => Err(with_code(
+                "the agent worktree could not be checked",
+                Some("team_worktree_git_dir"),
+            )),
+        };
+    }
     let read = |path: &Path| -> Result<String, String> {
         let mut text = String::new();
         std::fs::File::open(path)
