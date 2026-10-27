@@ -16,6 +16,8 @@ pub const RUNS_PER_PROJECT_MAX: usize = 64;
 pub const SCANNED_MAX: usize = 1024;
 /// The most bytes of what an interrupted turn was asked that its record keeps.
 pub const ASKED_BYTES_MAX: usize = 300;
+/// The most bytes of the reason a resume failed that its record keeps.
+pub const REASON_BYTES_MAX: usize = 300;
 
 /// The turn an interrupted agent was in: its number among the agent's turns, the team task
 /// a sub-agent ran or the owner message a master answered, and the first line of what it
@@ -28,11 +30,46 @@ pub struct LastTurn {
     pub asked: Option<String>,
 }
 
+/// Where the resume of one interrupted run stands: waiting to resume, started again in
+/// its own harness session and handed its note, resumed once that session runs, or failed
+/// with a reason until the owner retries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    Interrupted,
+    Resuming,
+    Resumed,
+    Failed,
+}
+
+impl RunState {
+    /// The name the store keeps the state under.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Interrupted => "interrupted",
+            Self::Resuming => "resuming",
+            Self::Resumed => "resumed",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Reads a stored state name. Input: the name. Output: the state, or none.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "interrupted" => Some(Self::Interrupted),
+            "resuming" => Some(Self::Resuming),
+            "resumed" => Some(Self::Resumed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
 /// One agent run an engine stop cut short: the record id, the team agent, its project,
 /// whether it is the master or a sub-agent, its harness, when the engine last saw it
 /// running in ms since the epoch, its last turn, the pane record naming its harness
 /// session's source, its working folder (the pane's, else its worktree), the exact session
-/// record file a resume continues, and whether its team was paused when it was recorded.
+/// record file a resume continues, whether its team was paused when it was recorded, where
+/// its resume stands and why a failed resume failed.
 /// `record.source`, `cwd` and `record_file` are the inputs `TranscriptReader::resumed` takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interrupted {
@@ -47,6 +84,8 @@ pub struct Interrupted {
     pub cwd: Option<PathBuf>,
     pub record_file: Option<PathBuf>,
     pub paused: bool,
+    pub state: RunState,
+    pub reason: Option<String>,
 }
 
 fn unavailable() -> EngineError {
@@ -84,12 +123,73 @@ pub fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), EngineErr
 pub fn scan(runtime: &Path) -> Result<Vec<Interrupted>, EngineError> {
     let db = open(runtime)?;
     store::settle(&db)?;
-    store::interrupted(&db, None, SCANNED_MAX)
+    store::runs(&db, None, &[RunState::Interrupted], SCANNED_MAX)
 }
 
-/// Lists a project's interrupted runs not yet handled, oldest first.
+/// Lists a project's newest interrupted runs in every state, oldest first, so the owner
+/// sees which resumed and which failed with their reasons.
 /// Inputs: the engine root and the project. Output: at most `RUNS_PER_PROJECT_MAX` runs.
 pub fn list(runtime: &Path, project: &ProjectId) -> Result<Vec<Interrupted>, EngineError> {
     let db = open(runtime)?;
-    store::interrupted(&db, Some(project), RUNS_PER_PROJECT_MAX)
+    store::newest(&db, project, RUNS_PER_PROJECT_MAX)
+}
+
+/// Starts a failed resume again: the agent's newest failed run waits to resume once more,
+/// on the team runtime's next tick, without its old reason.
+/// Inputs: the engine root and the team agent. Output: whether a failed run was waiting.
+pub fn retry(runtime: &Path, agent: i64) -> Result<bool, EngineError> {
+    let db = open(runtime)?;
+    store::retry(&db, agent)
+}
+
+/// Reads one project's runs whose resume is still open, waiting or started, oldest first.
+/// Inputs: the team runtime's connection and the project. Output: at most
+/// `RUNS_PER_PROJECT_MAX` runs.
+pub(crate) fn open_runs(
+    db: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<Interrupted>, EngineError> {
+    store::runs(
+        db,
+        Some(project),
+        &[RunState::Interrupted, RunState::Resuming],
+        RUNS_PER_PROJECT_MAX,
+    )
+}
+
+/// Reads the run of one agent whose resume was started and has not settled yet.
+/// Inputs: the team runtime's connection and the team agent. Output: the run, or none.
+pub(crate) fn resuming(db: &Connection, agent: i64) -> Result<Option<Interrupted>, EngineError> {
+    store::resuming(db, agent)
+}
+
+/// Moves one run from one resume state to the next, with the plain reason a failure
+/// keeps, bounded. Inputs: the connection, the run, the state it must be in, the new
+/// state and the reason. Output: whether the run was in `from`.
+pub(crate) fn mark(
+    db: &Connection,
+    run: i64,
+    from: RunState,
+    to: RunState,
+    reason: Option<&str>,
+) -> Result<bool, EngineError> {
+    store::mark(db, run, from, to, reason)
+}
+
+/// Keeps the session record of an agent that starts its harness for each turn while that
+/// turn runs, since no pane record is kept for it, so a stop in the middle of the turn
+/// can resume that session. Inputs: the connection, the team agent and its pane record.
+/// Output: done.
+pub(crate) fn remember(
+    db: &Connection,
+    agent: i64,
+    record: &PaneRecord,
+) -> Result<(), EngineError> {
+    store::remember(db, agent, record)
+}
+
+/// Drops the session record [`remember`] kept once the agent's harness stopped.
+/// Inputs: the connection and the team agent. Output: done.
+pub(crate) fn forget(db: &Connection, agent: i64) -> Result<(), EngineError> {
+    store::forget(db, agent)
 }
