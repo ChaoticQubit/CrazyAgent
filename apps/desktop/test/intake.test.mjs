@@ -526,6 +526,34 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
 });
 
+test("a failed setup read keeps the shown setup, says so, backs off, and a newer read clears it", () => {
+  const installing = { dependencies: [dep("uv", { state: "installing" })], pack, running: true };
+  const shown = intake.foldSetupRead(intake.SETUP_READS, ok(installing));
+  assert.deepEqual(shown, { seen: installing, latest: installing, failures: 0, line: "" });
+  assert.equal(intake.foldSetupRead(shown, { kind: "loading" }), shown);
+  const once = intake.foldSetupRead(shown, failed("setup_owner_unavailable", "CrazyAgent's engine isn't running."));
+  assert.notEqual(once, shown);
+  assert.deepEqual(once, { seen: installing, latest: installing, failures: 1, line: "Couldn't refresh setup progress: CrazyAgent's engine isn't running." });
+  assert.equal(intake.foldSetupRead(once, ok(installing)), once);
+  assert.equal(intake.foldSetupRead(once, { kind: "loading" }), once);
+  const twice = intake.foldSetupRead(once, failed("setup_owner_unavailable", "CrazyAgent's engine isn't running."));
+  assert.notEqual(twice, once);
+  assert.equal(twice.failures, 2);
+  const thrice = intake.foldSetupRead(twice, notReady);
+  assert.equal(thrice.failures, 3);
+  assert.equal(thrice.latest, installing);
+  assert.equal(thrice.line, "Couldn't refresh setup progress: Tool setup isn't in this build.");
+  const done = { dependencies: [dep("uv", { state: "installed" })], pack, running: false };
+  assert.deepEqual(intake.foldSetupRead(thrice, ok(done)), { seen: done, latest: done, failures: 0, line: "" });
+  const started = { ...shown, latest: { ...installing } };
+  assert.equal(intake.foldSetupRead(started, ok(installing)), started);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9, 4000].map(intake.setupPollMs), [2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000]);
+  const base = { status: ok(installing), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: true, problem: "", onRun: noop, onContinue: noop };
+  const stale = html(ToolsSetupView, { ...base, stale: once.line });
+  assert.match(stale, /Installing: \d+ of \d+ done\.[\s\S]*<p class="pj-error" role="alert">Couldn&#x27;t refresh setup progress: CrazyAgent&#x27;s engine isn&#x27;t running\.<\/p>/);
+  assert.doesNotMatch(html(ToolsSetupView, base), /role="alert"/);
+});
+
 test("first run walks profile, projects folder, tools and accounts in that order", () => {
   const steps = (step) => html(Welcome, { onSaved: noop, initialStep: step });
   assert.match(steps("profile"), /<h1>Tell CrazyAgent about you<\/h1>/);
