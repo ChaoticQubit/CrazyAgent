@@ -1,6 +1,8 @@
+use super::import_page::outcome_line;
 use super::skill_detail::{file_size, skill_body};
 use super::*;
 use crate::plugins::{Scope, SecretView};
+use crate::skills::import::{ImportCandidate, ImportFrom, ImportList, ImportState, Imported};
 use crate::tui::client::OwnerEvent;
 use crate::tui::screens::settings_accounts::tests::{check, dataset, list_ctx, render};
 use crate::tui::seam::Request;
@@ -837,5 +839,248 @@ fn the_skill_page_scrolls_inside_the_window_and_says_why_it_failed() {
     assert_eq!(
         [0, 1023, 1024, 4300, 1_048_576].map(file_size),
         ["0 B", "1023 B", "1.0 KB", "4.2 KB", "1.0 MB"]
+    );
+}
+
+fn found(name: &str, from: ImportFrom, state: ImportState) -> ImportCandidate {
+    let folder = match from {
+        ImportFrom::Claude => format!("/Users/mira/.claude/skills/{name}"),
+        ImportFrom::Codex => format!("/Users/mira/.codex/skills/{name}"),
+    };
+    ImportCandidate {
+        from,
+        folder,
+        name: name.into(),
+        line: format!("The {name} skill."),
+        state,
+    }
+}
+
+fn scanned() -> ImportList {
+    ImportList {
+        found: vec![
+            found("notes", ImportFrom::Claude, ImportState::New),
+            found(
+                "graph",
+                ImportFrom::Codex,
+                ImportState::Added {
+                    id: "skill-graph".into(),
+                },
+            ),
+            found(
+                "style",
+                ImportFrom::Claude,
+                ImportState::Differs {
+                    id: "skill-style".into(),
+                },
+            ),
+            found(
+                "heavy",
+                ImportFrom::Claude,
+                ImportState::Unusable {
+                    code: "skill_import_too_large".into(),
+                },
+            ),
+        ],
+        more: 3,
+    }
+}
+
+fn import_event(event: SettingsEvent) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event))))
+}
+
+#[test]
+fn i_opens_import_my_skills_which_reads_the_folders_only_once_it_opens() {
+    let (skills, servers) = lists();
+    let mut ctx = plugin_ctx(80, 24);
+    let mut screen = Plugins::with(skills, servers);
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .any(|hint| hint.key == "i" && hint.label == "Import")
+    );
+    let Flow::Replace(mut next) = screen.key(&Key::Char('i'), &mut ctx) else {
+        panic!("i opens Import my skills");
+    };
+    assert_eq!(
+        next.crumbs(),
+        ["Settings", "Plugins and skills", "Import my skills"]
+    );
+    assert_eq!(ctx.queued(), 0, "nothing is read before the page opens");
+    next.shown(&mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => assert!(matches!(*job, SettingsJob::ImportScan)),
+        other => panic!("a scan expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn found_skills_show_source_and_state_and_only_ticked_ones_are_imported() {
+    let ctx = plugin_ctx(80, 24);
+    let page = ImportSkillsPage::with(scanned());
+    let (lines, at) = page.lines(76, &ctx);
+    let lines = texts(&lines);
+    let row = |name: &str| {
+        lines
+            .iter()
+            .position(|line| line.contains(&format!("] {name}")))
+            .unwrap_or_else(|| panic!("{name} row in {lines:?}"))
+    };
+    assert_eq!(at, Some(row("notes")));
+    assert!(lines[row("notes")].starts_with("> [ ] notes"), "{lines:?}");
+    assert!(
+        lines[row("notes") + 1].contains("The notes skill.  Claude Code: ~/.claude/skills/notes")
+    );
+    assert!(
+        lines[row("graph")].contains("[-] graph  Already added"),
+        "{lines:?}"
+    );
+    assert!(lines[row("graph") + 1].contains("Codex: ~/.codex/skills/graph"));
+    assert!(lines[row("style")].contains("[ ] style  Differs"));
+    assert!(
+        lines[row("style") + 1]
+            .contains("Importing replaces the added copy and keeps its project switches.")
+    );
+    assert!(lines[row("heavy")].contains("[-] heavy  Can't import"));
+    assert!(
+        lines[row("heavy") + 1]
+            .contains("A skill brought in from your skills folders can be up to 2 MB.")
+    );
+    assert!(lines.contains(&"And 3 more not shown".to_owned()));
+    assert!(lines.iter().all(|line| !line.contains("skill-graph")));
+
+    let mut ctx = plugin_ctx(80, 24);
+    let mut page = ImportSkillsPage::with(scanned());
+    page.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0, "nothing ticked, nothing imported");
+    page.key(&Key::Char(' '), &mut ctx);
+    page.key(&Key::Down, &mut ctx);
+    page.key(&Key::Char(' '), &mut ctx);
+    page.key(&Key::Down, &mut ctx);
+    page.key(&Key::Char(' '), &mut ctx);
+    page.key(&Key::Down, &mut ctx);
+    page.key(&Key::Char(' '), &mut ctx);
+    let (ticked, _) = page.lines(76, &ctx);
+    let ticked = texts(&ticked);
+    assert!(ticked.iter().any(|line| line.contains("[x] notes")));
+    assert!(ticked.iter().any(|line| line.contains("[x] style")));
+    page.key(&Key::Enter, &mut ctx);
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => match *job {
+            SettingsJob::ImportSkills { ref picks } => assert_eq!(
+                picks,
+                &vec![
+                    ("/Users/mira/.claude/skills/notes".to_owned(), None),
+                    (
+                        "/Users/mira/.claude/skills/style".to_owned(),
+                        Some("skill-style".to_owned())
+                    ),
+                ]
+            ),
+            ref other => panic!("an import expected, got {other:?}"),
+        },
+        other => panic!("an import expected, got {other:?}"),
+    }
+    page.key(&Key::Enter, &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one import at a time");
+
+    let mut imported = skill("notes", true);
+    imported.id = "skill-notes".into();
+    let done = vec![
+        (
+            "/Users/mira/.claude/skills/notes".to_owned(),
+            Ok(Imported {
+                skill: imported,
+                skipped: vec![".env".into(), "api_key.txt".into()],
+                skipped_total: 3,
+            }),
+        ),
+        (
+            "/Users/mira/.claude/skills/style".to_owned(),
+            Err("skill_import_name_changed".into()),
+        ),
+    ];
+    page.arrive(&import_event(SettingsEvent::Imported(Ok(done))), &mut ctx);
+    assert_eq!(ctx.message().unwrap().lead, "Imported 1 skill.");
+    let after = texts(&page.lines(76, &ctx).0);
+    assert!(
+        after.contains(&"Imported notes. Left out .env, api_key.txt and 1 more.".to_owned()),
+        "{after:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|line| line.starts_with("Could not import style:"))
+    );
+    assert!(
+        after.iter().all(|line| !line.contains("[x]")),
+        "ticks clear"
+    );
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::ImportScan)),
+        "the list is read again"
+    );
+}
+
+#[test]
+fn the_import_page_scrolls_and_says_why_the_scan_failed() {
+    let mut many = scanned();
+    many.found = (0..30)
+        .map(|index| {
+            found(
+                &format!("skill-{index:02}"),
+                ImportFrom::Claude,
+                ImportState::New,
+            )
+        })
+        .collect();
+    let mut shell = Shell::with(plugin_ctx(80, 24), Box::new(ImportSkillsPage::with(many)));
+    for _ in 0..29 {
+        shell.key(Key::Down);
+    }
+    let frame = render(&mut shell, 80, 24);
+    assert_eq!(frame.len(), 24);
+    assert!(
+        frame.iter().any(|row| row.contains("> [ ] skill-29")),
+        "{frame:?}"
+    );
+
+    let mut ctx = plugin_ctx(80, 24);
+    let mut page = ImportSkillsPage::new();
+    page.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
+    page.arrive(
+        &import_event(SettingsEvent::ImportScan(Err(
+            "skill_import_home_unknown".into()
+        ))),
+        &mut ctx,
+    );
+    let lines = texts(&page.lines(70, &ctx).0);
+    assert!(lines.contains(&plugin_plain("skill_import_home_unknown").to_owned()));
+    assert!(lines.contains(&"Press r to try again.".to_owned()));
+    page.key(&Key::Char('r'), &mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
+    page.arrive(
+        &import_event(SettingsEvent::ImportScan(Ok(ImportList {
+            found: vec![],
+            more: 0,
+        }))),
+        &mut ctx,
+    );
+    assert!(
+        texts(&page.lines(70, &ctx).0).contains(&"No skills found in those folders.".to_owned())
+    );
+    let Flow::Replace(back) = page.key(&Key::Esc, &mut ctx) else {
+        panic!("Esc goes back to the list");
+    };
+    assert_eq!(back.crumbs(), ["Settings", "Plugins and skills"]);
+    assert_eq!(
+        outcome_line("notes", &Err("skill_link_outside".into())),
+        format!(
+            "Could not import notes: {}",
+            plugin_plain("skill_link_outside")
+        )
     );
 }
