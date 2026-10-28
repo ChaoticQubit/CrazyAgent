@@ -603,6 +603,7 @@ fn an_agent_whose_cleanup_stopped_after_its_claim_keeps_the_older_root_in_the_gi
     assert_eq!(crate::projects_home::state_folder(&case.repo), state);
     assert!(older().unwrap(), "the live record in the older root counts");
 
+    initialize(&case.db).unwrap();
     assert!(claim(&case.db, &case.project, &[7], NOW).unwrap().is_ok());
     assert_eq!(case.retiring(), [7]);
     assert!(!case.known(7));
