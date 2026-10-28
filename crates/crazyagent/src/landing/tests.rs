@@ -289,11 +289,14 @@ fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
 }
 
+/// One file of a layout: its name, its text and whether it is executable.
+type LayoutFile = (&'static str, &'static str, bool);
+
 /// The bare-repository layouts an agent can leave in a worktree (SM-R1): the folder git
 /// makes with `init --bare`, the same names in mixed case, `HEAD` beside a `commondir`, and
 /// executable files standing in for `objects` and `refs`. Output: each layout's folder and
 /// its files with their text and whether each is executable.
-fn bare_layouts() -> Vec<(&'static str, Vec<(&'static str, &'static str, bool)>)> {
+fn bare_layouts() -> Vec<(&'static str, Vec<LayoutFile>)> {
     let head = "ref: refs/heads/main\n";
     vec![
         (
