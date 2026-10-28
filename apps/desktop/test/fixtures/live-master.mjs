@@ -119,13 +119,13 @@ export function typeAndEnter(text) {
 }
 
 /** Opens a real xterm set up as the panel sets it up: queries muted and keys going through
- * the panel's key routing, and focuses it. */
-export function mountKeys() {
+ * the panel's key routing for a Mac or not, as `mac` says, and focuses it. */
+export function mountKeys(mac) {
   page().innerHTML = '<section class="tg-terminal"><div class="tg-terminal-screen" id="screen"></div></section>';
   terminal = new Terminal({ ...terminalOptions(), rows: 10, cols: 80 });
   muteQueries(terminal);
   terminal.open(document.getElementById("screen"));
-  typeKeys(terminal, (data) => typed.push(data));
+  typeKeys(terminal, (data) => typed.push(data), mac);
   terminal.focus();
 }
 

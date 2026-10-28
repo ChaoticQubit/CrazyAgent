@@ -133,7 +133,8 @@ export function terminalOutput(terminal: Terminal): string {
 
 /** Routes an opened terminal's keys to the agent: what xterm types, Shift+Enter as one new
  * line that xterm never also reads as Enter, the copy key copying a selection instead of
- * typing, and clipboard pastes with their control characters dropped before xterm brackets
+ * typing (off a Mac Ctrl+C then drops the selection, so the next Ctrl+C interrupts the
+ * agent), and clipboard pastes with their control characters dropped before xterm brackets
  * them. Inputs: the terminal, the typing action and whether this is a Mac. Output: the
  * subscription for typed text and pastes. */
 export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: boolean = isMac()): IDisposable {
@@ -142,7 +143,10 @@ export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: 
   const typed = terminal.onData(type);
   terminal.attachCustomKeyEventHandler((event) => {
     if (copyKey(event, terminal.hasSelection(), mac)) {
-      if (event.type === "keydown") void copyText(terminal.getSelection());
+      if (event.type === "keydown") {
+        void copyText(terminal.getSelection());
+        if (!mac) terminal.clearSelection();
+      }
       return false;
     }
     const override = keyOverride(event);

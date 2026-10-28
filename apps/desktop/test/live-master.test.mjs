@@ -231,5 +231,5 @@ test("a closed terminal panel detaches only the view its own attach opened", () 
 
 test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*if \(copyKey\(event, terminal\.hasSelection\(\), mac\)\) \{[^}]*\}\s*const override = keyOverride\(event\);/);
+  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*if \(copyKey\(event, terminal\.hasSelection\(\), mac\)\) \{(?:(?!keyOverride)[\s\S])*?return false;\s*\}\s*const override = keyOverride\(event\);/);
 });

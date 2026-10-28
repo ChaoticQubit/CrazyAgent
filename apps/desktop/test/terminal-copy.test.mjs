@@ -66,19 +66,42 @@ test("in a real terminal, Cmd+C puts the selection on the clipboard and types no
   const seen = await withPage(async ({ evaluate, send }) => {
     server = await securePage(evaluate, send);
     await evaluate(fixture);
-    await evaluate("Fixture.mountKeys()");
+    await evaluate("Fixture.mountKeys(true)");
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
     await evaluate("Fixture.selectAll()");
     const selection = await evaluate("Fixture.selection()");
     await keyPress(send, 4);
     const copied = await evaluate("navigator.clipboard.readText()");
     const typedAfterCopy = await evaluate("Fixture.typedText()");
+    const kept = await evaluate("Fixture.selection()");
     await evaluate("Fixture.clearSelection()");
     await keyPress(send, 2);
-    return { selection, copied, typedAfterCopy, typedAfterInterrupt: await evaluate("Fixture.typedText()") };
+    return { selection, copied, typedAfterCopy, kept, typedAfterInterrupt: await evaluate("Fixture.typedText()") };
   }).finally(() => server?.close());
   assert.match(seen.selection, /^first line of output\nsecond line\n/);
   assert.equal(seen.copied, seen.selection, "the clipboard holds exactly the selection");
   assert.deepEqual(seen.typedAfterCopy, [], "the copy key types nothing into the agent");
+  assert.equal(seen.kept, seen.selection, "on a Mac the selection stays after Cmd+C, as in Terminal");
   assert.deepEqual(seen.typedAfterInterrupt, ["\x03"]);
+});
+
+test("off a Mac, Ctrl+C copies the selection and lets it go, so the next Ctrl+C interrupts the agent", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send }) => {
+    server = await securePage(evaluate, send);
+    await evaluate(fixture);
+    await evaluate("Fixture.mountKeys(false)");
+    await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
+    await evaluate("Fixture.selectAll()");
+    const selection = await evaluate("Fixture.selection()");
+    await keyPress(send, 2);
+    const copied = await evaluate("navigator.clipboard.readText()");
+    const afterCopy = { selection: await evaluate("Fixture.selection()"), typed: await evaluate("Fixture.typedText()") };
+    await keyPress(send, 2);
+    return { selection, copied, afterCopy, typedAfterSecond: await evaluate("Fixture.typedText()") };
+  }).finally(() => server?.close());
+  assert.match(seen.selection, /^first line of output\nsecond line\n/);
+  assert.equal(seen.copied, seen.selection, "the clipboard holds exactly the selection");
+  assert.deepEqual(seen.afterCopy, { selection: "", typed: [] }, "the copy types nothing and lets the selection go");
+  assert.deepEqual(seen.typedAfterSecond, ["\x03"], "the next Ctrl+C reaches the agent");
 });
