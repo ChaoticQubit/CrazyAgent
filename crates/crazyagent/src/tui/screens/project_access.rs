@@ -11,6 +11,11 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
     "Lowering the level stops agents running above it; they restart at the new level.";
 
+/// What turning a toolchain off does to agents already running: the engine stops each one
+/// whose sandbox granted it.
+pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str =
+    "Turning a toolchain off stops agents running with it; they restart without it.";
+
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
@@ -189,6 +194,11 @@ impl AccessEdit {
                     .push(format!("   {note}"), look.muted),
             );
         }
+        body.extend(
+            wrap_words(TOOLCHAIN_OFF_STOPS_AGENTS, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
         body.push(Row::default());
         if self.confirm_full {
             body.extend(

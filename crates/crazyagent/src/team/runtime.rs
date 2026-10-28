@@ -25,8 +25,8 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
-use crate::sandbox::policy::AgentAccess;
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -128,7 +128,8 @@ struct Grant {
 /// Everything about an agent's harness launch except the account, so a managed agent
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
-/// conversation a live master continues instead of starting one.
+/// conversation a live master continues instead of starting one; `toolchains` the families
+/// its sandbox profile, built once for every turn, lets it use.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -137,6 +138,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    toolchains: Vec<Toolchain>,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -215,6 +217,7 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
+    toolchains: Vec<Toolchain>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -298,6 +301,31 @@ enum Busy {
     Message(i64),
 }
 
+/// Why the engine stopped an agent whose running process holds more than the owner saved:
+/// a lower access level, or a toolchain turned off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Narrowed {
+    Access,
+    Toolchains,
+}
+
+impl Narrowed {
+    /// The plain reason the stopped agent shows, with its code. Input: the cause.
+    /// Output: the sentence.
+    fn problem(self) -> String {
+        match self {
+            Self::Access => with_code(
+                "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                Some("agent_access_lowered"),
+            ),
+            Self::Toolchains => with_code(
+                "the project's toolchain access was turned off, so the agent was stopped; its next start goes without it",
+                Some("agent_toolchain_lowered"),
+            ),
+        }
+    }
+}
+
 struct Worker {
     project: ProjectId,
     role: AgentRole,
@@ -326,7 +354,9 @@ struct Worker {
     session: Option<String>,
     seed: Option<String>,
     access: AgentAccess,
-    lowered: bool,
+    toolchains: Vec<Toolchain>,
+    checked: Option<AgentPolicy>,
+    narrowed: Option<Narrowed>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -538,9 +568,11 @@ impl TeamRuntime {
     /// Takes over one live team pane when its agent may still run: the project's setup and
     /// team plan still hold its role and harness, the team is not paused, the project has
     /// room, and its account is still an endpoint in the project's pool. The pane keeps the
-    /// access level its record says it started at, Full access for a record without one, so
-    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
-    /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
+    /// access level its record says it started at, Full access for a record without one, and
+    /// the toolchains it started with, the saved ones for a record without them and every
+    /// family when those cannot be read, so a level lowered or a toolchain turned off while
+    /// no engine ran stops it on the next tick. Takes the host, the agent id, its pane record
+    /// and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
         host: &Arc<dyn Host>,
@@ -638,6 +670,15 @@ impl TeamRuntime {
                 params![id, now_ms()],
             )
             .map_err(error)?;
+        let toolchains = record.toolchains.clone().unwrap_or_else(|| {
+            crate::sandbox::policy::load(&self.connection, project.as_str())
+                .ok()
+                .zip(stored.project_folder().canonicalize().ok())
+                .map_or_else(
+                    || Toolchain::ALL.to_vec(),
+                    |(policy, root)| policy.allowed(&root),
+                )
+        });
         let adoption = Adoption {
             host: host.clone(),
             agent,
@@ -646,6 +687,7 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
+            toolchains,
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -1107,7 +1149,7 @@ impl TeamRuntime {
         }
         let paused = self.paused()?;
         self.retire_rejected(project, access);
-        self.retire_lowered(project);
+        self.retire_narrowed(&stored);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
@@ -1344,33 +1386,57 @@ impl TeamRuntime {
         }
     }
 
-    /// Stops the project's agents whose running process started at a wider access level
-    /// than the one the owner saved now (AL-2): a kept or live agent at once, a per-turn
-    /// agent while its turn runs. An idle per-turn agent has no process; its next turn reads
-    /// the saved level in its grant. Every next start reads the level again, so a lowered
-    /// level reaches each agent's next launch. An unreadable level counts as Sandboxed.
-    /// Takes the project.
-    fn retire_lowered(&mut self, project: &ProjectId) {
-        if !self.workers.values().any(|worker| {
-            &worker.project == project
-                && !worker.stopping
-                && worker.access != AgentAccess::Sandboxed
-        }) {
-            return;
-        }
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
-            .map_or(AgentAccess::Sandboxed, |policy| policy.access);
-        let lowered: Vec<i64> = self
+    /// Stops the project's agents whose running process holds more than the owner saved now.
+    /// At a wider access level (AL-2) a kept or live agent stops at once and a per-turn agent
+    /// while its turn runs, since an idle one reads the level again in its next grant. With a
+    /// toolchain the saved policy no longer allows any agent stops, since its sandbox profile
+    /// was built once at its start. Every next start reads the policy again, so it starts
+    /// with the new level and without that toolchain. Each agent is checked once per saved
+    /// policy; an unreadable policy or project folder counts as Sandboxed with no toolchain.
+    /// Takes the project's stored setup.
+    fn retire_narrowed(&mut self, stored: &StoredSetup) {
+        let project = &stored.project_id;
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str()).ok();
+        let stale: Vec<i64> = self
             .workers
             .iter()
-            .filter(|(_, w)| &w.project == project && !w.stopping && w.access.wider_than(saved))
-            .filter(|(_, w)| !w.managed || w.live || w.busy.is_some())
+            .filter(|(_, w)| &w.project == project && !w.stopping)
+            .filter(|(_, w)| saved.is_none() || w.checked != saved)
             .map(|(id, _)| *id)
             .collect();
-        for id in lowered {
+        if stale.is_empty() {
+            return;
+        }
+        let access = saved
+            .as_ref()
+            .map_or(AgentAccess::Sandboxed, |policy| policy.access);
+        let allowed = saved.as_ref().map_or_else(Vec::new, |policy| {
+            stored
+                .project_folder()
+                .canonicalize()
+                .map_or_else(|_| Vec::new(), |root| policy.allowed(&root))
+        });
+        assert!(allowed.len() <= Toolchain::ALL.len());
+        for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
+            let running = !worker.managed || worker.live || worker.busy.is_some();
+            let narrowed = if running && worker.access.wider_than(access) {
+                Some(Narrowed::Access)
+            } else if worker
+                .toolchains
+                .iter()
+                .any(|toolchain| !allowed.contains(toolchain))
+            {
+                Some(Narrowed::Toolchains)
+            } else {
+                None
+            };
+            let Some(narrowed) = narrowed else {
+                worker.checked = saved.clone();
+                continue;
+            };
             worker.stopping = true;
-            worker.lowered = true;
+            worker.narrowed = Some(narrowed);
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
@@ -2621,9 +2687,9 @@ impl TeamRuntime {
             Launch::Fresh(plan, _) => (plan.live, false),
             Launch::Adopt(adoption) => (adoption.live, adoption.managed.is_none()),
         };
-        let access = match &launch {
-            Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(adoption) => adoption.access,
+        let (access, toolchains) = match &launch {
+            Launch::Fresh(plan, _) => (plan.access, plan.toolchains.clone()),
+            Launch::Adopt(adoption) => (adoption.access, adoption.toolchains.clone()),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -2661,7 +2727,9 @@ impl TeamRuntime {
                 session: None,
                 seed: None,
                 access,
-                lowered: false,
+                toolchains,
+                checked: None,
+                narrowed: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -2781,8 +2849,9 @@ impl TeamRuntime {
         }
         let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        let toolchains = policy.allowed(&root);
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))
+            .allow_tools(&Toolchains::grant(&homes, &toolchains))
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
@@ -2877,6 +2946,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            toolchains,
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -3074,8 +3144,13 @@ impl TeamRuntime {
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
-                let access = Some(self.workers[&id].access);
-                let pane = pane.map(|record| PaneRecord { access, ..record });
+                let worker = &self.workers[&id];
+                let (access, toolchains) = (Some(worker.access), Some(worker.toolchains.clone()));
+                let pane = pane.map(|record| PaneRecord {
+                    access,
+                    toolchains,
+                    ..record
+                });
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(
@@ -3323,14 +3398,7 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
-                let problem = problem.or_else(|| {
-                    worker.lowered.then(|| {
-                        with_code(
-                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                            Some("agent_access_lowered"),
-                        )
-                    })
-                });
+                let problem = problem.or_else(|| worker.narrowed.map(Narrowed::problem));
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed

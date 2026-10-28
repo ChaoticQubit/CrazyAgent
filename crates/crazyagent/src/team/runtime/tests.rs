@@ -178,6 +178,7 @@ impl Fixture {
         let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
         PaneRecord {
             access: Some(AgentAccess::Sandboxed),
+            toolchains: Some(Vec::new()),
             ..PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
         }
     }
@@ -414,6 +415,82 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
     assert_eq!(started(kept), Some(AgentAccess::Sandboxed));
     assert_eq!(last.shutdown().unwrap(), names(&[kept]));
     host.close(&[]).unwrap();
+}
+
+#[test]
+fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_is_stopped() {
+    use crate::sandbox::toolchains::Toolchain;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: AgentAccess::Sandboxed,
+            toolchains: vec![crate::sandbox::policy::ToolchainChoice {
+                toolchain: Toolchain::Rust,
+                allowed: false,
+            }],
+        },
+    )
+    .unwrap();
+    let granted = |id: i64| {
+        let text: String = fixture
+            .connection
+            .query_row(
+                "SELECT record FROM team_panes WHERE agent=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        PaneRecord::decode(&text).unwrap().toolchains
+    };
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        toolchains: Some(vec![Toolchain::Rust]),
+        ..fixture.pane(&host, master)
+    };
+    fixture.keep(master, &record);
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(
+        &mut team,
+        "the master that started with Rust is stopped",
+        |f| {
+            f.agent_status(master).1.is_some_and(|problem| {
+                problem.contains("the project's toolchain access was turned off")
+            }) && host.alive().unwrap().is_empty()
+        },
+    );
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Stopped);
+    assert!(team.shutdown().unwrap().is_empty());
+
+    for (name, recorded) in [
+        ("without Rust", Some(Vec::new())),
+        ("from before toolchains were kept", None),
+    ] {
+        let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+        let record = PaneRecord {
+            toolchains: recorded,
+            ..fixture.pane(&host, kept)
+        };
+        fixture.keep(kept, &record);
+        let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+        fixture.until(&mut again, name, |f| {
+            f.agent_status(kept) == (AgentStatus::Idle, None) && f.recorded(kept)
+        });
+        for _ in 0..20 {
+            again.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            fixture.agent_status(kept),
+            (AgentStatus::Idle, None),
+            "{name}"
+        );
+        assert_eq!(granted(kept), Some(Vec::new()), "{name}");
+        assert_eq!(again.shutdown().unwrap(), names(&[kept]));
+        host.close(&[]).unwrap();
+    }
 }
 
 #[test]
@@ -3154,6 +3231,56 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
 
 #[cfg(target_os = "macos")]
 #[test]
+fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_goes_without_it() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
+    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    crate::sandbox::policy::save(
+        &run.fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            toolchains: vec![crate::sandbox::policy::ToolchainChoice {
+                toolchain: crate::sandbox::toolchains::Toolchain::Rust,
+                allowed: false,
+            }],
+        },
+    )
+    .unwrap();
+    let member = run.member;
+    run.fixture.until(
+        &mut run.team,
+        "the agent running with Rust is stopped",
+        |f| f.agent_status(member).0 == AgentStatus::Stopped,
+    );
+    let reason: Option<String> = run
+        .fixture
+        .connection
+        .query_row(
+            "SELECT error FROM team_agents WHERE id=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("the project's toolchain access was turned off")),
+        "{reason:?}"
+    );
+
+    let (next, _, codes) = delegated_run(&mut run.fixture, &mut run.team);
+    run.member = next;
+    assert_ne!(
+        codes["build"], 0,
+        "the next start has no Rust toolchain: {codes:?}"
+    );
+    assert_ne!(codes["secret"], 0, "{codes:?}");
+    run.stop();
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_clone() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
     assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
@@ -3266,6 +3393,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::Full,
+        toolchains: Vec::new(),
         layout,
         git_identity: None,
         limits: LaunchLimits::default(),
