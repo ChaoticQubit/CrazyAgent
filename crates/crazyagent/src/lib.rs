@@ -12,6 +12,7 @@ pub mod conversation;
 pub mod coordination;
 pub mod credentials;
 pub mod engine;
+pub(crate) mod file_identity;
 pub mod github;
 pub mod harnesses;
 pub mod instruction_files;
