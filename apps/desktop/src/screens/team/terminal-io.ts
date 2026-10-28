@@ -67,6 +67,14 @@ export function copyKey(event: { key: string; altKey: boolean; ctrlKey: boolean;
   return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
 }
 
+/** Where a menu opened at a point sits inside its panel: at the point when it fits, flipped
+ * up or left of it near an edge, and never past the panel's top or left. Inputs: the point and
+ * the menu's and panel's sizes, all in the panel's coordinates. Output: the menu's top left. */
+export function menuSpot(at: { x: number; y: number }, menu: { width: number; height: number }, panel: { width: number; height: number }): { x: number; y: number } {
+  const fit = (point: number, size: number, room: number) => Math.max(0, Math.min(point + size > room ? point - size : point, room - size));
+  return { x: fit(at.x, menu.width, panel.width), y: fit(at.y, menu.height, panel.height) };
+}
+
 /** The text Copy output puts on the clipboard: every line of the terminal's buffer, without
  * trailing spaces or the blank rows under the last written line. Input: the buffer's lines.
  * Output: the text, lines joined by new lines. */

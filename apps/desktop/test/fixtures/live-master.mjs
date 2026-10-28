@@ -7,17 +7,22 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
-import { terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
+import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 
 let root = null;
+let menuRoot = null;
 let terminal = null;
+export const notes = [];
 export const typed = [];
 const switched = [];
 
 function page() {
   root?.unmount();
   root = null;
+  menuRoot?.unmount();
+  menuRoot = null;
+  notes.length = 0;
   terminal?.dispose();
   terminal = null;
   typed.length = 0;
@@ -159,4 +164,45 @@ export function clearSelection() {
 /** The text the routed keys typed, in order. */
 export function typedText() {
   return [...typed];
+}
+
+/** Opens a real xterm as `mountKeys` does, in a panel no bigger than the terminal, as the
+ * panel's fit makes it, with the panel's right-click menu on its screen, opened from the
+ * click as the panel opens it. */
+export function mountMenu(mac) {
+  mountKeys(mac);
+  const section = document.querySelector(".tg-terminal");
+  Object.assign(section.style, { width: "fit-content", height: "fit-content" });
+  const holder = document.createElement("div");
+  section.append(holder);
+  menuRoot = createRoot(holder);
+  const close = (note) => {
+    notes.push(note);
+    menuRoot.render(null);
+  };
+  document.getElementById("screen").addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    flushSync(() => menuRoot.render(createElement(TerminalMenu, { terminal, at: { x: event.clientX, y: event.clientY, selection: terminal.getSelection() }, onDone: close })));
+  });
+}
+
+/** The menu as the owner sees it: its items, which one or whether the terminal has focus,
+ * and the menu, panel and screen boxes in page coordinates. */
+export function menuView() {
+  const box = (element) => {
+    if (!element) return null;
+    const rect = element.getBoundingClientRect();
+    return { left: Math.round(rect.left), top: Math.round(rect.top), right: Math.round(rect.right), bottom: Math.round(rect.bottom) };
+  };
+  const menu = document.querySelector(".tg-terminal-menu");
+  const active = document.activeElement;
+  return {
+    open: Boolean(menu),
+    items: [...document.querySelectorAll(".tg-terminal-menu [role=menuitem]")].map((item) => ({ text: item.textContent.trim(), disabled: item.disabled, ...box(item) })),
+    focus: active === terminal.textarea ? "terminal" : active?.closest(".tg-terminal-menu") ? active.textContent.trim() : active?.tagName ?? null,
+    menu: box(menu),
+    panel: box(document.querySelector(".tg-terminal")),
+    screen: box(document.querySelector("#screen .xterm-screen")),
+    notes: [...notes],
+  };
 }

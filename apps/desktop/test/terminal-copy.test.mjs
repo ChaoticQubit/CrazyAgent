@@ -105,3 +105,94 @@ test("off a Mac, Ctrl+C copies the selection and lets it go, so the next Ctrl+C 
   assert.deepEqual(seen.afterCopy, { selection: "", typed: [] }, "the copy types nothing and lets the selection go");
   assert.deepEqual(seen.typedAfterSecond, ["\x03"], "the next Ctrl+C reaches the agent");
 });
+
+test("the terminal menu opens at the click and flips up or left near an edge, never outside its panel", () => {
+  const menu = { width: 180, height: 70 };
+  const panel = { width: 600, height: 300 };
+  assert.deepEqual(io.menuSpot({ x: 10, y: 10 }, menu, panel), { x: 10, y: 10 });
+  assert.deepEqual(io.menuSpot({ x: 590, y: 290 }, menu, panel), { x: 410, y: 220 });
+  assert.deepEqual(io.menuSpot({ x: 500, y: 100 }, menu, panel), { x: 320, y: 100 });
+  assert.deepEqual(io.menuSpot({ x: 20, y: 280 }, menu, panel), { x: 20, y: 210 });
+  assert.deepEqual(io.menuSpot({ x: 100, y: 50 }, menu, { width: 150, height: 60 }), { x: 0, y: 0 }, "a panel smaller than the menu pins it to the corner");
+});
+
+async function mouse(send, x, y, button, clickCount = 1) {
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, clickCount });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, clickCount });
+}
+
+async function press(send, name, code) {
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: name, code: name, windowsVirtualKeyCode: code, nativeVirtualKeyCode: code });
+}
+
+async function settledMenu(evaluate) {
+  await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+  return evaluate("Fixture.menuView()");
+}
+
+const inside = (inner, outer) => inner.left >= outer.left && inner.top >= outer.top && inner.right <= outer.right && inner.bottom <= outer.bottom;
+
+test("a right-click on the terminal's last rows or near its right edge opens the whole menu inside the panel", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send }) => {
+    server = await securePage(evaluate, send);
+    await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mountMenu(true)");
+    await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
+    const start = await settledMenu(evaluate);
+    await mouse(send, start.screen.left + 12, start.screen.top + 40, "right");
+    const near = await settledMenu(evaluate);
+    await press(send, "Escape", 27);
+    await mouse(send, start.screen.right - 4, start.screen.bottom - 4, "right");
+    return { start, near, corner: await settledMenu(evaluate) };
+  }).finally(() => server?.close());
+  assert.equal(seen.corner.open, true);
+  assert.ok(inside(seen.corner.menu, seen.corner.panel), `menu ${JSON.stringify(seen.corner.menu)} inside panel ${JSON.stringify(seen.corner.panel)}`);
+  assert.equal(seen.near.open, true);
+  assert.deepEqual([seen.near.menu.left, seen.near.menu.top], [seen.start.screen.left + 12, seen.start.screen.top + 40], "with room, the menu opens at the click");
+});
+
+test("the terminal menu moves with the arrow keys and Escape hands focus back to the terminal", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send }) => {
+    server = await securePage(evaluate, send);
+    await evaluate(fixture);
+    await evaluate("Fixture.mountMenu(true)");
+    await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
+    await evaluate("Fixture.selectAll()");
+    const start = await settledMenu(evaluate);
+    await mouse(send, start.screen.left + 40, start.screen.top + 8, "right");
+    const focus = [(await settledMenu(evaluate)).focus];
+    for (const [name, code] of [["ArrowDown", 40], ["ArrowDown", 40], ["ArrowUp", 38]]) {
+      await press(send, name, code);
+      focus.push((await settledMenu(evaluate)).focus);
+    }
+    await press(send, "Escape", 27);
+    return { focus, closed: await settledMenu(evaluate) };
+  }).finally(() => server?.close());
+  assert.deepEqual(seen.focus, ["Copy", "Copy output", "Copy", "Copy output"]);
+  assert.deepEqual([seen.closed.open, seen.closed.focus, seen.closed.notes], [false, "terminal", [null]]);
+});
+
+test("Copy output in the terminal menu puts the whole output on the clipboard and hands focus back to the terminal", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send }) => {
+    server = await securePage(evaluate, send);
+    await evaluate(fixture);
+    await evaluate("Fixture.mountMenu(true)");
+    await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
+    await evaluate("navigator.clipboard.writeText('before')");
+    const start = await settledMenu(evaluate);
+    await mouse(send, start.screen.left + 300, start.screen.top + 120, "right");
+    const open = await settledMenu(evaluate);
+    const item = open.items.find((entry) => entry.text === "Copy output");
+    await mouse(send, Math.round((item.left + item.right) / 2), Math.round((item.top + item.bottom) / 2), "left");
+    for (let waited = 0; (await evaluate("Fixture.menuView()")).open && waited < 2000; waited += 20) await new Promise((done) => setTimeout(done, 20));
+    return { open, closed: await settledMenu(evaluate), clipboard: await evaluate("navigator.clipboard.readText()") };
+  }).finally(() => server?.close());
+  assert.equal(seen.open.open, true);
+  assert.equal(seen.clipboard, "first line of output\nsecond line");
+  assert.deepEqual([seen.closed.open, seen.closed.focus, seen.closed.notes], [false, "terminal", ["Copied the output."]]);
+});
