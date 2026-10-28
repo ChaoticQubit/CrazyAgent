@@ -2896,6 +2896,70 @@ fn git_temp_files_left_in_a_clone_s_pack_folder_let_the_turn_end() {
     assert_eq!(listed[0].files, 1);
 }
 
+/// Files an interrupted `git repack` leaves in the clone's pack folder, named as git
+/// names them (`.tmp-<pid>-pack-<id>.<extension>`), do not stop the agent's turn end and
+/// are never served, while a temp pack git would read, its `.idx` beside its `.pack`, and
+/// any other `.tmp-` name are still refused (RL3-N1).
+#[test]
+fn repack_temp_files_let_the_turn_end_but_a_temp_pack_git_would_read_is_refused() {
+    let case = Case::own_branch();
+    let text = "not for the agent: a repack temp pack\n";
+    let (foreign, commit) = case.foreign("foreign", text);
+    let secret = case.blob_id(text);
+    let packs = case.workspace.git_dir.join("objects/pack");
+    let mut pack_id = None;
+    for (folder, name) in foreign_files(&case, &foreign, true) {
+        let name = name.to_str().unwrap();
+        let rest = name.strip_prefix("pack-").unwrap();
+        std::fs::copy(
+            folder.join(name),
+            packs.join(format!(".tmp-4242-pack-{rest}")),
+        )
+        .unwrap();
+        pack_id = rest.split_once('.').map(|(found, _)| found.to_owned());
+    }
+    let pack_id = pack_id.unwrap();
+    let temp =
+        |pid: &str, extension: &str| packs.join(format!(".tmp-{pid}-pack-{pack_id}.{extension}"));
+    let own = case.agent_head();
+    branch_at(&case, &commit);
+    let turn_end = || {
+        record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+            .map(|_| "accepted".to_owned())
+            .unwrap_or_else(|error| error.0)
+    };
+    assert_eq!(turn_end(), "changes_workspace_invalid");
+
+    std::fs::rename(temp("4242", "pack"), temp("31337", "pack")).unwrap();
+    for extension in ["mtimes", "bitmap", "promisor"] {
+        write(&temp("4242", extension), "partial");
+    }
+    for refused_name in [
+        temp("4242", "keep"),
+        temp("04242", "rev"),
+        packs.join(format!(".tmp-4243-pack-{}.rev", pack_id.to_uppercase())),
+        packs.join(format!(".tmp-4242-cruft-{pack_id}.pack")),
+    ] {
+        write(&refused_name, "partial");
+        assert_eq!(turn_end(), "changes_workspace_invalid", "{refused_name:?}");
+        std::fs::remove_file(&refused_name).unwrap();
+    }
+    assert_eq!(turn_end(), "changes_agent_branch_invalid");
+    assert!(temp("4242", "idx").is_file() && temp("31337", "pack").is_file());
+    assert!(!case.owner_has(&secret), "a temp pack was served");
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert!(case.owner_refs("refs/crazyagent").is_empty());
+
+    branch_at(&case, &own);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+        .unwrap()
+        .expect("the turn's commit makes a change set");
+    let listed = list(&case.db, &case.workspace.project).unwrap();
+    assert_eq!((listed.len(), &listed[0].id, listed[0].files), (1, &id, 1));
+}
+
 /// The store folders of a clone, `pack` and the 256 loose-object folders, that the Own
 /// branch sandbox keeps the agent from making, moving or replacing (RL-3).
 /// Input: the clone's git folder. Output: each folder.

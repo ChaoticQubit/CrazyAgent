@@ -13,6 +13,8 @@ const REDIRECTS: [&str; 5] = [".git", "commondir", "shallow", "info/grafts", "..
 const PACK_EXTENSIONS: [&str; 7] = ["pack", "idx", "rev", "keep", "promisor", "mtimes", "bitmap"];
 const TEMP_KINDS: [&str; 5] = ["pack", "idx", "rev", "mtimes", "bitmap"];
 const TEMP_SUFFIX_LEN: usize = 6;
+const REPACK_TEMP_EXTENSIONS: [&str; 6] = ["pack", "idx", "rev", "mtimes", "bitmap", "promisor"];
+const PID_DIGITS_MAX: usize = 10;
 
 #[cfg(test)]
 thread_local! {
@@ -151,7 +153,8 @@ fn alternate_line(repository: &Path) -> Option<String> {
 /// fails its repository test, no `commondir`, which moves its objects and refs elsewhere,
 /// and no `shallow` or `info/grafts` file, which rewrite the history it serves. Its pack
 /// folder holds only git's own `pack-<id>` and temp files (`pack_file`), never a
-/// `multi-pack-index` that could name a pack outside it (RL-2). The Own
+/// `multi-pack-index` that could name a pack outside it (RL-2), nor a repack temp pack git
+/// would read (`repack_temp`). The Own
 /// branch sandbox keeps the agent from changing these while the fetch runs. Those files also
 /// bound what the fetch can carry into the project (DEC102-F2): at most `bounds.files` of
 /// them, of at most `bounds.bytes` together, objects the project already has included until
@@ -193,6 +196,7 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
         }
     }
     let (mut files, mut bytes) = (0_usize, 0_u64);
+    let (mut temp_indexes, mut temp_packs) = (Vec::new(), Vec::new());
     for held in &stored {
         if !folder(held) {
             return Err(invalid());
@@ -211,16 +215,27 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
             if files > bounds.files || bytes > bounds.bytes {
                 return Err(failure("changes_too_large"));
             }
+            if *held == pack {
+                match entry.file_name().to_str().and_then(repack_temp) {
+                    Some((name, "idx")) => temp_indexes.push(name.to_owned()),
+                    Some((name, "pack")) => temp_packs.push(name.to_owned()),
+                    _ => {}
+                }
+            }
         }
+    }
+    if temp_indexes.iter().any(|name| temp_packs.contains(name)) {
+        return Err(invalid());
     }
     Ok(())
 }
 
 /// Tells whether a name in the clone's pack folder is one of git's own pack files:
-/// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`, or a temp
+/// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`, a temp
 /// file an interrupted git command left, `tmp_<kind>_` and six letters or digits, which
-/// git never reads as a pack since only names ending in `.idx` are. Input: the file name.
-/// Output: the answer; a `multi-pack-index` or any other name is not one.
+/// git never reads as a pack since only names ending in `.idx` are, or one an interrupted
+/// `git repack` left (`repack_temp`). Input: the file name. Output: the answer; a
+/// `multi-pack-index` or any other name is not one.
 fn pack_file(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -233,17 +248,41 @@ fn pack_file(name: &std::ffi::OsStr) -> bool {
             && suffix.len() == TEMP_SUFFIX_LEN
             && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric());
     }
+    if repack_temp(name).is_some() {
+        return true;
+    }
     let Some((id, extension)) = name
         .strip_prefix("pack-")
         .and_then(|rest| rest.split_once('.'))
     else {
         return false;
     };
+    pack_id(id) && PACK_EXTENSIONS.contains(&extension)
+}
+
+/// Splits a file an interrupted `git repack` left in the pack folder, named as git's
+/// repack names its new pack before moving it into place, `.tmp-<pid>-pack-<id>` and one
+/// of `REPACK_TEMP_EXTENSIONS`, with the pid in decimal and no leading zero. Git reads
+/// such a pack, and the fetch would serve it, when its `.idx` and `.pack` are both there,
+/// so `check_store` refuses that pair. Input: the file name. Output: the name without its
+/// extension and the extension, or None for any other name.
+fn repack_temp(name: &str) -> Option<(&str, &str)> {
+    let (pid, rest) = name.strip_prefix(".tmp-")?.split_once("-pack-")?;
+    let (id, extension) = rest.split_once('.')?;
+    let decimal = (1..=PID_DIGITS_MAX).contains(&pid.len())
+        && !pid.starts_with('0')
+        && pid.bytes().all(|byte| byte.is_ascii_digit());
+    (decimal && pack_id(id) && REPACK_TEMP_EXTENSIONS.contains(&extension))
+        .then(|| (&name[..name.len() - extension.len() - 1], extension))
+}
+
+/// Tells whether a pack id is git's: a lower-case SHA-1 or SHA-256 hex digest.
+/// Input: the id. Output: the answer.
+fn pack_id(id: &str) -> bool {
     matches!(id.len(), 40 | 64)
         && id
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-        && PACK_EXTENSIONS.contains(&extension)
 }
 
 /// Checks that the clone's own config reads nothing from outside the clone (DEC102-F1): no
