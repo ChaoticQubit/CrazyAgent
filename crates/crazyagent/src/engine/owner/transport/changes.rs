@@ -17,6 +17,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_agent_has_pending",
     "changes_bare_repository",
     "changes_branch_moved",
+    "changes_branch_not_above_base",
     "changes_conflict",
     "changes_detached_head",
     "changes_git_busy",

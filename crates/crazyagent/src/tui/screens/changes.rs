@@ -1040,6 +1040,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_branch_moved" => {
             "Your branch moved while these changes were landing, so nothing changed. Review and accept again."
         }
+        "changes_branch_not_above_base" => {
+            "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard."
+        }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }
