@@ -1014,6 +1014,7 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
+        text.push_str(&app_exec_denies(&self.owner_home));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -1143,6 +1144,10 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(
+            text.find("(deny process-exec") > text.find("(allow process-exec)"),
+            "the app bundle exec deny must follow the exec allow, since the last match wins"
+        );
         assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
@@ -1627,6 +1632,35 @@ fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
     regex_escape(&text)
+}
+
+/// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
+/// executable in an app bundle's `Contents/MacOS` under `/Applications`,
+/// `/System/Applications` or the owner's `~/Applications`, the Data volume path of each
+/// included, each name in any letter case. A GUI app started inside the agent profile
+/// aborts at launch and macOS shows a crash report for every attempt (Chrome crash
+/// popups, decision C1). Command-line tools a bundle ships under `Contents/Resources` or
+/// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
+/// matching rule wins. Input: the owner's home. Output: the rule text.
+fn app_exec_denies(owner_home: &Path) -> String {
+    let data = format!(
+        "/{}/{}/{}",
+        any_case("System"),
+        any_case("Volumes"),
+        any_case("Data")
+    );
+    let bundle = format!(
+        "/{}/.+{}/{}/{}/",
+        any_case("Applications"),
+        any_case(".app"),
+        any_case("Contents"),
+        any_case("MacOS")
+    );
+    format!(
+        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\"))\n",
+        any_case("System"),
+        seatbelt_pattern(owner_home)
+    )
 }
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its
