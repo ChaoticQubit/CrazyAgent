@@ -651,7 +651,10 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             "Your projects folder is still being moved. Try again when it finishes."
         }
         "home_move_agent_work" => {
-            "Agents still have work in projects in this folder, and moving it would cut them off from it. Land or discard their changes and remove those agents first. Nothing was moved."
+            "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved."
+        }
+        "home_move_changes_restorable" => {
+            "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",

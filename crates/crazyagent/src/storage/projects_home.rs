@@ -263,8 +263,8 @@ pub(super) fn add_plan(
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, the new home, the request and the transport exchange that will
 /// run the move. Output: the checked plan, or the refusal code
-/// (`home_move_in_progress` while another move is pending, `home_move_agent_work`
-/// while an agent still has work in a repository inside the home).
+/// (`home_move_in_progress` while another move is pending, or the code
+/// `agent_work_inside` names while agent work is inside the home).
 pub(super) fn move_plan(
     db: &mut Connection,
     path: &Path,
@@ -284,8 +284,8 @@ pub(super) fn move_plan(
         return Err(error("home_move_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    if agent_work_inside(&tx, &saved)? {
-        return Err(error("home_move_agent_work"));
+    if let Some(code) = agent_work_inside(&tx, &saved)? {
+        return Err(error(code));
     }
     let plan = home::plan_move(&saved, Path::new(picked), &engine_root(path)?)?;
     tx.execute(
@@ -303,22 +303,18 @@ pub(super) fn move_plan(
     Ok(plan)
 }
 
-/// Tells whether an agent still has work that a home move would cut off: a team agent's
-/// worktree or own clone, one waiting for removal, or a change set that is open, has a
-/// step in flight or can still be restored, for a repository or worktree inside the home.
-/// Their records, each own clone's alternates line and each linked worktree's git files
-/// name absolute paths inside the home, so the move waits until that work is landed or
-/// discarded and the agents are removed. Inputs: the transaction and the saved home.
-/// Output: the answer.
-fn agent_work_inside(tx: &Transaction<'_>, home: &Path) -> Result<bool, EngineError> {
-    let now = i64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(error)?
-            .as_millis(),
-    )
-    .map_err(error)?;
-    Ok(held_inside(
+/// Names the agent work inside the home that a home move would cut off, as its refusal
+/// code: `home_move_agent_work` for a team agent's worktree or own clone, one waiting for
+/// removal, or a change set that is open or has a step in flight; otherwise
+/// `home_move_changes_restorable` for a discarded change set that can still be restored,
+/// for `crate::landing::RESTORE_WINDOW_MS` after the discard. Their records, each own
+/// clone's alternates line and each linked worktree's git files name absolute paths inside
+/// the home. Inputs: the transaction and the saved home. Output: the code, or None.
+fn agent_work_inside(
+    tx: &Transaction<'_>,
+    home: &Path,
+) -> Result<Option<&'static str>, EngineError> {
+    if held_inside(
         tx,
         home,
         "team_worktrees",
@@ -335,10 +331,27 @@ fn agent_work_inside(tx: &Transaction<'_>, home: &Path) -> Result<bool, EngineEr
         home,
         "landing_change_sets",
         "SELECT repository, worktree FROM landing_change_sets
-         WHERE state IN ('pending','conflict','updating') OR intent IS NOT NULL
-         OR (state='discarded' AND pruned=0 AND restorable_until_ms>?1)",
+         WHERE state IN ('pending','conflict','updating') OR intent IS NOT NULL",
+        params![],
+    )? {
+        return Ok(Some("home_move_agent_work"));
+    }
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_millis(),
+    )
+    .map_err(error)?;
+    Ok(held_inside(
+        tx,
+        home,
+        "landing_change_sets",
+        "SELECT repository, worktree FROM landing_change_sets
+         WHERE state='discarded' AND pruned=0 AND restorable_until_ms>?1",
         params![now],
-    )?)
+    )?
+    .then_some("home_move_changes_restorable"))
 }
 
 /// Tells whether a table of agent worktree records holds one for a repository or worktree

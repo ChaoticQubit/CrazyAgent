@@ -2152,3 +2152,135 @@ async fn an_own_branch_change_set_still_lands_when_the_owner_asks_to_move_the_ho
     drop(db);
     bench.stop().await;
 }
+
+/// A new folder for the projects home outside the bench. Returns its holder and path.
+fn next_home() -> (tempfile::TempDir, PathBuf) {
+    let place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    (place, next)
+}
+
+/// Checks that a home move was refused with `code`, which reads as a plain sentence, and
+/// that the bench repository stayed where it was with nothing in the new home.
+fn refused_move(moved: &OwnerResponse, code: &str, repo: &Path, next: &Path) {
+    assert_eq!(rejection(moved).as_deref(), Some(code), "{moved:?}");
+    assert!(
+        crazyagent::projects_home::plain_problem(code).is_some(),
+        "{code}"
+    );
+    assert!(repo.join(".git").is_dir() && !next.join(PROJECT).exists());
+}
+
+/// Checks that a home move went through and took the bench repository with it.
+fn moved_home(moved: &OwnerResponse, repo: &Path, next: &Path) {
+    assert_eq!(rejection(moved), None, "{moved:?}");
+    assert!(next.join(PROJECT).join(".git").is_dir() && !repo.exists());
+}
+
+/// Makes an own clone for the agent `name` in the bench repository and commits a file in
+/// it, so the agent's turn opens a change set. Returns the landing store, the change set
+/// and the head the owner reviews.
+fn agent_change(
+    bench: &Bench,
+    project: &ProjectId,
+    name: &str,
+) -> (
+    rusqlite::Connection,
+    crazyagent::landing::ChangeSetId,
+    String,
+) {
+    let worktree = crazyagent::projects_home::state_folder(&bench.repo)
+        .join("worktrees")
+        .join(name);
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&bench.repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = crazyagent::landing::open(&bench.root).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &bench.repo, &worktree, &git_dir).unwrap();
+    fs::write(worktree.join("NOTES.md"), "agent notes\n").unwrap();
+    git(&worktree, &["add", "NOTES.md"]);
+    git(&worktree, &["commit", "-q", "-m", "Add notes"]);
+    let workspace = crazyagent::landing::Workspace {
+        project: project.clone(),
+        agent: crazyagent::landing::ChangeAgent {
+            kind: crazyagent::landing::AgentKind::Sub,
+            id: name.into(),
+            label: "worker".into(),
+        },
+        repository: bench.repo.clone(),
+        worktree,
+        git_dir,
+    };
+    let turn = crazyagent::landing::TurnEnd {
+        outcome: crazyagent::landing::TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crazyagent::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("the agent's commit opens a change set");
+    let head = crazyagent::landing::list(&db, project)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == id)
+        .expect("the change set is listed")
+        .head;
+    (db, id, head)
+}
+
+impl Bench {
+    /// Asks the engine to move the projects home, with its projects, to `next`.
+    /// Returns the owner response.
+    async fn move_home(&mut self, next: &Path) -> OwnerResponse {
+        self.generation += 1;
+        self.owner
+            .move_projects_home(next.to_str().unwrap().to_owned(), true, self.generation)
+            .await
+            .unwrap()
+    }
+}
+
+/// A change set the owner discarded stays restorable for 7 days and holds a home move with
+/// its own sentence, which says when the move can go; once that time passed the move goes
+/// through. The agent work sentence no longer says that a discard is enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restorable_discarded_change_holds_a_home_move_until_its_restore_window_ends() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let (db, id, head) = agent_change(&bench, &project, "agent-discard");
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let until = crazyagent::landing::discard(&db, &id, &head, now).unwrap();
+    assert!(until > now, "{until} {now}");
+    assert_eq!(
+        crazyagent::landing::RESTORE_WINDOW_MS,
+        7 * 24 * 60 * 60 * 1000
+    );
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_changes_restorable", &repo, &next);
+    for code in ["home_move_changes_restorable", "home_move_agent_work"] {
+        let sentence = crazyagent::projects_home::plain_problem(code).unwrap();
+        assert!(sentence.contains("7 days"), "{code}: {sentence}");
+    }
+    db.execute(
+        "UPDATE landing_change_sets SET restorable_until_ms=?1 WHERE id=?2",
+        rusqlite::params![i64::try_from(now).unwrap() - 1, id.as_str()],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
