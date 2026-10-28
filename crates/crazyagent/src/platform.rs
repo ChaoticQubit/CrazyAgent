@@ -269,6 +269,57 @@ pub(crate) fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Opens a path below a folder the engine holds one part at a time, following no link in
+/// any part from that folder down, so a folder an agent swapped for a link is refused, not
+/// followed. Each part on the way opens as a folder and the last with `last`. Inputs: the
+/// folder, opened by its path, the plain names below it and the last part's flags. Output:
+/// the descriptor, or `EINVAL` for a part that is not a plain name.
+#[cfg(unix)]
+pub(crate) fn open_beneath(
+    base: &Path,
+    below: &Path,
+    last: rustix::fs::OFlags,
+) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    const FOLDER: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    let parts = below
+        .components()
+        .map(|part| match part {
+            Component::Normal(name) => Ok(name),
+            _ => Err(rustix::io::Errno::INVAL),
+        })
+        .collect::<rustix::io::Result<Vec<_>>>()?;
+    let mut opened = rustix::fs::open(base, FOLDER, Mode::empty())?;
+    for (index, name) in parts.iter().enumerate() {
+        let flags = if index + 1 == parts.len() {
+            last
+        } else {
+            FOLDER
+        };
+        opened = rustix::fs::openat(&opened, *name, flags, Mode::empty())?;
+    }
+    Ok(opened)
+}
+
+/// Opens a file below a folder the engine holds to read, with no link followed from that
+/// folder down and no FIFO waited on ([`open_beneath`]); on Windows through [`open_plain`].
+/// Inputs: the folder and the path below it. Output: the open file or the I/O error.
+pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::OFlags;
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        Ok(std::fs::File::from(open_beneath(base, below, flags)?))
+    }
+    #[cfg(windows)]
+    {
+        open_plain(&base.join(below))
+    }
+}
+
 /// Opens a path to read as the reparse point itself, never a link's target.
 /// Takes the path. Returns the open file or the I/O error.
 #[cfg(windows)]

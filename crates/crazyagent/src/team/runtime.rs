@@ -5158,6 +5158,7 @@ fn excerpt(text: &str, max: usize) -> String {
 }
 const RESUME_REFUSED: &str = "launch_resume_unavailable";
 const LIVE_STARTS_MAX: usize = 3;
+const GIT_POINTER_BYTES_MAX: u64 = 4096;
 const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LIVE_STOPPED: &str = "The live master was turned off";
 const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
@@ -5270,11 +5271,12 @@ impl Drop for NewClone {
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
 /// so the engine's later commits never rely on what the agent may write: for a linked
 /// worktree a folder directly in the project's `.git/worktrees` whose `gitdir` file names
-/// this worktree, for an agent's own clone the real folder `agent_git::git_dir` names.
-/// Inputs: the project root, the worktree and its layout. Output: the root, worktree and
-/// metadata folder as text, or the plain reason.
+/// this worktree, both pointer files read through one open that follows no link and never
+/// waits on a FIFO, kept only when regular and within `GIT_POINTER_BYTES_MAX` bytes, since
+/// an agent with Full access can replace them; for an agent's own clone the real folder
+/// `agent_git::git_dir` names. Inputs: the project root, the worktree and its layout.
+/// Output: the root, worktree and metadata folder as text, or the plain reason.
 fn agent_git_dir(root: &Path, worktree: &Path, layout: Layout) -> Result<[String; 3], String> {
-    use std::io::Read;
     if layout == Layout::Clone {
         let git_dir = crate::agent_git::git_dir(worktree);
         let plain = std::fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir());
@@ -5288,18 +5290,14 @@ fn agent_git_dir(root: &Path, worktree: &Path, layout: Layout) -> Result<[String
             )),
         };
     }
-    let read = |path: &Path| -> Result<String, String> {
-        let mut text = String::new();
-        std::fs::File::open(path)
-            .and_then(|file| file.take(4096).read_to_string(&mut text))
-            .map_err(|e| with_code("the agent worktree could not be checked", Some(io_code(&e))))?;
-        Ok(text)
-    };
     let refused = || {
         with_code(
             "the agent worktree could not be checked",
             Some("team_worktree_git_dir"),
         )
+    };
+    let read = |path: &Path| {
+        crate::platform::read_plain_file(path, GIT_POINTER_BYTES_MAX).ok_or_else(refused)
     };
     let pointer = read(&worktree.join(".git"))?;
     let git_dir = pointer

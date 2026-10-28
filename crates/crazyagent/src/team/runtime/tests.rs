@@ -5765,3 +5765,92 @@ fn an_adopted_agent_keeps_the_session_time_it_ran_before_the_engine_restarted() 
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+/// Runs `agent_git_dir` on its own thread for at most five seconds; past that it opens the
+/// FIFO for writing so the blocked reader can end. Inputs: the root, the worktree and the
+/// FIFO an agent planted. Output: the answer, or None when the read waited on the FIFO.
+fn git_dir_within(
+    root: &Path,
+    worktree: &Path,
+    fifo: &Path,
+) -> Option<Result<[String; 3], String>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (sent, read) = std::sync::mpsc::channel();
+    let (root_owned, worktree_owned) = (root.to_path_buf(), worktree.to_path_buf());
+    std::thread::spawn(move || {
+        let _ = sent.send(agent_git_dir(
+            &root_owned,
+            &worktree_owned,
+            crate::agent_git::Layout::Linked,
+        ));
+    });
+    let answer = read.recv_timeout(Duration::from_secs(5)).ok();
+    if answer.is_none() {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+            .open(fifo);
+    }
+    answer
+}
+
+/// The engine reads an agent worktree's `.git` pointer and its `gitdir` back-pointer without
+/// following a link or waiting on a FIFO, so an agent with no Seatbelt (Full access) cannot
+/// hang the team runtime or point the engine's commits elsewhere by planting one there.
+#[test]
+fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let root = temp.path().canonicalize().unwrap().join("project");
+    let admin = root.join(".git").join("worktrees").join("builder");
+    let worktree = root.join(".crazyagent").join("worktrees").join("builder");
+    std::fs::create_dir_all(&admin).unwrap();
+    std::fs::create_dir_all(&worktree).unwrap();
+    let pointer = (
+        worktree.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    );
+    let back = (
+        admin.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    );
+    let write = |(path, text): &(PathBuf, String)| {
+        let _ = std::fs::remove_file(path);
+        std::fs::write(path, text).unwrap();
+    };
+    write(&pointer);
+    write(&back);
+    let found = agent_git_dir(&root, &worktree, crate::agent_git::Layout::Linked).unwrap();
+    assert_eq!(found[2], admin.to_str().unwrap());
+
+    for planted in [&pointer, &back] {
+        std::fs::remove_file(&planted.0).unwrap();
+        let made = crate::spawn_gate::status(
+            Command::new("/usr/bin/mkfifo")
+                .arg(&planted.0)
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        assert!(made.success());
+        let answer = git_dir_within(&root, &worktree, &planted.0);
+        assert!(
+            answer.as_ref().is_some_and(|answer| answer
+                .as_ref()
+                .is_err_and(|problem| problem.contains("team_worktree_git_dir"))),
+            "a FIFO at {} made the engine wait or pass: {answer:?}",
+            planted.0.display()
+        );
+        write(planted);
+    }
+
+    let outside = temp.path().join("pointer");
+    std::fs::write(&outside, &pointer.1).unwrap();
+    std::fs::remove_file(&pointer.0).unwrap();
+    std::os::unix::fs::symlink(&outside, &pointer.0).unwrap();
+    let linked = agent_git_dir(&root, &worktree, crate::agent_git::Layout::Linked);
+    assert!(
+        linked
+            .as_ref()
+            .is_err_and(|problem| problem.contains("team_worktree_git_dir")),
+        "a linked .git pointer was followed: {linked:?}"
+    );
+}
