@@ -650,6 +650,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_move_in_progress" => {
             "Your projects folder is still being moved. Try again when it finishes."
         }
+        "home_move_agent_work" => {
+            "Agents still have work in projects in this folder, and moving it would cut them off from it. Land or discard their changes and remove those agents first. Nothing was moved."
+        }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
         "folder_size_unreadable" => "Some files in that folder cannot be read.",

@@ -2063,3 +2063,92 @@ async fn a_home_move_points_a_nested_project_and_its_repository_at_the_moved_fol
     drop(db);
     bench.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_own_branch_change_set_still_lands_when_the_owner_asks_to_move_the_home() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let project = project_id_for(&repo).unwrap();
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-own");
+    assert!(
+        worktree.starts_with(repo.join(".crazyagent")),
+        "{worktree:?}"
+    );
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = crazyagent::landing::open(&bench.root).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &repo, &worktree, &git_dir).unwrap();
+    fs::write(worktree.join("NOTES.md"), "agent notes\n").unwrap();
+    git(&worktree, &["add", "NOTES.md"]);
+    git(&worktree, &["commit", "-q", "-m", "Add notes"]);
+    let workspace = crazyagent::landing::Workspace {
+        project: project.clone(),
+        agent: crazyagent::landing::ChangeAgent {
+            kind: crazyagent::landing::AgentKind::Sub,
+            id: "agent-own".into(),
+            label: "worker".into(),
+        },
+        repository: repo.clone(),
+        worktree: worktree.clone(),
+        git_dir,
+    };
+    let turn = crazyagent::landing::TurnEnd {
+        outcome: crazyagent::landing::TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crazyagent::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("the agent's commit opens a change set");
+    let next_place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = next_place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    bench.generation += 1;
+    let moved = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    let head = crazyagent::landing::list(&db, &project)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == id)
+        .expect("the change set is listed")
+        .head;
+    let owner_home = tempfile::tempdir().unwrap();
+    fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
+    )
+    .unwrap();
+    let landed = crazyagent::landing::accept(&db, owner_home.path(), &id, &head, None);
+    assert!(
+        matches!(
+            landed,
+            Ok(crazyagent::landing::AcceptOutcome::Landed { .. })
+        ),
+        "after the home move answered {moved:?}, Accept answered {landed:?}"
+    );
+    assert_eq!(rejection(&moved).as_deref(), Some("home_move_agent_work"));
+    assert!(crazyagent::projects_home::plain_problem("home_move_agent_work").is_some());
+    assert!(repo.join("NOTES.md").is_file() && !next.join(PROJECT).exists());
+    bench.generation += 1;
+    let again = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&again), None, "{again:?}");
+    assert!(next.join(PROJECT).join("NOTES.md").is_file() && !repo.exists());
+    drop(db);
+    bench.stop().await;
+}

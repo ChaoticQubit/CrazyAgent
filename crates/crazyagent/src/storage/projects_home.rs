@@ -263,7 +263,8 @@ pub(super) fn add_plan(
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, the new home, the request and the transport exchange that will
 /// run the move. Output: the checked plan, or the refusal code
-/// (`home_move_in_progress` while another move is pending).
+/// (`home_move_in_progress` while another move is pending, `home_move_agent_work`
+/// while an agent still has work in a repository inside the home).
 pub(super) fn move_plan(
     db: &mut Connection,
     path: &Path,
@@ -283,6 +284,9 @@ pub(super) fn move_plan(
         return Err(error("home_move_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
+    if agent_work_inside(&tx, &saved)? {
+        return Err(error("home_move_agent_work"));
+    }
     let plan = home::plan_move(&saved, Path::new(picked), &engine_root(path)?)?;
     tx.execute(
         "INSERT INTO projects_home_move VALUES (1, ?1, ?2, ?3, ?4, ?5)",
@@ -297,6 +301,84 @@ pub(super) fn move_plan(
     .map_err(error)?;
     tx.commit().map_err(error)?;
     Ok(plan)
+}
+
+/// Tells whether an agent still has work that a home move would cut off: a team agent's
+/// worktree or own clone, one waiting for removal, or a change set that is open, has a
+/// step in flight or can still be restored, for a repository or worktree inside the home.
+/// Their records, each own clone's alternates line and each linked worktree's git files
+/// name absolute paths inside the home, so the move waits until that work is landed or
+/// discarded and the agents are removed. Inputs: the transaction and the saved home.
+/// Output: the answer.
+fn agent_work_inside(tx: &Transaction<'_>, home: &Path) -> Result<bool, EngineError> {
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_millis(),
+    )
+    .map_err(error)?;
+    Ok(held_inside(
+        tx,
+        home,
+        "team_worktrees",
+        "SELECT repository, worktree FROM team_worktrees",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "team_retiring",
+        "SELECT repository, worktree FROM team_retiring",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "landing_change_sets",
+        "SELECT repository, worktree FROM landing_change_sets
+         WHERE state IN ('pending','conflict','updating') OR intent IS NOT NULL
+         OR (state='discarded' AND pruned=0 AND restorable_until_ms>?1)",
+        params![now],
+    )?)
+}
+
+/// Tells whether a table of agent worktree records holds one for a repository or worktree
+/// inside the home, as recorded or as the path resolves now. A table the engine has not
+/// made yet holds none. Inputs: the transaction, the home, the table, the query reading
+/// its repository and worktree paths and that query's parameters. Output: the answer.
+fn held_inside(
+    tx: &Transaction<'_>,
+    home: &Path,
+    table: &str,
+    query: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<bool, EngineError> {
+    let present = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(error)?
+        .is_some();
+    if !present {
+        return Ok(false);
+    }
+    let inside = |text: &str| {
+        let path = Path::new(text);
+        path.starts_with(home)
+            || std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(home))
+    };
+    let mut statement = tx.prepare(query).map_err(error)?;
+    let mut rows = statement.query(parameters).map_err(error)?;
+    while let Some(row) = rows.next().map_err(error)? {
+        let repository: String = row.get(0).map_err(error)?;
+        let worktree: String = row.get(1).map_err(error)?;
+        if inside(&repository) || inside(&worktree) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A projects home move recorded before its folders moved: its request, the

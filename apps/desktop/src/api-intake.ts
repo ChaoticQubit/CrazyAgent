@@ -46,6 +46,7 @@ const COPY: Record<string, string> = {
   home_move_interrupted: "Moving your projects stopped part way. Check both folders before trying again.",
   home_move_too_many: "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  home_move_agent_work: "Agents still have work in projects in this folder, and moving it would cut them off from it. Land or discard their changes and remove those agents first. Nothing was moved.",
   home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
