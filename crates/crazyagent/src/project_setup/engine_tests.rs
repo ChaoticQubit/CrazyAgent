@@ -1310,9 +1310,27 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
             VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0);
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');",
+            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
+            INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');",
         )
         .unwrap();
+    let questions = crate::questions::open(engine.root.path()).unwrap();
+    crate::questions::ask(
+        &questions,
+        &project,
+        &crate::questions::Asker::Master(1),
+        &crate::questions::Ask {
+            question: "Ship on Friday?".into(),
+            options: Vec::new(),
+            recommended: None,
+            context: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        crate::questions::count_pending(&questions).unwrap(),
+        [(project.clone(), 1)]
+    );
 
     let removed = owner.remove_project(project.clone(), 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
@@ -1338,6 +1356,22 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM team_agent_conversations WHERE project='setup-pooled'"),
         0,
         "its agents' kept conversations go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM owner_questions WHERE project='setup-pooled'"),
+        0,
+        "its questions to the owner go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
+        0,
+        "the owner's chat turns go with it"
+    );
+    assert!(
+        crate::questions::count_pending(&questions)
+            .unwrap()
+            .is_empty(),
+        "the questions badge no longer counts the removed project"
     );
     assert!(
         Path::new(&folder)
