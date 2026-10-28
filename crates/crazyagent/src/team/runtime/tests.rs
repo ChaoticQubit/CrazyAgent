@@ -464,33 +464,43 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
     assert_eq!(fixture.agent_status(master).0, AgentStatus::Stopped);
     assert!(team.shutdown().unwrap().is_empty());
 
-    for (name, recorded) in [
-        ("without Rust", Some(Vec::new())),
-        ("from before toolchains were kept", None),
-    ] {
-        let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
-        let record = PaneRecord {
-            toolchains: recorded,
-            ..fixture.pane(&host, kept)
-        };
-        fixture.keep(kept, &record);
-        let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
-        fixture.until(&mut again, name, |f| {
-            f.agent_status(kept) == (AgentStatus::Idle, None) && f.recorded(kept)
-        });
-        for _ in 0..20 {
-            again.tick().unwrap();
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert_eq!(
-            fixture.agent_status(kept),
-            (AgentStatus::Idle, None),
-            "{name}"
-        );
-        assert_eq!(granted(kept), Some(Vec::new()), "{name}");
-        assert_eq!(again.shutdown().unwrap(), names(&[kept]));
-        host.close(&[]).unwrap();
+    let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        toolchains: Some(Vec::new()),
+        ..fixture.pane(&host, kept)
+    };
+    fixture.keep(kept, &record);
+    let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut again, "without Rust", |f| {
+        f.agent_status(kept) == (AgentStatus::Idle, None) && f.recorded(kept)
+    });
+    for _ in 0..20 {
+        again.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
     }
+    assert_eq!(fixture.agent_status(kept), (AgentStatus::Idle, None));
+    assert_eq!(granted(kept), Some(Vec::new()));
+    assert_eq!(again.shutdown().unwrap(), names(&[kept]));
+    host.close(&[]).unwrap();
+
+    let old = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        toolchains: None,
+        ..fixture.pane(&host, old)
+    };
+    fixture.keep(old, &record);
+    let mut upgraded = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(
+        &mut upgraded,
+        "a pane from before toolchains were kept counts as holding every toolchain",
+        |f| {
+            f.agent_status(old).1.is_some_and(|problem| {
+                problem.contains("before the engine kept the toolchains it was given")
+            }) && host.alive().unwrap().is_empty()
+        },
+    );
+    assert_eq!(fixture.agent_status(old).0, AgentStatus::Stopped);
+    assert!(upgraded.shutdown().unwrap().is_empty());
 }
 
 #[test]

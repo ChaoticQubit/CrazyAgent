@@ -217,7 +217,7 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
-    toolchains: Vec<Toolchain>,
+    toolchains: Option<Vec<Toolchain>>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -302,11 +302,13 @@ enum Busy {
 }
 
 /// Why the engine stopped an agent whose running process holds more than the owner saved:
-/// a lower access level, or a toolchain turned off.
+/// a lower access level, a toolchain turned off, or toolchains a pane from before the engine
+/// kept them may hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrowed {
     Access,
     Toolchains,
+    Unrecorded,
 }
 
 impl Narrowed {
@@ -321,6 +323,10 @@ impl Narrowed {
             Self::Toolchains => with_code(
                 "the project's toolchain access was turned off, so the agent was stopped; its next start goes without it",
                 Some("agent_toolchain_lowered"),
+            ),
+            Self::Unrecorded => with_code(
+                "the agent started before the engine kept the toolchains it was given, so it was stopped; its next start uses the project's toolchain settings",
+                Some("agent_toolchains_unrecorded"),
             ),
         }
     }
@@ -354,7 +360,7 @@ struct Worker {
     session: Option<String>,
     seed: Option<String>,
     access: AgentAccess,
-    toolchains: Vec<Toolchain>,
+    toolchains: Option<Vec<Toolchain>>,
     checked: Option<AgentPolicy>,
     narrowed: Option<Narrowed>,
 }
@@ -569,9 +575,8 @@ impl TeamRuntime {
     /// team plan still hold its role and harness, the team is not paused, the project has
     /// room, and its account is still an endpoint in the project's pool. The pane keeps the
     /// access level its record says it started at, Full access for a record without one, and
-    /// the toolchains it started with, the saved ones for a record without them and every
-    /// family when those cannot be read, so a level lowered or a toolchain turned off while
-    /// no engine ran stops it on the next tick. Takes the host, the agent id, its pane record
+    /// the toolchains it started with, every family for a record without them, so a level
+    /// lowered or a toolchain turned off while no engine ran stops it on the next tick. Takes the host, the agent id, its pane record
     /// and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -670,15 +675,6 @@ impl TeamRuntime {
                 params![id, now_ms()],
             )
             .map_err(error)?;
-        let toolchains = record.toolchains.clone().unwrap_or_else(|| {
-            crate::sandbox::policy::load(&self.connection, project.as_str())
-                .ok()
-                .zip(stored.project_folder().canonicalize().ok())
-                .map_or_else(
-                    || Toolchain::ALL.to_vec(),
-                    |(policy, root)| policy.allowed(&root),
-                )
-        });
         let adoption = Adoption {
             host: host.clone(),
             agent,
@@ -687,7 +683,7 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
-            toolchains,
+            toolchains: record.toolchains.clone(),
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -1390,7 +1386,8 @@ impl TeamRuntime {
     /// At a wider access level (AL-2) a kept or live agent stops at once and a per-turn agent
     /// while its turn runs, since an idle one reads the level again in its next grant. With a
     /// toolchain the saved policy no longer allows any agent stops, since its sandbox profile
-    /// was built once at its start. Every next start reads the policy again, so it starts
+    /// was built once at its start; a pane whose record kept no toolchains counts as holding
+    /// every family. Every next start reads the policy again, so it starts
     /// with the new level and without that toolchain. Each agent is checked once per saved
     /// policy; an unreadable policy or project folder counts as Sandboxed with no toolchain.
     /// Takes the project's stored setup.
@@ -1424,10 +1421,16 @@ impl TeamRuntime {
                 Some(Narrowed::Access)
             } else if worker
                 .toolchains
+                .as_deref()
+                .unwrap_or(&Toolchain::ALL)
                 .iter()
                 .any(|toolchain| !allowed.contains(toolchain))
             {
-                Some(Narrowed::Toolchains)
+                Some(if worker.toolchains.is_some() {
+                    Narrowed::Toolchains
+                } else {
+                    Narrowed::Unrecorded
+                })
             } else {
                 None
             };
@@ -2688,7 +2691,7 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => (adoption.live, adoption.managed.is_none()),
         };
         let (access, toolchains) = match &launch {
-            Launch::Fresh(plan, _) => (plan.access, plan.toolchains.clone()),
+            Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone())),
             Launch::Adopt(adoption) => (adoption.access, adoption.toolchains.clone()),
         };
         let thread = std::thread::Builder::new()
@@ -3145,7 +3148,7 @@ impl TeamRuntime {
         match report {
             Report::Ready { group, pane } => {
                 let worker = &self.workers[&id];
-                let (access, toolchains) = (Some(worker.access), Some(worker.toolchains.clone()));
+                let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
                 let pane = pane.map(|record| PaneRecord {
                     access,
                     toolchains,
