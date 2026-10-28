@@ -10,6 +10,7 @@ import {
   tipPlace, viewKey, wheelZoom, zoomView, type Link, type PlacedCard, type PlacedGroup, type Size, type View,
 } from "./graph";
 import { AgentInstructions } from "./agent-instructions";
+import { NodeMessages } from "./agent-messages";
 import { TerminalPanel } from "./terminal-panel";
 import "./team-graph.css";
 
@@ -275,6 +276,7 @@ export function TeamGraphView({ projectId, harness, account }: {
       {openNode && <div className="tg-side">
         <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />
         <AgentInstructions key={openNode.id} projectId={projectId} node={openNode} />
+        <NodeMessages key={openNode.id} projectId={projectId} node={openNode} refresh={graph} />
       </div>}
     </div>
   </section>;
