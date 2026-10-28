@@ -10,6 +10,7 @@ const PROJECT_LOCAL: &str = "PROJECT-LOCAL-RULE-74";
 const USER_CLAUDE: &str = "USER-CLAUDE-RULE-75";
 const USER_CODEX: &str = "USER-CODEX-RULE-76";
 const UNCOMMITTED: &str = "UNCOMMITTED-OWNER-EDIT-77";
+#[cfg(target_os = "macos")]
 const AGENT_EDIT: &str = "AGENT-WORKTREE-EDIT-78";
 
 /// One test's folders: the owner's checkout, a linked agent worktree of it, the owner's
@@ -19,6 +20,7 @@ struct Case {
     root: PathBuf,
     checkout: PathBuf,
     home: PathBuf,
+    #[cfg(target_os = "macos")]
     data: PathBuf,
 }
 
@@ -119,6 +121,7 @@ impl Case {
             root,
             checkout,
             home,
+            #[cfg(target_os = "macos")]
             data,
         }
     }
