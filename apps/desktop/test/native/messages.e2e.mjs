@@ -203,7 +203,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await rowCount(page), 25, "one page at the project's page size");
         const speakers = await page.evaluate(`[...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll(".am-row")].map((row) => [row.querySelector(".am-speaker").textContent, row.querySelector(".am-text").textContent])`);
         assert.ok(speakers.some(([who, text]) => who === history.label && text === "Finished the seed chart"));
-        await me.click("Load older");
+        await me.click("Load older", `${timeline} button`);
         for (const deadline = Date.now() + STEP_MS; await rowCount(page) < history.entries; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "Load older appends the next page");
         assert.equal(await rowCount(page), history.entries, "every entry once");
         const all = await page.evaluate(`[...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll(".am-row")].map((row) => [row.dataset.from, row.querySelector(".am-speaker").textContent, row.querySelector(".am-kind").textContent, row.querySelector(".am-text").textContent])`);
@@ -215,7 +215,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(timeline)}).querySelector("img") === null && window.__amXss === undefined`), true, "markup never renders or runs");
         const finished = await me.waitFor("the result's first line", (text) => text.includes("Built the seed chart"));
         assert.doesNotMatch(finished, /three/u, "the rest of the result waits");
-        await me.click("Show result");
+        await me.click("Show result", `${timeline} button`);
         await me.waitFor("the opened result", (text) => /It has three bars/u.test(text));
         assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(timeline)}).querySelector(".am-md strong")?.textContent ?? null`), "three", "an opened result is the existing Markdown view");
         const frame = await page.evaluate(`(() => {
