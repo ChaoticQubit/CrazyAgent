@@ -171,6 +171,7 @@ const copy: Record<string, string> = {
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
   team_agent_not_found: "That agent is no longer part of this team.",
   team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",
@@ -231,10 +232,11 @@ const copy: Record<string, string> = {
 
 /** Plain sentence for one engine failure, never opaque.
  * Input: the code, or a failure with the engine cause behind it. Output: what happened and
- * what to do, or the generic fallback naming the code. */
+ * what to do, the cause's sentence when the code has none, or the generic fallback naming the
+ * code. */
 export function failureCopy(failure: string | { code: string; cause?: string }): string {
   const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
-  return namedFailure(failureSentence(code), code, cause);
+  return namedFailure(failureSentence(code) ?? (cause === undefined ? undefined : failureSentence(cause)), code, cause);
 }
 
 /** The sentence the project screens have for a code. Input: the code. Output: the sentence,
