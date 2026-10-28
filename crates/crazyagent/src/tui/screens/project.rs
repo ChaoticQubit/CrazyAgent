@@ -1046,15 +1046,11 @@ impl ProjectScreen {
         counts
     }
 
-    /// Names one context file to open: the folder its context paths start from and the
-    /// path inside it. Takes the path inside the project folder.
-    /// Returns the request, or none before the folder is known.
+    /// Names one context file to open: the folder the engine listed the context in, which is
+    /// `.crazyagent/` for projects in the projects home, and the path inside it.
+    /// Takes a listed context path. Returns the request, or none before the context is read.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
-        let folder = self
-            .setup
-            .as_ref()
-            .map(|setup| setup.folder.clone())
-            .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
+        let folder = self.context.as_ref()?.folder.clone();
         Some(OpenRequest::Context {
             folder,
             path: path.to_owned(),
