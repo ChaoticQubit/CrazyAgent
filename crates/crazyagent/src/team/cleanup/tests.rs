@@ -903,3 +903,65 @@ fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_i
     );
     assert!(case.kept(1) && case.base_known(1));
 }
+
+/// Sets or clears the user immutable flag on one file with the system's `chflags`.
+/// Inputs: the flag name and the file. Output: whether `chflags` succeeded.
+#[cfg(target_os = "macos")]
+fn chflags(flag: &str, file: &Path) -> bool {
+    crate::spawn_gate::status(
+        Command::new("/usr/bin/chflags")
+            .arg(flag)
+            .arg(file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .is_ok_and(|done| done.success())
+}
+
+/// Clears the user immutable flag on a test file when dropped, so the temporary folder
+/// can always be deleted, whatever the test asserted. Holds the file's path.
+#[cfg(target_os = "macos")]
+struct Unlocked(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Drop for Unlocked {
+    fn drop(&mut self) {
+        let _ = chflags("nouchg", &self.0);
+    }
+}
+
+/// When git drops an agent's worktree record but leaves a file the engine cannot delete,
+/// the agent stays offered for removal with its record waiting, and a later removal
+/// finishes once the file can go, instead of refusing it as an invalid worktree for good
+/// (RVD-C-N1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_removal_finishes_it() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    let stuck = case.worktree(1).join("target/stuck.bin");
+    write(&stuck, b"locked\n");
+    let unlocked = Unlocked(stuck.clone());
+    assert!(chflags("uchg", &stuck));
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.remove(&[1]), refused("cleanup_worktree_leftover"));
+    assert!(!case.git_dir(1).exists() && stuck.exists());
+    assert_eq!(case.listed(), [1], "the agent stays offered for removal");
+    assert_eq!(
+        case.retiring(),
+        [1],
+        "its record waits instead of going back"
+    );
+    assert_eq!(
+        case.remove(&[1]),
+        refused("cleanup_worktree_leftover"),
+        "the file is still locked"
+    );
+    assert_eq!(case.retiring(), [1]);
+    assert!(chflags("nouchg", &stuck));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.worktree(1).exists() && !case.folder(1).exists() && !case.known(1));
+    assert!(case.retiring().is_empty() && case.listed().is_empty());
+    drop(unlocked);
+}
