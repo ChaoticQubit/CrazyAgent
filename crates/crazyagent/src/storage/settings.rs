@@ -622,6 +622,9 @@ fn finalize(
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| error("revision_exhausted"))?;
     store_config(&tx, next)?;
+    if let Some(access) = &next.settings.model_access {
+        crate::scheduling::forget_removed(&tx, access)?;
+    }
     let request = &pending.request;
     let hash = request.mutation_hash()?;
     let provenance = OwnerProvenance {

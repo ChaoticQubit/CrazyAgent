@@ -14,6 +14,8 @@ pub const RESERVE_PERCENT_MAX: u8 = 99;
 pub const SCOPED_STRATEGIES_MAX: usize = 4096;
 /// The most per-account plans the engine keeps.
 pub const ACCOUNT_PLANS_MAX: usize = 4096;
+/// The most bytes of rows one page of the schedule read carries, well inside one owner reply.
+const PAGE_BYTES_MAX: usize = 30_000;
 
 /// How a pool orders the accounts that can take work (DEC-096 item 8).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,9 +281,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)
 }
 
-/// Applies one owner scheduling change inside the engine transaction.
+/// Applies one owner scheduling change inside the engine transaction. Removing a row
+/// needs no known pool or connection, so a row whose target is gone can still be deleted.
 /// Takes the transaction, the current model access and the change. Returns Applied, or a
-/// rejection for an unknown pool or connection, a value out of range or a full table.
+/// rejection for a row kept for an unknown pool or connection, a value out of range or a
+/// full table.
 pub fn apply(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -295,7 +299,7 @@ pub fn apply(
             set_strategy(tx, "app", "", Some(*strategy))?;
         }
         ScheduleChange::PoolStrategy { pool, strategy } => {
-            if !access.pools.iter().any(|known| &known.id == pool) {
+            if strategy.is_some() && !access.pools.iter().any(|known| &known.id == pool) {
                 return Ok(rejected("pool_not_found"));
             }
             if !set_strategy(tx, "pool", pool.as_str(), *strategy)? {
@@ -308,10 +312,11 @@ pub fn apply(
             }
         }
         ScheduleChange::Account { connection, plan } => {
-            if !access
-                .connections
-                .iter()
-                .any(|known| &known.id == connection)
+            if *plan != AccountPlan::default()
+                && !access
+                    .connections
+                    .iter()
+                    .any(|known| &known.id == connection)
             {
                 return Ok(rejected("connection_not_found"));
             }
@@ -500,6 +505,149 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
     assert!(schedule.projects.len() <= SCOPED_STRATEGIES_MAX);
     assert!(schedule.accounts.len() <= ACCOUNT_PLANS_MAX);
     Ok(schedule)
+}
+
+/// One of the schedule's three row lists, in the order the paged schedule read walks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleList {
+    Pools,
+    Projects,
+    Accounts,
+}
+
+/// Where the next page of the schedule read starts: after row `after` of list `list`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleCursor {
+    pub list: ScheduleList,
+    pub after: CredentialRef,
+}
+
+/// The room one page of the schedule read has used, the last row it took and whether a
+/// row no longer fits.
+struct Page<'a> {
+    cursor: Option<&'a ScheduleCursor>,
+    bytes: usize,
+    last: Option<ScheduleCursor>,
+    full: bool,
+}
+
+impl Page<'_> {
+    /// Takes the rows of one list past the cursor while the page has room for them.
+    /// Inputs: the list, its rows sorted by id and how to read a row's id.
+    /// Output: the rows taken; once a row does not fit, the page is full.
+    fn take<T: Serialize>(
+        &mut self,
+        list: ScheduleList,
+        rows: Vec<T>,
+        id: impl Fn(&T) -> &CredentialRef,
+    ) -> Result<Vec<T>, EngineError> {
+        let mut taken = Vec::new();
+        for row in rows {
+            if self.full {
+                break;
+            }
+            let key = (list, id(&row));
+            if self
+                .cursor
+                .is_some_and(|cursor| key <= (cursor.list, &cursor.after))
+            {
+                continue;
+            }
+            let size = serde_json::to_vec(&row).map_err(error)?.len() + 1;
+            if self.bytes + size > PAGE_BYTES_MAX {
+                self.full = true;
+                break;
+            }
+            self.bytes += size;
+            self.last = Some(ScheduleCursor {
+                list,
+                after: key.1.clone(),
+            });
+            taken.push(row);
+        }
+        Ok(taken)
+    }
+}
+
+/// Reads one page of the stored scheduling choices, so a schedule larger than one owner
+/// reply is read whole over several: the app strategy and, past `cursor`, the pool
+/// strategies, project overrides and account plans in that order, each sorted by id.
+/// Takes the engine connection and the cursor, none for the first page.
+/// Returns the page and the cursor of the next one while rows remain.
+pub fn load_page(
+    connection: &Connection,
+    cursor: Option<&ScheduleCursor>,
+) -> Result<(Schedule, Option<ScheduleCursor>), EngineError> {
+    let all = load(connection)?;
+    let mut page = Page {
+        cursor,
+        bytes: 0,
+        last: None,
+        full: false,
+    };
+    let schedule = Schedule {
+        strategy: all.strategy,
+        pools: page.take(ScheduleList::Pools, all.pools, |row| &row.id)?,
+        projects: page.take(ScheduleList::Projects, all.projects, |row| &row.id)?,
+        accounts: page.take(ScheduleList::Accounts, all.accounts, |row| &row.connection)?,
+    };
+    assert!(page.bytes <= PAGE_BYTES_MAX);
+    assert!(!page.full || page.last.is_some());
+    Ok((schedule, if page.full { page.last } else { None }))
+}
+
+/// Deletes the pool strategies and account plans whose pool or connection the model access
+/// no longer holds, as after the owner removed one, so no row outlives its target.
+/// Takes the engine transaction and the new model access. Returns any SQLite failure.
+pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), EngineError> {
+    if !table_exists(tx, "account_strategies")? || !table_exists(tx, "account_plans")? {
+        return Ok(());
+    }
+    let pools: BTreeSet<&str> = access.pools.iter().map(|pool| pool.id.as_str()).collect();
+    let connections: BTreeSet<&str> = access
+        .connections
+        .iter()
+        .map(|connection| connection.id.as_str())
+        .collect();
+    for (stored, delete, known) in [
+        (
+            "SELECT id FROM account_strategies WHERE scope='pool'",
+            "DELETE FROM account_strategies WHERE scope='pool' AND id=?1",
+            &pools,
+        ),
+        (
+            "SELECT connection FROM account_plans",
+            "DELETE FROM account_plans WHERE connection=?1",
+            &connections,
+        ),
+    ] {
+        let ids: Vec<String> = tx
+            .prepare(stored)
+            .map_err(error)?
+            .query_map([], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?;
+        for id in ids.iter().filter(|id| !known.contains(id.as_str())) {
+            tx.execute(delete, [id]).map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes the strategy override of a project being removed, so no row outlives it.
+/// Takes the engine transaction and the project id. Returns any SQLite failure.
+pub fn forget_project(tx: &Transaction<'_>, project: &str) -> Result<(), EngineError> {
+    if table_exists(tx, "account_strategies")? {
+        tx.execute(
+            "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
+            [project],
+        )
+        .map_err(error)?;
+    }
+    Ok(())
 }
 
 /// Why the schedule leaves an account out of the accounts that can take work now, with
