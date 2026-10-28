@@ -78,10 +78,10 @@ test("cancelling a sign-in reaches the engine and says plainly when the engine c
   const result = await cancelSignIn("acct-1");
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
-  for (const code of ["native_auth_operation_missing", "native_profile_source_conflict"]) {
+  for (const code of ["native_auth_operation_missing"]) {
     assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.", code);
   }
-  for (const code of ["native_auth_operation_scope_conflict", "native_auth_recovery_required"]) {
+  for (const code of ["native_auth_operation_scope_conflict", "native_auth_recovery_required", "native_profile_source_conflict"]) {
     assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Use Clear stuck sign-in at the top of the window.", code);
   }
   assert.equal(cancelError("native_auth_not_active"), undefined);

@@ -272,7 +272,6 @@ impl NativeBridge {
             return Err(failure("native_auth_operation_scope_conflict"));
         }
         if original != scope {
-            operation.unresolved = false;
             return Err(failure("native_profile_source_conflict"));
         }
         Ok(operation.original.id().clone())
@@ -306,13 +305,7 @@ impl NativeBridge {
                     if error.code == "native_auth_outcome_unknown_read_same_operation" {
                         operation.unresolved = true;
                     } else if operation.generation.is_none()
-                        || matches!(
-                            error.code,
-                            "native_auth_not_active"
-                                | "native_auth_operation_missing"
-                                | "native_auth_database_mismatch"
-                                | "native_profile_source_conflict"
-                        )
+                        || crazyagent::engine::owner::ends_operation(error.code)
                     {
                         operation.unresolved = false;
                     }

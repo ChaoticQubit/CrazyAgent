@@ -1509,7 +1509,7 @@ async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
         let cleared = ui.auth().await;
         assert_eq!(
             cleared.result.as_ref().err().map(String::as_str),
-            Some("native_profile_source_conflict")
+            Some("native_auth_operation_missing")
         );
         ui.apply(cleared);
         assert!(!ui.app.model_access.signing_in());

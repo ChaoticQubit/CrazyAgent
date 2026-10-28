@@ -610,6 +610,13 @@ impl State {
                 self.claude_code.clear();
                 self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine no longer runs it");
             }
+            Err(problem) if self.clearing && problem == "native_profile_source_conflict" => {
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed(
+                    "Settings changed after this sign-in started; the engine ends it within 10 minutes of its start, then press c again",
+                );
+            }
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
                 self.notice = Cow::Borrowed(if self.inspected {

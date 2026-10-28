@@ -694,11 +694,49 @@ pub(crate) fn read_native_auth(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let connection = match validate_scope(&tx, config, sources, admission, &command) {
+        Err(refused) if refused.0 == "native_profile_source_conflict" => {
+            return Err(stale_read(&tx, request));
+        }
+        checked => checked?,
+    };
     let fact = existing(&tx, connection, admission, &command)?
         .ok_or_else(|| error("native_auth_operation_missing"))?;
     tx.commit().map_err(error)?;
     Ok(reply(admission, &command, fact))
+}
+
+/// Answers a read whose settings changed after its operation started, without the
+/// operation's content: `native_auth_not_active` once the engine no longer runs it or holds
+/// its profile, else the settings conflict, so a client never forgets a sign-in the engine
+/// may still finish. Inputs: the transaction and the read. Output: the refusal to send.
+fn stale_read(tx: &Transaction<'_>, request: &NativeAuthQuery) -> EngineError {
+    let conflict = || error("native_profile_source_conflict");
+    let fact = match load_fact(tx, &request.operation_id) {
+        Ok(fact) => fact,
+        Err(refused) => return refused,
+    };
+    let scope = &request.scope;
+    if fact.binding.database_instance != scope.expected_database_instance
+        || fact.binding.connection.id != scope.connection
+        || fact.binding.config_id != scope.expected_config_id
+        || fact.binding.source_hash != scope.expected_source_hash
+    {
+        return conflict();
+    }
+    let fenced = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE operation_id=?1)",
+        [fact.operation_id.as_str()],
+        |row| row.get::<_, bool>(0),
+    );
+    match fenced {
+        Err(failed) => error(failed),
+        Ok(true) => conflict(),
+        Ok(false) if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain => {
+            conflict()
+        }
+        Ok(false) => error("native_auth_not_active"),
+    }
 }
 
 pub(crate) fn cancel_native_auth(
