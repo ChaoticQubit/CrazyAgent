@@ -468,3 +468,134 @@ fn a_rolled_back_removal_keeps_the_project_skill_folder() {
         "the rolled back removal queued no trash, so the sweep keeps the folder"
     );
 }
+
+#[test]
+fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let project = ProjectId::new("ghost").unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+    };
+
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('ghost','{}')", [])
+        .unwrap();
+
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            name: "private".into(),
+            spec: spec.clone(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    let private = view.id;
+    attach(
+        &mut connection,
+        root,
+        &private,
+        "TOKEN",
+        b"super-secret-value",
+    );
+    execute(
+        &mut connection,
+        root,
+        Command::Approve {
+            id: private.clone(),
+            spec: spec.clone(),
+        },
+    )
+    .unwrap();
+    let reference = {
+        let tx = connection.transaction().unwrap();
+        let record: ServerRecord = load(&tx, "server", &private).unwrap();
+        record.secrets[0].reference.clone()
+    };
+
+    let skill_folder = Path::new("plugins")
+        .join("skills")
+        .join("project")
+        .join("ghost")
+        .join("notes");
+    let absolute = root.join(&skill_folder);
+    std::fs::create_dir_all(&absolute).unwrap();
+    std::fs::write(
+        absolute.join("SKILL.md"),
+        "---\nname: notes\ndescription: Project notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-ghost".into(),
+            name: "notes".into(),
+            description: "Project notes.".into(),
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/notes".into(),
+            folder: skill_folder.to_string_lossy().into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    connection
+        .execute("DELETE FROM projects WHERE id='ghost'", [])
+        .unwrap();
+
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::storage::create_project(
+            &tx,
+            &project,
+            &crate::protocol::ProjectSpec {
+                name: "Ghost".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+
+        let after = effective(&tx, root, &project).unwrap();
+        assert!(after.skills.is_empty(), "no orphaned skill is inherited");
+        assert!(
+            after.servers.iter().all(|server| server.name != "private"),
+            "no orphaned server is inherited"
+        );
+        tx.commit().unwrap();
+    }
+
+    let items: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(items, 0, "the orphaned rows are gone");
+
+    crate::storage::trash::sweep(&connection, root).unwrap();
+    assert!(!absolute.exists(), "the orphaned skill folder is reclaimed");
+    assert!(
+        !secret_saved(root, &reference),
+        "the orphaned secret file is reclaimed"
+    );
+}

@@ -1545,6 +1545,12 @@ fn execute(
     }
 }
 
+/// Records a new project and clears any plugin rows a prior project of the same id left
+/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
+/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
+/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
+/// or Rejected when the id is already in use.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -1570,6 +1576,7 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    plugins::remove_project(tx, project_id)?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
