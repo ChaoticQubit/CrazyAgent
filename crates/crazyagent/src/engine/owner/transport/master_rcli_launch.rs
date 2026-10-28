@@ -304,7 +304,7 @@ fallback_allowed = false
                 assert_eq!(operation.result, OwnerResult::Applied);
                 Ok(())
             },
-            Duration::from_millis(100),
+            super::super::master_dispatch::DRIVE_PAUSE,
         )
         .await
         .unwrap();
