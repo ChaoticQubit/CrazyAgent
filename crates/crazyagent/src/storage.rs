@@ -1549,8 +1549,11 @@ fn execute(
 /// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
 /// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
-/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
-/// or Rejected when the id is already in use.
+/// project's plugins untouched. The reused id's old skill store folder is removed at once,
+/// not left for the next start's trash sweep, so the new project starts with a clean skill
+/// store and a same-name skill import is not refused by a stale folder. Inputs: the
+/// transaction, the id and the spec. Output: Applied, or Rejected when the id is already in
+/// use.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -1577,6 +1580,9 @@ pub(crate) fn create_project(
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
     plugins::remove_project(tx, project_id)?;
+    if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
+        plugins::remove_skill_project_folder(root, project_id.as_str())?;
+    }
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }

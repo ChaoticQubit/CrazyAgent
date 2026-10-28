@@ -599,3 +599,80 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
         "the orphaned secret file is reclaimed"
     );
 }
+
+#[test]
+fn recreating_a_project_clears_the_reused_ids_stale_skill_folder_at_once() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let project = ProjectId::new("reused").unwrap();
+
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('reused','{}')", [])
+        .unwrap();
+    let project_store = root
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("reused");
+    let stale = project_store.join("old-notes");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(
+        stale.join("SKILL.md"),
+        "---\nname: old-notes\ndescription: Old project notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-old".into(),
+            name: "old-notes".into(),
+            description: "Old project notes.".into(),
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/old-notes".into(),
+            folder: Path::new("plugins")
+                .join("skills")
+                .join("project")
+                .join("reused")
+                .join("old-notes")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    connection
+        .execute("DELETE FROM projects WHERE id='reused'", [])
+        .unwrap();
+
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::storage::create_project(
+            &tx,
+            &project,
+            &crate::protocol::ProjectSpec {
+                name: "Reused".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+        tx.commit().unwrap();
+    }
+
+    assert!(
+        !project_store.exists(),
+        "the reused id's stale skill store is cleared at creation, before any trash sweep"
+    );
+}
