@@ -918,8 +918,8 @@ impl Driver {
                 interrupt,
                 server_turn,
             } => {
-                let method: serde_json::Value =
-                    serde_json::from_slice(line).map_err(|_| failure("launch_protocol_failed"))?;
+                let method = crate::adapters::claude::parse_line(line)
+                    .map_err(|_| failure("launch_protocol_failed"))?;
                 let started = method.get("method").and_then(serde_json::Value::as_str)
                     == Some("turn/started");
                 let decoded = protocol
@@ -1018,8 +1018,8 @@ impl Driver {
                 late,
                 ..
             } => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(line).map_err(|_| failure("launch_protocol_failed"))?;
+                let value = crate::adapters::claude::parse_line(line)
+                    .map_err(|_| failure("launch_protocol_failed"))?;
                 match value.get("type").and_then(serde_json::Value::as_str) {
                     Some("control_response") => {
                         let answered = value
