@@ -937,21 +937,7 @@ impl TeamView {
         })
     }
 
-    /// Draws the Team view for the body of the project's Agents tab.
-    /// Takes the content width, the rows available, the accounts used to name
-    /// agents' accounts and the look. Returns the body rows and the help keys.
-    pub fn rows(
-        &self,
-        content: usize,
-        room: usize,
-        accounts: &[AccountRow],
-        look: &Look,
-    ) -> (Vec<Row>, Help) {
-        let (lines, help, _) = self.draw(content, room, accounts, look);
-        (lines, help)
-    }
-
-    /// Draws the Team view like `rows` and also places the typing cursor.
+    /// Draws the Team view for the Team settings screen and places the typing cursor.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.

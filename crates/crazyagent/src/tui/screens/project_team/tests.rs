@@ -203,7 +203,7 @@ fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
         .collect();
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Agents as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
-    let (lines, help) = view.rows(columns - 4, room, &accounts(), &look);
+    let (lines, help, _) = view.draw(columns - 4, room, &accounts(), &look);
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(columns));
     }
