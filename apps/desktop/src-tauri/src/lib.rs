@@ -107,12 +107,12 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing, when `reinstall` asks or when the installed
-/// definition runs another executable, else starts it, then waits for the engine with the
-/// shared bound. The service runs the sidecar, or its private copy when the sidecar sits
-/// in the AppImage mount folder; a sidecar other users can change is refused.
-/// Inputs: the layout, the service and whether to replace the definition with this app's
-/// sidecar. Output: Ok once it answers.
+/// Installs the service when it is missing, when `reinstall` asks or when it is
+/// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
+/// engine with the shared bound. The service runs the sidecar, or its private copy when
+/// the sidecar sits in the AppImage mount folder; a sidecar other users can change is
+/// refused. Inputs: the layout, the service and whether to replace the definition with
+/// this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -124,16 +124,13 @@ async fn start_engine(
         .map_err(|_| engine_failure("engine_service_failed"))?
         .installed;
     let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
+    let bundled = &service.executable;
     let service = crazyagent::service::Service {
-        executable: crazyagent::service::persistable(
-            &service.executable,
-            layout,
-            appdir.as_deref(),
-        )
-        .map_err(|_| engine_failure("engine_service_failed"))?,
+        executable: crazyagent::service::persistable(bundled, layout, appdir.as_deref())
+            .map_err(|_| engine_failure("engine_service_failed"))?,
         ..service.clone()
     };
-    if reinstall || !installed || !service.current() {
+    if reinstall || !installed || service.stale(bundled) {
         if !service.executable.is_file() {
             return Err(engine_failure("engine_sidecar_missing"));
         }

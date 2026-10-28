@@ -548,6 +548,15 @@ WantedBy=default.target\n",
         })
     }
 
+    /// Whether a plain start must replace the installed definition instead of starting it:
+    /// only when this service runs a private copy in place of the `bundled` engine and the
+    /// file on disk is not [`Service::current`], as with a unit an older build left on an
+    /// AppImage mount path. Any other installed service starts as it is, so a launch PATH
+    /// that differs never stops or restarts a running engine. Input: the bundled engine.
+    pub fn stale(&self, bundled: &Path) -> bool {
+        self.executable != bundled && !self.current()
+    }
+
     fn loaded(&self) -> Result<bool, ServiceError> {
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }

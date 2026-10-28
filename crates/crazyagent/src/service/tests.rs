@@ -874,3 +874,38 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
         assert!(!wanted.current());
     }
 }
+
+#[test]
+fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp.path().join("CrazyAgent.app").join("crazyagent");
+    let copy = temp.path().join("engine").join("bin").join("crazyagent");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut installed = service(platform);
+        installed.root = temp.path().join("engine");
+        installed.executable = bundled.clone();
+        installed.path = OsString::from("/usr/bin:/bin");
+        installed.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(
+            &installed.definition,
+            &installed.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        let mut launched = installed.clone();
+        launched.path = OsString::from("/opt/homebrew/bin:/usr/bin:/bin");
+        assert!(!launched.current());
+        assert!(!launched.stale(&bundled));
+        assert!(!installed.stale(&bundled));
+        let mut copied = launched.clone();
+        copied.executable = copy.clone();
+        assert!(copied.stale(&bundled));
+        write_definition(
+            &copied.definition,
+            &copied.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!copied.stale(&bundled));
+    }
+}
