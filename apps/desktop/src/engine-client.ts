@@ -769,6 +769,7 @@ export interface TeamStatus {
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
+  message_settings?: MessageSettings;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -782,6 +783,60 @@ export interface TeamStatus {
   messages: TeamMessage[];
   plan: TeamPlanStep[];
   events: TeamEventsView;
+}
+
+/** How a finished or failed task's result shows in a Messages timeline: its first line until
+ * the owner opens it, or the whole result. */
+export type ResultsShown = "first_line" | "full";
+
+/** A project's Messages settings, stored whole: whether the master's messages and answers to
+ * its sub-agents are kept, how many kept messages the project holds, whether progress events
+ * and the owner's own tasks and prompts show, how results show and the page size. */
+export interface MessageSettings {
+  keep_master_messages: boolean;
+  kept_per_project: number;
+  progress_shown: boolean;
+  results: ResultsShown;
+  owner_items_shown: boolean;
+  page_size: number;
+}
+
+/** Who a Messages entry comes from, as the engine stored it, never as its text says. */
+export type MessageSpeaker = "master" | "owner" | "agent" | "engine";
+
+/** What one Messages entry is. */
+export type MessageKind = "task" | "wake" | "message" | "answer" | "prompt" | "question" | "progress" | "change_set_ready" | "finished" | "failed";
+
+/** Which store a Messages entry comes from; with its time and id it orders the timeline. */
+export type MessageSource = "task" | "message" | "event";
+
+/** Where a Messages page ends; the next page holds the entries before it. */
+export interface MessageCursor {
+  at_ms: number;
+  source: MessageSource;
+  id: number;
+}
+
+/** One entry of a sub-agent's Messages timeline. `text` is null for a master's message the
+ * project kept no text of; `result` is a finished task's result or a failed task's problem. */
+export interface AgentMessage extends MessageCursor {
+  from: MessageSpeaker;
+  kind: MessageKind;
+  text: string | null;
+  task: number | null;
+  state: TeamEventState | null;
+  result: string | null;
+  result_more: boolean;
+}
+
+/** One page of a sub-agent's Messages timeline, newest first, with whether older entries
+ * remain and the settings it was read under. */
+export interface AgentMessages {
+  project_id: string;
+  agent: number;
+  entries: AgentMessage[];
+  older: boolean;
+  settings: MessageSettings;
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
