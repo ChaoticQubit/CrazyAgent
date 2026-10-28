@@ -125,8 +125,12 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     );
     assert!(both.bytes > both.claude_bytes_max);
     let warning = both.claude_warning().expect("the save warns");
+    let room = format!(
+        "a Claude master takes {:.1} KB",
+        f64::from(claude_room()) / 1024.0
+    );
     assert!(
-        warning.contains("a Claude master takes 27.5 KB")
+        warning.contains(&room)
             && warning.contains(&format!("not {:.1} KB", given.text.len() as f64 / 1024.0)),
         "{warning}"
     );
