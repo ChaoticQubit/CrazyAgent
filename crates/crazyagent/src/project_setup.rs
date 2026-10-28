@@ -2251,8 +2251,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
-    let root = tx.path().map(Path::new).and_then(Path::parent);
-    crate::storage::plugins::remove_project(tx, root, project_id)?;
+    crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
 

@@ -47,7 +47,44 @@ pub(crate) const STEPS: &[Step] = &[
         to: 4,
         run: master_sessions_parked,
     },
+    Step {
+        to: 5,
+        run: widen_file_trash_kinds,
+    },
 ];
+
+/// Says whether a table of that name exists. Inputs: the open transaction and the name.
+/// Output: true when `sqlite_schema` holds a table row for it.
+fn has_table(tx: &Transaction<'_>, name: &str) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Step 5 (PP-2): a removed project's skill store folder is now queued in the transactional
+/// file trash, as its secrets already are, so the `skill_folder` kind must pass the check.
+/// An existing `file_trash` is rebuilt with the wider check, keeping its pending rows; a
+/// database that never had the table gets it from the current schema, which already lists
+/// the kind. Runs before step 6, which queues that kind for orphaned projects.
+fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "file_trash")? {
+        return super::trash::initialize(tx);
+    }
+    tx.execute_batch(
+        "CREATE TABLE file_trash_new (
+            kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+            name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+            PRIMARY KEY(kind, name)
+         ) WITHOUT ROWID;
+         INSERT INTO file_trash_new SELECT kind, name FROM file_trash;
+         DROP TABLE file_trash;
+         ALTER TABLE file_trash_new RENAME TO file_trash;",
+    )
+    .map_err(error)
+}
 
 /// Step 3 (DEC-096 addendum 3): an empty sub-harness list now means any harness, so a saved
 /// plan that lists none and allows at most one agent, the old "master only" default, gets the

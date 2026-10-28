@@ -365,7 +365,10 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
         )
         .unwrap();
     assert_eq!(switches, 0, "the project's switches are gone");
-    assert!(!absolute.exists(), "the project skill folder is reclaimed");
+    assert!(
+        absolute.is_dir(),
+        "the skill folder waits for the post-commit sweep, not an in-transaction delete"
+    );
 
     {
         let tx = connection.transaction().unwrap();
@@ -384,7 +387,84 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
 
     crate::storage::trash::sweep(&connection, root).unwrap();
     assert!(
+        !absolute.exists(),
+        "the project skill folder is reclaimed after the sweep"
+    );
+    assert!(
         !secret_saved(root, &reference),
         "the project secret file is reclaimed"
+    );
+}
+
+#[test]
+fn a_rolled_back_removal_keeps_the_project_skill_folder() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('victim','{}')", [])
+        .unwrap();
+    let project = ProjectId::new("victim").unwrap();
+
+    let skill_folder = Path::new("plugins")
+        .join("skills")
+        .join("project")
+        .join("victim")
+        .join("notes");
+    let absolute = root.join(&skill_folder);
+    std::fs::create_dir_all(&absolute).unwrap();
+    std::fs::write(
+        absolute.join("SKILL.md"),
+        "---\nname: notes\ndescription: Project notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-victim".into(),
+            name: "notes".into(),
+            description: "Project notes.".into(),
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/notes".into(),
+            folder: skill_folder.to_string_lossy().into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::project_setup::execute(
+            &tx,
+            &config,
+            &crate::project_setup::SetupAction::Remove {
+                project_id: project.clone(),
+            },
+            2,
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+        drop(tx);
+    }
+
+    assert!(
+        absolute.is_dir(),
+        "a removal rolled back before commit leaves the skill folder on disk"
+    );
+    crate::storage::trash::sweep(&connection, root).unwrap();
+    assert!(
+        absolute.is_dir(),
+        "the rolled back removal queued no trash, so the sweep keeps the folder"
     );
 }
