@@ -739,6 +739,66 @@ async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
     case.close().await;
 }
 
+/// A removed server's check home can hold a package manager's whole install, as an `npx`
+/// server's does. The removal still answers Done within the owner's wait, its check folder
+/// is gone from its path when it does, and what the check wrote is deleted after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once() {
+    let case = Case::new().await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    let server = controller
+        .add_mcp_server(
+            Scope::Global,
+            "packages".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: vec![],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let checks = root.join("mcp-checks");
+    let folder = checks.join(&server.id);
+    for package in 0..100 {
+        let installed = folder
+            .join("home/.npm/_cacache")
+            .join(format!("package-{package}"));
+        fs::create_dir_all(&installed).unwrap();
+        for file in 0..1000 {
+            fs::File::create(installed.join(format!("file-{file}"))).unwrap();
+        }
+    }
+
+    controller
+        .remove_mcp_server(server.id.clone())
+        .await
+        .expect("a committed removal answers Done however much its check home holds");
+    assert!(
+        !folder.exists(),
+        "the removed server's check folder is gone from its path when the removal answers"
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let left: Vec<String> = fs::read_dir(&checks)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(&server.id))
+            .collect();
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "what the removed server's check wrote must be deleted: {left:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    drop(controller);
+    case.close().await;
+}
+
 /// A checked server gets the open network agents get, but while the owner's local model
 /// server is down it cannot listen on that configured endpoint's port and answer the
 /// prompts sent there; another loopback port stays free for it to bind.

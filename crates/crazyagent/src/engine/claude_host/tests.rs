@@ -254,8 +254,13 @@ fn claude_launch_appends_only_a_private_engine_instruction_file() {
     assert!(launch(file.as_path()).is_ok());
     fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(launch(file.as_path()).is_err());
+    let limit = usize::try_from(INSTRUCTIONS_BYTES_MAX).unwrap();
+    let largest = directories.root.join("largest.md");
+    fs::write(&largest, "x".repeat(limit)).unwrap();
+    fs::set_permissions(&largest, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(launch(largest.as_path()).is_ok());
     let oversized = directories.root.join("oversized.md");
-    fs::write(&oversized, "x".repeat(64 * 1024 + 1)).unwrap();
+    fs::write(&oversized, "x".repeat(limit + 1)).unwrap();
     fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
     assert!(launch(oversized.as_path()).is_err());
 }

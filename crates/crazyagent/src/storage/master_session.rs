@@ -990,10 +990,11 @@ fn resume(
         return Ok(reject(&reason.0));
     }
     let current = live(tx, project, revision)?;
-    if current
-        .as_ref()
-        .is_some_and(|session| session.current_turn.is_some())
-        && !cancel_running
+    if !cancel_running
+        && (current
+            .as_ref()
+            .is_some_and(|session| session.current_turn.is_some())
+            || crate::team::master::turn_running(tx, project)?)
     {
         return Ok(reject("master_turn_running"));
     }
@@ -1601,7 +1602,10 @@ fn validate_registration(
         return Err(error("master_configured_receipt_conflict"));
     }
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
-    if record.database_identity != database_identity(&metadata)? {
+    if !crate::file_identity::same_files(
+        &[record.database_identity],
+        &[database_identity(&metadata)?],
+    ) {
         return Err(error("master_configured_database_changed"));
     }
     let config = crate::config::resolve_config(&record.global_source, &record.project_source)
@@ -4460,6 +4464,9 @@ fn execute(
                 }
                 Some(_) => {}
             }
+        }
+        if renew == Some(false) && crate::team::master::turn_running(tx, project_id)? {
+            return Ok(reject("master_turn_running"));
         }
         if !live_capacity(tx, current.is_some())? {
             return Ok(reject("master_session_capacity"));

@@ -135,7 +135,10 @@ pub struct TurnEnd {
 /// CrazyAgent check ran. `conflicts` names the files the last Accept conflicted on.
 /// `message` is the commit message an Accept proposes for the owner to edit. `waiting` is
 /// true while an updating change set is merged but its agent was not yet handed the work
-/// that resolves it.
+/// that resolves it. `outside` is true when the engine closed it because its work was
+/// landed outside the app (Accepted) or removed outside the app (Discarded, never
+/// restorable). While open, `files`, `added` and `removed` count only what is not yet on
+/// the owner's branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -157,6 +160,8 @@ pub struct ChangeSetView {
     pub message: String,
     #[serde(default)]
     pub waiting: bool,
+    #[serde(default)]
+    pub outside: bool,
 }
 
 /// How a file changed between a change set's base and head.
@@ -518,11 +523,13 @@ pub fn open_change_set(
     }
 }
 
-/// Reads one page of a change set's diff between its base and head, produced by the
-/// engine with no external diff or text conversion, only while the set is still at the
-/// head the owner is reading, so every page shown is of the head Accept and Discard name
-/// (RV-DS-13, RV-DS-79). Inputs: the store, the change set, that head and the page.
-/// Output: the page, or `changes_stale` once the set moved to another head.
+/// Reads one page of a change set's diff, produced by the engine with no external diff or
+/// text conversion, only while the set is still at the head the owner is reading, so every
+/// page shown is of the head Accept and Discard name (RV-DS-13, RV-DS-79): for an open
+/// set, first noticed against the owner's branch, only what is not yet on that branch when
+/// the owner landed part of it outside the app, else the whole change between its base and
+/// head. Inputs: the store, the change set, that head and the page. Output: the page, or
+/// `changes_stale` once the set moved to another head.
 pub fn diff(
     db: &Connection,
     id: &ChangeSetId,
@@ -536,7 +543,17 @@ pub fn diff(
         if record.head != head {
             return Err(EngineError("changes_stale".into()));
         }
-        diff::page(&record.repository, &record.base, &record.head, page)
+        let remainder = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
+            eprintln!(
+                "landing_observe_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        });
+        match remainder {
+            Some((tip, tree)) => diff::page(&record.repository, &tip, &tree, page),
+            None => diff::page(&record.repository, &record.base, &record.head, page),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -648,6 +665,23 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = db;
+        Err(unavailable())
+    }
+}
+
+/// Notices what the owner did outside the app to each open change set, one project's or
+/// every project's: closes one whose work the owner's checked-out branch already holds as
+/// landed outside the app, closes one whose agent copy, branch or commit is gone as
+/// removed outside the app, and counts only what is not yet on the owner's branch for the
+/// rest. A change set that cannot be judged now is logged by its plain code and left as it
+/// was, so it never stops the others. Inputs: the store and the project, None for every
+/// project. Output: Ok once each open change set was judged or left.
+pub fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return owner::observe(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
         Err(unavailable())
     }
 }

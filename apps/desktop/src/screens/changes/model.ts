@@ -49,8 +49,11 @@ export function sizeLine(set: ChangeSet): string {
   return `${plural(set.files, "file", "files")}, ${plural(set.added, "line", "lines")} added, ${set.removed} removed`;
 }
 
-/** The status word and tone of a change set's state. Input: the change set. */
+/** The status word and tone of a change set's state, saying when the engine closed it
+ * because its work was landed or removed outside the app. Input: the change set. */
 export function stateBadge(set: ChangeSet): { word: string; tone: Tone } {
+  if (set.outside && set.state === "accepted") return { word: "Landed outside the app", tone: "ok" };
+  if (set.outside && set.state === "discarded") return { word: "Removed outside the app", tone: "neutral" };
   return set.state === "updating" && set.waiting ? { word: "Updated, waiting for the agent", tone: "warn" } : STATES[set.state];
 }
 
@@ -124,9 +127,12 @@ function restorable(set: ChangeSet, now: number): boolean {
   return set.restorable_until_ms !== null && set.restorable_until_ms > now;
 }
 
-/** Says until when discarded changes can be restored. Inputs: the change set and now in
- * milliseconds. Output: the note, or null for a change set that is not discarded. */
+/** Says until when discarded changes can be restored, or that work landed or removed
+ * outside the app needs nothing more. Inputs: the change set and now in milliseconds.
+ * Output: the note, or null for a change set that is neither discarded nor closed outside. */
 export function restoreNote(set: ChangeSet, now: number): string | null {
+  if (set.outside && set.state === "accepted") return "Your branch already has these changes. They were landed outside the app.";
+  if (set.outside && set.state === "discarded") return "The agent's copy of these changes was removed outside the app, so they cannot be restored.";
   if (set.state !== "discarded") return null;
   if (!restorable(set, now)) return "These changes can no longer be restored.";
   const until = new Date(set.restorable_until_ms ?? now).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });

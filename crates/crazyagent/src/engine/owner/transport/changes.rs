@@ -14,12 +14,15 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// refusals, this protocol's own, the owner connection's it travels on, and the team's
 /// refusals of the resolve work an Update hands a team agent.
 pub const CHANGES_CODES: &[&str] = &[
+    "changes_agent_branch_invalid",
     "changes_agent_busy",
     "changes_agent_has_pending",
     "changes_bare_repository",
     "changes_branch_moved",
+    "changes_branch_not_above_base",
     "changes_conflict",
     "changes_detached_head",
+    "changes_embedded_repository",
     "changes_git_busy",
     "changes_git_failed",
     "changes_git_unsupported",
@@ -445,6 +448,9 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
     let db = landing::open(root)?;
     Ok(match action {
         Action::List { project } => {
+            if let Err(error) = landing::observe(&db, Some(&project)) {
+                eprintln!("landing_observe_failed cause={}", error.0);
+            }
             let mut change_sets = landing::list(&db, &project)?;
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
@@ -487,9 +493,10 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
-/// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
-/// deletes discarded refs past their restore window, each step run on its own so a failing
-/// one never skips the other. Input: the authority, held weakly so a server dropped
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
+/// open change sets the owner landed or removed outside the app and deletes discarded refs
+/// past their restore window, each step run on its own so a failing one never skips the
+/// others. Input: the authority, held weakly so a server dropped
 /// without its stop path still releases it. Runs until the server aborts it or the
 /// authority is gone.
 pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
@@ -501,6 +508,7 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
             Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
                 Ok(db) => [
                     landing::reconcile(&db).err(),
+                    landing::observe(&db, None).err(),
                     now_ms().and_then(|now| landing::prune(&db, now)).err(),
                 ]
                 .into_iter()
@@ -813,10 +821,12 @@ mod tests {
     fn changes_codes_cover_every_refusal_of_the_landing_engine_and_protocol() {
         let engine: std::collections::BTreeSet<&str> = [
             include_str!("../../../landing.rs"),
+            include_str!("../../../landing/clone.rs"),
             include_str!("../../../landing/diff.rs"),
             include_str!("../../../landing/flow.rs"),
             include_str!("../../../landing/git.rs"),
             include_str!("../../../landing/owner.rs"),
+            include_str!("../../../landing/retire.rs"),
             include_str!("../../../landing/store.rs"),
         ]
         .into_iter()

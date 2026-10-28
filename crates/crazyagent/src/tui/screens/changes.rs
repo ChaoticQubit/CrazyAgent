@@ -976,6 +976,15 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
                 .to_owned(),
             look.fg,
         )),
+        ChangeState::Accepted if set.outside => notes.push((
+            "Your branch already has these changes. They were landed outside the app.".to_owned(),
+            look.fg,
+        )),
+        ChangeState::Discarded if set.outside => notes.push((
+            "The agent's copy of these changes was removed outside the app, so they cannot be restored."
+                .to_owned(),
+            look.fg,
+        )),
         ChangeState::Discarded => notes.push((restore_note(set, now_ms), look.fg)),
         _ => {}
     }
@@ -1016,7 +1025,9 @@ fn state_word(set: &ChangeSetView) -> &'static str {
         ChangeState::Conflict => "Conflicts with your branch",
         ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
         ChangeState::Updating => "Agent is updating",
+        ChangeState::Accepted if set.outside => "Landed outside the app",
         ChangeState::Accepted => "Accepted",
+        ChangeState::Discarded if set.outside => "Removed outside the app",
         ChangeState::Discarded => "Discarded",
     }
 }
@@ -1209,6 +1220,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_branch_moved" => {
             "Your branch moved while these changes were landing, so nothing changed. Review and accept again."
         }
+        "changes_branch_not_above_base" => {
+            "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard."
+        }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }
@@ -1225,6 +1239,12 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_owner_identity_missing" => {
             "Git doesn't know your name and email yet. Set user.name and user.email, then accept again."
+        }
+        "changes_embedded_repository" => {
+            "These changes add a folder Git would treat as a repository of its own inside the project, such as a submodule. Ask the agent to remove it."
+        }
+        "changes_agent_branch_invalid" => {
+            "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard."
         }
         "changes_master_tools_off" => {
             "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard."

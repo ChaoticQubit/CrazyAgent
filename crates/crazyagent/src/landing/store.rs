@@ -32,7 +32,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     landed TEXT,
     intent TEXT,
     message TEXT NOT NULL DEFAULT '',
-    waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1))
+    waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1)),
+    outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -45,12 +46,16 @@ CREATE TABLE IF NOT EXISTS landing_bases (
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
-    restorable_until_ms,pruned,landed,intent,message,waiting";
-const ADDED_COLUMNS: [(&str, &str); 2] = [
+    restorable_until_ms,pruned,landed,intent,message,waiting,outside";
+const ADDED_COLUMNS: [(&str, &str); 3] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
         "waiting INTEGER NOT NULL DEFAULT 0 CHECK(waiting IN (0,1))",
+    ),
+    (
+        "outside",
+        "outside INTEGER NOT NULL DEFAULT 0 CHECK(outside IN (0,1))",
     ),
 ];
 
@@ -97,6 +102,7 @@ pub(super) struct Record {
     pub(super) intent: Option<Intent>,
     pub(super) message: String,
     pub(super) waiting: bool,
+    pub(super) outside: bool,
 }
 
 impl Record {
@@ -118,6 +124,7 @@ impl Record {
             conflicts: self.conflicts.clone(),
             message: self.message(),
             waiting: self.waiting && self.state == ChangeState::Updating,
+            outside: self.outside,
         }
     }
 
@@ -276,6 +283,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         intent,
         message: text(24)?,
         waiting: row.get::<_, bool>(25)?,
+        outside: row.get::<_, bool>(26)?,
     })
 }
 
@@ -307,7 +315,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -337,6 +345,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
             intent,
             record.message,
             record.waiting,
+            record.outside,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
@@ -462,6 +471,20 @@ pub(super) fn waiting(
 /// Input: the store. Output: the records, oldest first.
 pub(super) fn in_flight(db: &Connection) -> Result<Vec<Record>, EngineError> {
     collect(db, "intent IS NOT NULL", rusqlite::params![])
+}
+
+/// Reads the open change sets, pending, conflicting or updating, of one project or of
+/// every project. Inputs: the store and the project, None for every project. Output: the
+/// records, oldest first.
+pub(super) fn open_of(
+    db: &Connection,
+    project: Option<&ProjectId>,
+) -> Result<Vec<Record>, EngineError> {
+    let open = "state IN ('pending','conflict','updating')";
+    match project {
+        Some(project) => collect(db, &format!("{open} AND project=?1"), [project.as_str()]),
+        None => collect(db, open, rusqlite::params![]),
+    }
 }
 
 /// Reads the discarded change sets whose restore window ended by `now` and whose ref

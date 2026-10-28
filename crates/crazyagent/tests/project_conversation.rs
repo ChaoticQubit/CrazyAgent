@@ -1006,8 +1006,17 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
     );
     assert!(after.contains_key("conversation_entries"));
     for (name, sql) in &before {
+        if name == "file_trash" {
+            continue;
+        }
         assert_eq!(after.get(name), Some(sql));
     }
+    assert!(
+        after
+            .get("file_trash")
+            .is_some_and(|sql| sql.contains("skill_folder")),
+        "the upgrade rebuilds file_trash with the widened kind check (PP-2, 5dfa38f1)"
+    );
     let db = rusqlite::Connection::open_with_flags(
         root.path().join("db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,

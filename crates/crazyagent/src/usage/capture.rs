@@ -574,7 +574,8 @@ fn session_name(path: &Path) -> String {
 }
 
 /// Reads what one record gained since its stored progress, at most `READ_BYTES_MAX`.
-/// A replaced or shortened record starts over. A line longer than the read is skipped.
+/// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
+/// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the growth and the last limits.
 fn read_record(
     path: &Path,
@@ -590,15 +591,21 @@ fn read_record(
 
 /// Reads what an open record gained since its stored progress, up to the length it had
 /// when it was opened and at most `READ_BYTES_MAX`, so lines a harness appends meanwhile
-/// wait for the next scan. Inputs: the open record with its identity and length, its
-/// progress and the time. Output: the growth and the last limits.
+/// wait for the next scan. The record is the one the progress pinned while its inode is
+/// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
+/// device, so a reboot never counts a whole record again. Inputs: the open record with its
+/// identity and length, its progress and the time. Output: the growth and the last limits.
 fn read_opened(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
 ) -> (Tokens, Option<Observation>) {
-    if progress.identity != identity || length < progress.offset {
+    if crate::file_identity::same_files(&[progress.identity], &[identity])
+        && length >= progress.offset
+    {
+        progress.identity = identity;
+    } else {
         *progress = Progress {
             identity,
             ..Progress::default()

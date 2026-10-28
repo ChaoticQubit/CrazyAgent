@@ -81,6 +81,29 @@ struct RootIdentity {
     manifest: Identity,
 }
 
+impl RootIdentity {
+    /// Tells whether a root manifest read from disk still describes the live root: the
+    /// same version and database instance, and the same files (see `same_files`).
+    /// Inputs: the pinned manifest and the live identity. Output: true when they match.
+    fn matches(&self, live: &RootIdentity) -> bool {
+        self.version == live.version
+            && self.database_instance == live.database_instance
+            && same_files(&self.files(), &live.files())
+    }
+
+    fn files(&self) -> [Identity; 4] {
+        [self.state, self.database, self.directory, self.manifest]
+    }
+}
+
+/// Applies the crate-wide whole-volume renumber rule (`file_identity::same_files`) to
+/// custody identities. Inputs: pinned and live identities, in the same order. Output: true
+/// when they name the same files.
+fn same_files<const N: usize>(pinned: &[Identity; N], live: &[Identity; N]) -> bool {
+    let pair = |identity: Identity| (identity.device, identity.inode);
+    crate::file_identity::same_files(&pinned.map(pair), &live.map(pair))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileIdentity {
@@ -90,6 +113,41 @@ struct ProfileIdentity {
     directory: Identity,
     home: Identity,
     manifest: Identity,
+}
+
+impl ProfileIdentity {
+    /// Tells whether a profile manifest read from disk still describes the live profile:
+    /// the same version, binding and root record, and the same files, its copy of the root's
+    /// included, checked as one set, so every pin in the manifest must have moved together.
+    /// Inputs: the pinned manifest and the live identity. Output: true when they match.
+    fn matches(&self, live: &ProfileIdentity) -> bool {
+        let [state, database, root, root_manifest] = self.root.files();
+        let [live_state, live_database, live_root, live_root_manifest] = live.root.files();
+        self.version == live.version
+            && self.binding == live.binding
+            && self.root.version == live.root.version
+            && self.root.database_instance == live.root.database_instance
+            && same_files(
+                &[
+                    state,
+                    database,
+                    root,
+                    root_manifest,
+                    self.directory,
+                    self.home,
+                    self.manifest,
+                ],
+                &[
+                    live_state,
+                    live_database,
+                    live_root,
+                    live_root_manifest,
+                    live.directory,
+                    live.home,
+                    live.manifest,
+                ],
+            )
+    }
 }
 
 struct Directory {
@@ -540,7 +598,7 @@ impl NativeProfileCustody {
         };
         let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("native_profile_identity_invalid"))?;
-        if actual != expected {
+        if !actual.matches(&expected) {
             return Err(failure("native_profile_binding_conflict"));
         }
         if self
@@ -727,7 +785,7 @@ impl NativeProfileCustody {
         };
         let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("native_profile_identity_invalid"))?;
-        if actual != expected {
+        if !actual.matches(&expected) {
             return Err(failure("native_profile_binding_conflict"));
         }
         manifest.verify(&directory.file)?;
@@ -883,7 +941,7 @@ fn prepare_profile(
     };
     let actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
         .map_err(|_| failure("native_profile_identity_invalid"))?;
-    if actual != expected {
+    if !actual.matches(&expected) {
         return Err(failure("native_profile_binding_conflict"));
     }
     require_profile_entries(&profile.file)?;

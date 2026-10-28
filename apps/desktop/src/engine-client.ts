@@ -1,4 +1,5 @@
 import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
@@ -686,6 +687,14 @@ export function projectReadPaths(id: string): Promise<string[]> {
 
 export function setProjectReadPaths(id: string, paths: string[], generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
+export function projectAgentPolicy(id: string): Promise<PolicyView> {
+  return invoke<PolicyView>("desktop_project_agent_policy", { id });
+}
+
+export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
 }
 
 export type TeamRole = "master" | "sub";

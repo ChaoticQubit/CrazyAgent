@@ -313,6 +313,32 @@ pub(crate) fn pane_ended(
     Ok(())
 }
 
+/// Tells whether a project's live master is answering a turn now, so a session switch asks
+/// the owner before it stops that reply. Takes the engine database and the project. Returns
+/// false when no live master pane runs or the live master table does not exist yet.
+pub(crate) fn turn_running(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<bool, EngineError> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_live_masters')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if !exists {
+        return Ok(false);
+    }
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_live_masters WHERE project=?1 AND live=1 AND agent IS NOT NULL AND turn_open=1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(state)
+}
+
 /// Records that a live master's turn started, whoever typed it, which also ends any
 /// pending engine input and the owner's draft. Takes the engine database and the agent.
 /// Returns any SQLite failure.

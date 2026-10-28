@@ -24,6 +24,9 @@ pub const SUMMARY_BYTES_MAX: usize = 8192;
 pub const STATE_ROWS_MAX: usize = 12;
 /// The most bytes of earlier turns a master harness switch hands to the new harness.
 pub const HANDOFF_BYTES_MAX: usize = 8192;
+/// The most bytes of the seed a fresh master conversation starts with: two summaries and
+/// the session state, which also holds a switch handoff with its open tasks.
+pub const SEED_BYTES_MAX: usize = 2 * SUMMARY_BYTES_MAX + STATE_BYTES_MAX + 4;
 /// The line a switch handoff ends its turns with when older turns did not fit.
 pub const HANDOFF_OMITTED: &str = "(Older turns were left out to fit.)";
 /// The most bytes one turn takes in a switch handoff, so the newest turn always fits.
@@ -702,7 +705,7 @@ pub fn fresh_harness(
         ));
     }
     let seed = parts.join("\n\n");
-    assert!(seed.len() <= 2 * SUMMARY_BYTES_MAX + STATE_BYTES_MAX + 4);
+    assert!(seed.len() <= SEED_BYTES_MAX);
     Ok(ResumePlan::Fresh {
         seed,
         note: note.into(),

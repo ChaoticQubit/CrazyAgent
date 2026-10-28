@@ -1136,6 +1136,18 @@ impl Screen for ProjectPage {
         ctx.request(Request::PoolProjects);
         self.schedule_asked = false;
         self.covered = false;
+        if let Some((_, code)) = ctx
+            .sessions_key
+            .take_if(|(project, _)| *project == self.screen.project)
+        {
+            assert!(matches!(code, 'n' | 'l'));
+            self.screen.open(Tab::Conversation);
+            self.screen.typing = false;
+            let reply = self
+                .screen
+                .key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE));
+            let _ = self.reply(reply, ctx);
+        }
         self.ask_team(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);

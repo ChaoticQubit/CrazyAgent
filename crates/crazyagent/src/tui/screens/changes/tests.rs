@@ -34,6 +34,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         conflicts: Vec::new(),
         message: "Add a file".into(),
         waiting: false,
+        outside: false,
     }
 }
 
@@ -271,6 +272,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_conflict",
         "changes_stale",
         "changes_branch_moved",
+        "changes_branch_not_above_base",
         "changes_git_unsupported",
         "changes_restore_expired",
         "changes_agent_has_pending",
@@ -278,6 +280,8 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_not_found",
         "changes_owner_identity_missing",
         "changes_message_invalid",
+        "changes_embedded_repository",
+        "changes_agent_branch_invalid",
         "changes_unavailable",
     ] {
         assert!(
