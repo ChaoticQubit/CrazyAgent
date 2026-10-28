@@ -1614,7 +1614,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
         launch_end(LaunchError("launch_deadline".into())),
-        (TurnEnd::TimedOut, None)
+        (TurnEnd::TimedOut, Some("launch_deadline".to_owned()))
     );
     assert_eq!(
         launch_end(LaunchError("launch_event_limit".into())),
