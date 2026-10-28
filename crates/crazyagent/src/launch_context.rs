@@ -926,8 +926,8 @@ pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
     let lock = lock(home)?;
     Ok(Installed {
         arguments: Vec::new(),
-        removals: Vec::new(),
-        copies: None,
+        files: None,
+        transcripts: false,
         _lock: lock,
     })
 }

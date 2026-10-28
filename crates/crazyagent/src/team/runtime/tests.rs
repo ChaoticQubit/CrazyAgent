@@ -6474,6 +6474,8 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         ),
         1
     );
+    team.shutdown().unwrap();
+}
 
 /// A task never waits a tick behind an idle sub-agent past its session: dispatch ends that
 /// agent and gives the task to another idle sub-agent of the harness in the same tick
