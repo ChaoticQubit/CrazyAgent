@@ -1497,10 +1497,7 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
         revision: 1,
     };
     let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
-    for text in [
-        framing(&setup, true, &["codex", "claude-code"], &[]),
-        live_framing(&setup, true, &["codex", "claude-code"], &[]),
-    ] {
+    for text in [framing(&setup, true, &["codex", "claude-code"], &[])] {
         assert!(text.contains(listed), "{text}");
     }
 }
@@ -4051,19 +4048,6 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
             ))
             .collect::<Vec<_>>()
     );
-
-    let listed = format!(
-        "Finished sub-agents you can wake with wake(agent, text), newest first, as this session starts:\n{}\n",
-        lines.join("\n")
-    );
-    let framed = live_framing(&fixture.setup, true, &[], &lines);
-    assert!(framed.contains(&listed), "{framed}");
-    assert!(
-        framed.contains("wake(agent, text) wakes a finished sub-agent"),
-        "{framed}"
-    );
-    assert!(!live_framing(&fixture.setup, true, &[], &[]).contains("Finished sub-agents"));
-    assert!(!live_framing(&fixture.setup, false, &[], &lines).contains("Finished sub-agents"));
 }
 
 #[cfg(target_os = "macos")]
@@ -4953,7 +4937,7 @@ fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
     for team_tool in [true, false] {
         for text in [
             framing(&setup, team_tool, &[], &[]),
-            live_framing(&setup, team_tool, &[], &[]),
+            live_instructions(&setup, team_tool),
         ] {
             assert!(
                 text.contains(crate::launch_context::MASTER_LANDING_RULES),

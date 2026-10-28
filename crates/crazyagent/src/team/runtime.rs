@@ -112,9 +112,12 @@ impl TeamLimits {
     }
 }
 
-/// What a worker thread is told to do next: run one turn, with its prompt, the signed-in
-/// account it needs and the owner's task time limit for it (none for no limit), or stop.
+/// What a worker thread is told to do next: start a live master with the instructions its
+/// harness reads at launch and the signed-in account it needs, run one turn, with its
+/// prompt, the signed-in account it needs and the owner's task time limit for it (none for
+/// no limit), or stop.
 enum Order {
+    Start(String, Option<Box<Grant>>),
     Turn(String, Option<Box<Grant>>, Option<Duration>),
     Stop,
 }
@@ -2063,9 +2066,12 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Hands a live master that waits for its start the briefing, with the signed-in
-    /// account's profile on a managed account. Takes the setup, live access and the agent.
-    /// Returns once sent; a profile still in use waits for the next tick.
+    /// Starts a live master that waits for its start: hands it the instructions its harness
+    /// reads at launch as system context, never as a typed message, with the seed of a fresh
+    /// conversation for a session with earlier turns, and the signed-in account's profile on
+    /// a managed account. The master then waits for the owner's first line. Takes the setup,
+    /// live access and the agent. Returns once sent; a profile still in use waits for the
+    /// next tick.
     fn brief(
         &mut self,
         stored: &StoredSetup,
@@ -2093,25 +2099,17 @@ impl TeamRuntime {
         } else {
             None
         };
-        let finished: Vec<String> =
-            super::events::finished_agents(&self.connection, &stored.project_id, now_ms())?
-                .into_iter()
-                .map(|(_, line)| line)
-                .collect();
-        let mut framing = live_framing(
-            stored,
-            self.workers[&id].team_tool,
-            &super::available_harnesses(access, &stored.project_id),
-            &finished,
-        );
+        let mut instructions = live_instructions(stored, self.workers[&id].team_tool);
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if let Some(seed) = worker.seed.take() {
-            framing.push_str("\n\n");
-            framing.push_str(&seed);
+            assert!(seed.len() <= crate::master_sessions::SEED_BYTES_MAX);
+            instructions.push_str("\n\n");
+            instructions.push_str(&seed);
         }
+        assert!(instructions.len() <= crate::launch_context::LIVE_INSTRUCTIONS_BYTES_MAX);
         if worker
             .orders
-            .send(Order::Turn(framing, grant, None))
+            .send(Order::Start(instructions, grant))
             .is_ok()
         {
             worker.briefed = true;
@@ -4332,30 +4330,16 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
         .join("\n")
 }
 
-/// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive, when to ask the owner and how the team's work lands. Takes the
-/// setup, whether it has the engine's team tools, for an empty plan the harnesses with an
-/// eligible account now, and the finished sub-agents it can wake, listed only with the team
-/// tools. Returns the text.
-fn live_framing(
-    stored: &StoredSetup,
-    team_tool: bool,
-    available: &[&str],
-    finished: &[String],
-) -> String {
-    let team = sub_agent_lines(stored, available);
+/// The instructions a live master's harness reads at launch as system context, never as a
+/// typed message: who it is, how team events arrive, its team tools or the DELEGATE line,
+/// when to ask the owner and how the team's work lands. The team is not listed; with its
+/// tools the master reads it through the status tool when it needs it. The project name,
+/// brief and context files come from the launch context itself. Takes the setup and whether
+/// it has the engine's team tools. Returns at most `LIVE_RULES_BYTES_MAX` bytes.
+fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
-        let woken = if finished.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "Finished sub-agents you can wake with {}(agent, text), newest first, as this session starts:\n{}\n",
-                tool::WAKE_TOOL,
-                finished.join("\n")
-            )
-        };
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one.\n{woken}",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one. The team is not listed here: call {}() whenever you need to know who is on it, what each sub-agent is doing and which finished sub-agents you can wake.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
@@ -4363,18 +4347,19 @@ fn live_framing(
             tool::WAKE_TOOL,
             tool::STATUS_TOOL,
             tool::CHANGES_TOOL,
-            tool::ESCALATE_TOOL
+            tool::ESCALATE_TOOL,
+            tool::STATUS_TOOL
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
-    format!(
-        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}\nProject brief:\n{}\n",
-        stored.name,
-        team,
-        crate::launch_context::MASTER_LANDING_RULES,
-        master_brief(stored)
-    )
+    let text = format!(
+        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}",
+        bound_text(&stored.name, crate::launch_context::NAME_BYTES_MAX),
+        crate::launch_context::MASTER_LANDING_RULES
+    );
+    assert!(text.len() <= crate::launch_context::LIVE_RULES_BYTES_MAX);
+    text
 }
 
 /// Reads the project brief for the master the way setup reads context: one
@@ -4493,7 +4478,7 @@ fn work(
     };
     let problem = match started {
         Ok(AgentSession::Terminal(session)) if adopted_live => {
-            live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
+            live_serve(*session, &orders, &reports, &cancel, &leave, true)
         }
         Ok(session) => serve(session, &orders, &reports, &cancel, &interrupt, &leave),
         Err(problem) => Some(problem),
@@ -4501,10 +4486,11 @@ fn work(
     let _ = reports.send(Report::Ended { problem });
 }
 
-/// Runs a live master: waits for its briefing order, starts its own app in its pane (on
-/// a signed-in account the credential copy and profile use are held for the whole
-/// session), types the briefing, then follows every turn. Takes the plan, the account
-/// mode and the worker's channels and flags. Returns the problem that ended it, if any.
+/// Runs a live master: waits for its start order, starts its own app in its pane with the
+/// master's instructions in what its harness reads at launch (on a signed-in account the
+/// credential copy and profile use are held for the whole session), types nothing, then
+/// follows every turn, the owner's first line first. Takes the plan, the account mode and
+/// the worker's channels and flags. Returns the problem that ended it, if any.
 fn live(
     plan: &Plan,
     mode: Mode,
@@ -4513,7 +4499,7 @@ fn live(
     cancel: &AtomicBool,
     leave: &AtomicBool,
 ) -> Option<String> {
-    let Next::Turn(framing, grant, _) = next_turn(orders, cancel, None) else {
+    let Next::Start(instructions, grant) = next_turn(orders, cancel, None) else {
         return None;
     };
     let resume = plan.resume.as_ref();
@@ -4524,7 +4510,12 @@ fn live(
                 Err(problem) => return Some(problem),
             };
             (
-                AgentSession::start_resuming(request, context, plan.pane.clone(), resume),
+                AgentSession::start_resuming(
+                    request,
+                    context.with_live_instructions(&instructions),
+                    plan.pane.clone(),
+                    resume,
+                ),
                 None,
                 true,
             )
@@ -4554,22 +4545,21 @@ fn live(
                     }
                 };
             (
-                AgentSession::start_resuming(request, context, plan.pane.clone(), resume),
+                AgentSession::start_resuming(
+                    request,
+                    context.with_live_instructions(&instructions),
+                    plan.pane.clone(),
+                    resume,
+                ),
                 Some((credential, profile)),
                 true,
             )
         }
     };
     let problem = match started {
-        Ok(AgentSession::Terminal(session)) => live_serve(
-            *session,
-            resume.is_none().then_some(framing.as_str()),
-            orders,
-            reports,
-            cancel,
-            leave,
-            keep,
-        ),
+        Ok(AgentSession::Terminal(session)) => {
+            live_serve(*session, orders, reports, cancel, leave, keep)
+        }
         Ok(other) => {
             let _ = other.stop();
             Some(with_code(
@@ -4589,9 +4579,9 @@ fn live(
 }
 
 /// Takes over the pane of a live master on a signed-in account that an earlier engine left
-/// running: waits for the runtime's first order, which carries a fresh custody use of the
+/// running: waits for the runtime's start order, which carries a fresh custody use of the
 /// account, hands the credential to the master's home again, then follows every turn
-/// without typing the briefing again. The credential copy and the custody use are held
+/// without typing anything. The credential copy and the custody use are held
 /// until the pane is stopped or left, and removed then. Takes the adoption and the worker's
 /// channels and flags. Returns the problem that ended it, if any.
 fn live_adopted(
@@ -4611,8 +4601,8 @@ fn live_adopted(
     } = adoption;
     let managed = managed.expect("a managed adoption names its home");
     let grant = match next_turn(orders, cancel, None) {
-        Next::Turn(_, Some(grant), _) => grant,
-        Next::Turn(_, None, _) => {
+        Next::Start(_, Some(grant)) => grant,
+        Next::Start(_, None) | Next::Turn(..) => {
             let _ = host.kill(&agent);
             record.remove_context_files();
             return Some("The live master was taken over without its signed-in account".into());
@@ -4643,7 +4633,7 @@ fn live_adopted(
     };
     let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, None, orders, reports, cancel, leave, true)
+            live_serve(*session, orders, reports, cancel, leave, true)
         }
         Ok(other) => {
             let _ = other.stop();
@@ -4668,12 +4658,11 @@ fn live_adopted(
 /// Follows every turn of a live master's pane, the owner's included, and reports each
 /// start and end with the turn's reply text, bounded, for landing, usage and reply-line
 /// delegation. A turn the provider refused for a rate limit ends the session so the
-/// engine moves the master to another pool account. Takes the session, the briefing to
-/// type first, the worker's channels and flags, and whether a later engine may take the
-/// pane over. Returns the problem that ended it, if any.
+/// engine moves the master to another pool account. Nothing is typed into the pane at
+/// start. Takes the session, the worker's channels and flags, and whether a later engine
+/// may take the pane over. Returns the problem that ended it, if any.
 fn live_serve(
     mut session: TerminalSession,
-    framing: Option<&str>,
     orders: &Receiver<Order>,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
@@ -4685,13 +4674,6 @@ fn live_serve(
         group: session.process_group(),
         pane: session.record().filter(|_| keep).cloned(),
     });
-    if let Some(framing) = framing
-        && let Err(problem) = session.send_or_cancel(framing, cancel)
-    {
-        session.stop();
-        return (problem.0 != "launch_cancelled")
-            .then(|| with_code("The master could not be briefed", Some(&problem.0)));
-    }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
     let mut problem = None;
@@ -4702,7 +4684,7 @@ fn live_serve(
         }
         match orders.try_recv() {
             Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-            Ok(Order::Turn(..)) | Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Ok(Order::Start(..) | Order::Turn(..)) | Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
         match session.next_fact(EVENT_WAIT) {
             Ok(Some(TranscriptEvent::TurnStarted)) => {
@@ -4752,6 +4734,7 @@ fn live_serve(
 }
 
 enum Next {
+    Start(String, Option<Box<Grant>>),
     Turn(String, Option<Box<Grant>>, Option<Duration>),
     Stop,
     Closed(Option<String>),
@@ -4769,6 +4752,7 @@ fn next_turn(
             return Next::Stop;
         }
         match orders.recv_timeout(ORDER_WAIT) {
+            Ok(Order::Start(instructions, grant)) => return Next::Start(instructions, grant),
             Ok(Order::Turn(prompt, grant, limit)) => return Next::Turn(prompt, grant, limit),
             Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
             Err(RecvTimeoutError::Timeout) => {
@@ -4805,6 +4789,7 @@ fn serve(
     loop {
         let (prompt, grant, limit) = match next_turn(orders, cancel, Some(&mut session)) {
             Next::Turn(prompt, grant, limit) => (prompt, grant, limit),
+            Next::Start(..) => unreachable!("only a live master is started with its instructions"),
             Next::Stop => break,
             Next::Closed(cause) => {
                 problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
