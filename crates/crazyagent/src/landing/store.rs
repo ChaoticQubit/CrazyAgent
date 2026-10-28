@@ -435,6 +435,29 @@ pub(super) fn of_project(
         .map_err(storage)
 }
 
+/// Counts the change sets ready to review or conflicting, in projects the engine still has,
+/// and among them the given project's, in one read. Inputs: the store and the project, if
+/// any. Output: both counts; `here` is None without a project.
+pub(super) fn waiting(
+    db: &Connection,
+    project: Option<&ProjectId>,
+) -> Result<super::WaitingChanges, EngineError> {
+    let (all, here): (i64, i64) = db
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(project = ?1), 0) FROM landing_change_sets \
+             WHERE state IN ('pending','conflict') AND project IN (SELECT id FROM projects)",
+            [project.map(ProjectId::as_str)],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(storage)?;
+    let all = u32::try_from(all).map_err(storage)?;
+    let here = u32::try_from(here).map_err(storage)?;
+    Ok(super::WaitingChanges {
+        all,
+        here: project.map(|_| here),
+    })
+}
+
 /// Reads every change set with owner-checkout or worktree work in flight.
 /// Input: the store. Output: the records, oldest first.
 pub(super) fn in_flight(db: &Connection) -> Result<Vec<Record>, EngineError> {

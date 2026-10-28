@@ -1,4 +1,5 @@
 use super::client::app_setup::AppSetupEvent;
+use super::client::changes::{ChangesQuery, ChangesView};
 use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
@@ -12,9 +13,9 @@ use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{Arrival, ProjectCard};
+use super::seam::{Arrival, ProjectCard, Request};
 use super::text::{cells, join, list_row, pad, styled};
-use super::theme::Role;
+use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use ratatui::Frame;
@@ -262,6 +263,19 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .shown(ctx);
+    }
+
+    /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
+    /// many change sets wait for the owner, in all and in the top screen's project, then
+    /// refreshes the top screen.
+    /// Input: none. Output: none; requests are queued on the context.
+    pub fn tick(&mut self) {
+        let project = self.top().project();
+        self.ctx
+            .request(Request::Changes(Box::new(ChangesQuery::Waiting {
+                project,
+            })));
+        self.refresh();
     }
 
     fn running(&self) -> usize {
@@ -549,6 +563,15 @@ impl Shell {
                         ),
                     });
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Changes(event) = event.as_ref()
+                    && let ChangesQuery::Waiting { project } = &event.query
+                {
+                    self.ctx.store.waiting = match &event.result {
+                        Ok(ChangesView::Waiting(count)) => Some((project.clone(), *count)),
+                        _ => None,
+                    };
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}
@@ -755,7 +778,9 @@ impl Shell {
         let theme = self.ctx.theme.clone();
         let glyphs = self.ctx.glyphs;
         let top = self.stack.last().expect("the stack is never empty");
-        let header_line = header(width, &top.crumbs(), top.status(&self.ctx), &theme, glyphs);
+        let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
+        let status = with_waiting(waiting, top.status(&self.ctx), &theme);
+        let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
             frame.buffer_mut(),
@@ -814,6 +839,54 @@ impl Shell {
         {
             frame.set_cursor_position(cursor);
         }
+    }
+}
+
+/// The header status with the count of change sets that wait for the owner in front of it.
+/// Inputs: the count sentence, the top screen's own status and the theme.
+/// Output: the status line; no sentence leaves the screen's status as it is.
+fn with_waiting(waiting: Option<String>, status: Line<'static>, theme: &Theme) -> Line<'static> {
+    let Some(text) = waiting else {
+        return status;
+    };
+    let note = Line::from(Span::styled(text, theme.warning));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
+}
+
+/// The header's count of change sets that wait for the owner. On a project's screens, once
+/// the count was read for that project, it says how many wait in its Changes and how many
+/// in other projects; elsewhere it counts every project. Inputs: the last count with the
+/// project it was read for, and the top screen's project. Output: the sentence, or None
+/// when nothing waits.
+fn waiting_text(
+    waiting: Option<&(
+        Option<crate::protocol::ProjectId>,
+        crate::landing::WaitingChanges,
+    )>,
+    top: Option<&crate::protocol::ProjectId>,
+) -> Option<String> {
+    let (asked, count) = waiting?;
+    let Some(here) = count.here.filter(|_| asked.as_ref() == top) else {
+        return waiting_sets(count.all, "in your projects");
+    };
+    let others = count.all.checked_sub(here)?;
+    match (waiting_sets(here, "in Changes"), others) {
+        (None, _) => waiting_sets(others, "in other projects"),
+        (Some(text), 0) => Some(text),
+        (Some(text), others) => Some(format!("{text}, {others} in other projects")),
+    }
+}
+
+/// Counts change sets in one sentence. Inputs: the count and where they wait.
+/// Output: "1 change set waits <place>" or "N change sets wait <place>"; None for zero.
+fn waiting_sets(count: u32, place: &str) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some(format!("1 change set waits {place}")),
+        count => Some(format!("{count} change sets wait {place}")),
     }
 }
 

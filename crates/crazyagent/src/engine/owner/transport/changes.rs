@@ -1,6 +1,7 @@
 use super::*;
 use crate::landing::{
     self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX, MESSAGE_BYTES_MAX,
+    WaitingChanges,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,10 @@ enum Action {
     Update {
         id: ChangeSetId,
     },
+    Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +106,7 @@ enum Reply {
     Diff { diff: ChangeDiff },
     Accepted { outcome: AcceptOutcome },
     Discarded { restorable_until_ms: u64 },
+    Waiting { waiting: WaitingChanges },
     Done,
     Rejected { code: String },
 }
@@ -140,6 +146,26 @@ impl OwnerClient {
     pub async fn change_sets(&self, project: ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
         match self.changes_exchange(Action::List { project }).await? {
             Reply::List { change_sets } if change_sets.len() <= LIST_MAX => Ok(change_sets),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Counts the change sets waiting for the owner, ready to review or conflicting, across
+    /// the projects the engine has, and the given project's among them. Input: the project,
+    /// if any. Output: both counts; a reply whose project count is missing, unasked or above
+    /// the total is refused.
+    pub async fn waiting_changes(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<WaitingChanges, EngineError> {
+        let asked = project.is_some();
+        match self.changes_exchange(Action::Waiting { project }).await? {
+            Reply::Waiting { waiting }
+                if waiting.here.is_some() == asked
+                    && waiting.here.is_none_or(|here| here <= waiting.all) =>
+            {
+                Ok(waiting)
+            }
             _ => Err(unknown()),
         }
     }
@@ -344,7 +370,10 @@ async fn prepare(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    if !matches!(action, Action::List { .. } | Action::Diff { .. }) {
+    if !matches!(
+        action,
+        Action::List { .. } | Action::Diff { .. } | Action::Waiting { .. }
+    ) {
         return Ok(Prepared::Change(root, action));
     }
     tokio::task::spawn_blocking(move || {
@@ -423,6 +452,12 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
         Action::Diff { id, head, page } => (
             Reply::Diff {
                 diff: landing::diff(&db, &id, &head, page)?,
+            },
+            false,
+        ),
+        Action::Waiting { project } => (
+            Reply::Waiting {
+                waiting: landing::waiting(&db, project.as_ref())?,
             },
             false,
         ),

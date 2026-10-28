@@ -1072,6 +1072,54 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
 }
 
 #[test]
+fn the_finished_setting_counts_the_running_and_all_agents_the_team_tree_lists() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished agents: Hide."), "{text}");
+    assert!(text.contains("Team tree: Running (1)  All (1)"), "{text}");
+
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { show: true, .. },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Applied,
+        )),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished agents: Show."), "{text}");
+    assert!(text.contains("Team tree: Running (1)  All (3)"), "{text}");
+}
+
+#[test]
 fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
     use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
     let harness = |role: AgentRole, agents_max: u8| TeamHarness {

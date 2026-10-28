@@ -888,6 +888,7 @@ impl Screen for Team {
             None => {
                 hints.push(hint("f", "Finished"));
                 hints.push(hint("c", "Clean up"));
+                hints.push(hint("s", "Team settings"));
                 hints.push(hint("Esc", "Back"));
             }
         }
@@ -953,6 +954,12 @@ impl Screen for Team {
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char('s') if self.instructions.is_none() => {
+                return Flow::Open(Place::TeamSettings {
+                    id: self.project.clone(),
+                    name: self.name.clone(),
+                });
+            }
             Key::Esc if self.instructions.is_some() => self.instructions = None,
             Key::Esc => {
                 self.detach(ctx);

@@ -1293,7 +1293,9 @@ impl TeamView {
             .collect()
     }
 
-    fn help(&self) -> Help {
+    /// Lists the help keys for what the view shows now.
+    /// Takes the view. Returns key and label pairs in priority order.
+    pub fn help(&self) -> Help {
         if self.draft.is_some() {
             return vec![
                 ("Enter", "Hand over"),

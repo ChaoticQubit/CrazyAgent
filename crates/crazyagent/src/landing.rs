@@ -215,6 +215,16 @@ pub struct ChangeDiff {
     pub truncated: bool,
 }
 
+/// The change sets waiting for the owner: `all` counts every project the engine has, and
+/// `here` counts the one project asked about, None when the count was not for a project.
+/// `here` is never more than `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitingChanges {
+    pub all: u32,
+    pub here: Option<u32>,
+}
+
 /// What an Accept did: landed one squash commit on the owner's checked-out branch, or
 /// conflicted on the listed files and changed nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,6 +441,23 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
     #[cfg(not(unix))]
     {
         let _ = (db, id);
+        Err(unavailable())
+    }
+}
+
+/// Counts the change sets waiting for the owner in Changes: ready to review or conflicting
+/// with their branch, in the projects the engine still has. One its agent is updating waits
+/// on the agent instead. Inputs: the store and the project whose own count is wanted, if
+/// any. Output: the count in every project, and that project's count when one was given.
+pub fn waiting(
+    db: &Connection,
+    project: Option<&ProjectId>,
+) -> Result<WaitingChanges, EngineError> {
+    #[cfg(unix)]
+    return store::waiting(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
         Err(unavailable())
     }
 }
