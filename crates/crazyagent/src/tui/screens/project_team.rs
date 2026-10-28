@@ -963,7 +963,7 @@ impl TeamView {
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
-        let mut lines = vec![self.summary(content, look)];
+        let mut lines = self.summary(content, look);
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
@@ -1098,9 +1098,14 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    fn summary(&self, content: usize, look: &Look) -> Row {
+    /// The Team rows: the agent counts and alerts, then every team setting in order (Keep
+    /// warm, Task, Session, Idle stop, On harness switch), each whole. A setting that does
+    /// not fit on the row starts the next one, right-aligned under the first. Counts wider
+    /// than the content are cut with an ellipsis like any row. Inputs: the content width and
+    /// the look. Output: one row, or more when the settings wrap.
+    fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
         let Some(status) = &self.status else {
-            return Row::of("Team", look.accent).pad(content);
+            return vec![Row::of("Team", look.accent).pad(content)];
         };
         let count = |wanted: &[AgentStatus]| {
             status
@@ -1145,17 +1150,43 @@ impl TeamView {
                 .push("  ", Style::new())
                 .push("older history hidden", look.muted);
         }
-        let right = Row::of("Keep warm  ", look.muted)
-            .push(if status.keep_warm { "On" } else { "Off" }, look.fg)
-            .push("  Task  ", look.muted)
-            .push(limit_label(status.turn_limit_secs), look.fg)
-            .push("  Session  ", look.muted)
-            .push(limit_label(status.session_limit_secs), look.fg)
-            .push("  Idle stop  ", look.muted)
-            .push(limit_label(status.idle_stop_secs), look.fg)
-            .push("  On harness switch  ", look.muted)
-            .push(switch_words(status.on_harness_switch), look.fg);
-        spread(content, left, right)
+        let setting = |label: &str, value: String| {
+            Row::of(format!("{label}  "), look.muted).push(value, look.fg)
+        };
+        let settings = [
+            setting(
+                "Keep warm",
+                if status.keep_warm { "On" } else { "Off" }.to_owned(),
+            ),
+            setting("Task", limit_label(status.turn_limit_secs)),
+            setting("Session", limit_label(status.session_limit_secs)),
+            setting("Idle stop", limit_label(status.idle_stop_secs)),
+            setting(
+                "On harness switch",
+                switch_words(status.on_harness_switch).to_owned(),
+            ),
+        ];
+        let mut rows = Vec::new();
+        let mut right = Row::default();
+        for item in settings {
+            let used = match (left.width(), right.width()) {
+                (0, 0) => 0,
+                (0, taken) | (taken, 0) => taken + 2,
+                (lead, taken) => lead + 2 + taken + 2,
+            };
+            if used > 0 && used + item.width() > content {
+                rows.push(spread(content, left, right));
+                left = Row::default();
+                right = Row::default();
+            }
+            right = if right.width() == 0 {
+                item
+            } else {
+                right.push("  ", look.muted).cat(item)
+            };
+        }
+        rows.push(spread(content, left, right));
+        rows
     }
 
     fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
