@@ -51,6 +51,10 @@ const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
+/// The plain reason a mapping step fails with when `.crazyagent/overview.md` is there but
+/// is not a file with text, so the engine neither reads it nor writes over it.
+pub const OVERVIEW_BLOCKED: &str =
+    "The overview could not be written: .crazyagent/overview.md is empty or not a plain file";
 /// The plain reason a step fails with when its stored onboarding state cannot be read, so
 /// it is not claimed again and again.
 const ROW_UNREADABLE: &str =
@@ -539,6 +543,9 @@ fn mapping_step(
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
+    if draft::overview_blocked(&layout) {
+        return (Step::failed(OVERVIEW_BLOCKED), base);
+    }
     let harnesses: Vec<ResearchHarness> = MAPPING_HARNESSES
         .into_iter()
         .filter(|harness| work.runner.can_run(*harness))
@@ -592,11 +599,11 @@ fn mapping_step(
 }
 
 /// Finishes a mapping step from the agent's answer: merges its fields into the gaps of
-/// `base`, saves the draft and writes `overview.md` when none exists yet. An answer with
-/// no overview text, while no overview is kept from before, fails the step with
-/// [`MAPPING_NO_OVERVIEW`] and still keeps the merged draft. Takes the `.crazyagent`
-/// folder, the draft so far, the answer text and the facts the manifests gave.
-/// Returns the step's ending and the draft to keep.
+/// `base`, saves the draft and writes `overview.md` when nothing is there yet. With no
+/// overview kept, the step fails with [`OVERVIEW_BLOCKED`] while something else sits at
+/// `overview.md`, else with [`MAPPING_NO_OVERVIEW`], and still keeps the merged draft.
+/// Takes the `.crazyagent` folder, the draft so far, the answer text and the facts the
+/// manifests gave. Returns the step's ending and the draft to keep.
 #[cfg(unix)]
 pub(crate) fn answered(
     layout: &Path,
@@ -614,7 +621,12 @@ pub(crate) fn answered(
         return (Step::failed(DRAFT_UNSAVED), base.clone());
     }
     if !wrote && draft::overview(layout).is_none() {
-        return (Step::failed(MAPPING_NO_OVERVIEW), merged);
+        let reason = if draft::overview_blocked(layout) {
+            OVERVIEW_BLOCKED
+        } else {
+            MAPPING_NO_OVERVIEW
+        };
+        return (Step::failed(reason), merged);
     }
     (Step::Done, merged)
 }

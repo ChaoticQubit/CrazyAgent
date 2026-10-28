@@ -6,7 +6,7 @@ use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::service::{
-    CODEX_MISSING, OnboardingLimits, OnboardingService, installed_graphify,
+    CODEX_MISSING, OVERVIEW_BLOCKED, OnboardingLimits, OnboardingService, installed_graphify,
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::plugins::Scope;
@@ -1216,6 +1216,42 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
     assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overview_entry_that_is_not_a_text_file_fails_mapping_before_any_account_is_picked() {
+    let mut bench = Bench::start(|repo| {
+        fs::create_dir_all(repo.join(".crazyagent")).unwrap();
+        fs::write(repo.join(".crazyagent/overview.md"), "").unwrap();
+    })
+    .await;
+    let project = bench.start_onboarding().await;
+    let asked = Arc::new(Mutex::new(0_usize));
+    let (runner, agents) = bench.runner();
+    let service = {
+        let asked = asked.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, _: &[ResearchHarness]| {
+                *asked.lock().unwrap() += 1;
+                AccountPick::NoUsableAccount
+            },
+            || None,
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.mapping, failed(OVERVIEW_BLOCKED), "{view:?}");
+    assert_eq!(*asked.lock().unwrap(), 0);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert_eq!(
+        fs::read(bench.repo.join(".crazyagent/overview.md")).unwrap(),
+        b""
+    );
     bench.stop().await;
 }
 

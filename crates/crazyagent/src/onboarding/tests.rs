@@ -495,3 +495,39 @@ fn a_crazyagent_folder_swapped_for_a_link_is_never_read_or_written_through() {
     assert!(draft::save(&layout, &changed).is_err());
     assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
 }
+
+#[test]
+fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
+    let prose = "## Structure\n\nOne binary that greets people.\n\n```json\n{\"about\": \"Greets people.\"}\n```\n";
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("notes.md");
+    std::fs::write(&target, "# Notes\n\nKept outside.\n").unwrap();
+    let entries: [(&str, &dyn Fn(&Path)); 3] = [
+        ("an empty file", &|path| std::fs::write(path, "").unwrap()),
+        ("a link", &|path| symlink(&target, path).unwrap()),
+        ("a folder", &|path| std::fs::create_dir(path).unwrap()),
+    ];
+    for (what, make) in entries {
+        let dir = rust_repo();
+        let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+        std::fs::create_dir(&layout).unwrap();
+        let entry = layout.join("overview.md");
+        make(entry.as_path());
+        let before = std::fs::symlink_metadata(&entry).unwrap().file_type();
+        let base = Drafted::new("demo".into(), &pool());
+        let (step, kept) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+        assert_eq!(step, Step::failed(service::OVERVIEW_BLOCKED), "{what}");
+        assert_eq!(kept.draft.about, "Greets people.", "{what}");
+        assert_eq!(draft::reused(&layout), Some(kept), "{what}");
+        assert_eq!(
+            std::fs::symlink_metadata(&entry).unwrap().file_type(),
+            before,
+            "{what}"
+        );
+        assert!(draft::overview(&layout).is_none(), "{what}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "# Notes\n\nKept outside.\n"
+    );
+}
