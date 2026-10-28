@@ -842,6 +842,7 @@ fn finished_team() -> crate::team::TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        settings_version: 0,
         min_agents: 1,
         max_agents: 5,
         harnesses: Vec::new(),
@@ -996,14 +997,19 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
     let sent = requests(&mut shell);
     let [
         Request::Setup(SetupQuery::TeamChange {
-            action: TeamAction::FinishedAgents { project_id, show },
+            action:
+                TeamAction::FinishedAgents {
+                    project_id,
+                    show,
+                    version,
+                },
             generation,
         }),
     ] = &sent[..]
     else {
         panic!("{sent:?}");
     };
-    assert_eq!((project_id, *show), (&project(), true));
+    assert_eq!((project_id, *show, *version), (&project(), true, 0));
     shell.key(Key::Char('h'));
     assert!(requests(&mut shell).is_empty(), "one change at a time");
     shell.arrive(setup_reply(
@@ -1011,6 +1017,7 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
             action: TeamAction::FinishedAgents {
                 project_id: project(),
                 show: true,
+                version: 0,
             },
             generation: *generation,
         },
@@ -1037,7 +1044,12 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
     let sent = requests(&mut shell);
     let [
         Request::Setup(SetupQuery::TeamChange {
-            action: TeamAction::FinishedAgents { show: true, .. },
+            action:
+                TeamAction::FinishedAgents {
+                    show: true,
+                    version: 0,
+                    ..
+                },
             generation,
         }),
     ] = &sent[..]
@@ -1049,6 +1061,7 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
             action: TeamAction::FinishedAgents {
                 project_id: project(),
                 show: true,
+                version: 0,
             },
             generation: *generation,
         },
@@ -1068,6 +1081,206 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
     );
     shell.key(Key::Char('f'));
     assert!(!render(&mut shell).join("\n").contains("Finished (2)"));
+}
+
+/// The Finished agents setting names the team settings version the box read; one the engine
+/// refuses as stale says so, reads the team again at once, and the next change starts from
+/// the newer setting and names its version.
+#[test]
+fn a_finished_agents_change_from_an_older_read_is_refused_and_the_box_reads_the_team_again() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    let read = SetupQuery::Team { project: project() };
+    let mut older = finished_team();
+    older.settings_version = 3;
+    shell.arrive(setup_reply(
+        read.clone(),
+        Ok(SetupView::Team(Box::new(older))),
+    ));
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [Request::Setup(SetupQuery::TeamChange { action, generation })] = &sent[..] else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(
+        action,
+        &TeamAction::FinishedAgents {
+            project_id: project(),
+            show: true,
+            version: 3,
+        },
+        "the change names the version the box read"
+    );
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: action.clone(),
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: crate::storage::versioned::STALE_CODE.to_owned(),
+            },
+        )),
+    ));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::Setup(SetupQuery::Team { project: asked })] if *asked == project()),
+        "a stale change reads the team again at once: {sent:?}"
+    );
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("Could not change where finished agents show."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Finished agents: Hide."),
+        "the refused change is not shown as saved: {text}"
+    );
+    let mut newer = finished_team();
+    newer.show_finished = true;
+    newer.settings_version = 4;
+    shell.arrive(setup_reply(read, Ok(SetupView::Team(Box::new(newer)))));
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Finished agents: Show."),
+        "the newer setting from the other window shows"
+    );
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            &sent[..],
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::FinishedAgents {
+                    show: false,
+                    version: 4,
+                    ..
+                },
+                ..
+            })]
+        ),
+        "the next change starts from the newer setting and names its version: {sent:?}"
+    );
+}
+
+/// The live master switch names the team settings version the master view read; a switch the
+/// engine refuses as stale drops the owner's change and reads the switch again, and any other
+/// refusal of a start keeps the master shown as refused, never as on.
+#[test]
+fn a_live_master_switch_from_an_older_read_reads_the_switch_again() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut view = master_view(80, 24);
+    requests(&mut view);
+    let mut status = finished_team();
+    status.live_master = Some(false);
+    status.settings_version = 5;
+    view.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(status))),
+    ));
+    requests(&mut view);
+    view.key(Key::Char('s'));
+    let sent = requests(&mut view);
+    let Some(Request::Setup(SetupQuery::TeamChange { action, generation })) = sent
+        .iter()
+        .find(|request| live_master_change(request, true))
+    else {
+        panic!("{sent:?}");
+    };
+    assert_eq!(
+        action,
+        &crate::team::TeamAction::LiveMaster {
+            project_id: project(),
+            on: true,
+            version: 5,
+        },
+        "the switch names the version the master view read"
+    );
+    view.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: action.clone(),
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: crate::storage::versioned::STALE_CODE.to_owned(),
+            },
+        )),
+    ));
+    let sent = requests(&mut view);
+    assert!(
+        sent.iter().any(|request| matches!(request, Request::Setup(SetupQuery::Team { project: asked }) if *asked == project())),
+        "a stale switch reads the switch again at once: {sent:?}"
+    );
+    assert!(
+        !sent.iter().any(|request| live_master_change(request, true)),
+        "a stale switch is not resent from the old read: {sent:?}"
+    );
+
+    let mut newer = finished_team();
+    newer.live_master = Some(false);
+    newer.settings_version = 6;
+    view.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(newer))),
+    ));
+    requests(&mut view);
+    let start = |view: &mut Shell| {
+        view.key(Key::Char('s'));
+        requests(view)
+            .into_iter()
+            .find_map(|request| match request {
+                Request::Setup(SetupQuery::TeamChange {
+                    action: action @ crate::team::TeamAction::LiveMaster { on: true, .. },
+                    generation,
+                }) => Some((action, generation)),
+                _ => None,
+            })
+            .expect("s starts the live master")
+    };
+    let (action, generation) = start(&mut view);
+    assert_eq!(
+        action,
+        crate::team::TeamAction::LiveMaster {
+            project_id: project(),
+            on: true,
+            version: 6,
+        },
+        "the next switch names the newer version"
+    );
+    view.arrive(setup_reply(
+        SetupQuery::TeamChange { action, generation },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: "team_master_no_terminal".to_owned(),
+            },
+        )),
+    ));
+    let rows = render(&mut view);
+    assert!(
+        !rows[2].contains("Live master on."),
+        "an engine refusal is not shown as on: {}",
+        rows[2]
+    );
+    let (action, _) = start(&mut view);
+    assert_eq!(
+        action,
+        crate::team::TeamAction::LiveMaster {
+            project_id: project(),
+            on: true,
+            version: 6,
+        },
+        "a refused switch does not move the version"
+    );
 }
 
 #[test]
@@ -1095,6 +1308,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         paused: false,
         live_master: None,
         live_problem: None,
+        settings_version: 0,
         min_agents: 1,
         max_agents: 5,
         harnesses: vec![harness(AgentRole::Master, 1), harness(AgentRole::Sub, 4)],
@@ -1423,7 +1637,7 @@ fn live_master_change(request: &Request, turned: bool) -> bool {
     matches!(
         request,
         Request::Setup(crate::project_setup::SetupQuery::TeamChange {
-            action: crate::team::TeamAction::LiveMaster { project_id, on },
+            action: crate::team::TeamAction::LiveMaster { project_id, on, .. },
             ..
         }) if *project_id == project() && *on == turned
     )
@@ -1436,6 +1650,7 @@ fn turned(on: bool, result: Result<(), &str>) -> Arrival {
                 action: crate::team::TeamAction::LiveMaster {
                     project_id: project(),
                     on,
+                    version: 0,
                 },
                 generation: 1,
             },
@@ -1487,6 +1702,7 @@ fn switched(
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
+        settings_version: 0,
         min_agents: 0,
         max_agents: 1,
         harnesses: Vec::new(),
@@ -1823,6 +2039,7 @@ fn the_master_view_follows_the_master_to_its_new_terminal_and_says_when_it_canno
                 action: crate::team::TeamAction::LiveMaster {
                     project_id: project(),
                     on: true,
+                    version: 0,
                 },
                 generation: 1,
             },

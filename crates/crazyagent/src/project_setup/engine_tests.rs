@@ -1681,6 +1681,110 @@ async fn stale_read_paths_write_is_refused() {
     engine.stop().await;
 }
 
+/// A removed project's team settings version moves on once more, so a team setting saved
+/// from a screen read before the removal is refused on a project added again under the same
+/// id, which keeps its defaults until a change from a fresh read (V2SYNC-2).
+#[tokio::test]
+async fn a_team_setting_read_before_a_projects_removal_is_refused_on_the_project_added_again() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let read = owner.team_status(project.clone()).await.unwrap();
+    assert_eq!(
+        read.settings_version, 0,
+        "team settings nobody saved are at version 0"
+    );
+    let warmed = owner
+        .team_action(
+            crate::team::TeamAction::KeepWarm {
+                project_id: project.clone(),
+                on: true,
+                version: read.settings_version,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(warmed), OwnerResult::Applied);
+    let before = owner.team_status(project.clone()).await.unwrap();
+    assert!(before.keep_warm);
+    assert_eq!(before.settings_version, 1);
+
+    let removed = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='team-settings:setup-pooled'"),
+        2,
+        "removal moves the team settings version past every screen read before it"
+    );
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner.team_status(project.clone()).await.unwrap();
+    assert!(
+        !readded.keep_warm,
+        "the project added again starts with its defaults"
+    );
+    assert_eq!(readded.settings_version, 2);
+    for (version, generation) in [(read.settings_version, 5), (before.settings_version, 6)] {
+        let refused = owner
+            .team_action(
+                crate::team::TeamAction::FinishedAgents {
+                    project_id: project.clone(),
+                    show: true,
+                    version,
+                },
+                generation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a screen read at version {version}, before the removal"
+        );
+    }
+    assert!(
+        !owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .show_finished
+    );
+    let fresh = owner
+        .team_action(
+            crate::team::TeamAction::FinishedAgents {
+                project_id: project.clone(),
+                show: true,
+                version: readded.settings_version,
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
+    let shown = owner.team_status(project).await.unwrap();
+    assert!(shown.show_finished);
+    assert_eq!(shown.settings_version, 3);
+}
+
 #[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
@@ -1966,6 +2070,7 @@ async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply(
             crate::team::TeamAction::LiveMaster {
                 project_id: project.clone(),
                 on: false,
+                version: status.settings_version,
             },
         ),
     ] {

@@ -864,6 +864,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::KeepWarm {
             project_id: self.project.clone(),
             on,
+            version: status.settings_version,
         })
     }
 
@@ -930,6 +931,7 @@ impl TeamView {
             turn_secs: turn,
             session_secs: kept,
             idle_secs: idle,
+            version: status.settings_version,
         })
     }
 
@@ -964,6 +966,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: self.project.clone(),
             mode,
+            version: status.settings_version,
         })
     }
 

@@ -767,12 +767,13 @@ async fn desktop_team_keep_warm(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_keep_warm(&id, on, generation)
+        .team_keep_warm(&id, on, version, generation)
         .await
 }
 
@@ -786,12 +787,13 @@ async fn desktop_team_time_limits(
     turn_secs: Option<u32>,
     session_secs: Option<u32>,
     idle_secs: Option<u32>,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation)
+        .team_time_limits(&id, turn_secs, session_secs, idle_secs, version, generation)
         .await
 }
 
@@ -801,12 +803,13 @@ async fn desktop_team_on_harness_switch(
     state: State<'_, NativeState>,
     id: String,
     mode: String,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_on_harness_switch(&id, &mode, generation)
+        .team_on_harness_switch(&id, &mode, version, generation)
         .await
 }
 
@@ -816,12 +819,13 @@ async fn desktop_team_finished_agents(
     state: State<'_, NativeState>,
     id: String,
     show: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_finished_agents(&id, show, generation)
+        .team_finished_agents(&id, show, version, generation)
         .await
 }
 
@@ -831,12 +835,13 @@ async fn desktop_team_live_master(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_live_master(&id, on, generation)
+        .team_live_master(&id, on, version, generation)
         .await
 }
 

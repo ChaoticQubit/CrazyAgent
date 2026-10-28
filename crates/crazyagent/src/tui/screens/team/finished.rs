@@ -102,6 +102,7 @@ pub(super) struct Finished {
     open: bool,
     rows: Option<Vec<FinishedRow>>,
     show: Option<bool>,
+    version: u64,
     cursor: usize,
     waking: Option<String>,
     saving: bool,
@@ -114,6 +115,7 @@ impl Finished {
             open: false,
             rows: None,
             show: None,
+            version: 0,
             cursor: 0,
             waking: None,
             saving: false,
@@ -196,6 +198,7 @@ impl Finished {
             action: TeamAction::FinishedAgents {
                 project_id: project.clone(),
                 show: !show,
+                version: self.version,
             },
             generation,
         }));
@@ -216,6 +219,7 @@ impl Finished {
                 if asked == project =>
             {
                 self.show = Some(status.show_finished);
+                self.version = status.settings_version;
                 if self.open {
                     let rows = finished_rows(status);
                     self.cursor = self.cursor.min(rows.len().saturating_sub(1));
@@ -233,7 +237,12 @@ impl Finished {
             }
             (
                 SetupQuery::TeamChange {
-                    action: TeamAction::FinishedAgents { project_id, show },
+                    action:
+                        TeamAction::FinishedAgents {
+                            project_id,
+                            show,
+                            version,
+                        },
                     ..
                 },
                 result,
@@ -242,6 +251,7 @@ impl Finished {
                 match refusal(result) {
                     None => {
                         self.show = Some(*show);
+                        self.version = version + 1;
                         let lead = if *show {
                             "Finished agents now stay in the team tree."
                         } else {
@@ -252,10 +262,15 @@ impl Finished {
                             project: project.clone(),
                         });
                     }
-                    Some(code) => ctx.say(Message::warning(
-                        "Could not change where finished agents show.",
-                        words(code),
-                    )),
+                    Some(code) => {
+                        ctx.say(Message::warning(
+                            "Could not change where finished agents show.",
+                            words(code),
+                        ));
+                        if code == crate::storage::versioned::STALE_CODE {
+                            Self::read(project, ctx);
+                        }
+                    }
                 }
             }
             (

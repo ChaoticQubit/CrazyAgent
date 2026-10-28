@@ -147,10 +147,11 @@ test("the live master switch is read from the team status, and a switch never se
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
   const status = (patch) => ({ kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], ...patch } });
   assert.equal(liveSwitch(undefined, "alpha"), undefined, "not read yet");
-  assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null }, "an engine without the field reads as never set");
-  assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null });
-  assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null });
-  assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account." });
+  assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null, version: 0 }, "an engine without the field reads as never set");
+  assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null, version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: true, live_problem: null }), "alpha"), { on: true, problem: null, version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: false, live_problem: "No account." }), "alpha"), { on: false, problem: "No account.", version: 0 });
+  assert.deepEqual(liveSwitch(status({ live_master: true, settings_version: 7 }), "alpha"), { on: true, problem: null, version: 7 }, "a switch change names the team settings version read");
   assert.equal(liveSwitch({ kind: "error", code: "engine_unavailable" }, "alpha"), undefined, "a failed read is not a switch never set, so it never starts the master");
   assert.equal(liveSwitch({ kind: "not_ready" }, "alpha"), undefined);
   assert.equal(liveSwitch(status({ live_master: true }), "beta"), undefined, "another project's read is not this switch");
@@ -239,9 +240,21 @@ test("a refused live master stop names its project, so a toast on another page s
 
 test("a live master area left before the switch reply changes nothing on the next page", () => {
   const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
-  assert.match(source, /const turned = await setLiveMaster\(id, next\);[\s\S]*?if \(failed && !next\) data\.notify\(stopFailedNote\(data\.name, failed\)\);\s*if \(!mounted\.current\) return;\s*if \(failed\) \{/);
+  assert.match(source, /const turned = await setLiveMaster\(id, next, version\);[\s\S]*?if \(failed && !next\) data\.notify\(stopFailedNote\(data\.name, failed\)\);\s*if \(!mounted\.current\) return;\s*if \(failed\) \{/);
   assert.match(source, /mounted\.current = true;\s*return \(\) => \{ mounted\.current = false; \};/);
   assert.doesNotMatch(source, /data\.notify\(`Couldn't stop the live master\./, "no toast without the project's name");
+});
+
+test("a live master switch from an older team read is not saved; the area says so and reads the team again", () => {
+  assert.equal(live.liveStaleNote("plant-shop"), "The team settings of plant-shop changed in another window, so your live master switch was not saved. The master area now shows the saved switch.");
+  assert.equal(live.liveStaleNote(""), "The team settings of this project changed in another window, so your live master switch was not saved. The master area now shows the saved switch.");
+  assert.ok(!live.liveStaleNote("shop\u202eevil").includes("\u202e"), "the name is shown through displayText");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  assert.match(source, /const version = Math\.max\(engine\?\.version \?\? 0, saved\.current\);/, "the switch names the newer of the team read and this area's own last save");
+  assert.match(source, /if \(savedStale\(turned\)\) \{\s*data\.notify\(liveStaleNote\(data\.name\)\);\s*if \(!mounted\.current\) return;\s*asked\.current = false;\s*setWant\(null\);\s*setLive\(\{ kind: "starting" \}\);\s*data\.reloadTeam\(\);\s*return;\s*\}/, "a stale switch drops the owner's change and reads the team again");
+  assert.ok(source.indexOf("savedStale(turned)") < source.indexOf("stopFailedNote(data.name, failed)"), "a stale stop is not reported as a failed stop");
+  assert.match(source, /\} else \{\s*saved\.current = version \+ 1;/, "an applied switch moves the version this area names next");
+  assert.match(source, /if \(on === null && !asked\.current\) void turn\(true\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read");
 });
 
 test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {

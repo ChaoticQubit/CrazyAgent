@@ -97,6 +97,13 @@ pub fn agent_policy_item(project: &ProjectId) -> Item {
     named(format!("agent-policy:{}", project.as_str()))
 }
 
+/// Names the versioned item of one project's team settings: keep warm, the task and session
+/// time limits with the idle stop, the On harness switch, the live master switch and where
+/// finished agents show. Input: the project. Output: the item.
+pub fn team_settings_item(project: &ProjectId) -> Item {
+    named(format!("team-settings:{}", project.as_str()))
+}
+
 /// Names the versioned item of one wake-rule level. Inputs: the project, none for the app
 /// level, and the sub-agent id, 0 for the app or project level; team agent ids are never
 /// reused, so an agent's level needs no project. Output: the item.

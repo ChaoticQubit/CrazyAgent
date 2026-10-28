@@ -1001,37 +1001,43 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
   return call<void>("desktop_terminal_detach", { agent, serial });
 }
 
-/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id
- * and the switch. Output: the engine receipt, not ready, or a plain error. */
-export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id,
+ * the switch and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function keepTeamWarm(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_keep_warm", { id, on, version, generation: nextGeneration() });
 }
 
 /** Sets how long one task turn and one agent session of the team may run, and how long a
- * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
- * seconds. Output: the engine receipt, not ready, or a plain error. */
-export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+ * sub-agent may sit idle; null is no limit. Inputs: the project id, the three limits in
+ * seconds and the team settings version the screen read. Output: the engine receipt, not
+ * ready, or a plain error; a save from an older read is rejected as `stale_revision`. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, version, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
- * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
-export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+ * Inputs: the project id, the mode and the team settings version the screen read. Output:
+ * the engine receipt, not ready, or a plain error; a save from an older read is rejected as
+ * `stale_revision`. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation: nextGeneration() });
 }
 
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
- * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
- * receipt, not ready, or a plain error. */
-export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+ * the Finished fold-out (Hide). Inputs: the project id, true for Show and the team settings
+ * version the screen read. Output: the engine receipt, not ready, or a plain error; a save
+ * from an older read is rejected as `stale_revision`. */
+export function showFinishedAgents(id: string, show: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, version, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
- * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
- * or a plain error. */
-export function setLiveMaster(id: string, on: boolean): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_live_master", { id, on, generation: nextGeneration() });
+ * in a terminal. Inputs: the project id, the switch and the team settings version the screen
+ * read. Output: the engine receipt, not ready, or a plain error; a save from an older read is
+ * rejected as `stale_revision`. */
+export function setLiveMaster(id: string, on: boolean, version: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_live_master", { id, on, version, generation: nextGeneration() });
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan

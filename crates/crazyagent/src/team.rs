@@ -2,6 +2,7 @@ use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
+use crate::storage::versioned::{self, STALE_CODE};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -409,20 +410,24 @@ pub enum TeamAction {
     KeepWarm {
         project_id: ProjectId,
         on: bool,
+        version: u64,
     },
     TimeLimits {
         project_id: ProjectId,
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
+        version: u64,
     },
     OnHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchMode,
+        version: u64,
     },
     LiveMaster {
         project_id: ProjectId,
         on: bool,
+        version: u64,
     },
     Pause {
         project_id: ProjectId,
@@ -452,6 +457,7 @@ pub enum TeamAction {
     FinishedAgents {
         project_id: ProjectId,
         show: bool,
+        version: u64,
     },
     WakeAgent {
         project_id: ProjectId,
@@ -1560,6 +1566,26 @@ fn owner_turn(tx: &Transaction<'_>, project: &ProjectId, message: i64) -> Result
     Ok(())
 }
 
+/// Takes the next version of a project's team settings for an owner change made from a read
+/// of `version`, in the change's transaction before the value is written, so a change from a
+/// screen that read older settings never replaces newer ones (V2SYNC-2). Inputs: the owner
+/// transaction, the project and the version the owner's screen showed. Output: true when the
+/// change may be written, false when it is stale.
+fn settings_write(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    version: u64,
+) -> Result<bool, EngineError> {
+    Ok(versioned::owner_write(tx, &versioned::team_settings_item(project), version)?.is_ok())
+}
+
+/// Reads the version of a project's team settings that a change must name, 0 before the
+/// owner first changed one. Inputs: the engine database and the project. Output: the version,
+/// or `versioned_unavailable`.
+pub fn settings_version(connection: &Connection, project: &ProjectId) -> Result<u64, EngineError> {
+    Ok(versioned::current(connection, &versioned::team_settings_item(project))?.version)
+}
+
 /// Cuts text to at most `max` bytes on a character boundary.
 /// Takes the text and the byte bound.
 /// Returns the bounded text.
@@ -1679,7 +1705,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::KeepWarm { on, .. } => {
+        TeamAction::KeepWarm { on, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_settings(project,keep_warm) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET keep_warm=excluded.keep_warm",
@@ -1692,8 +1721,12 @@ fn perform(
             turn_secs,
             session_secs,
             idle_secs,
+            version,
             ..
         } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(project) DO UPDATE SET turn_secs=excluded.turn_secs,
@@ -1703,7 +1736,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::OnHarnessSwitch { mode, .. } => {
+        TeamAction::OnHarnessSwitch { mode, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
@@ -1712,7 +1748,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::FinishedAgents { show, .. } => {
+        TeamAction::FinishedAgents { show, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET show=excluded.show",
@@ -1721,12 +1760,15 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::LiveMaster { on, .. } => {
+        TeamAction::LiveMaster { on, version, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
                     != crate::harnesses::interactive::Support::Terminal
             {
                 return Ok(rejected("team_master_no_terminal"));
+            }
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
             }
             master::set_live(tx, project, *on)?;
             Ok(Outcome::Applied)
@@ -2088,6 +2130,8 @@ pub struct TeamStatus {
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
+    #[serde(default)]
+    pub settings_version: u64,
     pub min_agents: u8,
     pub max_agents: u8,
     pub harnesses: Vec<TeamHarness>,
@@ -2724,6 +2768,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         paused: paused(connection, project)?,
         live_master,
         live_problem,
+        settings_version: settings_version(connection, project)?,
         min_agents: plan.min_agents,
         max_agents: plan.max_agents,
         harnesses,
