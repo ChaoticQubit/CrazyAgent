@@ -112,8 +112,24 @@ async fn import_flow(root: &std::path::Path) -> TestResult<()> {
     assert!(free.status().connected);
     assert!(free.pending_intent()?.is_none());
     drop(free);
+    let home = std::path::PathBuf::from(
+        std::env::var_os("HOME").ok_or("the engine scans the owner's HOME, which is unset")?,
+    );
     let list = scan.await??;
-    assert!(list.found.iter().any(|candidate| candidate.name == "style"));
+    assert!(
+        list.found.iter().all(|candidate| {
+            std::path::Path::new(&candidate.folder).parent()
+                == Some(home.join(candidate.from.folder()).as_path())
+        }),
+        "the scan lists only skills directly in the owner's own skills folders"
+    );
+    assert!(
+        !list
+            .found
+            .iter()
+            .any(|candidate| std::path::Path::new(&candidate.folder).starts_with(root)),
+        "a skill folder outside the owner's home is never listed, only imported by its path"
+    );
     let imported = import.await??;
     assert_eq!(imported.skill.name, "style");
     let server = add.await??;
