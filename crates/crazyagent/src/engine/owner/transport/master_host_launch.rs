@@ -54,7 +54,7 @@ const MASTER_PROFILE: &str = "sandbox.sb";
 const HTTPS_PORT: u16 = 443;
 #[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-const MASTER_CONFIG: [&str; 15] = [
+const MASTER_CONFIG: [&str; 16] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"read-only\"",
@@ -70,8 +70,9 @@ const MASTER_CONFIG: [&str; 15] = [
     "features.goals=false",
     "web_search=\"disabled\"",
     "mcp_servers={}",
+    PROJECT_DOCS_OFF,
 ];
-const MASTER_TOOLS_CONFIG: [&str; 9] = [
+const MASTER_TOOLS_CONFIG: [&str; 10] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"danger-full-access\"",
@@ -81,7 +82,9 @@ const MASTER_TOOLS_CONFIG: [&str; 9] = [
     "features.goals=false",
     "features.multi_agent=false",
     "features.multi_agent_v2=false",
+    PROJECT_DOCS_OFF,
 ];
+const PROJECT_DOCS_OFF: &str = "project_doc_max_bytes=0";
 const DELEGATE_SERVERS: &str = "mcp_servers=";
 
 impl OwnerRuntimeHandle {
@@ -138,13 +141,17 @@ impl OwnerRuntimeHandle {
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let process = match claude {
+            true => claude_process(&prepared.instructions, process),
+            false => process,
+        };
         let turn = if claude {
             claude_master_turn(
                 &place,
                 profile,
                 executable.verified_path()?,
                 &prepared.attempt.connection,
-                &master_prompt(&prepared.instructions, &process),
+                &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
             )?
@@ -192,16 +199,57 @@ impl OwnerRuntimeHandle {
 }
 
 /// The most bytes of the owner's app and project instructions a Claude master is sure to
-/// take: the Claude host's prompt file limit less the largest project context and the line
-/// `master_prompt` puts between them.
+/// take: the Claude host's prompt file limit less the largest project context, the largest
+/// instruction files section and the line `master_prompt` puts between them.
 pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
     crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
         - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - crate::instruction_files::SECTION_BYTES_MAX
         - 1;
 
+const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a Claude master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
+
+const _: () = assert!(CUT_NOTE.len() < CLAUDE_PROCESS_BYTES_MAX);
+
+/// Fits what a Claude master gets from the Process page within the Claude host's prompt
+/// file limit beside its startup instruction, so no instruction text ever fails a turn:
+/// past the room the owner's app and project instructions are cut at a character boundary
+/// and end with a plain note, which the agent card shows, while the instruction files
+/// section, which has its own reserved room, stays whole. Inputs: the startup instruction
+/// and what `agent_home::text` built. Output: what the master gets and its home records.
+fn claude_process(
+    instructions: &str,
+    process: crate::agent_home::Given,
+) -> crate::agent_home::Given {
+    assert!(instructions.len() <= crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(process.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+    assert!(process.section_bytes <= crate::instruction_files::SECTION_BYTES_MAX);
+    assert!(process.section_bytes <= process.text.len());
+    let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize - instructions.len() - 1;
+    if process.text.len() <= room {
+        return process;
+    }
+    let (own, section) = process
+        .text
+        .split_at(process.text.len() - process.section_bytes);
+    let mut keep = room - section.len() - CUT_NOTE.len();
+    assert!(keep < own.len());
+    while !own.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    let text = format!("{}{CUT_NOTE}{section}", &own[..keep]);
+    assert!(text.len() <= room);
+    crate::agent_home::Given {
+        section_bytes: section.len(),
+        text,
+        files: process.files,
+    }
+}
+
 /// Joins a Claude Code master's startup instruction with the owner's app and project
-/// instructions. Claude Code runs with setting sources off, which skips the `CLAUDE.md` in
-/// its home, so its prompt file carries the same text. Input: both texts. Output: the prompt.
+/// instructions and the instruction files the engine read. Claude Code runs with setting
+/// sources off, which skips every `CLAUDE.md`, so its prompt file carries the same text.
+/// Input: both texts. Output: the prompt.
 fn master_prompt(instructions: &str, process: &str) -> String {
     assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     if process.is_empty() {
@@ -464,6 +512,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "features.multi_agent=false",
             "features.multi_agent_v2=false",
+            PROJECT_DOCS_OFF,
         ]
     } else {
         &[
@@ -475,6 +524,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "web_search=\"disabled\"",
             "mcp_servers={}",
+            PROJECT_DOCS_OFF,
         ]
     };
     let fixed: &[&str] = if tools.is_some() {
@@ -1240,11 +1290,145 @@ mod tests {
         );
         assert_eq!(fits.len(), host_limit);
         assert_eq!(
-            host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1,
+            host_limit
+                - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+                - crate::instruction_files::SECTION_BYTES_MAX
+                - 1,
             CLAUDE_PROCESS_BYTES_MAX,
-            "the Process page warns at exactly the room the largest context leaves"
+            "the Process page warns at exactly the room the largest context and the largest instruction files leave"
         );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
+    }
+
+    /// Runs git in a test checkout with no system or global config. Inputs: the folder and
+    /// the arguments. Output: unit.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .args([
+                    "-c",
+                    "user.name=Owner",
+                    "-c",
+                    "user.email=owner@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn a_claude_master_past_the_host_limit_gets_its_owner_text_cut_with_a_note_and_every_instruction_file()
+     {
+        use crate::instruction_files::{Choice, FILE_BYTES_MAX, State};
+        let temporary = private_root();
+        let base = std::fs::canonicalize(temporary.path()).unwrap();
+        let (data, folder, home) = (
+            base.join("data"),
+            base.join("repo"),
+            base.join("master-home"),
+        );
+        for made in [&data, &folder, &home] {
+            std::fs::create_dir(made).unwrap();
+            std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        git_in(&folder, &["init", "-q"]);
+        std::fs::write(folder.join("CLAUDE.md"), "c".repeat(FILE_BYTES_MAX + 1)).unwrap();
+        let agents = format!("AGENTS-RULE-91\n{}\n", "a".repeat(30_000));
+        std::fs::write(folder.join("AGENTS.md"), &agents).unwrap();
+        std::fs::write(folder.join(".gitignore"), ".crazyagent/\n").unwrap();
+        git_in(&folder, &["add", "-A"]);
+        git_in(&folder, &["commit", "-q", "-m", "rules"]);
+        std::fs::create_dir(folder.join(".crazyagent")).unwrap();
+        let full = crate::agent_home::TEXT_BYTES_MAX;
+        crate::agent_home::save_app(&data, &format!("APP-START-92{}", "A".repeat(full - 12)))
+            .unwrap();
+        crate::agent_home::save_project(&folder, &"P".repeat(full)).unwrap();
+        let project = crate::agent_home::AgentProject {
+            data,
+            id: crate::protocol::ProjectId::new("cut-instructions").unwrap(),
+            folder: Some(folder),
+            files: Choice::Project,
+            owner_home: None,
+        };
+        let given = crate::agent_home::text(&project).unwrap();
+        let states: Vec<(&str, State)> = given
+            .files
+            .iter()
+            .map(|file| (file.name.as_str(), file.state))
+            .collect();
+        assert_eq!(
+            states,
+            [("CLAUDE.md", State::TooLarge), ("AGENTS.md", State::Given)],
+            "a CLAUDE.md past its limit is left out whole and recorded"
+        );
+        let section = given.text[given.text.len() - given.section_bytes..].to_owned();
+        assert!(section.contains("AGENTS-RULE-91"));
+
+        let instructions = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+        let host_limit =
+            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
+        assert!(instructions.len() + 1 + given.text.len() > host_limit);
+        let capped = claude_process(&instructions, given.clone());
+        let prompt = master_prompt(&instructions, &capped.text);
+        assert!(prompt.len() <= host_limit, "{} bytes", prompt.len());
+        let root = Root::open(&base).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        assert!(
+            write_master_instructions(&root, &runtime_ref, &prompt).is_ok(),
+            "the turn's prompt file is written, never refused"
+        );
+        assert!(capped.text.starts_with("# Instructions from CrazyAgent\n"));
+        assert!(capped.text.contains("APP-START-92"));
+        assert!(
+            capped
+                .text
+                .contains("CrazyAgent cut the app and project instructions here")
+        );
+        assert!(
+            capped.text.ends_with(&section),
+            "the instruction files section stays whole"
+        );
+        assert_eq!(capped.section_bytes, section.len());
+        assert_eq!(capped.files, given.files);
+
+        crate::agent_home::prepare(&home, crate::agent_home::Harness::Claude, &project, &capped)
+            .unwrap();
+        let card = crate::agent_home::received(&home, crate::agent_home::Harness::Claude)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            card.text, capped.text,
+            "the agent card shows what the master got"
+        );
+        assert!(card.text.contains("Shorten them on the Process page."));
+        assert_eq!(
+            crate::agent_home::given_files(&project.data, &home).unwrap(),
+            given.files
+        );
+
+        let small = crate::agent_home::Given {
+            text: "# Instructions from CrazyAgent\n\nShort.\n".into(),
+            files: Vec::new(),
+            section_bytes: 0,
+        };
+        assert_eq!(
+            claude_process(&instructions, small.clone()),
+            small,
+            "text that fits is never cut"
+        );
     }
 
     #[test]

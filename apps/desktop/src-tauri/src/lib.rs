@@ -2203,6 +2203,31 @@ async fn desktop_agent_instructions(
 }
 
 #[tauri::command]
+async fn desktop_instruction_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.instruction_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_instruction_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    settings: crazyagent::engine::owner::InstructionSettings,
+) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .save_instruction_settings(project_id, settings)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_default_process(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2613,6 +2638,8 @@ pub fn run() {
             desktop_import_global_instructions,
             desktop_default_process,
             desktop_agent_instructions,
+            desktop_instruction_settings,
+            desktop_save_instruction_settings,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

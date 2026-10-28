@@ -233,6 +233,45 @@ fn a_mismatched_or_oversized_request_is_refused() {
     );
 }
 
+#[test]
+fn saves_at_once_each_read_back_the_settings_they_stored() {
+    use crate::instruction_files::Choice;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+        .into_iter()
+        .flat_map(|files| {
+            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        })
+        .collect();
+    assert_eq!(options.len(), 6);
+    let start = std::sync::Barrier::new(options.len());
+    std::thread::scope(|scope| {
+        let saves: Vec<_> = options
+            .iter()
+            .map(|&settings| {
+                let (root, project, start) = (&root, &project, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        assert_eq!(
+                            instruction_settings(root, project, Some(settings)),
+                            Ok(settings)
+                        );
+                    }
+                })
+            })
+            .collect();
+        for save in saves {
+            save.join()
+                .expect("every save reads back what it stored, whatever saves beside it");
+        }
+    });
+    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+}
+
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();
@@ -289,6 +328,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             sessions: 0,
             loaded: Vec::new(),
             skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
@@ -296,9 +336,16 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let text = |text: &str| crate::agent_home::Given {
+        text: text.into(),
+        files: Vec::new(),
+        section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, "# Sub rules\n").unwrap();
+    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
     record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -311,6 +358,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             sessions: 0,
             loaded: Vec::new(),
             skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
@@ -346,7 +394,13 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
     assert!(!format!("{reported:?}").contains("OWNER-SECRET-78"));
 
     let master_home = launched_home(&root, master);
-    prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();
+    prepare(
+        &master_home,
+        Harness::Claude,
+        &given,
+        &text("# Master rules\n"),
+    )
+    .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
     assert_eq!(
         shown.agent, master,
@@ -384,6 +438,68 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         "agent_instructions_unsafe",
         "a link the agent planted in its home is never followed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare};
+    use crate::instruction_files::{Choice, Record, State};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "claude-code");
+    let home = launched_home(&root, sub);
+    let files = vec![
+        Record {
+            name: "CLAUDE.md".into(),
+            bytes: 120,
+            state: State::Given,
+        },
+        Record {
+            name: "AGENTS.md".into(),
+            bytes: 40_000,
+            state: State::TooLarge,
+        },
+    ];
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: files.clone(),
+        section_bytes: 0,
+    };
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: Choice::Project,
+        owner_home: None,
+    };
+    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .files,
+        files
+    );
+
+    let forged = "given\t5\tCLAUDE.local.md\n";
+    let mut planted = vec![home.join("crazyagent-instruction-files")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "CLAUDE.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
 }
 
 #[test]

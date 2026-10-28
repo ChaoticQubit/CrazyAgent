@@ -31,7 +31,7 @@ test("the master and each agent card name the team agent the engine reads", () =
 });
 
 test("the view shows the instruction file with its size and each installed skill as a tag", () => {
-  const markup = panel({ kind: "ok", value: { agent: 12, harness: "codex", launched: true, text: "Use tdd.\n", skills: ["tdd", "retired-skill"], sessions: 0, loaded: [], skills_used: [] } });
+  const markup = panel({ kind: "ok", value: { agent: 12, harness: "codex", launched: true, text: "Use tdd.\n", skills: ["tdd", "retired-skill"], sessions: 0, loaded: [], skills_used: [], files: [] } });
   assert.match(markup, /AGENTS\.md/);
   assert.match(markup, /9 bytes/);
   assert.match(markup, /Use <\/span><a[^>]*>tdd<\/a><span>\./);
@@ -40,7 +40,7 @@ test("the view shows the instruction file with its size and each installed skill
   assert.doesNotMatch(markup, /<a[^>]*>retired-skill<\/a>/, "a name the catalog no longer has is plain text");
   assert.doesNotMatch(markup, /<textarea|<input|<button[^>]*>Save/, "the view is read-only");
 
-  const claude = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "", skills: [], sessions: 0, loaded: [], skills_used: [] } });
+  const claude = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "", skills: [], sessions: 0, loaded: [], skills_used: [], files: [] } });
   assert.match(claude, /CLAUDE\.md/);
   assert.match(claude, /No app or project instructions were given at its last launch\./);
   assert.match(claude, /No skills were installed at its last launch\./);
@@ -49,7 +49,7 @@ test("the view shows the instruction file with its size and each installed skill
 test("the view says which instruction files the harness loaded and which skills it invoked", () => {
   const value = { agent: 12, harness: "claude-code", launched: true, text: "", skills: [], sessions: 2,
     loaded: [{ name: "CLAUDE.md", path: "/w/agent-12/CLAUDE.md" }, { name: "AGENTS.md", path: "/w/agent-12/AGENTS.md" }, { name: "CLAUDE.md", path: "/h/agent-12/CLAUDE.md" }],
-    skills_used: ["tdd", "systematic-debugging"] };
+    skills_used: ["tdd", "systematic-debugging"], files: [] };
   const markup = panel({ kind: "ok", value });
   assert.match(markup, /Instructions: CLAUDE\.md, AGENTS\.md - Skills used: tdd, systematic-debugging/);
   for (const path of ["/w/agent-12/CLAUDE.md", "/w/agent-12/AGENTS.md", "/h/agent-12/CLAUDE.md"]) assert.ok(markup.includes(path), path);
@@ -61,8 +61,35 @@ test("the view says which instruction files the harness loaded and which skills 
   assert.doesNotMatch(panel({ kind: "ok", value: { ...value, launched: false } }), /Skills used/, "an agent that never launched has no report");
 });
 
+test("the view lists each instruction file the engine recorded with its size and what became of it", () => {
+  const files = [
+    { name: "CLAUDE.md", bytes: 1229, state: "given" },
+    { name: "AGENTS.md", bytes: 300, state: "same" },
+    { name: "CLAUDE.local.md", bytes: 0, state: "unsafe" },
+    { name: "~/.claude/CLAUDE.md", bytes: 40000, state: "too_large" },
+    { name: "~/.codex/AGENTS.md", bytes: 12, state: "invalid" },
+    { name: ".claude/CLAUDE.md", bytes: 5, state: "unreadable" },
+  ];
+  const markup = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "Use tdd.\n", skills: [], sessions: 0, loaded: [], skills_used: [], files } });
+  for (const shown of [
+    /CLAUDE\.md<\/span> 1\.2 KB, given/,
+    /AGENTS\.md<\/span> 300 bytes, left out: the same text as a file above/,
+    /CLAUDE\.local\.md<\/span> 0 bytes, left out: a link or not a plain file/,
+    /~\/\.claude\/CLAUDE\.md<\/span> 39\.1 KB, left out: larger than CrazyAgent gives/,
+    /~\/\.codex\/AGENTS\.md<\/span> 12 bytes, left out: not plain text/,
+    /\.claude\/CLAUDE\.md<\/span> 5 bytes, left out: couldn&#x27;t be read/,
+  ]) assert.match(markup, shown);
+  assert.ok(markup.indexOf(">Instruction files</h4>") < markup.indexOf(">Skills</h4>"));
+  const none = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "", skills: [], sessions: 0, loaded: [], skills_used: [], files: [] } });
+  assert.match(none, /No instruction files were found at its last launch\./);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  for (const state of ["given", "same", "too_large", "unsafe", "invalid", "unreadable"]) {
+    assert.match(engine, new RegExp(`=> "${state}"`), `${state} is a state the engine records`);
+  }
+});
+
 test("an agent that never launched and a refused read say so plainly", () => {
-  assert.match(panel({ kind: "ok", value: { agent: 4, harness: "codex", launched: false, text: "", skills: [], sessions: 0, loaded: [], skills_used: [] } }), /hasn&#x27;t launched yet/);
+  assert.match(panel({ kind: "ok", value: { agent: 4, harness: "codex", launched: false, text: "", skills: [], sessions: 0, loaded: [], skills_used: [], files: [] } }), /hasn&#x27;t launched yet/);
   const refused = panel({ kind: "error", code: "agent_instructions_unsafe", message: "" });
   assert.match(refused, /link or not a plain file/);
   assert.doesNotMatch(refused, /agent_instructions_/);

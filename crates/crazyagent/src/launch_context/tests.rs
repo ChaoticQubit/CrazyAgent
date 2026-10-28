@@ -201,6 +201,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -238,6 +239,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
     assert_eq!(
@@ -341,6 +343,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     }
     .with_index(&plugins);
     let home = root.join("codex");
@@ -379,6 +382,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         plugins: LaunchPlugins::default(),
         instructions: String::new(),
         process: None,
+        transcripts: true,
     };
 
     agents.shell(&plant);
@@ -507,12 +511,15 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
     };
-    let text = crate::agent_home::text(&project).unwrap();
+    let given = crate::agent_home::text(&project).unwrap();
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
-        process: Some(Box::new(Process { project, text })),
+        process: Some(Box::new(Process { project, given })),
+        transcripts: true,
     };
     let home = |name: &str| {
         let home = root.join(name);

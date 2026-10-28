@@ -15,6 +15,16 @@ fn project(root: &Path) -> AgentProject {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    }
+}
+
+fn given(text: &str) -> Given {
+    Given {
+        text: text.into(),
+        files: Vec::new(),
+        section_bytes: 0,
     }
 }
 
@@ -25,7 +35,7 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     let folder = project.folder.clone().unwrap();
     assert_eq!(read_app(&project.data).unwrap(), "");
     assert_eq!(read_project(&folder).unwrap(), "");
-    assert_eq!(text(&project).unwrap(), "");
+    assert_eq!(text(&project).unwrap().text, "");
 
     save_app(&project.data, "Use TDD.\n").unwrap();
     save_project(&folder, "Run make check.\n").unwrap();
@@ -75,7 +85,7 @@ fn the_size_bound_holds_on_save_and_on_read() {
     save_app(&project.data, &full).unwrap();
     save_project(&folder, &full).unwrap();
     assert_eq!(read_app(&project.data).unwrap().len(), TEXT_BYTES_MAX);
-    let rendered = text(&project).unwrap();
+    let rendered = text(&project).unwrap().text;
     assert!(rendered.len() <= PROCESS_BYTES_MAX);
 
     let over = "a".repeat(TEXT_BYTES_MAX + 1);
@@ -173,13 +183,13 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     let project = project(&root);
     save_app(&project.data, "App rule.\n").unwrap();
     save_project(project.folder.as_deref().unwrap(), "Project rule.\n").unwrap();
-    let rendered = text(&project).unwrap();
+    let rendered = text(&project).unwrap().text;
     let app = rendered.find("App rule.").unwrap();
     let own = rendered.find("Project rule.").unwrap();
     assert!(app < own, "project text goes last");
 
     let claude = home(&root, "claude");
-    prepare(&claude, Harness::Claude, &project, &rendered).unwrap();
+    prepare(&claude, Harness::Claude, &project, &given(&rendered)).unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         rendered
@@ -195,7 +205,7 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     );
 
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, &rendered).unwrap();
+    prepare(&codex, Harness::Codex, &project, &given(&rendered)).unwrap();
     assert_eq!(
         fs::read_to_string(codex.join("AGENTS.md")).unwrap(),
         rendered
@@ -212,15 +222,15 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
     let (_directory, root) = folder();
     let project = project(&root);
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, "# old\n").unwrap();
-    prepare(&codex, Harness::Codex, &project, "").unwrap();
+    prepare(&codex, Harness::Codex, &project, &given("# old\n")).unwrap();
+    prepare(&codex, Harness::Codex, &project, &given("")).unwrap();
     assert!(!codex.join("AGENTS.md").exists());
 
     let outside = root.join("outside.md");
     fs::write(&outside, "owner file").unwrap();
     let claude = home(&root, "claude");
     std::os::unix::fs::symlink(&outside, claude.join("CLAUDE.md")).unwrap();
-    prepare(&claude, Harness::Claude, &project, "# new\n").unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# new\n")).unwrap();
     assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
     assert!(
         !fs::symlink_metadata(claude.join("CLAUDE.md"))
@@ -235,15 +245,20 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 
     fs::remove_file(claude.join("CLAUDE.md")).unwrap();
     fs::create_dir_all(claude.join("CLAUDE.md/inner")).unwrap();
-    prepare(&claude, Harness::Claude, &project, "# again\n").unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# again\n")).unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         "# again\n"
     );
     assert_eq!(
-        prepare(Path::new("relative"), Harness::Claude, &project, "x")
-            .unwrap_err()
-            .0,
+        prepare(
+            Path::new("relative"),
+            Harness::Claude,
+            &project,
+            &given("x")
+        )
+        .unwrap_err()
+        .0,
         "agent_home_invalid"
     );
 }
@@ -296,7 +311,7 @@ fn what_an_agent_received_is_read_back_from_its_own_home() {
         Some(Received::default())
     );
 
-    prepare(&claude, Harness::Claude, &project, "# given\n").unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# given\n")).unwrap();
     record_skills(&claude, &["tdd", "release-notes"]).unwrap();
     assert_eq!(
         received(&claude, Harness::Claude).unwrap(),

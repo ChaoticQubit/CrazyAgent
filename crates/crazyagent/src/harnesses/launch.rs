@@ -97,8 +97,9 @@ const CLAUDE_COMMON: [&str; 12] = [
     "",
     "--settings",
     CLAUDE_SETTINGS,
-    "--no-session-persistence",
+    CLAUDE_NO_TRANSCRIPT,
 ];
+const CLAUDE_NO_TRANSCRIPT: &str = "--no-session-persistence";
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
 /// serialization, arguments or reports and is handed to the child only as an environment value.
@@ -592,8 +593,10 @@ fn claude_invocation(
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
     let settings = claude_settings(key_file);
+    let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()
+        .filter(|argument| !(keep && **argument == CLAUDE_NO_TRANSCRIPT))
         .map(|argument| {
             if *argument == CLAUDE_SETTINGS {
                 OsString::from(&settings)

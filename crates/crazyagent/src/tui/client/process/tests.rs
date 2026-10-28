@@ -52,6 +52,7 @@ fn set_up_project(root: &Path, folder: &Path) -> ProjectId {
 fn claude_room() -> u32 {
     let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
         - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - crate::instruction_files::SECTION_BYTES_MAX
         - 1;
     u32::try_from(room).unwrap()
 }
@@ -119,14 +120,14 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     drop(tx);
     assert_eq!(
         both.bytes as usize,
-        given.len(),
+        given.text.len(),
         "the save reports exactly what the project's agents now get"
     );
     assert!(both.bytes > both.claude_bytes_max);
     let warning = both.claude_warning().expect("the save warns");
     assert!(
         warning.contains("a Claude master takes 27.5 KB")
-            && warning.contains(&format!("not {:.1} KB", given.len() as f64 / 1024.0)),
+            && warning.contains(&format!("not {:.1} KB", given.text.len() as f64 / 1024.0)),
         "{warning}"
     );
 
@@ -237,9 +238,11 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let launch = crate::launch_context::agent_project(&tx, &project).unwrap();
     let given = crate::agent_home::text(&launch).unwrap();
     let app = given
+        .text
         .find("APP-RULE-51")
         .expect("a launch reads the saved app text");
     let own = given
+        .text
         .find("PROJECT-RULE-52")
         .expect("a launch reads the saved project text");
     assert!(app < own);
@@ -276,7 +279,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     assert_eq!(view.harness, "codex");
     assert!(view.launched);
     assert_eq!(
-        view.text, given,
+        view.text, given.text,
         "the view shows exactly what the launch wrote"
     );
     assert!(
@@ -349,5 +352,84 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         Ok(ProcessReply::Text("APP-RULE-51\n".into())),
         "a refused save keeps the saved text"
     );
+    service.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
+    use crate::engine::owner::InstructionSettings;
+    use crate::instruction_files::Choice;
+    let root = private_root("ca-tsettings-");
+    let work = private_root("ca-tsettings-work-");
+    let folder = std::fs::canonicalize(work.path()).unwrap().join("project");
+    std::fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let mut native = NativeOwner::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    );
+    let (_, access) = native.attach().await;
+    assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+    let unknown = ProjectId::new("never-set-up").unwrap();
+    assert_eq!(
+        native
+            .process(ProcessQuery::Settings { project: unknown })
+            .await
+            .result,
+        Err("process_project_unknown".into())
+    );
+    let project = set_up_project(root.path(), &folder);
+    assert_eq!(
+        native
+            .process(ProcessQuery::Settings {
+                project: project.clone()
+            })
+            .await
+            .result,
+        Ok(ProcessReply::Settings(InstructionSettings::default())),
+        "a project the owner never changed gets the project's files and keeps transcripts"
+    );
+    for files in [Choice::ProjectAndUser, Choice::None, Choice::Project] {
+        for transcripts in [false, true] {
+            let settings = InstructionSettings { files, transcripts };
+            assert_eq!(
+                native
+                    .process(ProcessQuery::SaveSettings {
+                        project: project.clone(),
+                        settings,
+                    })
+                    .await
+                    .result,
+                Ok(ProcessReply::Settings(settings))
+            );
+            assert_eq!(
+                native
+                    .process(ProcessQuery::Settings {
+                        project: project.clone()
+                    })
+                    .await
+                    .result,
+                Ok(ProcessReply::Settings(settings))
+            );
+            let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+            assert_eq!(
+                crate::instruction_files::load(&connection, &project),
+                Ok(settings)
+            );
+            let tx = connection.unchecked_transaction().unwrap();
+            assert_eq!(
+                crate::launch_context::agent_project(&tx, &project)
+                    .unwrap()
+                    .files,
+                files,
+                "the next launch reads the stored choice"
+            );
+            drop(tx);
+        }
+    }
     service.shutdown().await.unwrap();
 }
