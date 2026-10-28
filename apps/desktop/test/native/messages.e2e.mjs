@@ -243,6 +243,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(!kinds.includes("Progress"), "no progress row");
         const whole = await me.waitFor("the whole result", (text) => text.includes("It has **three** bars"));
         assert.doesNotMatch(whole, /Show result/u, "Full text needs no opening and renders no Markdown");
+        const wholeFrame = await page.evaluate(`(() => {
+          const texts = [...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll(".am-full")];
+          const box = texts[0]?.closest("figure.am-md") ?? null;
+          return { texts: texts.length, framed: texts.every((text) => text.closest("figure.am-md") !== null), caption: box?.querySelector("figcaption")?.textContent ?? null, lead: box?.textContent.includes("9:41 PM **Master** \`Task\`") ?? false, border: box ? parseFloat(getComputedStyle(box).borderLeftWidth) : 0 };
+        })()`);
+        assert.ok(wholeFrame.texts > 0 && wholeFrame.framed, `every whole result sits in a frame: ${JSON.stringify(wholeFrame)}`);
+        assert.equal(wholeFrame.caption, `Result from ${history.label}`, "the frame names the agent");
+        assert.ok(wholeFrame.lead && wholeFrame.border >= 2, `the posing lead shows as plain text inside the drawn frame: ${JSON.stringify(wholeFrame)}`);
         await me.capture("messages-hidden-full");
         for (const command of ["desktop_team_agent_messages", "desktop_team_message_settings"]) assert.ok(log.calls.includes(command), `the page called ${command}`);
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
