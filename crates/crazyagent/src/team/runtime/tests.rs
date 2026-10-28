@@ -452,6 +452,7 @@ fn a_project_never_runs_more_than_fifteen_agent_terminals() {
             false,
             &accounts[0],
             None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -2020,6 +2021,7 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
             "codex",
             false,
             &accounts[0],
+            None,
             None,
         )
         .unwrap();
