@@ -3488,3 +3488,99 @@ fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() 
     );
     assert_eq!(launched().len(), 3, "nothing started for a gone record");
 }
+
+/// The owner's Wake of a finished sub-agent whose conversation cannot continue (WK-R4): it
+/// starts fresh with no task, the master is told the owner woke it, and the next task it
+/// takes carries its last result, as a master's wake gives it at once.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes its task and keeps its conversation",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Idle && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (_, record) = agent_conversation(&fixture, member).unwrap();
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    std::fs::remove_file(&record).unwrap();
+
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: member,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(
+        &mut team,
+        "the same agent starts a fresh conversation",
+        |f| launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle,
+    );
+    assert!(
+        !launches(&fixture, member)[1].contains("resume"),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_events WHERE agent=?1 AND kind='progress' AND text=?2",
+            params![member, OWNER_WOKE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 1, "the master is told the owner woke it");
+    assert!(!typed(&fixture, member).contains("Your last result then"));
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Check page.md.".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the woken agent takes the next task", |f| {
+        typed(f, member).contains("Check page.md.")
+    });
+    assert!(
+        typed(&fixture, member).contains("Your last result then: Done."),
+        "{}",
+        typed(&fixture, member)
+    );
+    assert_eq!(subs(&fixture), vec![member]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}

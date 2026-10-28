@@ -291,6 +291,7 @@ struct Worker {
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
+    handoff: Option<String>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -967,9 +968,15 @@ impl TeamRuntime {
         };
         let paused = self.paused()?;
         let started = match self.account_for(access, &project, &harness, &paused) {
-            Ok(account) if role == AgentRole::Sub => self
-                .wake(&stored, reference, &harness, tools, &account, again)?
-                .map(|(id, _)| id),
+            Ok(account) if role == AgentRole::Sub => {
+                match self.wake(&stored, reference, &harness, tools, &account, again)? {
+                    Ok((id, resumed)) => {
+                        self.owner_woke(&project, id, resumed)?;
+                        Ok(id)
+                    }
+                    Err(reason) => Err(reason),
+                }
+            }
             Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
             Err(reason) => Err(reason),
         };
@@ -980,6 +987,37 @@ impl TeamRuntime {
                 &format!("The agent could not restart: {}.", bound_text(&reason, 300)),
             ),
         }
+    }
+
+    /// After the owner's Wake or restart starts a sub-agent again with no task (WK-R4): when
+    /// its harness conversation could not continue, keeps its last result for its next task's
+    /// prompt, as a master's wake gives it at once, and tells the master the owner woke it.
+    /// Takes the project, the agent and whether its conversation continues. Returns any
+    /// SQLite failure.
+    fn owner_woke(
+        &mut self,
+        project: &ProjectId,
+        id: i64,
+        resumed: bool,
+    ) -> Result<(), EngineError> {
+        let handoff = if resumed {
+            None
+        } else {
+            last_result(&self.connection, id)?
+        };
+        if let Some(worker) = self.workers.get_mut(&id) {
+            worker.handoff = handoff;
+        }
+        super::events::record(
+            &self.connection,
+            project,
+            id,
+            None,
+            super::events::EventKind::Progress,
+            OWNER_WOKE,
+            now_ms(),
+        )?;
+        Ok(())
     }
 
     /// Tells whether any agent process is still running.
@@ -2209,17 +2247,20 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            let earlier = if woken_fresh {
+            let handoff = if woken_fresh {
                 last_result(&self.connection, agent)?
-                    .map(|last| {
-                        format!(
-                            "You worked in this worktree before and stopped. Your last result then: {last}\n"
-                        )
-                    })
-                    .unwrap_or_default()
             } else {
-                String::new()
+                self.workers
+                    .get_mut(&agent)
+                    .and_then(|worker| worker.handoff.take())
             };
+            let earlier = handoff
+                .map(|last| {
+                    format!(
+                        "You worked in this worktree before and stopped. Your last result then: {last}\n"
+                    )
+                })
+                .unwrap_or_default();
             let prompt = format!(
                 "You are a sub-agent of the project \"{}\". Work only inside {}.\n{earlier}Your task: {}\nWhen you finish, reply with a short summary of what you did.",
                 stored.name,
@@ -2699,6 +2740,7 @@ impl TeamRuntime {
                 turn_started: None,
                 session: None,
                 seed: None,
+                handoff: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -4367,6 +4409,7 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
 
