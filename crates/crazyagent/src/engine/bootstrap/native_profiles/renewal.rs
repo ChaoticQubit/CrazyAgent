@@ -161,15 +161,16 @@ impl Renewal {
 
     /// Renews like [`Self::renew`], leaving the lock wait and starting no harness run once
     /// `halted` tells the caller stopped. A run already started finishes under its own
-    /// deadline, since the provider may have rotated the refresh token it has yet to save.
-    /// Inputs: the expiry the caller saw and the stop test. Output: the record after
-    /// renewal, or the refusal.
+    /// deadline, since the provider may have rotated the refresh token it has yet to save,
+    /// and shares the renewal lock, so a run left behind by an engine that exits keeps the
+    /// lock until it ends. Inputs: the expiry the caller saw and the stop test. Output: the
+    /// record after renewal, or the refusal.
     fn renew_unless(
         &self,
         stale: Duration,
         halted: &dyn Fn() -> bool,
     ) -> Result<Record, EngineError> {
-        let _lock = hold_unless(&self.profile, LOCK_WAIT, halted)?;
+        let lock = hold_unless(&self.profile, LOCK_WAIT, halted)?;
         let current = self.record()?;
         if current.expires > stale {
             return Ok(current);
@@ -178,11 +179,11 @@ impl Renewal {
             return Err(failure("native_profile_renewal_stopped"));
         }
         let _ = match self.harness {
-            Harness::Codex => codex_refresh(&self.executable, &self.managed),
+            Harness::Codex => codex_refresh(&self.executable, &self.managed, &lock),
             Harness::Claude if current.expires > since_epoch()? + REFRESH_WINDOW => {
                 return Ok(current);
             }
-            Harness::Claude => claude_turn(&self.executable, &self.managed),
+            Harness::Claude => claude_turn(&self.executable, &self.managed, &lock),
         };
         self.record()
     }
@@ -206,6 +207,17 @@ fn managed_command(executable: &Path, managed: &Path) -> Command {
         .stderr(Stdio::null())
         .process_group(0);
     command
+}
+
+/// Starts a renewal child that also holds the account's renewal lock, so the lock outlives
+/// an engine that exits while the run goes on and ends with the run; the engine's own unlock
+/// once the run settles ends it for every holder. Inputs: the command and the held lock.
+/// Output: the child, or `native_profile_renewal_failed`.
+fn spawn_locked(command: &mut Command, lock: &HeldLock) -> Result<Child, EngineError> {
+    let shared = rustix::io::fcntl_dupfd_cloexec(&lock.0, 3)
+        .map_err(|_| failure("native_profile_renewal_failed"))?;
+    crate::spawn_gate::spawn_handing(command, shared)
+        .map_err(|_| failure("native_profile_renewal_failed"))
 }
 
 /// Waits for a renewal child until the deadline, then stops its whole process group.
@@ -233,22 +245,21 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
 
 /// Runs the Claude Code renewal turn in the managed home: Claude Code renews the account's
 /// OAuth token in place, and waits for the refresh, before the turn's one Haiku request.
-/// Its output is discarded. Inputs: the executable and the managed home. Output: whether
-/// it succeeded within a minute, which outlasts Claude Code's own refresh request bound.
-fn claude_turn(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
+/// Its output is discarded. Inputs: the executable, the managed home and the renewal lock.
+/// Output: whether it succeeded within a minute, which outlasts Claude Code's own refresh
+/// request bound.
+fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
     let mut command = managed_command(executable, managed);
     command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
-    let mut child = crate::spawn_gate::spawn(&mut command)
-        .map_err(|_| failure("native_profile_renewal_failed"))?;
+    let mut child = spawn_locked(&mut command, lock)?;
     Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
 }
 
 /// Asks the managed home's Codex app-server to refresh its ChatGPT tokens with
 /// `account/read {refreshToken: true}`, then stops it. The reply is matched by id and
-/// otherwise ignored. Inputs: the executable and the managed home. Output: whether the
-/// reply arrived in time.
-fn codex_refresh(executable: &Path, managed: &Path) -> Result<bool, EngineError> {
-    let refused = |_| failure("native_profile_renewal_failed");
+/// otherwise ignored. Inputs: the executable, the managed home and the renewal lock.
+/// Output: whether the reply arrived in time.
+fn codex_refresh(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
     let mut command = managed_command(executable, managed);
     command
         .args([
@@ -267,7 +278,7 @@ fn codex_refresh(executable: &Path, managed: &Path) -> Result<bool, EngineError>
         .env("CODEX_HOME", managed)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(refused)?;
+    let mut child = spawn_locked(&mut command, lock)?;
     let deadline = Instant::now() + RUN_TIME;
     let answered = match (child.stdin.take(), child.stdout.take()) {
         (Some(input), Some(output)) => converse(input, output, deadline),
