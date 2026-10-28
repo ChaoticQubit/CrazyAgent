@@ -828,6 +828,7 @@ fn finished_team() -> crate::team::TeamStatus {
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
+        live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -870,6 +871,7 @@ fn finished_team() -> crate::team::TeamStatus {
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     }
 }
 
