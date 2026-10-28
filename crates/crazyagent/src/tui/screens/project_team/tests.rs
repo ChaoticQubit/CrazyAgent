@@ -1655,6 +1655,13 @@ fn message_change(view: &mut TeamView, key: KeyCode, settings: MessageSettings, 
         Ok(SetupView::Changed(OwnerResult::Applied)),
     );
     assert_eq!(view.notice, Some(Notice::plain(done)));
+    let now = view.now_ms;
+    let query = view
+        .next_query(now)
+        .expect("the team is read again right after a save");
+    let mut read = team();
+    read.message_settings = settings;
+    view.apply(&query, Ok(SetupView::Team(Box::new(read))));
 }
 
 #[test]
@@ -1699,83 +1706,60 @@ fn o_opens_messages_settings_and_every_choice_of_every_setting_is_one_change() {
             ("Esc", "Close"),
         ]
     );
-    let base = MessageSettings::default();
+    let mut saved = MessageSettings {
+        keep_master_messages: false,
+        ..MessageSettings::default()
+    };
     message_change(
         &mut view,
         KeyCode::Char(' '),
-        MessageSettings {
-            keep_master_messages: false,
-            ..base
-        },
+        saved,
         "Keep the master's messages to agents: Off.",
     );
     view.key(press(KeyCode::Down));
-    for (key, kept) in [(KeyCode::Right, 5000), (KeyCode::Left, 500)] {
+    for (key, kept) in [
+        (KeyCode::Right, 5000),
+        (KeyCode::Right, 500),
+        (KeyCode::Left, 5000),
+    ] {
+        saved.kept_per_project = kept;
         message_change(
             &mut view,
             key,
-            MessageSettings {
-                kept_per_project: kept,
-                ..base
-            },
+            saved,
             &format!("Messages kept per project: {kept}."),
         );
     }
     view.key(press(KeyCode::Down));
-    message_change(
-        &mut view,
-        KeyCode::Enter,
-        MessageSettings {
-            progress_shown: false,
-            ..base
-        },
-        "Progress events: Hidden.",
-    );
+    saved.progress_shown = false;
+    message_change(&mut view, KeyCode::Enter, saved, "Progress events: Hidden.");
     view.key(press(KeyCode::Down));
+    saved.results = ResultsShown::Full;
     message_change(
         &mut view,
         KeyCode::Char(' '),
-        MessageSettings {
-            results: ResultsShown::Full,
-            ..base
-        },
+        saved,
         "Task results: Full text.",
     );
     view.key(press(KeyCode::Down));
+    saved.owner_items_shown = false;
     message_change(
         &mut view,
         KeyCode::Right,
-        MessageSettings {
-            owner_items_shown: false,
-            ..base
-        },
+        saved,
         "Your own tasks and prompts: Hidden.",
     );
     view.key(press(KeyCode::Down));
     view.key(press(KeyCode::Down));
-    for (key, size) in [(KeyCode::Right, 100), (KeyCode::Left, 25)] {
-        message_change(
-            &mut view,
-            key,
-            MessageSettings {
-                page_size: size,
-                ..base
-            },
-            &format!("Entries per page: {size}."),
-        );
+    for (key, size) in [
+        (KeyCode::Right, 100),
+        (KeyCode::Right, 25),
+        (KeyCode::Left, 100),
+    ] {
+        saved.page_size = size;
+        message_change(&mut view, key, saved, &format!("Entries per page: {size}."));
     }
 
-    let mut saved = team();
-    saved.message_settings = MessageSettings {
-        keep_master_messages: false,
-        kept_per_project: 5000,
-        progress_shown: false,
-        results: ResultsShown::Full,
-        owner_items_shown: false,
-        page_size: 100,
-    };
-    let query = view.next_query(NOW + REFRESH_MS).unwrap();
-    view.apply(&query, Ok(SetupView::Team(Box::new(saved.clone()))));
     let rows = frame(&view, 80, 24);
     for (label, value) in [
         ("Keep the master's messages to agents", "Off"),
@@ -1787,23 +1771,12 @@ fn o_opens_messages_settings_and_every_choice_of_every_setting_is_one_change() {
     ] {
         assert!(find(&rows, label).contains(&format!("{label:<40}{value}")));
     }
-    message_change(
-        &mut view,
-        KeyCode::Right,
-        MessageSettings {
-            page_size: 25,
-            ..saved.message_settings
-        },
-        "Entries per page: 25.",
-    );
     view.key(press(KeyCode::Up));
+    saved.owner_items_shown = true;
     message_change(
         &mut view,
         KeyCode::Char(' '),
-        MessageSettings {
-            owner_items_shown: true,
-            ..saved.message_settings
-        },
+        saved,
         "Your own tasks and prompts: Shown.",
     );
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
@@ -1812,5 +1785,65 @@ fn o_opens_messages_settings_and_every_choice_of_every_setting_is_one_change() {
         !frame(&view, 120, 36)
             .iter()
             .any(|row| row.contains("Messages settings"))
+    );
+}
+
+/// A change made after a save but before the team read that follows it would be built
+/// from the older read and undo the save, so it waits for a read sent after the save.
+#[test]
+fn a_settings_change_waits_for_the_team_read_sent_after_the_last_save() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    let TeamReply::Change(action) = view.key(press(KeyCode::Char(' '))) else {
+        panic!("a Messages settings change expected: {:?}", view.notice);
+    };
+    let sent_before = view
+        .next_query(NOW + REFRESH_MS)
+        .expect("the paced team read is due");
+    assert!(matches!(sent_before, SetupQuery::Team { .. }));
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 1,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    let still = Some(Notice::problem(
+        "Still saving the last change. Try again in a moment.",
+    ));
+    view.key(press(KeyCode::Down));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Handled,
+        "a change built before the read after the save would undo the save"
+    );
+    assert_eq!(view.notice, still);
+    view.apply(&sent_before, Ok(SetupView::Team(Box::new(team()))));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Handled,
+        "a read sent before the save still shows the older settings"
+    );
+    assert_eq!(view.notice, still);
+    let sent_after = view
+        .next_query(NOW + REFRESH_MS)
+        .expect("the read after the save goes at once");
+    let saved = MessageSettings {
+        keep_master_messages: false,
+        ..MessageSettings::default()
+    };
+    let mut read = team();
+    read.message_settings = saved;
+    view.apply(&sent_after, Ok(SetupView::Team(Box::new(read))));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Change(TeamAction::MessageSettings {
+            project_id: project(),
+            settings: MessageSettings {
+                kept_per_project: 5000,
+                ..saved
+            },
+        }),
+        "the next change keeps the saved one"
     );
 }

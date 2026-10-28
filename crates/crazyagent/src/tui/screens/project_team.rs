@@ -113,6 +113,15 @@ pub(in crate::tui) struct WakeEdit {
     pub row: usize,
 }
 
+/// Where the team read after a saved change stands: due, or sent after the save. Every change
+/// is built from the team read on screen, so the next change waits for a read sent after the
+/// save; a read sent before it still shows the older settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reread {
+    Due,
+    Sent,
+}
+
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
 const MESSAGE_ROWS: usize = 6;
 const MESSAGE_LABEL: usize = 40;
@@ -138,6 +147,7 @@ pub(in crate::tui) struct TeamView {
     read_ms: Option<i64>,
     waiting: bool,
     changing: Option<String>,
+    reread: Option<Reread>,
 }
 
 impl TeamView {
@@ -163,6 +173,7 @@ impl TeamView {
             read_ms: None,
             waiting: false,
             changing: None,
+            reread: None,
         }
     }
 
@@ -183,6 +194,9 @@ impl TeamView {
             return None;
         }
         self.waiting = true;
+        if self.reread.is_some() {
+            self.reread = Some(Reread::Sent);
+        }
         Some(SetupQuery::Team {
             project: self.project.clone(),
         })
@@ -212,11 +226,14 @@ impl TeamView {
         match query {
             SetupQuery::Team { project } if project == &self.project => {
                 self.waiting = false;
-                self.read_ms = Some(self.now_ms);
+                self.read_ms = (self.reread != Some(Reread::Due)).then_some(self.now_ms);
                 match result {
                     Ok(SetupView::Team(status)) => {
                         assert_eq!(status.project_id, self.project);
                         self.status = Some(*status);
+                        if self.reread == Some(Reread::Sent) {
+                            self.reread = None;
+                        }
                     }
                     Ok(_) => {}
                     Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
@@ -235,6 +252,7 @@ impl TeamView {
                         }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
+                        self.reread = Some(Reread::Due);
                     }
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
                         self.notice = Some(Notice::problem(team_plain(&code)));
@@ -252,6 +270,19 @@ impl TeamView {
     /// Returns true until the change result arrives.
     pub fn busy(&self) -> bool {
         self.changing.is_some()
+    }
+
+    /// Refuses a change while the last one is with the engine or the team read sent after it
+    /// has not landed, since a change built from an older read can undo the last save.
+    /// Takes the view. Returns true, with the notice set, when the change must wait.
+    fn still_saving(&mut self) -> bool {
+        let saving = self.changing.is_some() || self.reread.is_some();
+        if saving {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+        }
+        saving
     }
 
     /// Says whether the owner is writing a new task, so the host sends pastes
@@ -464,10 +495,7 @@ impl TeamView {
     }
 
     fn cancel(&mut self, id: i64) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let Some(task) = self.task(id) else {
@@ -561,10 +589,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("Write what the sub-agent should do first."));
             return TeamReply::Handled;
         }
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.notice = None;
@@ -668,10 +693,7 @@ impl TeamView {
             KeyCode::Left => false,
             _ => return TeamReply::Handled,
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let settings = next_message_setting(shown, row, forward);
@@ -806,10 +828,7 @@ impl TeamView {
     }
 
     fn wake_change(&mut self, level: WakeLevel, rule: Option<WakeRule>) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let target = match level {
@@ -842,10 +861,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("There are no new notifications."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.changing = Some("Notifications marked as seen.".to_owned());
@@ -957,10 +973,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let on = !status.keep_warm;
@@ -992,10 +1005,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let below = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if a < b);
@@ -1055,10 +1065,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let mode = match status.on_harness_switch {
