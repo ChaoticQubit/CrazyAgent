@@ -11,6 +11,8 @@ import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, job
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
+const FOLLOW_MS = 1000;
+const FOLLOW_TRIES = 30;
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
@@ -259,16 +261,21 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
  * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, `embedded` when a console around it owns the head, and where the owner types:
- * the terminal, the message box under it, or both. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both" }: {
+ * closed, `embedded` when a console around it owns the head, where the owner types: the
+ * terminal, the message box under it, or both, and `follow` when an ended terminal opens
+ * again on its own, cleared, for an agent that restarts in a new pane. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", follow = false }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
   embedded?: boolean;
   input?: InputChoice;
+  follow?: boolean;
 }) {
   const mode = inputMode(input);
+  const following = useRef(follow);
+  following.current = follow;
+  const tries = useRef(0);
   const keys = useRef(mode.keys);
   keys.current = mode.keys;
   const screen = useRef<HTMLDivElement>(null);
@@ -300,6 +307,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     setView({ kind: "connecting" });
     let disposed = false;
     let serial: number | null = null;
+    let again = 0;
     let release = () => {};
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -319,7 +327,16 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       let frame = 0;
       const end = (copy: string) => {
         live = false;
-        if (!disposed) setView({ kind: "ended", copy });
+        if (disposed) return;
+        if (following.current && tries.current < FOLLOW_TRIES) {
+          tries.current += 1;
+          terminal.reset();
+          setView({ kind: "connecting" });
+          window.clearTimeout(again);
+          again = window.setTimeout(() => setRound((value) => value + 1), FOLLOW_MS);
+          return;
+        }
+        setView({ kind: "ended", copy });
       };
       const sendSize = () => {
         const size = terminalSize(terminal.cols, terminal.rows);
@@ -367,6 +384,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
+          tries.current = 0;
           live = true;
           setView({ kind: "live" });
           terminal.focus();
@@ -399,6 +417,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     })();
     return () => {
       disposed = true;
+      window.clearTimeout(again);
       release();
       if (serial !== null) void detachTerminal(name, serial);
     };
@@ -415,7 +434,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Connecting to the terminal...</p>}
     {view.kind === "ended" && <div className="tg-terminal-state" role="alert">
       <span>{view.copy}</span>
-      <Button size="small" icon="refresh-cw" onClick={() => setRound((value) => value + 1)}>Open again</Button>
+      <Button size="small" icon="refresh-cw" onClick={() => { tries.current = 0; setRound((value) => value + 1); }}>Open again</Button>
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} onContextMenu={(event) => {
       if (!term.current) return;

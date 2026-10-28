@@ -191,6 +191,8 @@ pub(in crate::tui) struct ProjectPage {
     team_asked: Option<(i64, bool)>,
     files_asked: Option<String>,
     covered: bool,
+    from_master: bool,
+    reopen_master: bool,
 }
 
 impl ProjectPage {
@@ -219,6 +221,8 @@ impl ProjectPage {
             team_asked: None,
             files_asked: None,
             covered: false,
+            from_master: false,
+            reopen_master: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -511,10 +515,17 @@ impl ProjectPage {
     }
 
     /// Carries on after the engine confirmed a master request: an opened master takes the
-    /// waiting message, and a conversation ended for a renewal opens a new one.
+    /// waiting message, a conversation ended for a renewal opens a new one, and a session
+    /// switch the owner started from the live master view opens that view again.
     /// Takes the confirmed action.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
+            MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. }
+                if self.from_master =>
+            {
+                self.from_master = false;
+                self.reopen_master = true;
+            }
             MasterOwnerAction::Open { .. } => {
                 let Some(waiting) = self.waiting.take() else {
                     return;
@@ -1135,6 +1146,12 @@ impl Screen for ProjectPage {
         self.say_problem(ctx);
         self.ask_team(ctx);
         self.redraw(ctx);
+        if std::mem::take(&mut self.reopen_master) && !self.covered && self.screen.live_master() {
+            return Flow::Open(Place::Master {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            });
+        }
         Flow::Handled
     }
 
@@ -1148,6 +1165,7 @@ impl Screen for ProjectPage {
             .take_if(|(project, _)| *project == self.screen.project)
         {
             assert!(matches!(code, 'n' | 'l'));
+            self.from_master = true;
             self.screen.open(Tab::Conversation);
             self.screen.typing = false;
             let reply = self
