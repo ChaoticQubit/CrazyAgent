@@ -1,6 +1,6 @@
 use super::{
-    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
-    clean_absolute, invalid,
+    LINUX_LIMITED_NETWORK_OFF, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, ProjectSandbox, Sandbox,
+    SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -31,6 +31,7 @@ const READ: &str = "--read";
 const WRITE: &str = "--write";
 const CONNECT: &str = "--connect";
 const LIMIT_NETWORK: &str = "--limit-network";
+const OPEN_SOCKETS: &str = "--open-sockets";
 const PROBE: &str = "--probe";
 const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
@@ -39,6 +40,11 @@ const NET_ABI: ABI = ABI::V4;
 const SOCKET_TYPE_MASK: u64 = 0xf;
 const DNS_PORT: u16 = 53;
 const DNS_OVER_TCP: &str = "use-vc";
+const LIMITED_NETWORK_OFF: &str = "the Linux limited-network sockets setting is 'Do not start \
+     limited-network agents'; choose 'TCP only' or 'TCP ports only' in Settings";
+const RESOLVER_NEEDS_UDP: &str = "this harness cannot look up names over TCP, which the Linux \
+     limited-network sockets setting 'TCP only' needs; choose 'TCP ports only' or leave limited \
+     network off";
 const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
@@ -86,14 +92,16 @@ const LANDLOCK_DEVICES: &[&str] = &[
 
 /// The rules the Landlock helper applies to itself before it starts the harness: read and
 /// execute beneath `read`, full access beneath `write`, and, when `limit_network` is set,
-/// outbound TCP only to the `connect` ports. The engine renders it as helper arguments and
-/// the helper parses it back.
+/// outbound TCP only to the `connect` ports and no socket but TCP, unless `open_sockets`
+/// keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). The engine renders it as
+/// helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
     pub connect: Vec<u16>,
     pub limit_network: bool,
+    pub open_sockets: bool,
 }
 
 impl LandlockPolicy {
@@ -111,6 +119,9 @@ impl LandlockPolicy {
         if self.limit_network {
             args.push(LIMIT_NETWORK.into());
         }
+        if self.open_sockets {
+            args.push(OPEN_SOCKETS.into());
+        }
         for port in &self.connect {
             args.push(CONNECT.into());
             args.push(port.to_string().into());
@@ -125,6 +136,7 @@ impl LandlockPolicy {
 pub enum HelperRequest {
     Probe {
         limit_network: bool,
+        open_sockets: bool,
     },
     Run {
         policy: LandlockPolicy,
@@ -136,8 +148,8 @@ pub enum HelperRequest {
 impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
-    /// `--probe` with an optional `--limit-network`. Output: the request, or the reason the
-    /// arguments are refused.
+    /// `--probe` with an optional `--limit-network` and `--open-sockets`. `--open-sockets`
+    /// needs `--limit-network`. Output: the request, or the reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
@@ -146,10 +158,12 @@ impl HelperRequest {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
+                Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
                 Some("--") if !probe => {
+                    open_needs_limit(&policy)?;
                     let program = absolute(rest.next())?;
                     if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
                         return Err("too many path grants".into());
@@ -164,12 +178,21 @@ impl HelperRequest {
             }
         }
         if probe && policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty() {
+            open_needs_limit(&policy)?;
             return Ok(Self::Probe {
                 limit_network: policy.limit_network,
+                open_sockets: policy.open_sockets,
             });
         }
         Err("missing the harness command after --".into())
     }
+}
+
+fn open_needs_limit(policy: &LandlockPolicy) -> Result<(), String> {
+    if policy.open_sockets && !policy.limit_network {
+        return Err(format!("{OPEN_SOCKETS} needs {LIMIT_NETWORK}"));
+    }
+    Ok(())
 }
 
 fn absolute(value: Option<OsString>) -> Result<PathBuf, String> {
@@ -222,22 +245,22 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
 }
 
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`, and on a limited network so does
-/// every socket but TCP over IPv4 or IPv6 and netlink, since Landlock limits TCP only and a
-/// datagram, raw or other family socket reaches any host. Landlock does not mediate a
+/// socket and a new io_uring ring both fail with `EACCES`, and with `tcp_only` so does every
+/// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
+/// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
-/// `socketpair(2)` stays allowed since it reaches no path. Input: whether the network is
-/// limited. Output: the installed filter, or the reason this kernel or architecture cannot
+/// `socketpair(2)` stays allowed since it reaches no path. Input: whether only TCP sockets
+/// may open. Output: the installed filter, or the reason this kernel or architecture cannot
 /// hold it.
-fn refuse_sockets(limit_network: bool) -> Result<(), String> {
+fn refuse_sockets(tcp_only: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    rules.insert(libc::SYS_socket, refused_sockets(limit_network)?);
+    rules.insert(libc::SYS_socket, refused_sockets(tcp_only)?);
     rules.insert(libc::SYS_io_uring_setup, Vec::new());
     #[cfg(target_arch = "x86_64")]
     {
         rules.insert(
             X32_SYSCALL_BIT | libc::SYS_socket,
-            refused_sockets(limit_network)?,
+            refused_sockets(tcp_only)?,
         );
         rules.insert(X32_SYSCALL_BIT | libc::SYS_io_uring_setup, Vec::new());
     }
@@ -259,11 +282,12 @@ fn refuse_sockets(limit_network: bool) -> Result<(), String> {
 }
 
 /// The `socket(2)` calls the filter refuses, any one rule refusing a call: a Unix-domain
-/// socket, and on a limited network a family other than IPv4, IPv6 and netlink, an IPv4 or
-/// IPv6 socket of a type other than stream, and one naming a protocol other than TCP.
-/// Input: whether the network is limited. Output: the rules, or the reason seccomp
+/// socket, and with `tcp_only` a family other than IPv4, IPv6 and netlink, a netlink socket
+/// other than routing (glibc's `getaddrinfo` reads interface addresses through it), an IPv4
+/// or IPv6 socket of a type other than stream, and one naming a protocol other than TCP.
+/// Input: whether only TCP sockets may open. Output: the rules, or the reason seccomp
 /// cannot express one.
-fn refused_sockets(limit_network: bool) -> Result<Vec<SeccompRule>, String> {
+fn refused_sockets(tcp_only: bool) -> Result<Vec<SeccompRule>, String> {
     let seccomp = |error: seccompiler::BackendError| format!("seccomp: {error}");
     let rule = |conditions: &[(u8, SeccompCmpOp, u64)]| {
         let conditions = conditions
@@ -276,11 +300,15 @@ fn refused_sockets(limit_network: bool) -> Result<Vec<SeccompRule>, String> {
         SeccompRule::new(conditions).map_err(seccomp)
     };
     let mut rules = vec![rule(&[(0, SeccompCmpOp::Eq, libc::AF_UNIX as u64)])?];
-    if limit_network {
+    if tcp_only {
         rules.push(rule(&[
             (0, SeccompCmpOp::Ne, libc::AF_INET as u64),
             (0, SeccompCmpOp::Ne, libc::AF_INET6 as u64),
             (0, SeccompCmpOp::Ne, libc::AF_NETLINK as u64),
+        ])?);
+        rules.push(rule(&[
+            (0, SeccompCmpOp::Eq, libc::AF_NETLINK as u64),
+            (2, SeccompCmpOp::Ne, libc::NETLINK_ROUTE as u64),
         ])?);
         for family in [libc::AF_INET as u64, libc::AF_INET6 as u64] {
             for kind in (0..=SOCKET_TYPE_MASK).filter(|kind| *kind != libc::SOCK_STREAM as u64) {
@@ -345,9 +373,13 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         }
     };
     let (policy, launch) = match request {
-        HelperRequest::Probe { limit_network } => (
+        HelperRequest::Probe {
+            limit_network,
+            open_sockets,
+        } => (
             LandlockPolicy {
                 limit_network,
+                open_sockets,
                 ..LandlockPolicy::default()
             },
             None,
@@ -376,7 +408,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         eprintln!("crazyagent-landlock: {error}");
         return ExitCode::from(3);
     }
-    if let Err(reason) = refuse_sockets(policy.limit_network) {
+    if let Err(reason) = refuse_sockets(policy.limit_network && !policy.open_sockets) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -408,7 +440,8 @@ pub enum LinuxBackend {
 /// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
 /// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
 /// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports
-/// and the socket filter refuses every other kind of network socket; bubblewrap cannot, so a
+/// and, under the owner's [`LinuxSockets`] setting, the socket filter refuses every other kind
+/// of network socket or no limited-network agent starts; bubblewrap cannot limit ports, so a
 /// tools-off agent needs Landlock.
 #[derive(Debug)]
 pub struct LinuxSandbox {
@@ -419,12 +452,11 @@ pub struct LinuxSandbox {
 impl LinuxSandbox {
     /// Binds the policy to one backend. Input: the project policy and the helper or bwrap
     /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
-    /// or `Unavailable` for a network limit on bubblewrap or for a policy confined to one
-    /// worktree, whose git denies neither backend can hold.
+    /// or `Unavailable` for a network limit on bubblewrap, for a policy confined to one
+    /// worktree, whose git denies neither backend can hold, or for a limited network the
+    /// sockets setting starts no agent on.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
-        if sandbox.checkout.is_some() {
-            return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
-        }
+        admitted(&sandbox)?;
         let executable = match &backend {
             LinuxBackend::Landlock { helper } => helper,
             LinuxBackend::Bubblewrap { bwrap } => bwrap,
@@ -449,10 +481,14 @@ impl LinuxSandbox {
     /// the project policy and the helper executable. Output: the sandbox, or `Unavailable`
     /// when neither backend can hold it.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
+        admitted(&sandbox)?;
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
         if matches!(sandbox.network(), SandboxNetwork::Only(_)) {
             probe.arg(LIMIT_NETWORK);
+            if sandbox.linux_sockets() == LinuxSockets::TcpPorts {
+                probe.arg(OPEN_SOCKETS);
+            }
         }
         let held = clean_absolute(helper)
             && helper.is_file()
@@ -510,11 +546,36 @@ impl LinuxSandbox {
     }
 }
 
+/// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
+/// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
+/// plain `Unavailable` reason.
+fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
+    if sandbox.checkout.is_some() {
+        return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
+    }
+    if matches!(sandbox.network(), SandboxNetwork::Only(_))
+        && sandbox.linux_sockets() == LinuxSockets::Refuse
+    {
+        return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
+    }
+    Ok(())
+}
+
 impl Sandbox for LinuxSandbox {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
+        }
+        match self.sandbox.linux_refusal(program) {
+            None => {}
+            Some(LINUX_LIMITED_NETWORK_OFF) => {
+                return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
+            }
+            Some(code) => {
+                assert_eq!(code, LINUX_RESOLVER_NEEDS_UDP);
+                return Err(SandboxError::Unavailable(RESOLVER_NEEDS_UDP.into()));
+            }
         }
         let cwd = harness
             .get_current_dir()
@@ -532,7 +593,7 @@ impl Sandbox for LinuxSandbox {
         let mut command = match &self.backend {
             LinuxBackend::Landlock { helper } => {
                 let mut command = Command::new(helper);
-                command.args(landlock_policy(&grants, self.sandbox.network()).args());
+                command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
             }
             LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
@@ -544,7 +605,7 @@ impl Sandbox for LinuxSandbox {
             ("LANG", OsStr::new("C")),
             ("LC_ALL", OsStr::new("C")),
         ];
-        if resolves_names(self.sandbox.network()) {
+        if self.sandbox.resolves_over_tcp() {
             base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
         }
         let env = agent_env(&base, harness.get_envs())?;
@@ -650,7 +711,7 @@ fn writable_children(
     Ok(())
 }
 
-fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy {
+fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {
     let mut read: Vec<PathBuf> = SYSTEM_READ_ROOTS
         .iter()
         .chain(&["/proc"])
@@ -659,15 +720,16 @@ fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy 
     read.extend(grants.read.iter().cloned());
     let mut write: Vec<PathBuf> = LANDLOCK_DEVICES.iter().map(PathBuf::from).collect();
     write.extend(grants.write.iter().cloned());
-    let (limit_network, mut connect) = match network {
+    let (limit_network, mut connect) = match sandbox.network() {
         SandboxNetwork::Open => (false, Vec::new()),
         SandboxNetwork::Only(remotes) => (true, ports(remotes)),
     };
-    if resolves_names(network) {
+    if sandbox.resolves_over_tcp() {
         connect.push(DNS_PORT);
         connect.sort_unstable();
         connect.dedup();
     }
+    let open_sockets = limit_network && sandbox.linux_sockets() == LinuxSockets::TcpPorts;
     assert!(
         read.len() + write.len() <= HELPER_PATHS_MAX,
         "the helper accepts every policy the engine writes"
@@ -677,16 +739,8 @@ fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy 
         write,
         connect,
         limit_network,
+        open_sockets,
     }
-}
-
-/// True when a limited network names a remote on any host, so the agent resolves that
-/// host's name. The socket filter refuses datagrams there, so the resolver asks over TCP:
-/// the helper may reach port 53 and the agent gets `RES_OPTIONS=use-vc`. A network with
-/// only loopback remotes, or none, gets neither. Input: the network. Output: the answer.
-fn resolves_names(network: &SandboxNetwork) -> bool {
-    matches!(network, SandboxNetwork::Only(remotes)
-        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::AnyHost(_))))
 }
 
 fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {

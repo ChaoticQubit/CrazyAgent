@@ -13,6 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod elf;
 pub mod extra_paths;
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -485,6 +486,27 @@ impl SandboxRemote {
     }
 }
 
+/// How a limited-network agent's sockets are held on Linux, the owner's setting "Linux
+/// limited-network sockets". Landlock limits outbound TCP by port only, so a UDP, ping or
+/// other socket would reach any host. `TcpOnly` (the default) refuses every socket but TCP
+/// and has names looked up over TCP, `Refuse` starts no limited-network agent, and
+/// `TcpPorts` keeps only Landlock's TCP port rules. Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSockets {
+    #[default]
+    TcpOnly,
+    Refuse,
+    TcpPorts,
+}
+
+/// The launch refusal when the Linux sockets setting starts no limited-network agent.
+pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
+
+/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
+/// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
+pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -527,6 +549,7 @@ pub struct ProjectSandbox {
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
+    linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
@@ -577,6 +600,7 @@ impl ProjectSandbox {
             scratch: None,
             hidden: Vec::new(),
             network,
+            linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
@@ -854,6 +878,43 @@ impl ProjectSandbox {
     /// The network reach this sandbox grants the agent.
     pub fn network(&self) -> &SandboxNetwork {
         &self.network
+    }
+
+    /// Sets how this agent's sockets are held on Linux when its network is limited. Input:
+    /// the owner's setting. Output: the sandbox.
+    pub fn limit_sockets(mut self, sockets: LinuxSockets) -> Self {
+        self.linux_sockets = sockets;
+        self
+    }
+
+    /// How this agent's sockets are held on Linux when its network is limited.
+    pub fn linux_sockets(&self) -> LinuxSockets {
+        self.linux_sockets
+    }
+
+    /// True when, on Linux, this agent looks host names up over TCP: the setting is
+    /// `TcpOnly` and its limited network names a remote on any host. It then may reach TCP
+    /// port 53 and gets `RES_OPTIONS=use-vc`; loopback-only and empty networks get neither.
+    pub fn resolves_over_tcp(&self) -> bool {
+        self.linux_sockets == LinuxSockets::TcpOnly
+            && matches!(&self.network, SandboxNetwork::Only(remotes)
+                if remotes.iter().any(|remote| matches!(remote, SandboxRemote::AnyHost(_))))
+    }
+
+    /// Why the Linux sockets setting refuses to start `program` in this sandbox:
+    /// [`LINUX_LIMITED_NETWORK_OFF`] for any limited network under `Refuse`, and
+    /// [`LINUX_RESOLVER_NEEDS_UDP`] under `TcpOnly` when the agent resolves names and the
+    /// program is not a glibc one ([`elf::glibc_program`]). The setting never changes
+    /// silently. Input: the harness program. Output: the refusal code, or None.
+    pub fn linux_refusal(&self, program: &Path) -> Option<&'static str> {
+        match (&self.network, self.linux_sockets) {
+            (SandboxNetwork::Open, _) => None,
+            (SandboxNetwork::Only(_), LinuxSockets::Refuse) => Some(LINUX_LIMITED_NETWORK_OFF),
+            _ if self.resolves_over_tcp() && !elf::glibc_program(program) => {
+                Some(LINUX_RESOLVER_NEEDS_UDP)
+            }
+            _ => None,
+        }
     }
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
@@ -1775,5 +1836,152 @@ mod windows_path_tests {
         assert!(!windows_clean_text(&long));
         let fits = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX - 3));
         assert!(windows_clean_text(&fits));
+    }
+}
+
+#[cfg(test)]
+mod linux_sockets_tests {
+    use super::*;
+    use crate::sandbox::elf::tests::executable;
+
+    struct Case {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    fn case() -> Case {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(
+            root.join("glibc"),
+            executable(true, false, Some("/lib64/ld-linux-x86-64.so.2")),
+        )
+        .unwrap();
+        fs::write(
+            root.join("musl"),
+            executable(true, false, Some("/lib/ld-musl-x86_64.so.1")),
+        )
+        .unwrap();
+        fs::write(root.join("static"), executable(true, false, None)).unwrap();
+        fs::write(root.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+        Case { _temp: temp, root }
+    }
+
+    fn sandbox(case: &Case, network: SandboxNetwork, sockets: LinuxSockets) -> ProjectSandbox {
+        ProjectSandbox::new(
+            &case.root.join("project"),
+            &case.root.join("home"),
+            &case.root.join("tmp"),
+            network,
+        )
+        .unwrap()
+        .limit_sockets(sockets)
+    }
+
+    fn model() -> SandboxNetwork {
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+    }
+
+    fn local() -> SandboxNetwork {
+        SandboxNetwork::Only(vec![SandboxRemote::Loopback(8080)])
+    }
+
+    #[test]
+    fn the_setting_defaults_to_tcp_only_and_keeps_its_wire_names() {
+        let case = case();
+        let fresh = ProjectSandbox::new(
+            &case.root.join("project"),
+            &case.root.join("home"),
+            &case.root.join("tmp"),
+            model(),
+        )
+        .unwrap();
+        assert_eq!(fresh.linux_sockets(), LinuxSockets::TcpOnly);
+        for (sockets, name) in [
+            (LinuxSockets::TcpOnly, "\"tcp_only\""),
+            (LinuxSockets::Refuse, "\"refuse\""),
+            (LinuxSockets::TcpPorts, "\"tcp_ports\""),
+        ] {
+            assert_eq!(serde_json::to_string(&sockets).unwrap(), name);
+            assert_eq!(serde_json::from_str::<LinuxSockets>(name).unwrap(), sockets);
+        }
+        assert!(serde_json::from_str::<LinuxSockets>("\"udp\"").is_err());
+    }
+
+    #[test]
+    fn tcp_only_starts_a_glibc_harness_and_refuses_one_that_cannot_ask_over_tcp() {
+        let case = case();
+        let named = sandbox(&case, model(), LinuxSockets::TcpOnly);
+        assert!(named.resolves_over_tcp());
+        assert_eq!(named.linux_refusal(&case.root.join("glibc")), None);
+        for program in ["musl", "static", "codex.js", "absent"] {
+            assert_eq!(
+                named.linux_refusal(&case.root.join(program)),
+                Some(LINUX_RESOLVER_NEEDS_UDP),
+                "{program}"
+            );
+        }
+        for network in [
+            local(),
+            SandboxNetwork::Only(Vec::new()),
+            SandboxNetwork::Open,
+        ] {
+            let quiet = sandbox(&case, network, LinuxSockets::TcpOnly);
+            assert!(!quiet.resolves_over_tcp());
+            assert_eq!(quiet.linux_refusal(&case.root.join("musl")), None);
+        }
+    }
+
+    #[test]
+    fn refuse_starts_no_limited_network_agent() {
+        let case = case();
+        for network in [model(), local(), SandboxNetwork::Only(Vec::new())] {
+            let refused = sandbox(&case, network, LinuxSockets::Refuse);
+            assert!(!refused.resolves_over_tcp());
+            assert_eq!(
+                refused.linux_refusal(&case.root.join("glibc")),
+                Some(LINUX_LIMITED_NETWORK_OFF)
+            );
+        }
+        let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::Refuse);
+        assert_eq!(open.linux_refusal(&case.root.join("glibc")), None);
+    }
+
+    #[test]
+    fn each_refusal_reads_plainly_and_names_the_setting() {
+        let udp = crate::config::plain_problem(LINUX_RESOLVER_NEEDS_UDP).unwrap();
+        for part in [
+            "cannot look up names over TCP",
+            "'TCP only'",
+            "'TCP ports only'",
+            "Settings",
+        ] {
+            assert!(udp.contains(part), "{udp}");
+        }
+        let off = crate::config::plain_problem(LINUX_LIMITED_NETWORK_OFF).unwrap();
+        for part in [
+            "Linux limited-network sockets",
+            "does not start",
+            "Settings",
+        ] {
+            assert!(off.contains(part), "{off}");
+        }
+    }
+
+    #[test]
+    fn tcp_ports_starts_any_harness_and_moves_no_lookup_to_tcp() {
+        let case = case();
+        let ports = sandbox(&case, model(), LinuxSockets::TcpPorts);
+        assert!(!ports.resolves_over_tcp());
+        for program in ["glibc", "musl", "static", "codex.js"] {
+            assert_eq!(
+                ports.linux_refusal(&case.root.join(program)),
+                None,
+                "{program}"
+            );
+        }
     }
 }
