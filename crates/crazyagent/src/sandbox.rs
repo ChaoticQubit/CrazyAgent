@@ -221,16 +221,20 @@ const REFUSED_SUFFIXES: &[&str] = &[
     "_CREDENTIALS",
 ];
 
-/// The git settings every sandboxed agent process gets: no system git config (whose
-/// `credential.helper=osxkeychain` would ask the owner's Keychain), no credential helper
-/// at all, and no terminal prompt. They are set after the harness's own variables, so a
-/// harness cannot replace them.
-pub const AGENT_GIT_ENV: [(&str, &str); 5] = [
+/// The git settings every agent process gets, sandboxed or at Full access: no system git
+/// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
+/// credential helper at all, no terminal prompt, and no bare repository found by
+/// discovery (`safe.bareRepository=explicit`, SR1-2), so a folder another agent laid out
+/// as one never runs its config, while `--git-dir` still opens it. They are set after the
+/// harness's own variables, so a harness cannot replace them.
+pub const AGENT_GIT_ENV: [(&str, &str); 7] = [
     ("GIT_CONFIG_NOSYSTEM", "1"),
     ("GIT_TERMINAL_PROMPT", "0"),
-    ("GIT_CONFIG_COUNT", "1"),
+    ("GIT_CONFIG_COUNT", "2"),
     ("GIT_CONFIG_KEY_0", "credential.helper"),
     ("GIT_CONFIG_VALUE_0", ""),
+    ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
+    ("GIT_CONFIG_VALUE_1", "explicit"),
 ];
 
 /// The root certificates every sandboxed agent process trusts for TLS on macOS: the system
