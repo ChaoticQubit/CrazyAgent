@@ -402,6 +402,68 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare};
+    use crate::instruction_files::{Choice, Record, State};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "claude-code");
+    let home = launched_home(&root, sub);
+    let files = vec![
+        Record {
+            name: "CLAUDE.md".into(),
+            bytes: 120,
+            state: State::Given,
+        },
+        Record {
+            name: "AGENTS.md".into(),
+            bytes: 40_000,
+            state: State::TooLarge,
+        },
+    ];
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: files.clone(),
+        section_bytes: 0,
+    };
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: Choice::Project,
+        owner_home: None,
+    };
+    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .files,
+        files
+    );
+
+    let forged = "given\t5\tCLAUDE.local.md\n";
+    let mut planted = vec![home.join("crazyagent-instruction-files")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "CLAUDE.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
+}
+
 #[test]
 fn a_received_payload_holds_the_rendered_bound() {
     let runtime = tokio::runtime::Builder::new_current_thread()

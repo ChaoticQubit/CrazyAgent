@@ -107,10 +107,10 @@ enum Reply {
     },
 }
 
-/// What one team agent received at its last launch, read back from its private home: the
-/// agent id, its harness, whether it has launched, the text of its harness's instruction
-/// file (empty when none was given), the names of the skills installed for it and the
-/// engine's record of the instruction files it found.
+/// What one team agent received at its last launch: the agent id, its harness, whether it
+/// has launched, the text of its harness's instruction file (empty when none was given) and
+/// the names of the skills installed for it, read back from its private home, and the
+/// engine's own record of the instruction files it found, kept outside that home.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstructions {
@@ -623,8 +623,9 @@ fn project_texts(root: &Path) -> Vec<String> {
 }
 
 /// Reads what one team agent of a project received at its last launch from its private
-/// home under `<root>/team`. Inputs: the engine root, the project and the agent id, none
-/// for the project's newest master. Output: the view, or a plain code.
+/// home under `<root>/team` and the engine's own instruction files record. Inputs: the
+/// engine root, the project and the agent id, none for the project's newest master.
+/// Output: the view, or a plain code.
 fn agent_instructions(
     root: &Path,
     project: &ProjectId,
@@ -662,6 +663,12 @@ fn agent_instructions(
     let received =
         crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
     let launched = received.is_some();
+    let files = match launched {
+        true => {
+            crate::agent_home::given_files(root, &home).map_err(|problem| EngineError(problem.0))?
+        }
+        false => Vec::new(),
+    };
     let received = received.unwrap_or_default();
     Ok(AgentInstructions {
         agent: id,
@@ -669,7 +676,7 @@ fn agent_instructions(
         launched,
         text: received.text,
         skills: received.skills,
-        files: received.files,
+        files,
     })
 }
 

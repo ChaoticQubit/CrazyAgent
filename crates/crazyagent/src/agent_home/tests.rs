@@ -290,7 +290,6 @@ fn a_relaunch_replaces_a_planted_skills_record_in_place_without_writing_through_
         Some(Received {
             text: String::new(),
             skills: vec!["code-review".into()],
-            files: Vec::new(),
         }),
         "the last record replaces the one before it"
     );
@@ -319,7 +318,6 @@ fn what_an_agent_received_is_read_back_from_its_own_home() {
         Some(Received {
             text: "# given\n".into(),
             skills: vec!["tdd".into(), "release-notes".into()],
-            files: Vec::new(),
         })
     );
     assert_eq!(
