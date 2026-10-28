@@ -40,6 +40,7 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -184,6 +185,10 @@ pub enum Place {
         first_run: bool,
     },
     Team {
+        id: ProjectId,
+        name: String,
+    },
+    TeamSettings {
         id: ProjectId,
         name: String,
     },
@@ -352,6 +357,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::TeamSettings { id, name } => {
+            Box::new(team_settings::TeamSettings::new(id.clone(), name.clone()))
+        }
         Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {

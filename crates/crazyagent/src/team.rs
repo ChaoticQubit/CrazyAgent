@@ -414,10 +414,16 @@ pub enum TeamAction {
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
+        /// The team settings revision the client last read; a stale one is refused.
+        #[serde(default)]
+        revision: u64,
     },
     OnHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchMode,
+        /// The team settings revision the client last read; a stale one is refused.
+        #[serde(default)]
+        revision: u64,
     },
     LiveMaster {
         project_id: ProjectId,
@@ -2018,6 +2024,10 @@ pub struct TeamStatus {
     pub on_harness_switch: SwitchMode,
     #[serde(default)]
     pub show_finished: bool,
+    /// The revision of the time limits and the On harness switch setting; a change to
+    /// either sends it back and is refused once another client changed them since.
+    #[serde(default)]
+    pub settings_revision: u64,
     #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
@@ -2657,6 +2667,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
         show_finished: show_finished(connection, project)?,
+        settings_revision: 0,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,

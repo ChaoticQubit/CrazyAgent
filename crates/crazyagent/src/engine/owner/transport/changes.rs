@@ -86,6 +86,7 @@ enum Action {
     Update {
         id: ChangeSetId,
     },
+    Waiting,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,6 +102,7 @@ enum Reply {
     Diff { diff: ChangeDiff },
     Accepted { outcome: AcceptOutcome },
     Discarded { restorable_until_ms: u64 },
+    Waiting { count: u32 },
     Done,
     Rejected { code: String },
 }
@@ -140,6 +142,15 @@ impl OwnerClient {
     pub async fn change_sets(&self, project: ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
         match self.changes_exchange(Action::List { project }).await? {
             Reply::List { change_sets } if change_sets.len() <= LIST_MAX => Ok(change_sets),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Counts the change sets waiting for the owner, ready to review or conflicting, across
+    /// the projects the engine has. Output: the count.
+    pub async fn waiting_changes(&self) -> Result<u32, EngineError> {
+        match self.changes_exchange(Action::Waiting).await? {
+            Reply::Waiting { count } => Ok(count),
             _ => Err(unknown()),
         }
     }
@@ -344,7 +355,10 @@ async fn prepare(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    if !matches!(action, Action::List { .. } | Action::Diff { .. }) {
+    if !matches!(
+        action,
+        Action::List { .. } | Action::Diff { .. } | Action::Waiting
+    ) {
         return Ok(Prepared::Change(root, action));
     }
     tokio::task::spawn_blocking(move || {
@@ -423,6 +437,12 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
         Action::Diff { id, head, page } => (
             Reply::Diff {
                 diff: landing::diff(&db, &id, &head, page)?,
+            },
+            false,
+        ),
+        Action::Waiting => (
+            Reply::Waiting {
+                count: landing::waiting(&db)?,
             },
             false,
         ),

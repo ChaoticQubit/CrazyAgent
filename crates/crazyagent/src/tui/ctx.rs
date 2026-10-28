@@ -60,6 +60,7 @@ pub struct Store {
     pub memory: Load<usize>,
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
+    pub waiting: Option<u32>,
 }
 
 impl Default for Store {
@@ -74,6 +75,7 @@ impl Default for Store {
             memory: Load::NotReady,
             setup: Load::Idle,
             projects_seen: None,
+            waiting: None,
         }
     }
 }

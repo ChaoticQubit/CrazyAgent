@@ -1,4 +1,5 @@
 use super::client::app_setup::AppSetupEvent;
+use super::client::changes::{ChangesQuery, ChangesView};
 use super::client::settings::SettingsEvent;
 use super::clock;
 use super::ctx::{Ctx, Link, Load};
@@ -12,9 +13,9 @@ use super::screens::new_project_page::kept_draft;
 use super::screens::settings_accounts::settings_event;
 use super::screens::startup::Startup;
 use super::screens::{DRAFT_LOSS, Flow, Place, ProjectTab, Screen, SettingsSection, open};
-use super::seam::{Arrival, ProjectCard};
+use super::seam::{Arrival, ProjectCard, Request};
 use super::text::{cells, join, list_row, pad, styled};
-use super::theme::Role;
+use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
 use ratatui::Frame;
@@ -262,6 +263,15 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .shown(ctx);
+    }
+
+    /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
+    /// many change sets wait for the owner, then refreshes the top screen.
+    /// Input: none. Output: none; requests are queued on the context.
+    pub fn tick(&mut self) {
+        self.ctx
+            .request(Request::Changes(Box::new(ChangesQuery::Waiting)));
+        self.refresh();
     }
 
     fn running(&self) -> usize {
@@ -549,6 +559,15 @@ impl Shell {
                         ),
                     });
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let super::client::OwnerEvent::Changes(event) = event.as_ref()
+                    && event.query == ChangesQuery::Waiting
+                {
+                    self.ctx.store.waiting = match &event.result {
+                        Ok(ChangesView::Waiting(count)) => Some(*count),
+                        _ => None,
+                    };
+                }
                 super::screens::settings_accounts::keep_rows(&arrival, &mut self.ctx);
             }
             _ => {}
@@ -755,7 +774,8 @@ impl Shell {
         let theme = self.ctx.theme.clone();
         let glyphs = self.ctx.glyphs;
         let top = self.stack.last().expect("the stack is never empty");
-        let header_line = header(width, &top.crumbs(), top.status(&self.ctx), &theme, glyphs);
+        let status = with_waiting(self.ctx.store.waiting, top.status(&self.ctx), &theme);
+        let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
             frame.buffer_mut(),
@@ -815,6 +835,22 @@ impl Shell {
             frame.set_cursor_position(cursor);
         }
     }
+}
+
+/// The header status with the count of change sets that wait for the owner in front of it.
+/// Inputs: the count the engine gave, the top screen's own status and the theme.
+/// Output: the status line; no count or zero leaves the screen's status as it is.
+fn with_waiting(waiting: Option<u32>, status: Line<'static>, theme: &Theme) -> Line<'static> {
+    let text = match waiting {
+        None | Some(0) => return status,
+        Some(1) => "1 change set waits in Changes".to_owned(),
+        Some(count) => format!("{count} change sets wait in Changes"),
+    };
+    let note = Line::from(Span::styled(text, theme.warning));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
 }
 
 #[cfg(all(test, unix))]

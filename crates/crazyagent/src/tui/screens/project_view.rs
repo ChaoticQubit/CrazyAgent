@@ -1316,6 +1316,7 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
     help.extend([
         ("Enter", "Open report"),
         ("t", "Team"),
+        ("s", "Team settings"),
         TABS,
         ("Esc", "Home"),
     ]);

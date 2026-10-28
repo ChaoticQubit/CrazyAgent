@@ -237,7 +237,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         "no time limit and a 10 minute idle stop until the owner sets them"
     );
     let limited = bridge
-        .team_time_limits(&id, Some(3600), Some(14_400), None, 15)
+        .team_time_limits(
+            &id,
+            Some(3600),
+            Some(14_400),
+            None,
+            team.settings_revision,
+            15,
+        )
         .await?;
     assert!(
         matches!(limited.outcome, ActionOutcome::Applied),
@@ -254,7 +261,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         "an idle stop of None is Off"
     );
     let refused = bridge
-        .team_time_limits(&id, Some(7200), Some(3600), Some(600), 16)
+        .team_time_limits(
+            &id,
+            Some(7200),
+            Some(3600),
+            Some(600),
+            team.settings_revision,
+            16,
+        )
         .await
         .unwrap_err();
     assert_eq!(

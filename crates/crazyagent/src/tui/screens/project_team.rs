@@ -856,6 +856,7 @@ impl TeamView {
             status.session_limit_secs,
             status.idle_stop_secs,
         );
+        let revision = status.settings_revision;
         let (turn, kept, idle) = match which {
             Limit::Task => {
                 let next = next_limit(limits, turn);
@@ -896,6 +897,7 @@ impl TeamView {
             turn_secs: turn,
             session_secs: kept,
             idle_secs: idle,
+            revision,
         })
     }
 
@@ -912,6 +914,7 @@ impl TeamView {
             ));
             return TeamReply::Handled;
         }
+        let revision = status.settings_revision;
         let mode = match status.on_harness_switch {
             SwitchMode::Carry => SwitchMode::Fresh,
             SwitchMode::Fresh => SwitchMode::Carry,
@@ -930,6 +933,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: self.project.clone(),
             mode,
+            revision,
         })
     }
 
@@ -1293,7 +1297,9 @@ impl TeamView {
             .collect()
     }
 
-    fn help(&self) -> Help {
+    /// Lists the help keys for what the view shows now.
+    /// Takes the view. Returns key and label pairs in priority order.
+    pub fn help(&self) -> Help {
         if self.draft.is_some() {
             return vec![
                 ("Enter", "Hand over"),

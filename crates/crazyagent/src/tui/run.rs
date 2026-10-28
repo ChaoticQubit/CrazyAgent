@@ -176,7 +176,7 @@ fn drive(
                     send(request, shell, connection, terminals)?;
                     dirty = true;
                 } else if now >= refresh {
-                    shell.refresh();
+                    shell.tick();
                     refresh = now + REFRESH;
                 }
             }
