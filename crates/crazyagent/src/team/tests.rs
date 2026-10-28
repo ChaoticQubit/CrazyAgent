@@ -2217,10 +2217,12 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
     let second = status(&connection, &setup).unwrap();
     assert_eq!(
         second.agents.len(),
-        2,
-        "one fresh team agent, no extra warm one: {second:#?}"
+        1,
+        "the restart brings back the same team agent, no extra warm one (DEC-102): {second:#?}"
     );
-    assert_eq!(second.agents[0].status, AgentStatus::Stopped);
+    assert_eq!(second.agents[0].id, first.agents[0].id);
+    assert_ne!(second.agents[0].status, AgentStatus::Stopped);
+    assert_eq!(second.agents[0].worktree, first.agents[0].worktree);
     assert_eq!(
         agents
             .list(Some(&project), 0, crate::agents::LIST_MAX)
@@ -2238,7 +2240,7 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
     let after = status(&connection, &setup).unwrap();
     assert_eq!(
         after.agents.len(),
-        2,
+        1,
         "a stopped agent is not replaced: {after:#?}"
     );
     assert!(
@@ -2254,8 +2256,9 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
         view.state == AgentState::Running && view.attempt == 3 && groups(&connection) == 1
     });
     let third = status(&connection, &setup).unwrap();
-    assert_eq!(third.agents.len(), 3, "{third:#?}");
-    let group = third.agents[2].process_group.unwrap() as i32;
+    assert_eq!(third.agents.len(), 1, "{third:#?}");
+    assert_eq!(third.agents[0].id, first.agents[0].id);
+    let group = third.agents[0].process_group.unwrap() as i32;
 
     service.stop();
     let closed = agents.view(&id).unwrap();
@@ -2870,6 +2873,31 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     let stopped = status(&connection, &setup).unwrap();
     assert_eq!(stopped.agents.len(), 4, "a stopped agent is not replaced");
     assert!(stopped.agents.iter().all(|agent| agent.task.is_none()));
+    assert!(
+        stopped.agents.iter().all(|agent| agent.finished),
+        "{stopped:#?}"
+    );
+    let hidden = graph(&stopped);
+    assert!(
+        hidden.nodes.iter().all(|node| node.kind != NodeKind::Agent),
+        "finished sub-agents leave the team tree while Finished agents is Hide, the default (DEC-102): {hidden:#?}"
+    );
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::FinishedAgents {
+                project_id: setup.project_id.clone(),
+                show: true,
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let stopped = status(&connection, &setup).unwrap();
+    assert!(stopped.show_finished);
     let stopped = graph(&stopped);
     let nodes: Vec<&GraphNode> = stopped
         .nodes
@@ -2879,7 +2907,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     assert_eq!(
         nodes.len(),
         4,
-        "stopped sub-agents stay listed: {stopped:#?}"
+        "with Finished agents on Show, stopped sub-agents stay listed: {stopped:#?}"
     );
     for (node, id) in nodes.iter().zip(&ids) {
         assert_eq!(node.label, labels[id]);
