@@ -885,6 +885,17 @@ impl ProjectPage {
             ProjectReply::Session(action) => {
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
+                } else if matches!(action, super::sessions::SessionsAction::New { .. })
+                    && self.screen.live_master()
+                {
+                    let generation = ctx.next_generation();
+                    ctx.request(Request::Setup(SetupQuery::TeamChange {
+                        action: crate::team::TeamAction::LiveMaster {
+                            project_id: self.screen.project.clone(),
+                            on: true,
+                        },
+                        generation,
+                    }));
                 }
                 Flow::Handled
             }
