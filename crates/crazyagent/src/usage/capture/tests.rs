@@ -1027,13 +1027,13 @@ fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_parti
 }
 
 /// MSL2B-R3-1: a home of more records than one scan reads, all well inside the walk's
-/// bounds, says its reading is partial whenever the scan leaves out a record that changed
-/// since the previous scan, and only then. An agent rewriting its other records in a loop
-/// keeps its live session record out of every scan, so the owner must see the reading as
-/// partial rather than complete; records left out unchanged since the previous scan hold no
-/// usage of the period, and a record once read again is counted whole.
+/// bounds, reads as partial while a record the scan leaves out holds lines no scan counted,
+/// however many scans pass, and only then. An agent rewriting its other records keeps its
+/// live session record out of every scan; once a scan reads it, the records left out are
+/// all counted and the reading is complete again, as it is for a home that grows past the
+/// bound with records already counted.
 #[test]
-fn a_home_whose_scan_leaves_out_a_changed_record_reads_as_partial() {
+fn a_home_whose_scan_leaves_out_an_uncounted_record_reads_as_partial_until_it_is_read() {
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();
     let folder = home.path().join("projects").join("x");
@@ -1045,7 +1045,7 @@ fn a_home_whose_scan_leaves_out_a_changed_record_reads_as_partial() {
         .map(|index| folder.join(format!("o{index:03}.jsonl")))
         .collect();
     for other in &others {
-        append(other, "");
+        append(other, "\n");
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
@@ -1061,27 +1061,47 @@ fn a_home_whose_scan_leaves_out_a_changed_record_reads_as_partial() {
     assert_eq!(
         scan(NOW),
         ((0, 0), Some(1)),
-        "the first scan leaves out the live record, which no scan read before"
+        "the first scan leaves out the live record, which no scan read"
     );
     assert_eq!(
         scan(NOW + 1),
-        ((0, 0), Some(0)),
-        "a record left out unchanged since the previous scan holds nothing of this period"
+        ((0, 0), Some(1)),
+        "a second scan that leaves it out unread still reads as partial"
     );
     append(&live, &claude_assistant("m2", 5, 2, 0, 0, "end_turn"));
     assert_eq!(
         scan(NOW + 2),
         ((12, 5), Some(0)),
-        "the live record changed last is read whole, and the records left out did not change"
+        "the live record changed last is read whole, and the record left out was counted"
     );
+    let grown = folder.join("grown.jsonl");
+    append(&grown, "\n");
+    assert_eq!(
+        scan(NOW + 3),
+        ((0, 0), Some(0)),
+        "a home that grows past the bound with counted records reads as complete"
+    );
+
     append(&live, &claude_assistant("m3", 1, 1, 0, 0, "end_turn"));
     pause();
-    for other in &others {
+    for other in others.iter().chain([&grown]) {
         append(other, "\n");
     }
     assert_eq!(
-        scan(NOW + 3),
+        scan(NOW + 4),
         ((0, 0), Some(1)),
         "an agent rewriting its other records keeps the changed live record out, and the reading says so"
+    );
+    assert_eq!(
+        scan(NOW + 5),
+        ((0, 0), Some(1)),
+        "the next scan that leaves it out unread says so again"
+    );
+    std::fs::remove_file(&grown).unwrap();
+    std::fs::remove_file(&others[0]).unwrap();
+    assert_eq!(
+        scan(NOW + 6),
+        ((1, 1), Some(0)),
+        "once the home fits one scan the live record is read and the reading is complete"
     );
 }
