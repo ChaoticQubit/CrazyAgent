@@ -4,8 +4,10 @@ use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
+use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
+use crazyagent::protocol::CredentialRef;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -730,6 +732,142 @@ fn stopping_a_headless_agent_stops_what_its_shells_detached() {
     assert!(survivors.is_empty(), "{survivors:?} survived the agent");
 }
 
+const LEAVING_AGENT: &str = r#"#!/bin/sh
+[ "$1" = first-exec ] && exit 3
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+(/usr/bin/perl -e 'setpgrp(0, 0) or exit 1; open(my $file, ">", "member.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &)
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
+/// Kills, by id, the processes a test's stand-in agent left, however the test ends.
+struct Leftover(Vec<rustix::process::Pid>);
+
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        for process in &self.0 {
+            let _ = rustix::process::kill_process(*process, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+/// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
+/// once it has ended.
+fn parent_of(process: rustix::process::Pid) -> Option<i32> {
+    let listing = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    String::from_utf8_lossy(&listing.stdout).trim().parse().ok()
+}
+
+/// The ids and programs a leftovers report names. Input: the report. Output: them.
+fn named_in(report: &str) -> BTreeMap<i32, String> {
+    let (_, named) = report.split_once("still running: ").unwrap();
+    let (named, _) = named.split_once(". ").unwrap();
+    named
+        .split(", ")
+        .map(|entry| {
+            let (pid, program) = entry.split_once(' ').unwrap();
+            (pid.parse().unwrap(), program.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_until_it_ends() {
+    let root = private_dir("crazyagent-leaving-agent-");
+    let project = private_folder(root.path(), "project");
+    let home = private_folder(root.path(), "home");
+    let bin = private_folder(root.path(), "bin");
+    let harness = bin.join("claude");
+    std::fs::write(&harness, LEAVING_AGENT).unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = crazyagent::spawn_gate::status(
+        std::process::Command::new(&harness)
+            .arg("first-exec")
+            .current_dir(&bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert_eq!(first.code(), Some(3));
+    let session = Session::start(LaunchRequest {
+        harness: "claude-code".into(),
+        executable: harness,
+        working_dir: project.clone(),
+        account: AccountBinding::Subscription { home },
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        unconfined: true,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (leader, descendant, member) = loop {
+        if let (Some(leader), Some(descendant), Some(member)) = (
+            written_pid(&project, "leader.pid"),
+            written_pid(&project, "descendant.pid"),
+            written_pid(&project, "member.pid"),
+        ) && parent_of(member) == Some(1)
+        {
+            break (leader, descendant, member);
+        }
+        assert!(Instant::now() < deadline, "stand-in agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let leftover = Leftover(vec![descendant, member]);
+    assert_eq!(rustix::process::getsid(Some(member)), Ok(leader));
+    assert_ne!(rustix::process::getsid(Some(descendant)), Ok(leader));
+
+    let left = match session.stop() {
+        Err(Unstopped::Left(left)) => left,
+        other => panic!(
+            "the stop of a Full access agent was reported {other:?} while {descendant:?} and {member:?} kept running"
+        ),
+    };
+    let report = left.plain();
+    assert!(
+        report.starts_with(
+            "Full access cannot stop what the agent started outside its terminal; still running: "
+        ),
+        "{report}"
+    );
+    assert_eq!(
+        named_in(&report),
+        BTreeMap::from([
+            (descendant.as_raw_nonzero().get(), "perl".to_owned()),
+            (member.as_raw_nonzero().get(), "perl".to_owned()),
+        ]),
+        "{report}"
+    );
+    assert_eq!(
+        rustix::process::test_kill_process(leader),
+        Err(rustix::io::Errno::SRCH)
+    );
+
+    let (held, released) = std::sync::mpsc::channel::<()>();
+    left.hold(Some(CredentialRef::new("leaving-headless").unwrap()), held);
+    assert_eq!(
+        released.recv_timeout(Duration::from_secs(3)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "the account was let go while the agent's processes still run"
+    );
+    drop(leftover);
+    assert_eq!(
+        released.recv_timeout(Duration::from_secs(10)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "the account stayed held after the agent's processes ended"
+    );
+}
+
 #[test]
 fn stopping_a_headless_agent_whose_warden_was_killed_reports_cleanup_uncertain() {
     let (_root, project, harness, session) =
@@ -748,10 +886,10 @@ fn stopping_a_headless_agent_whose_warden_was_killed_reports_cleanup_uncertain()
         1,
         "one warden per run, killed by id: {killed:?}"
     );
-    let stopped = session.stop().map_err(|problem| problem.0);
+    let stopped = session.stop().map_err(|problem| problem.code());
     let outlived = rustix::process::test_kill_process(detached) == Ok(());
     let _ = rustix::process::kill_process(detached, rustix::process::Signal::KILL);
-    assert_eq!(stopped, Err("harness_cleanup_uncertain".to_owned()));
+    assert_eq!(stopped.map(drop), Err("harness_cleanup_uncertain"));
     assert!(
         outlived,
         "with its warden killed the detached process outlives the group"

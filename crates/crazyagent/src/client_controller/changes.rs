@@ -1,5 +1,5 @@
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, WaitingChanges};
 use crate::protocol::ProjectId;
 
 impl OwnerController {
@@ -17,10 +17,14 @@ impl OwnerController {
     }
 
     /// Counts the change sets waiting for the owner in Changes, across the projects the engine
-    /// has. Output: the count of change sets ready to review or conflicting, or a
-    /// `CHANGES_CODES` refusal; an older engine refuses it.
-    pub async fn waiting_changes(&self) -> Result<u32, EngineError> {
-        self.changes_client()?.waiting_changes().await
+    /// has, and the given project's among them. Input: the project, if any. Output: the
+    /// counts of change sets ready to review or conflicting, or a `CHANGES_CODES` refusal; an
+    /// older engine refuses it.
+    pub async fn waiting_changes(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<WaitingChanges, EngineError> {
+        self.changes_client()?.waiting_changes(project).await
     }
 
     /// Reads one page of a change set's diff at the head the owner is reading; callers ask

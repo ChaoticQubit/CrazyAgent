@@ -10,6 +10,7 @@ use crate::harnesses::launch::{
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
+use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
@@ -955,12 +956,25 @@ impl ResearchRunner {
             let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
-            if stopped.is_err() {
-                if let Some(credential) = credential {
-                    credential.retain();
+            match stopped {
+                Ok(_) => {}
+                Err(Unstopped::Uncertain) => {
+                    if let Some(credential) = credential {
+                        credential.retain();
+                    }
+                    std::mem::forget(lease);
+                    return Err(RunError::Uncertain(leftovers::UNCERTAIN));
                 }
-                std::mem::forget(lease);
-                return Err(RunError::Uncertain("harness_cleanup_uncertain"));
+                Err(Unstopped::Left(left)) => {
+                    let code = left.code();
+                    let mut credential = credential;
+                    if let Some(credential) = credential.as_mut() {
+                        credential.stop_renewing();
+                    }
+                    let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
+                    left.hold(account, (credential, lease));
+                    return Err(RunError::Uncertain(code));
+                }
             }
             drop(credential);
             drop(lease);

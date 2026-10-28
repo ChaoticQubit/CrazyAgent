@@ -505,6 +505,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.team_status(&id).await }.await;
             routed(result)
         }
+        "desktop_team_agent_messages" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                agent: i64,
+                before: Option<crazyagent::team::agent_messages::Cursor>,
+                limit: Option<u16>,
+            }
+            let Args { id, agent, before, limit } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state) .await? .team_agent_messages(&id, agent, before, limit) .await }.await;
+            routed(result)
+        }
+        "desktop_team_message_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                settings: crazyagent::team::agent_messages::MessageSettings,
+                generation: u64,
+            }
+            let Args { id, settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_message_settings(&id, settings, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_message" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

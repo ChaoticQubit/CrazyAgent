@@ -9,7 +9,7 @@ use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
 };
 use crate::config::ModelAccess;
-use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
@@ -17,6 +17,7 @@ use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
     RUN_TIME_MAX,
 };
+use crate::harnesses::leftovers::Unstopped;
 use crate::harnesses::terminal_session::{
     AgentSession, PaneRecord, Resume, TerminalSession, end_left_pane,
 };
@@ -419,10 +420,21 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
+    held_restarts: Vec<HostedRestart>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+/// How one agent start ended: started, held back because a projects home move holds the
+/// project folder, so the work that asked for it waits for the move to end with nothing
+/// spent or switched off, or refused for the plain reason.
+#[derive(Debug, PartialEq, Eq)]
+enum Start<T> {
+    Started(T),
+    Held,
+    Refused(String),
 }
 
 /// The most stopped masters of one project the last-master lookup reads.
@@ -562,6 +574,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
             resuming: None,
+            held_restarts: Vec::new(),
         })
     }
 
@@ -1006,7 +1019,9 @@ impl TeamRuntime {
         let Some(agents) = self.agents.clone() else {
             return Ok(());
         };
-        for restart in agents.take_restarts(TEAM_HOST) {
+        let mut restarts = std::mem::take(&mut self.held_restarts);
+        restarts.extend(agents.take_restarts(TEAM_HOST));
+        for restart in restarts {
             if let Ok(reference) = restart.reference.parse::<i64>() {
                 self.start_again(reference, Some(&restart), access)?;
             }
@@ -1047,7 +1062,8 @@ impl TeamRuntime {
     /// worktree and register entry; no other sub-agent starts again, so a register entry
     /// never moves to another agent. A restarted master starts as a fresh process under its
     /// register entry. A Wake (no `again`) of an agent that is no longer finished does
-    /// nothing, so a stale Wake never stops or replaces a running agent.
+    /// nothing, so a stale Wake never stops or replaces a running agent. A restart a
+    /// projects home move holds back waits and is tried again on each tick until it starts.
     fn start_again(
         &mut self,
         reference: i64,
@@ -1130,7 +1146,14 @@ impl TeamRuntime {
                     Err(reason) => Err(reason),
                 }
             }
-            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
+            Ok(account) => match self.spawn_run(&stored, role, &harness, tools, &account, again)? {
+                Start::Started(id) => Ok(id),
+                Start::Held => {
+                    self.held_restarts.extend(again.cloned());
+                    return Ok(());
+                }
+                Start::Refused(reason) => Err(reason),
+            },
             Err(reason) => Err(reason),
         };
         match started {
@@ -1769,13 +1792,17 @@ impl TeamRuntime {
             None => {
                 let harness = stored.team.master.clone();
                 let started = match self.account_for(access, project, &harness, paused) {
-                    Ok(account) => self.spawn(
+                    Ok(account) => match self.spawn(
                         stored,
                         AgentRole::Master,
                         &harness,
                         stored.team.master_tools,
                         &account,
-                    )?,
+                    )? {
+                        Start::Started(id) => Ok(id),
+                        Start::Held => return Ok(()),
+                        Start::Refused(reason) => Err(reason),
+                    },
                     Err(reason) => Err(reason),
                 };
                 match started {
@@ -1945,17 +1972,23 @@ impl TeamRuntime {
         starts.push(Instant::now());
         let started = match self.account_for(access, project, &harness, paused) {
             Ok(account) => self.start_master(stored, &harness, &account, session.as_deref())?,
-            Err(reason) => Err(reason),
+            Err(reason) => Start::Refused(reason),
         };
         match started {
-            Ok((id, note)) => {
+            Start::Started((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
                 self.brief(stored, access, id)
             }
-            Err(reason) => self.live_off(
+            Start::Held => {
+                if let Some(starts) = self.live_starts.get_mut(project) {
+                    starts.pop();
+                }
+                Ok(())
+            }
+            Start::Refused(reason) => self.live_off(
                 project,
                 &format!("it could not start: {}", bound_text(&reason, 300)),
             ),
@@ -1971,15 +2004,15 @@ impl TeamRuntime {
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
     /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// session. Returns the agent id with the note to show, Held while a projects home move
+    /// holds the project folder, or the plain reason it could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
-    ) -> Result<Result<(i64, Option<String>), String>, EngineError> {
+    ) -> Result<Start<(i64, Option<String>)>, EngineError> {
         let project = &stored.project_id;
         let tools = stored.team.master_tools;
         let launch = launch_harness(harness).unwrap_or(harness);
@@ -2021,6 +2054,16 @@ impl TeamRuntime {
                     }
                 }
             }
+            (Some(session), None)
+                if crate::master_sessions::fresh_after_switch(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                )? =>
+            {
+                ResumePlan::New
+            }
             (Some(session), None) => crate::master_sessions::resume_harness(
                 &self.connection,
                 project,
@@ -2053,7 +2096,11 @@ impl TeamRuntime {
             self.resuming = None;
             if let Ok(id) = revived? {
                 assert_eq!(id, *agent);
-                return Ok(Ok(self.seat_session(id, session.as_ref(), None)));
+                return Ok(Start::Started(self.seat_session(
+                    id,
+                    session.as_ref(),
+                    None,
+                )));
             }
             let session = session.as_ref().expect("only a session resumes");
             let kept =
@@ -2092,18 +2139,18 @@ impl TeamRuntime {
             None => None,
         };
         let started = match started {
-            Some(id) => Ok(id),
-            None => self.spawn(stored, AgentRole::Master, harness, tools, account)?,
+            Some(id) => id,
+            None => match self.spawn(stored, AgentRole::Master, harness, tools, account)? {
+                Start::Started(id) => id,
+                Start::Held => return Ok(Start::Held),
+                Start::Refused(reason) => return Ok(Start::Refused(reason)),
+            },
         };
-        if started.is_ok()
-            && let (Some(session), Some(mode)) = (&session, switch_mode)
-        {
+        if let (Some(session), Some(mode)) = (&session, switch_mode) {
             super::record_switch(&self.connection, project, session.as_str(), launch, mode)?;
         }
-        Ok(started.map(|id| {
-            let (id, note) = self.seat_session(id, session.as_ref(), seeded);
-            (id, note.or(switch_note))
-        }))
+        let (id, note) = self.seat_session(started, session.as_ref(), seeded);
+        Ok(Start::Started((id, note.or(switch_note))))
     }
 
     /// Binds a live master that just started to the session it runs, with the seed its
@@ -2463,22 +2510,29 @@ impl TeamRuntime {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
-            let idle = self
-                .workers
-                .iter()
-                .find(|(id, w)| {
-                    &w.project == project
-                        && w.role == AgentRole::Sub
-                        && w.harness == harness
-                        && w.busy.is_none()
-                        && !w.stopping
-                        && !paused.contains(&w.connection)
-                        && pin.is_none_or(|pin| pin == **id)
-                })
-                .map(|(id, _)| *id);
+            let mut ended = 0;
+            let idle = loop {
+                let found = self
+                    .workers
+                    .iter()
+                    .find(|(id, w)| {
+                        &w.project == project
+                            && w.role == AgentRole::Sub
+                            && w.harness == harness
+                            && w.busy.is_none()
+                            && !w.stopping
+                            && !paused.contains(&w.connection)
+                            && pin.is_none_or(|pin| pin == **id)
+                    })
+                    .map(|(id, _)| *id);
+                match found {
+                    Some(agent) if self.end_session(agent)? => ended += 1,
+                    found => break found,
+                }
+                assert!(ended <= self.workers.len());
+            };
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
-                (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
                 (None, Some(pinned))
@@ -2526,11 +2580,12 @@ impl TeamRuntime {
                         continue;
                     };
                     match self.spawn(stored, AgentRole::Sub, &harness, slot.tools, &account)? {
-                        Ok(agent) => {
+                        Start::Started(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
                         }
-                        Err(problem) => {
+                        Start::Held => continue,
+                        Start::Refused(problem) => {
                             self.fail_task(
                                 task,
                                 &format!(
@@ -2649,25 +2704,26 @@ impl TeamRuntime {
                 let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
                     break;
                 };
-                let started =
-                    self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)?;
-                if let Ok(agent) = started {
-                    self.workers.get_mut(&agent).expect("worker exists").warm = true;
-                }
-                if let Err(problem) = started {
-                    self.connection
-                        .execute(
-                            "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
-                            [project.as_str()],
-                        )
-                        .map_err(error)?;
-                    return self.note(
+                match self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)? {
+                    Start::Started(agent) => {
+                        self.workers.get_mut(&agent).expect("worker exists").warm = true;
+                    }
+                    Start::Held => return Ok(()),
+                    Start::Refused(problem) => {
+                        self.connection
+                            .execute(
+                                "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
+                                [project.as_str()],
+                            )
+                            .map_err(error)?;
+                        return self.note(
                         project,
                         &full_stop(format!(
                             "Keeping sub-agents warm was turned off because a sub-agent could not start: {}",
                             bound_text(&problem, 300)
                         )),
                     );
+                    }
                 }
             }
         }
@@ -2779,10 +2835,15 @@ impl TeamRuntime {
         harness: &str,
         tools: bool,
         account: &TeamAccount,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         self.spawn_run(stored, role, harness, tools, account, None)
     }
 
+    /// Records and launches one new team agent, unless the project already runs the most
+    /// panes or a projects home move holds its folder: the hold is checked in the same write
+    /// transaction that records the agent, so a move planned first holds the start back.
+    /// Takes the setup, the role, harness, tools switch, account and any register restart.
+    /// Returns the started agent, Held, or the plain reason it could not start.
     fn spawn_run(
         &mut self,
         stored: &StoredSetup,
@@ -2791,9 +2852,9 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         again: Option<&HostedRestart>,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         if self.panes(&stored.project_id) >= PANES_PER_PROJECT_MAX {
-            return Ok(Err(format!(
+            return Ok(Start::Refused(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents, the most one project may run at once"
             )));
         }
@@ -2803,7 +2864,7 @@ impl TeamRuntime {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
         if crate::projects_home::move_holds(&tx, &stored.project_folder()).map_err(error)? {
-            return Ok(Err(HOME_MOVING.into()));
+            return Ok(Start::Held);
         }
         tx.execute(
             "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6)",
@@ -2816,7 +2877,12 @@ impl TeamRuntime {
         if role == AgentRole::Sub {
             names::assign_persona(&self.connection, &stored.project_id, id)?;
         }
-        self.launch(stored, id, role, harness, tools, account, again, None)
+        Ok(
+            match self.launch(stored, id, role, harness, tools, account, again, None)? {
+                Ok(agent) => Start::Started(agent),
+                Err(reason) => Start::Refused(reason),
+            },
+        )
     }
 
     /// Wakes a stopped sub-agent (DEC-102), the one way a task pinned to it, the master's
@@ -4579,10 +4645,9 @@ fn work(
         }
     };
     let problem = match started {
-        Ok(AgentSession::Terminal(session)) if adopted_live => {
-            live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
-                .unwrap_or_else(Some)
-        }
+        Ok(AgentSession::Terminal(session)) if adopted_live => live_serve(
+            *session, None, &orders, &reports, &cancel, &leave, true, None,
+        ),
         Ok(session) => serve(session, &orders, &reports, &cancel, &interrupt, &leave),
         Err(problem) => Some(problem),
     };
@@ -4605,7 +4670,7 @@ fn live(
         return None;
     };
     let resume = plan.resume.as_ref();
-    let (started, mut held, keep) = match mode {
+    let (started, held, keep) = match mode {
         Mode::Kept { account, context } => {
             let request = match plan.request(account, plan.access) {
                 Ok(request) => request,
@@ -4648,8 +4713,8 @@ fn live(
             )
         }
     };
-    let problem = match started {
-        Ok(AgentSession::Terminal(session)) => match live_serve(
+    match started {
+        Ok(AgentSession::Terminal(session)) => live_serve(
             *session,
             resume.is_none().then_some(framing.as_str()),
             orders,
@@ -4657,32 +4722,22 @@ fn live(
             cancel,
             leave,
             keep,
-        ) {
-            Ok(problem) => problem,
-            Err(uncertain) => {
-                if let Some((credential, profile)) = held.take() {
-                    credential.retain();
-                    std::mem::forget(profile);
-                }
-                Some(uncertain)
-            }
-        },
-        Ok(other) => {
-            let _ = other.stop();
+            held,
+        ),
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
+            drop(held);
             if resume.is_some() && problem.0 == RESUME_REFUSED {
                 let _ = reports.send(Report::ResumeRefused);
             }
             Some(start_problem(&problem))
         }
-    };
-    drop(held);
-    problem
+    }
 }
 
 /// Takes over the pane of a live master on a signed-in account that an earlier engine left
@@ -4738,52 +4793,39 @@ fn live_adopted(
             ));
         }
     };
-    let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+    let held = Some((credential, profile));
+    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            match live_serve(*session, None, orders, reports, cancel, leave, true) {
-                Ok(problem) => problem,
-                Err(uncertain) => {
-                    credential.retain();
-                    std::mem::forget(profile);
-                    return Some(uncertain);
-                }
-            }
+            live_serve(*session, None, orders, reports, cancel, leave, true, held)
         }
-        Ok(other) => {
-            let _ = other.stop();
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
             if matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(false)) {
-                credential.retain();
-                std::mem::forget(profile);
-                return Some(with_code(
-                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
-                    Some("harness_cleanup_uncertain"),
-                ));
+                return settle_stop(Err(Unstopped::Uncertain), held);
             }
+            drop(held);
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
             ))
         }
-    };
-    drop(credential);
-    drop(profile);
-    problem
+    }
 }
 
 /// Follows every turn of a live master's pane, the owner's included, and reports each
 /// start and end with the turn's reply text, bounded, for landing, usage and reply-line
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Takes the session, the briefing to
-/// type first, the worker's channels and flags, and whether a later engine may take the
-/// pane over. Returns the problem that ended it, if any, or `Err` with the cleanup problem
-/// when the pane's stop did not confirm its processes gone, so the caller keeps the
-/// account's credential copy and custody use.
+/// type first, the worker's channels and flags, whether a later engine may take the pane
+/// over, and the account's credential copy and lease the session holds, if any, which the
+/// stop settles (see [`settle_stop`]). Returns the problem that ended it, if any, a stop's
+/// own problem first.
+#[allow(clippy::too_many_arguments)]
 fn live_serve(
     mut session: TerminalSession,
     framing: Option<&str>,
@@ -4792,7 +4834,8 @@ fn live_serve(
     cancel: &AtomicBool,
     leave: &AtomicBool,
     keep: bool,
-) -> Result<Option<String>, String> {
+    held: Option<Held>,
+) -> Option<String> {
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
@@ -4801,14 +4844,10 @@ fn live_serve(
     if let Some(framing) = framing
         && let Err(problem) = session.send_or_cancel(framing, cancel)
     {
-        if let Err(uncertain) = session.stop() {
-            return Err(with_code(
-                crate::sandbox::warden::CLEANUP_UNCERTAIN,
-                Some(&uncertain.0),
-            ));
-        }
-        return Ok((problem.0 != "launch_cancelled")
-            .then(|| with_code("The master could not be briefed", Some(&problem.0))));
+        return settle_stop(session.stop(), held).or_else(|| {
+            (problem.0 != "launch_cancelled")
+                .then(|| with_code("The master could not be briefed", Some(&problem.0)))
+        });
     }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
@@ -4863,13 +4902,47 @@ fn live_serve(
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
     if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
         session.leave();
-    } else if let Err(uncertain) = session.stop() {
-        return Err(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(&uncertain.0),
-        ));
+        drop(held);
+        return None;
     }
-    Ok(problem)
+    settle_stop(session.stop(), held).or(problem)
+}
+
+/// The account's credential copy and lease an agent's harness holds while it runs.
+type Held = (AgentCredential, NativeProfileUse);
+
+/// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
+/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
+/// access stop that left processes running, or could not list them, keeps both until a
+/// listing shows none running (see [`crate::harnesses::leftovers::Leftovers::hold`]), with
+/// the copy's keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
+/// harness held, if anything. Output: none for a clean stop, or the plain problem, naming
+/// what still runs and that Full access cannot stop it.
+fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> Option<String> {
+    match stopped {
+        Ok(_) => {
+            drop(held);
+            None
+        }
+        Err(Unstopped::Uncertain) => {
+            if let Some((credential, profile)) = held {
+                credential.retain();
+                std::mem::forget(profile);
+            }
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN),
+            ))
+        }
+        Err(Unstopped::Left(left)) => {
+            let problem = with_code(&left.plain(), Some(left.code()));
+            if let Some((mut credential, profile)) = held {
+                credential.stop_renewing();
+                left.hold(Some(profile.account().clone()), (credential, profile));
+            }
+            Some(problem)
+        }
+    }
 }
 
 enum Next {
@@ -4907,8 +4980,8 @@ fn next_turn(
 
 /// Serves turns on an agent whose harness keeps running between them. At the end it stops
 /// the agent, or, when the engine quits with the agent kept, stops the running turn and
-/// leaves the pane running for the next engine. A stop its warden did not confirm ends the
-/// agent with that problem.
+/// leaves the pane running for the next engine. A stop its warden did not confirm, or a
+/// Full access stop that left processes running, ends the agent with that problem.
 fn serve(
     mut session: AgentSession,
     orders: &Receiver<Order>,
@@ -4951,18 +5024,17 @@ fn serve(
     if problem.is_none() && leave.load(Ordering::SeqCst) {
         let _ = session.interrupt();
         session.leave();
-    } else if let Err(uncertain) = session.stop() {
-        problem = Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(&uncertain.0),
-        ));
+    } else if let Some(stopped) = settle_stop(session.stop(), None) {
+        problem = Some(stopped);
     }
     problem
 }
 
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
-/// stop its warden did not confirm keeps both for the engine's life and ends the agent.
+/// stop its warden did not confirm keeps both for the engine's life and ends the agent; a
+/// Full access stop that left processes running keeps both until they end, names them and
+/// ends the agent.
 /// A sub-agent's turn continues the conversation its previous turn recorded, or the one the
 /// plan resumes for a woken agent, and a new conversation is reported so a later wake
 /// continues it; a refused resume is reported and ends the agent as a kept one does. A
@@ -5051,27 +5123,15 @@ fn per_turn(
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
         }
-        let stopped = session.stop();
-        let reusable = stopped.is_ok()
+        let stopped = settle_stop(session.stop(), Some((credential, profile)));
+        let reusable = stopped.is_none()
             && matches!(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = match stopped {
-            Ok(_) => {
-                drop(credential);
-                drop(profile);
-                (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-            }
-            Err(uncertain) => {
-                credential.retain();
-                std::mem::forget(profile);
-                Some(with_code(
-                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
-                    Some(&uncertain.0),
-                ))
-            }
-        };
+        let closed = stopped.or_else(|| {
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
+        });
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }
@@ -5080,7 +5140,6 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
-const HOME_MOVING: &str = "the projects folder is being moved, so agents start once the move ends";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
@@ -5333,9 +5392,6 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
-/// An owner line that names the plain code behind it in the style every window uses, so a
-/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
-/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, any other refusal names its plain code.
 /// Input: the launch error. Output: the line.
@@ -5346,6 +5402,9 @@ fn start_problem(problem: &LaunchError) -> String {
     }
 }
 
+/// An owner line that names the plain code behind it in the style every window uses, so a
+/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
+/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 fn with_code(sentence: &str, cause: Option<&str>) -> String {
     match cause {
         Some(code) => {

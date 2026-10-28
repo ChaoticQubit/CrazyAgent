@@ -955,7 +955,11 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
                 .unwrap();
         }
     }
-    let found = records(home.path(), Format::Claude);
+    let (found, _, cut) = records(home.path(), Format::Claude);
+    assert!(
+        cut,
+        "a walk stopped at the entry bound says the home was cut"
+    );
     assert_eq!(found.len(), FILES_PER_SCAN_MAX);
     let folders: std::collections::BTreeSet<&Path> =
         found.iter().map(|path| path.parent().unwrap()).collect();
@@ -965,12 +969,13 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
     );
 }
 
-/// A home past the entry bound still counts the record that changed last: the walk enters
-/// the most recently changed folder first and reads every entry of it, so the bound leaves
-/// out only folders that changed before. Here that record is the last entry of a folder of
-/// 1,100 records that a walk in plain directory order reaches last.
+/// A home past the entry bound still counts the record written last, however its agent dates
+/// it, and its reading says it is partial until a scan reads the home whole. The walk orders
+/// by the inode change time, which no agent can set, and enters the folder changed last
+/// first. Here that record is the last entry of a folder of 1,100 records that a walk in
+/// plain directory order reaches last, and the agent set both to an old modification time.
 #[test]
-fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_partial() {
     const FOLDERS: usize = 20;
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();
@@ -995,25 +1000,264 @@ fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
     };
     let folders = listed(&projects);
     let last = folders[0].clone();
-    for dir in &folders[1..] {
-        std::fs::File::open(dir)
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    for path in [&live, &last] {
+        std::fs::File::open(path)
             .unwrap()
             .set_modified(at(0))
             .unwrap();
     }
-    let live = listed(&last).pop().unwrap();
-    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
-    let added = scan_home(
-        &db,
-        home.path(),
-        Format::Claude,
-        &attribution(RunKind::Agent, None),
-        NOW,
-    )
-    .unwrap();
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let added = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    let cut = partial(&db);
+    for dir in &folders[1..16] {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
     assert_eq!(
-        (added.input, added.output),
-        (7, 3),
-        "the record that changed last is counted"
+        ((added.input, added.output), cut, partial(&db)),
+        ((7, 3), Some(1), Some(0)),
+        "the record written last is counted, and the reading is partial only while the home is cut"
+    );
+}
+
+/// MSL2B-R3-1: a home of more records than one scan reads, all well inside the walk's
+/// bounds, reads as partial while a record the scan leaves out holds lines no scan counted,
+/// however many scans pass, and only then. An agent rewriting its other records keeps its
+/// live session record out of every scan; once a scan reads it, the records left out are
+/// all counted and the reading is complete again, as it is for a home that grows past the
+/// bound with records already counted.
+#[test]
+fn a_home_whose_scan_leaves_out_an_uncounted_record_reads_as_partial_until_it_is_read() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let live = folder.join("live.jsonl");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    pause();
+    let others: Vec<PathBuf> = (0..FILES_PER_SCAN_MAX)
+        .map(|index| folder.join(format!("o{index:03}.jsonl")))
+        .collect();
+    for other in &others {
+        append(other, "\n");
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((0, 0), Some(1)),
+        "the first scan leaves out the live record, which no scan read"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(1)),
+        "a second scan that leaves it out unread still reads as partial"
+    );
+    append(&live, &claude_assistant("m2", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan(NOW + 2),
+        ((12, 5), Some(0)),
+        "the live record changed last is read whole, and the record left out was counted"
+    );
+    let grown = folder.join("grown.jsonl");
+    append(&grown, "\n");
+    assert_eq!(
+        scan(NOW + 3),
+        ((0, 0), Some(0)),
+        "a home that grows past the bound with counted records reads as complete"
+    );
+
+    append(&live, &claude_assistant("m3", 1, 1, 0, 0, "end_turn"));
+    pause();
+    for other in others.iter().chain([&grown]) {
+        append(other, "\n");
+    }
+    assert_eq!(
+        scan(NOW + 4),
+        ((0, 0), Some(1)),
+        "an agent rewriting its other records keeps the changed live record out, and the reading says so"
+    );
+    assert_eq!(
+        scan(NOW + 5),
+        ((0, 0), Some(1)),
+        "the next scan that leaves it out unread says so again"
+    );
+    std::fs::remove_file(&grown).unwrap();
+    std::fs::remove_file(&others[0]).unwrap();
+    assert_eq!(
+        scan(NOW + 6),
+        ((1, 1), Some(0)),
+        "once the home fits one scan the live record is read and the reading is complete"
+    );
+}
+
+/// MSL2B-R3-1: a home whose records were all counted, in which one scan leaves out a record
+/// for the first time because one more record arrived, reads as complete: the record left
+/// out was read when it was among the newest, so no usage is missing.
+#[test]
+fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    for index in 0..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    append(
+        &folder.join("s256.jsonl"),
+        &claude_assistant("m256", 1, 1, 0, 0, "end_turn"),
+    );
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((1, 1), Some(0)),
+        "the record left out was counted, so the reading is complete"
+    );
+}
+
+/// CUT-L1: a record left out of a scan whose bytes past its counted lines hold no line a scan
+/// could count reads as complete: a last line torn by a stopped agent, alone or after the
+/// rest of a line longer than one read that the next read would skip (CUTT-L1).
+#[test]
+fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    let torn_line = "{\"type\":\"assistant\",\"message\":{\"id\":\"t2\"";
+    let long = folder.join("long.jsonl");
+    append(&long, &claude_assistant("l1", 1, 1, 0, 0, "end_turn"));
+    append(
+        &long,
+        &format!(
+            "{{\"type\":\"assistant\",\"pad\":\"{}\"}}\n",
+            "x".repeat(READ_BYTES_MAX + 10)
+        ),
+    );
+    append(&long, torn_line);
+    pause();
+    let torn = folder.join("torn.jsonl");
+    append(&torn, &claude_assistant("t1", 1, 1, 0, 0, "end_turn"));
+    append(&torn, torn_line);
+    pause();
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(0)),
+        "the next read of the long record skips one read of its long line"
+    );
+    append(
+        &folder.join("n1.jsonl"),
+        &claude_assistant("n1", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 2),
+        ((1, 1), Some(0)),
+        "the long record left out while skipping holds only the rest of its skipped line and a torn line, so the reading is complete"
+    );
+    append(
+        &folder.join("n2.jsonl"),
+        &claude_assistant("n2", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 3),
+        ((1, 1), Some(0)),
+        "the record left out holds only a torn line past its counted lines, so the reading is complete"
+    );
+}
+
+/// CUT-L1: one scan reads at most `READ_BYTES_MAX` bytes of the tails of the records it left
+/// out; a home whose left-out tails pass that bound reads as partial rather than complete.
+#[test]
+fn a_home_whose_left_out_tails_pass_one_read_reads_as_partial() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    for name in ["a", "b"] {
+        let record = folder.join(format!("{name}.jsonl"));
+        append(&record, &claude_assistant(name, 1, 1, 0, 0, "end_turn"));
+        append(&record, &"x".repeat(READ_BYTES_MAX / 2 + 1));
+        pause();
+    }
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    pause();
+    for name in ["n1", "n2"] {
+        append(
+            &folder.join(format!("{name}.jsonl")),
+            &claude_assistant(name, 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((2, 2), Some(1)),
+        "left-out tails past one read in all are not read through, so the reading stays partial"
     );
 }

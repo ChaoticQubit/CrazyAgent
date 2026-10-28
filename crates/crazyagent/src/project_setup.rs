@@ -654,6 +654,11 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    TeamMessages {
+        project: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -670,6 +675,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
 }
 
@@ -2170,15 +2176,19 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 18] = [
+const REMOVED_WITH_PROJECT: [&str; 22] = [
     "research_jobs",
     "onboarding",
     "team_messages",
+    "team_events",
+    "team_agent_messages",
+    "team_message_settings",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
     "team_time_limits",
     "team_master_switch",
+    "team_settings_revision",
     "team_session_switches",
     "team_finished_view",
     "team_paused_projects",

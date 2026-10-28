@@ -1,4 +1,4 @@
-use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
+use super::{AgentSession, KEY_FILE_BYTES_MAX, KeyFile, Resume, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
@@ -165,11 +165,14 @@ impl PaneRecord {
         run_time.saturating_sub(ran)
     }
 
+    /// Guards the key file the record names, as the pane's launch wrote it. The file sits in
+    /// the agent-writable account home, so it is read through one open that follows no link
+    /// and waits on no FIFO, and taken only as a regular file of at most
+    /// `KEY_FILE_BYTES_MAX` bytes. Input: the record. Output: the guard, or none.
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
-        std::fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.file_type().is_file())
-            .then(|| KeyFile(path.clone()))
+        let content = crate::platform::read_plain_file(path, KEY_FILE_BYTES_MAX)?;
+        Some(KeyFile::new(path.clone(), content.as_bytes()))
     }
 }
 
@@ -276,6 +279,10 @@ impl TerminalSession {
             stopped: false,
             group_ended: false,
             uncertain: false,
+            unconfined: !matches!(
+                record.access,
+                Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
+            ),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

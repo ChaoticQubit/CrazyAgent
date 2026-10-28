@@ -128,7 +128,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
     setLimits(next);
     setBusy(true);
-    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle), "team time limits");
+    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle, status.settings_revision ?? 0), "team time limits");
     setBusy(false);
     setLimits(null);
     setNote(message);
@@ -138,7 +138,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   async function chooseSwitch(mode: SwitchMode) {
     setOnSwitch(mode);
     setBusy(true);
-    const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
+    const message = changeNote(await setOnHarnessSwitch(projectId, mode, status.settings_revision ?? 0), "the On harness switch setting");
     setBusy(false);
     setOnSwitch(null);
     setNote(message);

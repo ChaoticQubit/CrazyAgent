@@ -6,6 +6,10 @@ use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
+/// One end-to-end test per option of each agent Messages timeline setting, through a real
+/// engine, its owner connection and a real tmux pane.
+mod message_timeline;
+
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
 /// process-wide git setup lock, so parallel New Projects queue behind each
@@ -1196,7 +1200,13 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
             VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0);
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
-            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');",
+            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
+            INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
+            VALUES ('setup-pooled',1,NULL,'question','Which theme?','delivered',0);
+            INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
+            VALUES ('setup-pooled',1,'master','message','Start with the header',0);
+            INSERT INTO team_message_settings(project,keep_master,kept,progress,results,owner_items,page_size)
+            VALUES ('setup-pooled',0,500,1,'full',1,25);",
         )
         .unwrap();
 
@@ -1225,6 +1235,22 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         0,
         "its agents' kept conversations go with it"
     );
+    for (table, what) in [
+        ("team_events", "its agents' events"),
+        (
+            "team_agent_messages",
+            "the words kept for its agents' timelines",
+        ),
+        ("team_message_settings", "its Messages settings"),
+    ] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{what} go with it"
+        );
+    }
     assert!(
         Path::new(&folder)
             .join(".crazyagent/context/brief.md")
@@ -1540,6 +1566,142 @@ async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply(
     assert_eq!(
         engine.rows("SELECT count(*) FROM team_paused_projects WHERE project='setup-pooled'"),
         1
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// The owner reads one sub-agent's Messages timeline through the engine (MSG-B) and saves the
+/// project's Messages settings with a team action (MSG-E): the page carries the speakers the
+/// engine stored and the saved settings, the team status shows them too, and a bad page size,
+/// another project's agent or an unlisted setting is refused with a plain code.
+#[tokio::test]
+async fn the_owner_reads_a_sub_agent_s_messages_timeline_and_saves_its_settings_through_the_engine()
+{
+    use crate::team::agent_messages::{EntryKind, MessageSettings, ResultsShown, Speaker};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(ENGINE_WAIT).unwrap();
+    let agent = |project: &str| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,stopped_ms) VALUES (?1,'sub','codex',0,'stopped',1,1,1)",
+                [project],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let ada = agent("setup-pooled");
+    let far = agent("elsewhere");
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,delivered,created_ms,finished_ms)
+             VALUES ('setup-pooled','master','codex',0,'Build the page','done',{ada},1,10,10);
+             INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms)
+             VALUES ('setup-pooled',{ada},'master','message','Start with the header',20);
+             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
+             VALUES ('setup-pooled',{ada},NULL,'question','Which theme?','delivered',30);"
+        ))
+        .unwrap();
+    drop(connection);
+
+    let page = owner
+        .team_agent_messages(project.clone(), ada, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (Speaker::Agent, EntryKind::Question, Some("Which theme?")),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Start with the header")
+            ),
+            (Speaker::Master, EntryKind::Task, Some("Build the page")),
+        ]
+    );
+    assert_eq!(page.settings, MessageSettings::default());
+    for (agent, limit, code) in [
+        (ada, Some(0), "team_messages_limit_invalid"),
+        (
+            ada,
+            Some(crate::team::agent_messages::PAGE_MAX + 1),
+            "team_messages_limit_invalid",
+        ),
+        (far, None, "team_agent_not_found"),
+    ] {
+        let refused = owner
+            .team_agent_messages(project.clone(), agent, None, limit)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.0);
+        assert_eq!(refused, Err(code.to_owned()), "{agent} {limit:?}");
+    }
+
+    let chosen = MessageSettings {
+        page_size: 25,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        ..MessageSettings::default()
+    };
+    let saved = owner
+        .team_action(
+            crate::team::TeamAction::MessageSettings {
+                project_id: project.clone(),
+                settings: chosen,
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert_eq!(
+        owner
+            .team_agent_messages(project.clone(), ada, None, None)
+            .await
+            .unwrap()
+            .settings,
+        chosen
+    );
+    assert_eq!(
+        owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .message_settings,
+        chosen
+    );
+    let unlisted = owner
+        .team_action(
+            crate::team::TeamAction::MessageSettings {
+                project_id: project.clone(),
+                settings: MessageSettings {
+                    kept_per_project: 1000,
+                    ..chosen
+                },
+            },
+            3,
+        )
+        .await;
+    assert_eq!(
+        unlisted.map(|_| ()).map_err(|error| error.0),
+        Err("team_message_settings_invalid".to_owned())
     );
     drop(owner);
     engine.stop().await;

@@ -1,6 +1,6 @@
 use super::intake::NOT_READY;
 use super::new_project_input::TextInput;
-use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
+use super::new_project_view::{Look, Row, columns, list_row, printable, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
@@ -12,8 +12,11 @@ use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::cell::Cell;
 
 const LIST_POLL_MS: i64 = 5_000;
+const DIFF_HEADER: &str = "diff --git ";
+const QUOTED_HEADER: &str = "diff --git \"";
 const DIFF_LINES_MAX: usize = 20_000;
 const DIFF_AHEAD: usize = 40;
 const DIFF_PAGE_ROWS: usize = 20;
@@ -50,6 +53,8 @@ struct Diff {
     top: usize,
     moved: bool,
     seen_all: bool,
+    skip: usize,
+    width: Cell<usize>,
 }
 
 impl Diff {
@@ -69,6 +74,8 @@ impl Diff {
             top: 0,
             moved,
             seen_all: false,
+            skip: 0,
+            width: Cell::new(0),
         }
     }
 
@@ -113,6 +120,72 @@ impl Diff {
         assert!(self.lines.len() <= DIFF_LINES_MAX);
         assert!(self.files.len() <= FILES_MAX);
         assert!(self.files_done || self.next.is_some());
+    }
+
+    /// Whether a diff header line starts a file that carries the instruction file mark; a
+    /// quoted header, which git writes for unusual names, counts when any file is marked.
+    /// Input: the header line. Output: true for a marked file.
+    fn marked_header(&self, header: &str) -> bool {
+        let instructions = instruction_headers(&self.files);
+        instructions.iter().any(|known| known == header)
+            || (header.starts_with(QUOTED_HEADER) && !instructions.is_empty())
+    }
+
+    /// How many view rows one diff line takes: its wrapped rows at the width last drawn when
+    /// it belongs to a marked instruction file, which is shown in full, else one, as other
+    /// lines are cut. Input: the line index. Output: the rows, at least one.
+    fn rows_of(&self, index: usize) -> usize {
+        let width = self.width.get();
+        let Some(line) = self.lines.get(index) else {
+            return 1;
+        };
+        let marked = self.lines[..=index]
+            .iter()
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(|header| self.marked_header(header));
+        if width == 0 || !marked {
+            return 1;
+        }
+        crate::tui::text::wrap(&printable(line.clone()), width)
+            .len()
+            .max(1)
+    }
+
+    /// Moves the view down by rows: through the rest of a marked line's wrapped rows before
+    /// the next line, so a marked line taller than the view can be read to its end.
+    /// Input: the rows.
+    fn down(&mut self, rows: usize) {
+        let last = self.lines.len().saturating_sub(1);
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip + 1 < self.rows_of(self.top) {
+                self.skip += 1;
+            } else if self.top < last {
+                self.top += 1;
+                self.skip = 0;
+            } else {
+                break;
+            }
+        }
+        assert!(self.top <= last && self.skip < self.rows_of(self.top));
+    }
+
+    /// Moves the view up by rows: through a marked line's wrapped rows, entering a line
+    /// above at its last row. Input: the rows.
+    fn up(&mut self, rows: usize) {
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip > 0 {
+                self.skip -= 1;
+            } else if self.top > 0 {
+                self.top -= 1;
+                self.skip = self.rows_of(self.top) - 1;
+            } else {
+                break;
+            }
+        }
+        assert!(self.skip < self.rows_of(self.top));
     }
 }
 
@@ -485,14 +558,11 @@ impl ProjectChanges {
         let Some(diff) = self.diff.as_mut() else {
             return false;
         };
-        let last = diff.lines.len().saturating_sub(1);
         match code {
-            KeyCode::Up => diff.top = diff.top.saturating_sub(1),
-            KeyCode::Down => diff.top = (diff.top + 1).min(last),
-            KeyCode::PageUp => diff.top = diff.top.saturating_sub(DIFF_PAGE_ROWS),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                diff.top = (diff.top + DIFF_PAGE_ROWS).min(last)
-            }
+            KeyCode::Up => diff.up(1),
+            KeyCode::Down => diff.down(1),
+            KeyCode::PageUp => diff.up(DIFF_PAGE_ROWS),
+            KeyCode::PageDown | KeyCode::Char(' ') => diff.down(DIFF_PAGE_ROWS),
             KeyCode::Esc => self.diff = None,
             _ => return false,
         }
@@ -699,8 +769,41 @@ impl ProjectChanges {
             return lines;
         }
         let text_rows = room.saturating_sub(lines.len()).max(1);
-        for line in diff.lines.iter().skip(diff.top).take(text_rows) {
-            lines.push(Row::of(line.clone(), diff_style(line, look)).pad(content));
+        diff.width.set(content.max(1));
+        let mut inside = diff
+            .lines
+            .iter()
+            .take(diff.top)
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(|header| diff.marked_header(header));
+        let mut shown = 0;
+        for (index, line) in diff.lines.iter().enumerate().skip(diff.top) {
+            if shown >= text_rows {
+                break;
+            }
+            if line.starts_with(DIFF_HEADER) {
+                inside = diff.marked_header(line);
+            }
+            let style = diff_style(line, look);
+            if inside {
+                let pieces = crate::tui::text::wrap(&printable(line.clone()), content.max(1));
+                let skip = match index == diff.top {
+                    true => diff.skip.min(pieces.len().saturating_sub(1)),
+                    false => 0,
+                };
+                for piece in pieces.into_iter().skip(skip).take(text_rows - shown) {
+                    lines.push(Row::of(piece, style).pad(content));
+                    shown += 1;
+                }
+                if line.is_empty() {
+                    lines.push(Row::of(String::new(), style).pad(content));
+                    shown += 1;
+                }
+            } else {
+                lines.push(Row::of(line.clone(), style).pad(content));
+                shown += 1;
+            }
         }
         lines.truncate(room.max(1));
         lines
@@ -1003,6 +1106,9 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
             FileMark::Attributes => ".gitattributes: changes how Git treats files",
             FileMark::Modules => ".gitmodules: changes the project's submodules",
             FileMark::Mode => "File mode changed",
+            FileMark::Instructions => {
+                "Instruction file: changes what every agent of this project is told"
+            }
         };
         if !marks.contains(&word) {
             marks.push(word);
@@ -1027,6 +1133,21 @@ fn conflict_line(files: &[String]) -> String {
     format!(
         "These files also changed on your branch: {shown}{more}. Ask the agent to update, or discard."
     )
+}
+
+/// The diff header lines of the changed files that carry the instruction file mark, as the
+/// engine's patch writes them, so the diff view shows those files' lines in full rather than
+/// cut. A quoted header, which git writes for unusual names, counts when any file is marked.
+/// Input: the files. Output: the headers.
+fn instruction_headers(files: &[ChangedFile]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::Instructions))
+        .map(|file| {
+            let old = file.old_path.as_deref().unwrap_or(&file.path);
+            format!("{DIFF_HEADER}a/{old} b/{}", file.path)
+        })
+        .collect()
 }
 
 fn diff_line(line: &str) -> String {

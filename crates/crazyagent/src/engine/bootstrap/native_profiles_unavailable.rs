@@ -55,6 +55,10 @@ impl Drop for NativeProfileRelease {
 pub(crate) enum NativeProfileUse {}
 
 impl NativeProfileUse {
+    pub(crate) fn account(&self) -> &crate::protocol::CredentialRef {
+        match *self {}
+    }
+
     pub(crate) fn profile_path(&self) -> Result<PathBuf, EngineError> {
         match *self {}
     }
@@ -83,6 +87,12 @@ impl AgentCredential {
     /// No value is ever made, so this never runs.
     pub(crate) fn retain(self) {
         match self {}
+    }
+
+    /// Matches the Unix keeper stop for a copy a Full access agent's processes may read.
+    /// No value is ever made, so this never runs.
+    pub(crate) fn stop_renewing(&mut self) {
+        match *self {}
     }
 }
 

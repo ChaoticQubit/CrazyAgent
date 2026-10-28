@@ -1048,16 +1048,19 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
 }
 
 /** Sets how long one task turn and one agent session of the team may run, and how long a
- * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
- * seconds. Output: the engine receipt, not ready, or a plain error. */
-export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+ * sub-agent may sit idle; null is no limit. Inputs: the project id, the three limits in
+ * seconds and the team settings revision the window read. Output: the engine receipt, refused
+ * as stale once another client changed the settings, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
- * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
-export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+ * Inputs: the project id, the mode and the team settings revision the window read. Output:
+ * the engine receipt, refused as stale once another client changed the settings, not ready,
+ * or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode, revision: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation: nextGeneration() });
 }
 
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in

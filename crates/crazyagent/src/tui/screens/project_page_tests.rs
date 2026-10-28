@@ -137,6 +137,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::ReviewMemory { .. } => "review",
                         SetupQuery::Team { .. } => "team",
                         SetupQuery::TeamChange { .. } => "team change",
+                        SetupQuery::TeamMessages { .. } => "team messages",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
                         SetupQuery::ReadPaths { .. } => "read paths",
@@ -2118,6 +2119,106 @@ async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
     assert!(!line.contains("in Changes"), "{line}");
 }
 
+<<<<<<< HEAD
+async fn waiting_header(engine: &Engine, place: Place) -> String {
+    let mut connection = engine.connect();
+    let mut ctx = ctx(160, 30);
+    let screen = open(&place, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    render(&mut shell, 160, 30)
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_page_counts_its_own_change_sets_and_the_rest_as_other_projects() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let todo = engine.project("todo-app", "Todo App", 2).await;
+    let work = tempfile::Builder::new()
+        .prefix("ca-tui-here-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let (repo, home) = (base.join("repo"), base.join("home"));
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let owner = |args: &[&str]| git_in(&home, &repo, args);
+    owner(&["init", "-q", "--template=", "-b", "main"]);
+    owner(&["config", "user.name", "Repo Owner"]);
+    owner(&["config", "user.email", "owner@example.invalid"]);
+    owner(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README"), "one\n").unwrap();
+    owner(&["add", "README"]);
+    owner(&["commit", "-q", "-m", "Start"]);
+    let root = engine.root.path().to_path_buf();
+    pending_change(&root, &home, &repo, &notes, "agent-1");
+    pending_change(&root, &home, &repo, &notes, "agent-2");
+    pending_change(&root, &home, &repo, &todo, "agent-3");
+    let removed = ProjectId::new("removed-project").unwrap();
+    pending_change(&root, &home, &repo, &removed, "agent-4");
+    let notes_page = || Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab: ProjectTab::Agents,
+    };
+    let todo_page = || Place::Project {
+        id: todo.clone(),
+        name: "Todo App".into(),
+        tab: ProjectTab::Agents,
+    };
+
+    let line = waiting_header(&engine, notes_page()).await;
+    assert!(
+        line.contains("2 change sets wait in Changes, 1 in other projects"),
+        "{line}"
+    );
+    let line = waiting_header(&engine, todo_page()).await;
+    assert!(
+        line.contains("1 change set waits in Changes, 2 in other projects"),
+        "{line}"
+    );
+    let line = waiting_header(&engine, Place::Home).await;
+    assert!(
+        line.contains("3 change sets wait in your projects"),
+        "{line}"
+    );
+    assert!(!line.contains("in Changes"), "{line}");
+    let line = waiting_header(
+        &engine,
+        Place::Team {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+    )
+    .await;
+    assert!(
+        line.contains("2 change sets wait in Changes, 1 in other projects"),
+        "{line}"
+    );
+
+    let set = engine.controller.change_sets(todo.clone()).await.unwrap();
+    assert_eq!(set.len(), 1);
+    engine
+        .controller
+        .discard_changes(set[0].id.clone(), set[0].head.clone())
+        .await
+        .unwrap();
+    let line = waiting_header(&engine, notes_page()).await;
+    assert!(line.contains("2 change sets wait in Changes"), "{line}");
+    assert!(!line.contains("other projects"), "{line}");
+    let line = waiting_header(&engine, todo_page()).await;
+    assert!(
+        line.contains("2 change sets wait in other projects"),
+        "{line}"
+    );
+    assert!(!line.contains("in Changes"), "{line}");
+=======
 async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs: u32) {
     let client = Client::new(
         engine.root.path().join("e.sock"),
@@ -2195,6 +2296,7 @@ async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desk
         (Some(1800), Some(7200)),
         "a change from the fresh read applies and keeps the desktop session limit"
     );
+>>>>>>> fix/tui-team-route
 }
 
 async fn team_settings_after(keys: &[char]) -> (crate::team::TeamStatus, String) {

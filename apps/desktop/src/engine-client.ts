@@ -774,6 +774,8 @@ export interface TeamStatus {
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
+  message_settings?: MessageSettings;
+  settings_revision?: number;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -787,6 +789,60 @@ export interface TeamStatus {
   messages: TeamMessage[];
   plan: TeamPlanStep[];
   events: TeamEventsView;
+}
+
+/** How a finished or failed task's result shows in a Messages timeline: its first line until
+ * the owner opens it, or the whole result. */
+export type ResultsShown = "first_line" | "full";
+
+/** A project's Messages settings, stored whole: whether the master's messages and answers to
+ * its sub-agents are kept, how many kept messages the project holds, whether progress events
+ * and the owner's own tasks and prompts show, how results show and the page size. */
+export interface MessageSettings {
+  keep_master_messages: boolean;
+  kept_per_project: number;
+  progress_shown: boolean;
+  results: ResultsShown;
+  owner_items_shown: boolean;
+  page_size: number;
+}
+
+/** Who a Messages entry comes from, as the engine stored it, never as its text says. */
+export type MessageSpeaker = "master" | "owner" | "agent" | "engine";
+
+/** What one Messages entry is. */
+export type MessageKind = "task" | "wake" | "message" | "answer" | "prompt" | "question" | "progress" | "change_set_ready" | "finished" | "failed";
+
+/** Which store a Messages entry comes from; with its time and id it orders the timeline. */
+export type MessageSource = "task" | "message" | "event";
+
+/** Where a Messages page ends; the next page holds the entries before it. */
+export interface MessageCursor {
+  at_ms: number;
+  source: MessageSource;
+  id: number;
+}
+
+/** One entry of a sub-agent's Messages timeline. `text` is null for a master's message the
+ * project kept no text of; `result` is a finished task's result or a failed task's problem. */
+export interface AgentMessage extends MessageCursor {
+  from: MessageSpeaker;
+  kind: MessageKind;
+  text: string | null;
+  task: number | null;
+  state: TeamEventState | null;
+  result: string | null;
+  result_more: boolean;
+}
+
+/** One page of a sub-agent's Messages timeline, newest first, with whether older entries
+ * remain and the settings it was read under. */
+export interface AgentMessages {
+  project_id: string;
+  agent: number;
+  entries: AgentMessage[];
+  older: boolean;
+  settings: MessageSettings;
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
@@ -885,13 +941,14 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
 }
 
 /** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
- * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
-export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
+ * limits in seconds or null for no limit, the team settings revision read and a generation.
+ * Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation });
 }
 
-export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, revision: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation });
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
@@ -1664,11 +1721,13 @@ export interface AgentView {
 }
 
 /** Something other than an agent that holds an account's sign-in while it runs: a master
- * conversation's turn, ended by closing that conversation, or a research job, ended by
- * cancelling it. */
+ * conversation's turn, ended by closing that conversation, a research job, ended by
+ * cancelling it, or processes a Full access agent left running, named by `report`, which
+ * signing the account out lets go of while they still run. */
 export type Holder =
   | { kind: "master"; project: string; session: string }
-  | { kind: "research"; project: string; job: number; title: string };
+  | { kind: "research"; project: string; job: number; title: string }
+  | { kind: "leftover"; report: string };
 
 /** Everything that holds one account's sign-in now: its running agents and other holders. */
 export interface AccountUse {

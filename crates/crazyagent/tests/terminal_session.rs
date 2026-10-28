@@ -4,6 +4,7 @@ use crazyagent::harnesses::interactive::KEY_FILE;
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
 };
+use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::terminal_session::TerminalSession;
 use crazyagent::research::runner::{ResearchLimits, ResearchRunner};
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
@@ -11,6 +12,7 @@ use crazyagent::terminal::{AgentId, FOLDER, Host};
 use rustix::process::{
     Pid, Signal, getpgid, kill_process, test_kill_process, test_kill_process_group,
 };
+use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -148,7 +150,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         None
     );
 
-    assert_eq!(session.stop(), Ok(None));
+    assert_eq!(session.stop().unwrap(), None);
     assert!(!host.alive().unwrap().contains(&agent));
     assert!(!key_file.exists());
     let config = std::fs::read_to_string(home.join(".claude.json")).unwrap();
@@ -215,7 +217,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         seen.ends_with(pasted),
         "a prompt typed before the app reads keys loses its Enter: {seen:?}"
     );
-    assert_eq!(session.stop(), Ok(None));
+    assert_eq!(session.stop().unwrap(), None);
 }
 
 /// Waits until `wanted` holds, at most `wait`. Input: the condition and the wait.
@@ -283,6 +285,7 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         model: None,
         tools: true,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -337,7 +340,7 @@ fn stopping_a_pane_session_ends_every_process_left_in_its_group() {
     let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
     let server = background(&pane.home, group);
 
-    assert_eq!(pane.session.stop(), Ok(None));
+    assert_eq!(pane.session.stop().unwrap(), None);
     assert!(!pane.host.alive().unwrap().contains(&pane.agent));
     let ended = within(Duration::from_secs(10), || {
         test_kill_process(server).is_err()
@@ -371,8 +374,8 @@ fn a_pane_gone_unseen_reports_its_surviving_group_uncertain_without_killing_it()
     let survived = test_kill_process(server).is_ok();
     let _ = kill_process(server, Signal::KILL);
     assert_eq!(
-        stopped.map_err(|problem| problem.0),
-        Err("harness_cleanup_uncertain".to_owned()),
+        stopped.map_err(|problem| problem.code()),
+        Err("harness_cleanup_uncertain"),
         "a pane stop confirmed a stop while a process of its group still ran"
     );
     assert!(
@@ -406,7 +409,7 @@ fn stopping_a_pane_session_ends_what_its_tools_started_in_their_own_sessions() {
         ended,
         "a process the pane agent started in its own session outlived the stop"
     );
-    assert_eq!(stopped, Ok(None));
+    assert_eq!(stopped.map_err(|problem| problem.code()), Ok(None));
 }
 
 /// PR-2 (rv-code pre-review of RV-DS-75): a research pane an earlier engine left running,
@@ -444,5 +447,133 @@ fn a_research_pane_an_earlier_engine_left_is_swept_with_what_it_started() {
     assert!(
         ended,
         "a research pane an earlier engine left kept its background process after the sweep"
+    );
+}
+
+const LEAVING_STAND_IN: &str = "#!/bin/sh\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"$ENV{HOME}/descendant.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &\n(/usr/bin/nohup /bin/sleep 31 < /dev/null > /dev/null 2>&1 & echo $! > \"$HOME/member.pid\")\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+
+/// Kills, by id, the processes a test's stand-in agent left, however the test ends.
+struct Leftover(Vec<rustix::process::Pid>);
+
+impl Drop for Leftover {
+    fn drop(&mut self) {
+        for process in &self.0 {
+            let _ = rustix::process::kill_process(*process, rustix::process::Signal::KILL);
+        }
+    }
+}
+
+fn pid_in(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
+    std::fs::read_to_string(folder.join(name))
+        .ok()
+        .and_then(|text| text.trim().parse::<i32>().ok())
+        .and_then(rustix::process::Pid::from_raw)
+}
+
+/// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
+/// once it has ended.
+fn parent_of(process: rustix::process::Pid) -> Option<i32> {
+    let listing = crazyagent::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    String::from_utf8_lossy(&listing.stdout).trim().parse().ok()
+}
+
+/// The ids and programs a leftovers report names. Input: the report. Output: them.
+fn named_in(report: &str) -> BTreeMap<i32, String> {
+    let (_, named) = report.split_once("still running: ").unwrap();
+    let (named, _) = named.split_once(". ").unwrap();
+    named
+        .split(", ")
+        .map(|entry| {
+            let (pid, program) = entry.split_once(' ').unwrap();
+            (pid.parse().unwrap(), program.to_owned())
+        })
+        .collect()
+}
+
+/// A shell script stands in for Claude Code at Full access in a real tmux pane and leaves
+/// a process in its own session and one in the pane's session that ignores the hangup.
+/// Ending the pane reaches neither, so the stop names both instead of reporting a clean
+/// stop (CB-2).
+#[test]
+fn stopping_a_full_access_pane_names_what_it_left_running() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-pane-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    private(&root_path);
+    let tmux = installed(&root_path).expect("tmux must be installed on this machine");
+    let folder = root_path.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let home = root_path.join("home");
+    let work = root_path.join("work");
+    let bin = root_path.join("bin");
+    for path in [&home, &work, &bin] {
+        private(path);
+    }
+    let executable = bin.join("claude");
+    std::fs::write(&executable, LEAVING_STAND_IN).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work,
+        account: AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: false,
+        sandbox_profile: None,
+        unconfined: true,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let agent = AgentId::new("stand-in-3").unwrap();
+    let session = TerminalSession::start(host.clone(), agent.clone(), request, None).unwrap();
+    let leader =
+        rustix::process::Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (descendant, member) = loop {
+        if let (Some(descendant), Some(member)) =
+            (pid_in(&home, "descendant.pid"), pid_in(&home, "member.pid"))
+            && parent_of(member) == Some(1)
+        {
+            break (descendant, member);
+        }
+        assert!(Instant::now() < deadline, "stand-in agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let _leftover = Leftover(vec![descendant, member]);
+    assert_eq!(rustix::process::getsid(Some(member)), Ok(leader));
+    assert_ne!(rustix::process::getsid(Some(descendant)), Ok(leader));
+
+    let left = match session.stop() {
+        Err(Unstopped::Left(left)) => left,
+        other => panic!(
+            "the stop of a Full access pane was reported {other:?} while {descendant:?} and {member:?} kept running"
+        ),
+    };
+    assert!(!host.alive().unwrap().contains(&agent));
+    let report = left.plain();
+    assert_eq!(
+        named_in(&report),
+        BTreeMap::from([
+            (descendant.as_raw_nonzero().get(), "perl".to_owned()),
+            (member.as_raw_nonzero().get(), "sleep".to_owned()),
+        ]),
+        "{report}"
+    );
+    assert!(
+        report.ends_with("Its account stays held until they end or you sign it out"),
+        "{report}"
     );
 }

@@ -49,6 +49,17 @@ export function localClock(ms: number): string {
   return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 }
 
+/** The Team panel's row key of one team agent. Input: its team id. Output: the key. */
+export function agentKey(id: number): string {
+  return `agent-${id}`;
+}
+
+/** Whether a team agent is starting, waiting or working, so its views keep reading. Input: its
+ * status. Output: true then. */
+export function liveAgent(status: TeamAgentStatus): boolean {
+  return LIVE_AGENT.includes(status);
+}
+
 /** The first line of a task prompt, cut to fit one row. Input: the prompt. Output: the line. */
 export function firstLine(text: string): string {
   const line = text.trim().split("\n", 1)[0].trim();
@@ -142,7 +153,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
       item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
     return {
-      key: `agent-${agent.id}`,
+      key: agentKey(agent.id),
       role: agent.role === "master" ? "Master" : "Sub-agent",
       name: agent.label,
       harness: harnessLabel(agent.harness),

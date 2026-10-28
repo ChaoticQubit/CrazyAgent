@@ -519,6 +519,419 @@ fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder
     );
 }
 
+/// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
+fn plant_links(folder: &Path, links: &[(&str, &str)]) {
+    for (link, target) in links {
+        let path = folder.join(link);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+    }
+}
+
+#[test]
+fn a_link_reaching_the_agents_folder_through_another_link_dots_or_a_folded_name_is_refused() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let rows: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "a link through an ancestor link",
+            &[
+                ("p", ".crazyagent"),
+                ("q", "p/worktrees/agent-3/target/bare"),
+            ],
+        ),
+        (
+            "dots through a folder link",
+            &[("x/d", ".."), ("y", "x/d/../..")],
+        ),
+        (
+            "transit through a link the agent keeps",
+            &[(
+                "t",
+                ".crazyagent/worktrees/agent-3/lnk/../../../../target/bare",
+            )],
+        ),
+        (
+            "a name the volume folds to worktrees",
+            &[("k", ".crazyagent/wor\u{212A}trees/agent-3/target/bare")],
+        ),
+    ];
+    let outcomes: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, links)| {
+            let case = Case::new();
+            std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+            plant_links(&case.workspace.worktree, links);
+            let outcome = match record_turn_end(&case.db, &case.workspace, &turn) {
+                Err(error) => error.0,
+                Ok(landed) => format!("landed {landed:?}"),
+            };
+            (*name, outcome)
+        })
+        .collect();
+
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    plant_links(
+        &case.workspace.worktree,
+        &[("docs/readme", "../README"), ("a/b/docs", "../../docs")],
+    );
+    let id = record_turn_end(&case.db, &case.workspace, &turn)
+        .unwrap()
+        .expect("plain in-tree links land as a change set");
+    assert!(
+        matches!(case.accept(&id).unwrap(), AcceptOutcome::Landed { .. }),
+        "plain in-tree links pass Accept"
+    );
+
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(outcomes, refusals);
+}
+
+#[test]
+fn accepting_two_change_sets_that_each_hold_half_a_link_chain_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let ancestor: &[(&str, &str)] = &[("p", ".crazyagent")];
+    let through: &[(&str, &str)] = &[("q", "p/worktrees/agent-3/target/bare")];
+    let outcomes: Vec<String> = [(through, ancestor), (ancestor, through)]
+        .iter()
+        .map(|(first, second)| {
+            let case = Case::new();
+            std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+            let sibling = second_agent(&case);
+            plant_links(&case.workspace.worktree, first);
+            plant_links(&sibling.worktree, second);
+            let one = record_turn_end(&case.db, &case.workspace, &turn)
+                .unwrap()
+                .expect("one link lands as a change set");
+            let two = record_turn_end(&case.db, &sibling, &turn)
+                .unwrap()
+                .expect("the other link lands as a change set");
+            assert!(matches!(
+                case.accept(&one).unwrap(),
+                AcceptOutcome::Landed { .. }
+            ));
+            let tip = case.tip();
+            let outcome = match case.accept(&two) {
+                Err(error) => error.0,
+                Ok(landed) => format!("landed {landed:?}"),
+            };
+            let landed = case.repo.join(second[0].0);
+            if landed.symlink_metadata().is_err() && case.tip() == tip {
+                outcome
+            } else {
+                format!("{outcome}, branch moved or {} written", landed.display())
+            }
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["changes_link_outside", "changes_link_outside"],
+        "the merge would chain q through p, in both orders"
+    );
+}
+
+/// Records one turn of an agent's links and says what the engine did with it.
+/// Inputs: the case and the workspace. Output: the refusal code, else what landed.
+fn turn_outcome(case: &Case, workspace: &Workspace) -> String {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    match record_turn_end(&case.db, workspace, &turn) {
+        Err(error) => error.0,
+        Ok(landed) => format!("landed {landed:?}"),
+    }
+}
+
+#[test]
+fn a_link_into_the_owners_git_folder_where_a_linked_agent_writes_is_refused() {
+    let rows: [(&str, &[(&str, &str)]); 3] = [
+        (
+            "a worktree admin folder from a subfolder",
+            &[("docs/n", "../.git/worktrees/agent-3/x")],
+        ),
+        (
+            "the git folder in another case",
+            &[("n", ".GIT/worktrees/agent-3/x")],
+        ),
+        ("the object store", &[("n", ".git/objects/evil")]),
+    ];
+    let outcomes: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, links)| {
+            let case = Case::new();
+            plant_links(&case.workspace.worktree, links);
+            (*name, turn_outcome(&case, &case.workspace))
+        })
+        .collect();
+
+    let case = Case::new();
+    plant_links(
+        &case.workspace.worktree,
+        &[
+            ("ci", ".github"),
+            ("ignore", ".gitignore"),
+            ("docs/hooks", "../.githooks"),
+        ],
+    );
+    let id = record_turn_end(
+        &case.db,
+        &case.workspace,
+        &TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Link the notes".into(),
+        },
+    )
+    .unwrap()
+    .expect("links to names that only start with .git land as a change set");
+    assert!(
+        matches!(case.accept(&id).unwrap(), AcceptOutcome::Landed { .. }),
+        "links to names that only start with .git pass Accept"
+    );
+
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(outcomes, refusals);
+}
+
+#[test]
+fn a_link_name_the_volume_folds_onto_a_step_of_another_link_is_refused() {
+    let rows: [(&str, &[(&str, &str)]); 2] = [
+        (
+            "U+212A KELVIN SIGN folds onto k",
+            &[
+                ("\u{212A}", ".crazyagent"),
+                ("o", "k/worktrees/agent-3/target/bare"),
+            ],
+        ),
+        (
+            "U+017F LONG S folds onto s",
+            &[
+                ("\u{17F}", ".crazyagent"),
+                ("o2", "s/worktrees/agent-3/target/bare"),
+            ],
+        ),
+    ];
+    let outcomes: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, links)| {
+            let case = Case::new();
+            std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+            plant_links(&case.workspace.worktree, links);
+            (*name, turn_outcome(&case, &case.workspace))
+        })
+        .collect();
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(outcomes, refusals);
+}
+
+/// Commits the owner's links on the owner's branch, records the agent's links and, from a
+/// second agent, the sibling's links, accepts the agent's change set and reports what
+/// happens to the sibling's: its refusal at turn end or at Accept, or what landed. The
+/// sibling's worktree starts before the owner's commit. Inputs: the owner's, the agent's
+/// and the sibling's links; empty skips that step. Output: the refusal code, else what
+/// landed and whether the branch moved.
+fn sibling_link_outcome(
+    owner: &[(&str, &str)],
+    agent: &[(&str, &str)],
+    sibling: &[(&str, &str)],
+) -> String {
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    let second = second_agent(&case);
+    if !owner.is_empty() {
+        plant_links(&case.repo, owner);
+        for (link, _) in owner {
+            case.owner(&["add", link]);
+        }
+        case.owner(&["commit", "-q", "-m", "Owner links"]);
+    }
+    if !agent.is_empty() {
+        plant_links(&case.workspace.worktree, agent);
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Link the notes".into(),
+        };
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("the agent's link lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+    }
+    plant_links(&second.worktree, sibling);
+    let tip = case.tip();
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let two = match record_turn_end(&case.db, &second, &turn) {
+        Err(error) => return error.0,
+        Ok(None) => return "no change set".to_owned(),
+        Ok(Some(two)) => two,
+    };
+    let outcome = match case.accept(&two) {
+        Err(error) => error.0,
+        Ok(landed) => format!("landed {landed:?}"),
+    };
+    let landed = case.repo.join(sibling[0].0);
+    if landed.symlink_metadata().is_err() && case.tip() == tip {
+        outcome
+    } else {
+        format!("{outcome}, branch moved or {} written", landed.display())
+    }
+}
+
+#[test]
+fn accepting_a_link_whose_step_the_volume_folds_onto_another_link_is_refused() {
+    let kelvin: &[(&str, &str)] = &[("\u{212A}", ".crazyagent")];
+    let through: &[(&str, &str)] = &[("o", "k/worktrees/agent-3/target/bare")];
+    let rows: [(&str, String); 3] = [
+        (
+            "the Kelvin link lands second",
+            sibling_link_outcome(&[], through, kelvin),
+        ),
+        (
+            "the owner's branch holds the Kelvin link",
+            sibling_link_outcome(kelvin, &[], through),
+        ),
+        (
+            "the owner's branch holds a link through a Kelvin step",
+            sibling_link_outcome(
+                &[("o", "\u{212A}/worktrees/agent-3/target/bare")],
+                &[],
+                &[("k", ".crazyagent")],
+            ),
+        ),
+    ];
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(rows.to_vec(), refusals);
+}
+
+/// Commits the owner's links on the owner's branch, starts an agent from it, records the
+/// agent's links and accepts their change set. Inputs: the owner's and the agent's links.
+/// Output: the refusal code at turn end or Accept, else "landed" once the agent's first
+/// link is on the owner's branch.
+fn owner_then_agent_outcome(owner: &[(&str, &str)], agent: &[(&str, &str)]) -> String {
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    plant_links(&case.repo, owner);
+    for (link, _) in owner {
+        case.owner(&["add", link]);
+    }
+    case.owner(&["commit", "-q", "-m", "Owner links"]);
+    let workspace = second_agent(&case);
+    plant_links(&workspace.worktree, agent);
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let id = match record_turn_end(&case.db, &workspace, &turn) {
+        Err(error) => return error.0,
+        Ok(None) => return "no change set".to_owned(),
+        Ok(Some(id)) => id,
+    };
+    match case.accept(&id) {
+        Err(error) => error.0,
+        Ok(AcceptOutcome::Landed { .. }) if case.repo.join(agent[0].0).is_symlink() => {
+            "landed".to_owned()
+        }
+        Ok(other) => format!("accepted {other:?} without the link"),
+    }
+}
+
+#[test]
+fn a_non_ascii_owner_link_leaves_an_agent_link_it_cannot_fold_onto_to_land() {
+    let cafe: &[(&str, &str)] = &[("caf\u{E9}", "README")];
+    let rows: [(&str, String); 3] = [
+        (
+            "an unrelated link beside the owner's caf\u{E9}",
+            owner_then_agent_outcome(cafe, &[("docs/n", "../README")]),
+        ),
+        (
+            "a link to cafe, which the volume keeps apart from caf\u{E9}",
+            owner_then_agent_outcome(cafe, &[("docs/n", "../cafe")]),
+        ),
+        (
+            "an agent link beside an owner link through a caf\u{E9} step",
+            owner_then_agent_outcome(&[("o", "caf\u{E9}/x")], &[("n", "README")]),
+        ),
+    ];
+    let landed: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "landed".to_owned()))
+        .collect();
+    assert_eq!(rows.to_vec(), landed);
+}
+
+#[test]
+fn accepting_a_link_through_a_name_the_volume_folds_onto_several_ascii_letters_is_refused() {
+    let rows: [(&str, String); 4] = [
+        (
+            "the owner's branch holds U+00DF SHARP S, which folds onto ss",
+            sibling_link_outcome(
+                &[("\u{DF}", ".crazyagent")],
+                &[],
+                &[("o", "ss/worktrees/agent-3/target/bare")],
+            ),
+        ),
+        (
+            "the owner's branch holds U+FB03 LIGATURE FFI, which folds onto ffi",
+            sibling_link_outcome(
+                &[("\u{FB03}", ".crazyagent")],
+                &[],
+                &[("o", "FFI/worktrees/agent-3/target/bare")],
+            ),
+        ),
+        (
+            "the owner's branch holds a link through a U+1E9E CAPITAL SHARP S step",
+            sibling_link_outcome(
+                &[("o", "\u{1E9E}/worktrees/agent-3/target/bare")],
+                &[],
+                &[("ss", ".crazyagent")],
+            ),
+        ),
+        (
+            "the owner's branch holds a link through a U+037E GREEK QUESTION MARK step",
+            sibling_link_outcome(
+                &[("o", "a\u{37E}/worktrees/agent-3/target/bare")],
+                &[],
+                &[("a;", ".crazyagent")],
+            ),
+        ),
+    ];
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(rows.to_vec(), refusals);
+}
+
 #[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();
@@ -1695,6 +2108,93 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 }
 
 #[test]
+fn an_instruction_file_change_is_marked_and_its_hidden_characters_show_as_escapes() {
+    let case = Case::new();
+    case.edit("AGENTS.md", "Follow the plan.\u{200b}\u{e0041}\u{e0042}\n");
+    case.edit(".claude/CLAUDE.md", "Keep tests real.\n");
+    case.edit("web/CLAUDE.local.md", "Local notes.\n");
+    case.edit("notes.md", "Plain\u{2028}notes.\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marks: Vec<(String, String)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                serde_json::to_string(&file.marks).unwrap(),
+            )
+        })
+        .collect();
+    let instructions = r#"["instructions"]"#.to_owned();
+    assert_eq!(
+        marks,
+        [
+            (".claude/CLAUDE.md".to_owned(), instructions.clone()),
+            ("AGENTS.md".to_owned(), instructions.clone()),
+            ("notes.md".to_owned(), "[]".to_owned()),
+            ("web/CLAUDE.local.md".to_owned(), instructions),
+        ]
+    );
+    assert!(
+        page.text
+            .contains("+Follow the plan.\\u200b\\u{e0041}\\u{e0042}\n"),
+        "{:?}",
+        page.text
+    );
+    assert!(
+        page.text.contains("+Plain\\u2028notes.\n"),
+        "{:?}",
+        page.text
+    );
+    assert!(!crate::memory::hidden_text(&page.text), "{:?}", page.text);
+}
+
+#[test]
+fn instruction_marks_ignore_case_and_cover_codex_overrides_and_harness_folders() {
+    let case = Case::new();
+    for path in [
+        "claude.md",
+        "web/Agents.md",
+        "AGENTS.override.md",
+        ".claude/commands/x.md",
+        ".codex/config.toml",
+        "docs/.Claude/notes.md",
+        "notes.md",
+    ] {
+        case.edit(path, "Text.\n");
+    }
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marked: Vec<(&str, bool)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.marks.contains(&FileMark::Instructions),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            (".claude/commands/x.md", true),
+            (".codex/config.toml", true),
+            ("AGENTS.override.md", true),
+            ("claude.md", true),
+            ("docs/.Claude/notes.md", true),
+            ("notes.md", false),
+            ("web/Agents.md", true),
+        ]
+    );
+}
+
+#[test]
 fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
     let case = Case::new();
     let start = case.tip();
@@ -2470,6 +2970,15 @@ impl Case {
         self.owner(&["for-each-ref", "--format=%(refname) %(objectname)", prefix])
     }
 
+    /// The owner's engine refs when the clone's base ref is the only one, as `owner_refs`
+    /// lists them (GA-R5). Output: the listing.
+    fn base_ref_only(&self) -> String {
+        let base = store::base_of(&self.db, self.workspace.worktree.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        format!("refs/crazyagent/base/agent-own {base}\n")
+    }
+
     /// Plants in the agent's own clone, under a blob id its commit stored there, the
     /// stored bytes of another text, as an agent with full git in its clone can.
     /// Inputs: the id and the text.
@@ -2587,7 +3096,11 @@ fn an_own_branch_agent_commits_on_its_branch_and_the_project_refs_stay_as_they_w
     assert_eq!(case.owner_refs("refs/tags"), "");
     assert_eq!(
         case.owner_refs("refs/crazyagent"),
-        format!("refs/crazyagent/pending/{} {first}\n", id.as_str())
+        format!(
+            "{}refs/crazyagent/pending/{} {first}\n",
+            case.base_ref_only(),
+            id.as_str()
+        )
     );
     case.edit("README", "uncommitted\n");
     assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
@@ -2745,7 +3258,7 @@ fn objects_planted_in_an_own_branch_clone_never_reach_a_change_set() {
         "changes_agent_branch_invalid"
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
     assert_eq!(case.tip(), tip);
     assert_eq!(
         case.checkout(),
@@ -2879,7 +3392,7 @@ fn a_clone_that_borrows_another_object_store_is_refused_and_imports_nothing() {
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/heads"), heads);
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// One way an agent can make git serve another repository, history or object source
@@ -3194,7 +3707,7 @@ fn a_clone_that_redirects_its_repository_is_refused_and_imports_nothing() {
         let leaked = case.owner_has(&secret);
         let sets = list(&case.db, &case.workspace.project).unwrap().len();
         let moved = case.owner_refs("refs/heads") != heads
-            || !case.owner_refs("refs/crazyagent").is_empty();
+            || case.owner_refs("refs/crazyagent") != case.base_ref_only();
         if code != "changes_workspace_invalid" || leaked || sets != 0 || moved {
             held.push(format!(
                 "{}: {code}, foreign object imported {leaked}, change sets {sets}, refs moved {moved}",
@@ -3239,7 +3752,7 @@ fn a_redirect_made_after_the_checks_is_never_served() {
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/heads"), heads);
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// Temp files an interrupted git command leaves in the clone's pack folder do not stop
@@ -3324,7 +3837,7 @@ fn repack_temp_files_let_the_turn_end_but_a_temp_pack_git_would_read_is_refused(
     assert!(temp("4242", "idx").is_file() && temp("31337", "pack").is_file());
     assert!(!case.owner_has(&secret), "a temp pack was served");
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert!(case.owner_refs("refs/crazyagent").is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 
     branch_at(&case, &own);
     case.edit("README", "one\ntwo\nthree\nfour\n");
@@ -3434,7 +3947,7 @@ fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project()
         "a refused clone's object reached the project"
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// Engine git never opens an agent's own clone, whose config is the agent's: the engine
@@ -3456,5 +3969,154 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         &case.repo,
         &case.workspace.git_dir,
         Some(&case.workspace.worktree),
+    );
+}
+
+/// An Own branch clone's discarded change set comes back only while the clone's branch
+/// holds exactly the discarded head: commits made since, or a reset of the branch below
+/// it, keep it discarded with `changes_agent_busy`, so a later turn end cannot quietly
+/// replace the restored head with a tip that lacks it (GA-R4).
+#[test]
+fn an_own_branch_restore_needs_the_clone_branch_at_the_discarded_head() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).head, head);
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    assert_eq!(
+        case.agent_head(),
+        head,
+        "a discard leaves the clone's branch as it was"
+    );
+
+    case.edit("later.txt", "more work\n");
+    case.agent_commit("More work");
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+
+    case.agent(&["reset", "-q", "--hard", &base]);
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+
+    case.agent(&["reset", "-q", "--hard", &head]);
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        case.owner(&[
+            "rev-parse",
+            &format!("refs/crazyagent/pending/{}", id.as_str())
+        ])
+        .trim(),
+        head
+    );
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(
+        case.view(&id).head,
+        head,
+        "the restored head stays the set's"
+    );
+}
+
+/// The owner repository keeps the commit an Own branch clone borrows as its base under an
+/// engine ref that follows the base, so the owner rewriting their branch and pruning
+/// leaves the clone's history readable (GA-R5).
+#[test]
+fn the_owner_repository_keeps_an_own_branch_clone_s_base_through_a_rewrite_and_prune() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    let linked = case.repo.parent().unwrap().join("agent-1");
+    case.owner(&["worktree", "remove", "--force", linked.to_str().unwrap()]);
+    case.owner(&["commit", "-q", "--amend", "-m", "Start, reworded"]);
+    assert_ne!(case.tip(), base);
+    case.owner(&["reflog", "expire", "--expire=now", "--all"]);
+    case.owner(&["gc", "-q", "--prune=now"]);
+    assert!(
+        case.owner_has(&base),
+        "the clone's base survived the owner's prune"
+    );
+    assert_eq!(case.agent_head(), base);
+    case.agent(&["log", "-q", "--format=%H"]);
+
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/crazyagent/base/agent-own"])
+            .trim(),
+        head,
+        "the base ref follows the clone's base"
+    );
+}
+
+#[test]
+fn files_an_instruction_file_imports_or_links_to_are_marked() {
+    let case = Case::new();
+    let fed = [
+        "docs/conventions.md",
+        "style/guide.md",
+        "rules/extra.md",
+        "docs/agents-target.md",
+        "docs/other.md",
+        "config/codex/config.toml",
+    ];
+    case.edit(
+        "CLAUDE.md",
+        "Read @docs/conventions.md and @./style/Guide.md, then the rest.\nNot these: @~/private.md @/etc/hosts @../outside.md\n",
+    );
+    case.edit(".claude/CLAUDE.md", "Also @../rules/extra.md\n");
+    for path in fed {
+        case.edit(path, "Old.\n");
+    }
+    std::os::unix::fs::symlink(
+        "docs/agents-target.md",
+        case.workspace.worktree.join("AGENTS.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("config/codex", case.workspace.worktree.join(".codex")).unwrap();
+    case.agent_commit("Instructions that pull in other files");
+    for path in fed {
+        case.edit(path, "New.\n");
+    }
+    case.edit(
+        "CLAUDE.md",
+        "Read @docs/conventions.md and @./style/Guide.md, then the rest.\nNow also @docs/fresh.md\n",
+    );
+    case.edit("docs/fresh.md", "Fresh.\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marked: Vec<(&str, bool)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.marks.contains(&FileMark::Instructions),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            ("CLAUDE.md", true),
+            ("config/codex/config.toml", true),
+            ("docs/agents-target.md", true),
+            ("docs/conventions.md", true),
+            ("docs/fresh.md", true),
+            ("docs/other.md", false),
+            ("rules/extra.md", true),
+            ("style/guide.md", true),
+        ]
     );
 }

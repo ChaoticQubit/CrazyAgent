@@ -1,6 +1,7 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
+use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{SwitchMode, TeamAction, TeamStatus};
 
@@ -31,6 +32,49 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(status)
+    }
+
+    /// Reads one page of a project sub-agent's Messages timeline, newest first: its tasks,
+    /// what the master and the owner said to it and its events, each with the speaker the
+    /// engine stored. Takes the project id, the agent, the cursor of the newest entry not
+    /// wanted and the page size, none for the project's setting. Returns the bounded page or a
+    /// plain failure code.
+    pub async fn team_agent_messages(
+        &self,
+        id: &str,
+        agent: i64,
+        before: Option<Cursor>,
+        limit: Option<u16>,
+    ) -> Result<AgentMessages, BridgeError> {
+        let project_id = project(id)?;
+        let messages = self
+            .reader()?
+            .team_agent_messages(project_id, agent, before, limit)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(messages)
+    }
+
+    /// Stores a project's Messages settings whole: keeping the master's messages, the kept
+    /// count, progress events, how results show, the owner's own items and the page size.
+    /// Takes the project id, the settings and the client generation. Returns the actual
+    /// commit receipt; a value outside the choices is refused as `team_action_invalid` with
+    /// `team_message_settings_invalid` behind it.
+    pub async fn team_message_settings(
+        &mut self,
+        id: &str,
+        settings: MessageSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::MessageSettings {
+                project_id,
+                settings,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Reads the app's own wake rule and every project's newest owner notifications.

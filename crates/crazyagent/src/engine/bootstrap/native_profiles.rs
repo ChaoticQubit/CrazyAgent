@@ -359,6 +359,12 @@ pub(crate) struct NativeProfileUse {
 }
 
 impl NativeProfileUse {
+    /// Names the account this lease holds the profile of. Input: the lease. Output: the
+    /// account's connection id.
+    pub(crate) fn account(&self) -> &crate::protocol::CredentialRef {
+        &self.binding.connection.id
+    }
+
     pub(crate) fn profile_path(&self) -> Result<std::path::PathBuf, EngineError> {
         self.revalidate_retained()?;
         if let Some(configured) = &self.configured {

@@ -70,6 +70,7 @@ fn status() -> TeamStatus {
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
         settings_revision: 0,
         live_switch: None,
         paused: false,

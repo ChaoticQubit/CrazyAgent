@@ -90,7 +90,39 @@ fn report() -> UsageReport {
         }],
         agent_lines: Vec::new(),
         limits: vec![limits(Some("usage_rate_limited"))],
+        partial_homes: 0,
     }
+}
+
+#[test]
+fn a_reading_with_a_home_cut_at_the_scan_bound_says_it_is_partial() {
+    let ctx = ctx(100, 40);
+    let shown = |homes: u64| {
+        text(&summary(
+            &UsageReport {
+                partial_homes: homes,
+                ..report()
+            },
+            UsageRange::Today,
+            &names(),
+            NOW,
+            0,
+            96,
+            &ctx,
+        ))
+        .join("\n")
+    };
+    assert!(!shown(0).contains("may be missing"), "{}", shown(0));
+    assert!(
+        shown(1).contains("Some usage may be missing: 1 agent home holds more records than one scan reads, so its least recently changed records are not counted."),
+        "{}",
+        shown(1)
+    );
+    assert!(
+        shown(3).contains("3 agent homes hold more records than one scan reads, so their least"),
+        "{}",
+        shown(3)
+    );
 }
 
 fn names() -> Names {

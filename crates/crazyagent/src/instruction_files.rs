@@ -8,6 +8,7 @@ pub const FILE_BYTES_MAX: usize = 32 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_MAX: usize = SOURCES.len();
 const NAME_BYTES_MAX: usize = 32;
+const IMPORTS_MAX: usize = 64;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
 pub const SECTION_BYTES_MAX: usize =
@@ -22,6 +23,13 @@ enum Source {
     Checkout(&'static str),
     Home(&'static str),
 }
+
+const CODEX_OVERRIDE: &str = "AGENTS.override.md";
+const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
+const HFS_IGNORED: [char; 16] = [
+    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
 
 const SOURCES: [(&str, Source); 6] = [
     ("CLAUDE.md", Source::Committed("CLAUDE.md")),
@@ -153,6 +161,115 @@ pub struct Delivery {
 /// home names only these files. Input: the name. Output: true for a known name.
 pub fn known_name(name: &str) -> bool {
     SOURCES.iter().any(|(known, _)| *known == name)
+}
+
+/// Folds a file name the way case-insensitive volumes compare names, so a name such a
+/// volume opens as an instruction file matches it: ASCII letters to lower case, U+017F LONG S
+/// to `s` and U+212A KELVIN SIGN to `k` as APFS folds them (probed), U+0131 DOTLESS I to `i` as
+/// the NTFS upcase table maps it to `I`, and the code points HFS+ ignores in names (git's
+/// `core.protectHFS` list) left out. Input: the name or path. Output: the folded text.
+fn folded(name: &str) -> String {
+    name.chars()
+        .filter(|c| !HFS_IGNORED.contains(c))
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            '\u{131}' => 'i',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Tells whether a file name is one an instruction file is read under in any folder: a
+/// project source name above or Codex's `AGENTS.override.md`, compared as `folded` compares
+/// names. Input: the name. Output: true for one.
+pub(crate) fn instruction_name(name: &str) -> bool {
+    let name = folded(name);
+    SOURCES
+        .iter()
+        .filter_map(|(_, source)| match source {
+            Source::Committed(file) | Source::Checkout(file) => file.rsplit('/').next(),
+            Source::Home(_) => None,
+        })
+        .chain([CODEX_OVERRIDE])
+        .any(|known| folded(known) == name)
+}
+
+/// Tells whether a folder name is a harness folder, `.claude` or `.codex`, compared as
+/// `folded` compares names. Input: the name. Output: true for one.
+pub(crate) fn harness_folder(name: &str) -> bool {
+    let name = folded(name);
+    HARNESS_FOLDERS.iter().any(|folder| *folder == name)
+}
+
+/// Tells whether a changed project path is an instruction file agents are given or read: a
+/// file named like a project source above or Codex's `AGENTS.override.md` in any folder, or
+/// any path through a `.claude` or `.codex` folder, names compared as case-insensitive
+/// volumes compare them, since macOS and Windows open `claude.md` or a long-s `AGENTS.md`
+/// as the instruction file. Input: the path relative to the project. Output: true for one.
+pub fn instruction_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    instruction_name(name) || path.split('/').any(harness_folder)
+}
+
+/// Resolves a link or import target written in the instruction file at `path` to a path in
+/// the project, from the file's folder. Inputs: the file's path in the project and the
+/// target. Output: the path, or None for an empty, absolute or home target or one that
+/// leaves the project.
+pub(crate) fn resolved(path: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target.starts_with('/') || target.starts_with('~') {
+        return None;
+    }
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The project paths one instruction file imports into what agents are told, as Claude Code
+/// reads imports: each word that starts with `@`, with and without trailing punctuation,
+/// resolved from the file's folder, at most `IMPORTS_MAX`. Inputs: the file's path in the
+/// project and its text. Output: the paths.
+pub(crate) fn imports(path: &str, text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let Some(target) = word.strip_prefix('@') else {
+            continue;
+        };
+        let trimmed = target.trim_end_matches(|c: char| ".,;:!?)]}'\"`".contains(c));
+        for candidate in [target, trimmed] {
+            if found.len() == IMPORTS_MAX {
+                return found;
+            }
+            if let Some(resolved) = resolved(path, candidate)
+                && !found.contains(&resolved)
+            {
+                found.push(resolved);
+            }
+        }
+    }
+    assert!(found.len() <= IMPORTS_MAX);
+    found
+}
+
+/// Tells whether a changed path is a file, or lies under a folder, whose text an
+/// instruction file feeds to agents, paths compared as case-insensitive volumes compare
+/// names. Inputs: the fed paths, each with whether it is a folder, and the changed path.
+/// Output: true when fed.
+pub(crate) fn fed(feeds: &[(String, bool)], path: &str) -> bool {
+    let path = folded(path);
+    feeds.iter().any(|(feed, folder)| {
+        let feed = folded(feed);
+        path == feed || (*folder && path.starts_with(&format!("{feed}/")))
+    })
 }
 
 /// Creates the settings table. Input: a connection to `engine.db`. Output: unit.

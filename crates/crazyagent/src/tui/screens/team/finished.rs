@@ -60,6 +60,17 @@ pub(super) fn finished_rows(status: &TeamStatus) -> Vec<FinishedRow> {
     rows
 }
 
+/// Counts the agents the team tree lists, as the desktop's Running and All filters do: the
+/// agents the engine has not marked finished, and the finished ones too while the setting is
+/// Show; Running leaves out stopped and failed ones. Inputs: each agent's finished and live
+/// flags and the setting. Output: the Running and All counts.
+fn tree_counts(agents: &[(bool, bool)], show: bool) -> (usize, usize) {
+    let listed = agents.iter().filter(|(finished, _)| show || !finished);
+    let all = listed.clone().count();
+    let running = listed.filter(|(_, live)| *live).count();
+    (running, all)
+}
+
 /// The box title. Input: how many agents it holds. Output: "Finished (N)".
 pub(super) fn finished_label(count: usize) -> String {
     format!("Finished ({count})")
@@ -102,6 +113,7 @@ pub(super) struct Finished {
     open: bool,
     rows: Option<Vec<FinishedRow>>,
     show: Option<bool>,
+    tally: Option<Vec<(bool, bool)>>,
     cursor: usize,
     waking: Option<String>,
     saving: bool,
@@ -114,6 +126,7 @@ impl Finished {
             open: false,
             rows: None,
             show: None,
+            tally: None,
             cursor: 0,
             waking: None,
             saving: false,
@@ -216,6 +229,13 @@ impl Finished {
                 if asked == project =>
             {
                 self.show = Some(status.show_finished);
+                self.tally = Some(
+                    status
+                        .agents
+                        .iter()
+                        .map(|agent| (agent.finished, agent.status.live()))
+                        .collect(),
+                );
                 if self.open {
                     let rows = finished_rows(status);
                     self.cursor = self.cursor.min(rows.len().saturating_sub(1));
@@ -301,9 +321,9 @@ impl Finished {
         vec![hint("w", "Wake"), hint("h", setting), hint("f", "Close")]
     }
 
-    /// The box lines while it is open: the setting, then each finished agent with its
-    /// harness and status and, below it, the engine's reason when it cannot wake and what it
-    /// last worked on; the picked one is marked.
+    /// The box lines while it is open: the setting and the team tree's Running and All counts,
+    /// then each finished agent with its harness and status and, below it, the engine's
+    /// reason when it cannot wake and what it last worked on; the picked one is marked.
     /// Rows past the box's height are counted in one "and N more" line.
     /// Inputs: the line width, the box's inner height and the context. Output: the title and
     /// at most `room` lines (one when `room` is zero), or None while closed.
@@ -331,6 +351,18 @@ impl Finished {
             .into_iter()
             .map(|text| styled(text, Role::Muted, theme))
             .collect();
+        if let Some(agents) = &self.tally {
+            let (running, all) = tree_counts(agents, self.show == Some(true));
+            lines.push(styled(
+                cut(
+                    &format!("Team tree: Running ({running})  All ({all})"),
+                    limit,
+                    ctx.glyphs.ellipsis,
+                ),
+                Role::Muted,
+                theme,
+            ));
+        }
         lines.push(Line::default());
         if rows.is_empty() {
             lines.push(Line::raw(cut(
