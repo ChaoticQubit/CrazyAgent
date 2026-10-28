@@ -155,6 +155,17 @@ pub fn known_name(name: &str) -> bool {
     SOURCES.iter().any(|(known, _)| *known == name)
 }
 
+/// Tells whether a changed project path is an instruction file agents are given or read,
+/// by its file name in any folder: `CLAUDE.md`, `AGENTS.md` or `CLAUDE.local.md`, the names
+/// of the project sources above. Input: the path relative to the project. Output: true for one.
+pub fn instruction_file(path: &str) -> bool {
+    let name = path.rsplit('/').next();
+    SOURCES.iter().any(|(_, source)| match source {
+        Source::Committed(file) | Source::Checkout(file) => file.rsplit('/').next() == name,
+        Source::Home(_) => false,
+    })
+}
+
 /// Creates the settings table. Input: a connection to `engine.db`. Output: unit.
 pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(

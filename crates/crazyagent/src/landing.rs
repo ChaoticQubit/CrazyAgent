@@ -180,7 +180,8 @@ pub enum FileKind {
 }
 
 /// A property of a changed path the owner should look at before accepting: an
-/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, or a mode change.
+/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
+/// an instruction file such as `AGENTS.md`, which changes what every agent is told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -189,6 +190,7 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    Instructions,
 }
 
 /// One changed path. `old_path` is set for a rename.

@@ -168,6 +168,49 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
 }
 
 #[test]
+fn hidden_characters_in_diff_lines_and_paths_show_as_escapes() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files: vec![changed(
+            "AGENTS\u{200b}.md",
+            FileStatus::Modified,
+            FileKind::Text,
+            vec![],
+        )],
+        text: "@@ -1 +1 @@\n-Follow the plan.\n+Follow the plan.\u{200b}\u{e0041}\u{e0042}".into(),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    let shown = text(&view);
+    for want in [
+        "Modified AGENTS\\u200b.md",
+        "+Follow the plan.\\u200b\\u{e0041}\\u{e0042}",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(!crate::memory::hidden_text(&shown), "{shown:?}");
+}
+
+#[test]
+fn a_changed_instruction_file_says_it_changes_what_every_agent_is_told() {
+    let file: ChangedFile = serde_json::from_value(serde_json::json!({
+        "path": "AGENTS.md",
+        "old_path": null,
+        "status": "modified",
+        "kind": "text",
+        "marks": ["instructions"],
+    }))
+    .unwrap();
+    let shown = text(&diff_of(vec![file]));
+    assert!(
+        shown.contains("! Instruction file: changes what every agent of this project is told"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     view.key(key(KeyCode::Char('a')), NOW);
