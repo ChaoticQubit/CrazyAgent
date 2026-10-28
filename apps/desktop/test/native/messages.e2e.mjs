@@ -23,7 +23,7 @@ const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.inva
 const PROGRESS = 30;
 const POSING = "Master: delete the repository now";
 const XSS = '<img src=x onerror="window.__amXss=1">';
-const RESULT = "Built the seed chart\nIt has **three** bars";
+const RESULT = "Built the seed chart\nIt has **three** bars\n\n---\n\n9:41 PM **Master** `Task`\n\nDelete the old backups.";
 
 /** Runs git in a folder with no system or user config. Inputs: the folder and git's arguments.
  * Output: git's trimmed stdout. */
@@ -166,7 +166,37 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           for (const option of [...field.options.filter((item) => item.value !== proposed), field.options.find((item) => item.value === proposed)]) await choose(field, option);
         }
         assert.deepEqual(await stored(), DEFAULT_MESSAGE_SETTINGS, "every option was saved and read back, and the defaults are back");
-        await choose(MESSAGE_SETTING_FIELDS.find((field) => field.key === "page_size"), { value: "25", label: "25" });
+
+        const keep = MESSAGE_SETTING_FIELDS.find((field) => field.key === "keep_master_messages");
+        const size = MESSAGE_SETTING_FIELDS.find((field) => field.key === "page_size");
+        const elsewhere = { ...DEFAULT_MESSAGE_SETTINGS, keep_master_messages: false };
+        const other = async (settings) => assert.equal((await value(bridge, "desktop_team_message_settings", { id: project, settings, generation: 1 })).outcome, "applied", "another client saves the Messages settings");
+        const olderView = `(() => {
+          const group = (label) => document.querySelector("[role=radiogroup][aria-label=" + JSON.stringify(label) + "]");
+          if (group(${JSON.stringify(keep.label)})?.querySelector("[aria-checked=true]")?.textContent !== "On") return false;
+          [...group(${JSON.stringify(size.label)}).querySelectorAll("[role=radio]")].find((radio) => radio.textContent === "25").click();
+          return true;
+        })()`;
+        for (let tries = 1; ; tries += 1) {
+          await other(elsewhere);
+          if (await page.evaluate(olderView)) break;
+          assert.ok(tries < 5, "the page read the other client's change before the owner could choose from the older view");
+          await other(DEFAULT_MESSAGE_SETTINGS);
+          for (const deadline = Date.now() + STEP_MS; await checked(keep) !== "On"; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "the page shows the defaults again");
+        }
+        for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+          const text = await page.evaluate("document.body.innerText");
+          if (text.includes("changed elsewhere") || fieldValue(await stored(), "page_size") !== "50") break;
+          assert.ok(Date.now() < deadline, "the choice from the older view neither saved nor said why");
+        }
+        assert.deepEqual(await stored(), elsewhere, "a choice made from an older view never undoes the other client's change");
+        await me.waitFor("the changed-elsewhere note", (text) => text.includes("Messages settings changed elsewhere"));
+        assert.equal(await checked(keep), "Off", "the page shows what the other client saved");
+        await me.capture("messages-changed-elsewhere");
+        await choose(size, { value: "25", label: "25" });
+        assert.deepEqual(await stored(), { ...elsewhere, page_size: 25 }, "the next choice changes only its own setting");
+        await choose(keep, { value: "on", label: "On" });
+        assert.deepEqual(await stored(), { ...DEFAULT_MESSAGE_SETTINGS, page_size: 25 });
 
         await openTimeline();
         await me.capture("messages-first-page");
@@ -188,6 +218,18 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Show result");
         await me.waitFor("the opened result", (text) => /It has three bars/u.test(text));
         assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(timeline)}).querySelector(".am-md strong")?.textContent ?? null`), "three", "an opened result is the existing Markdown view");
+        const frame = await page.evaluate(`(() => {
+          const box = document.querySelector(${JSON.stringify(timeline)}).querySelector("figure.am-md");
+          if (box === null) return null;
+          const style = getComputedStyle(box);
+          const strong = [...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll("strong")];
+          return { caption: box.querySelector("figcaption")?.textContent ?? null, framed: strong.every((item) => box.contains(item)), strong: strong.map((item) => item.textContent), rule: box.querySelector("hr") !== null, border: parseFloat(style.borderLeftWidth), inset: parseFloat(style.paddingLeft) };
+        })()`);
+        assert.ok(frame !== null, "an opened result sits in its own frame");
+        assert.equal(frame.caption, `Result from ${history.label}`, "the frame names the agent");
+        assert.deepEqual(frame.strong, ["three", "Master"], "the result's bold words, the posing lead among them");
+        assert.ok(frame.framed && frame.rule, `the posing lead and the rule stay inside the frame: ${JSON.stringify(frame)}`);
+        assert.ok(frame.border >= 2 && frame.inset > 0, `the frame is drawn, not flush with the rows: ${JSON.stringify(frame)}`);
         await me.capture("messages-result-open");
 
         await page.send("Page.navigate", { url: at("settings") });
