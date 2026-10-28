@@ -66,44 +66,6 @@ pub(super) struct ConfiguredProfileIdentity {
     generation: u64,
 }
 
-impl ConfiguredHomeIdentity {
-    /// Moves the identities recorded for a configured home onto the current device of that
-    /// home, which may sit on another volume than the engine, as [`rebase`] does for one
-    /// record. Input: the home's current device. Output: none.
-    fn rebase(&mut self, device: u64) {
-        rebase(
-            &mut [&mut self.home, &mut self.sdk, &mut self.config.identity],
-            device,
-        );
-    }
-}
-
-impl ConfiguredProfileIdentity {
-    /// Moves the identities this slot manifest recorded inside the engine state folder, its
-    /// root's included, onto the volume's current device, as [`rebase`] does for one record;
-    /// the configured home moves on its own. Input: the state folder's current device.
-    /// Output: none.
-    fn rebase(&mut self, device: u64) {
-        let Self {
-            root,
-            directory,
-            manifest,
-            ..
-        } = self;
-        rebase(
-            &mut [
-                &mut root.state,
-                &mut root.database,
-                &mut root.directory,
-                &mut root.manifest,
-                directory,
-                manifest,
-            ],
-            device,
-        );
-    }
-}
-
 pub(super) struct ConfiguredRcliUse {
     anchor: Anchor,
     sdk: Directory,
@@ -364,9 +326,8 @@ impl NativeProfileCustody {
         let profile =
             Directory::open(&root.file, OsStr::new(key)).map_err(configuration_missing)?;
         let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
-        let mut actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
+        let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("rcli_profile_binding_conflict"))?;
-        actual.rebase(root_identity.state.device);
         if actual.version != 2
             || actual.root != *root_identity
             || actual.profile_ref != *target_profile_ref
@@ -399,14 +360,13 @@ impl NativeProfileCustody {
             return Err(failure("native_profile_identity_changed"));
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
-        let (profile, manifest, mut actual) =
+        let (profile, manifest, actual) =
             self.read_configured_slot(&root, &root_identity, &slots, &key, target_profile_ref)?;
         if actual.connection != *connection {
             return Err(failure("rcli_profile_binding_conflict"));
         }
         self.validate_configured_home_path(&actual.configured.path)?;
         let (home, configured) = ConfiguredRcliUse::capture(&actual.configured.path, connection)?;
-        actual.configured.rebase(configured.identity.home.device);
         if configured.identity != actual.configured {
             return Err(failure("rcli_profile_identity_changed"));
         }
@@ -477,9 +437,8 @@ impl NativeProfileCustody {
         }
         let key = digest(target_profile_ref.as_str().as_bytes());
         let (profile, manifest, previous, manifest_lock) = if slots.contains_key(&key) {
-            let (profile, manifest, mut actual) =
+            let (profile, manifest, actual) =
                 self.read_configured_slot(root, locked.identity, &slots, &key, target_profile_ref)?;
-            actual.configured.rebase(configured.identity.home.device);
             if actual.connection == *connection && actual.configured == configured.identity {
                 let loaded = self.load_configured_rcli(host, connection, target_profile_ref)?;
                 if loaded.configured.identity != configured.identity {

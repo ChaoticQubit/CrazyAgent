@@ -1,4 +1,4 @@
-use super::{Anchor, Identity, hex, rebase, safe_directory, safe_file};
+use super::{Anchor, Identity, hex, safe_directory, safe_file};
 use crate::config::{ModelAuthentication, ModelConnection};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
@@ -90,49 +90,6 @@ struct ProfileIdentity {
     directory: Identity,
     home: Identity,
     manifest: Identity,
-}
-
-impl RootIdentity {
-    /// Moves the identities this manifest recorded onto the volume's current device, as
-    /// [`rebase`] does for one record. Input: the state folder's current device. Output: none.
-    fn rebase(&mut self, device: u64) {
-        rebase(
-            &mut [
-                &mut self.state,
-                &mut self.database,
-                &mut self.directory,
-                &mut self.manifest,
-            ],
-            device,
-        );
-    }
-}
-
-impl ProfileIdentity {
-    /// Moves the identities this manifest recorded, its root's included, onto the volume's
-    /// current device, as [`rebase`] does for one record. Input: the state folder's current
-    /// device. Output: none.
-    fn rebase(&mut self, device: u64) {
-        let Self {
-            root,
-            directory,
-            home,
-            manifest,
-            ..
-        } = self;
-        rebase(
-            &mut [
-                &mut root.state,
-                &mut root.database,
-                &mut root.directory,
-                &mut root.manifest,
-                directory,
-                home,
-                manifest,
-            ],
-            device,
-        );
-    }
 }
 
 struct Directory {
@@ -575,9 +532,8 @@ impl NativeProfileCustody {
             directory: root.identity,
             manifest: manifest.identity,
         };
-        let mut actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
+        let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("native_profile_identity_invalid"))?;
-        actual.rebase(self.anchor.identity.device);
         if actual != expected {
             return Err(failure("native_profile_binding_conflict"));
         }
@@ -763,9 +719,8 @@ impl NativeProfileCustody {
             directory: directory.identity,
             manifest: manifest.identity,
         };
-        let mut actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
+        let actual: RootIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("native_profile_identity_invalid"))?;
-        actual.rebase(self.anchor.identity.device);
         if actual != expected {
             return Err(failure("native_profile_binding_conflict"));
         }
@@ -920,9 +875,8 @@ fn prepare_profile(
         home: home.identity,
         manifest: manifest.identity,
     };
-    let mut actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
+    let actual: ProfileIdentity = serde_json::from_slice(&manifest.bytes)
         .map_err(|_| failure("native_profile_identity_invalid"))?;
-    actual.rebase(root.state.device);
     if actual != expected {
         return Err(failure("native_profile_binding_conflict"));
     }
