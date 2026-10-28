@@ -1,14 +1,15 @@
 use super::*;
 use crate::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome};
 use crate::project_setup::{StoredSetup, TeamPlan};
-use crate::protocol::{ProjectSpec, StoredProject};
+use crate::protocol::{Outcome, ProjectSpec};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
 
 const PROJECT: &str = "alpha";
 
 /// Records a project with a stored setup whose folder is `folder`, the rows a project
-/// created through setup has. Inputs: the engine database, the project id and its folder.
+/// created through setup has, the project row through the engine's own create path.
+/// Inputs: the engine database, the project id and its folder.
 pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
     let setup = StoredSetup {
         project_id: ProjectId::new(project).unwrap(),
@@ -30,23 +31,21 @@ pub(crate) fn add_project(db: &Connection, project: &str, folder: &Path) {
         created_ms: 1,
         revision: 1,
     };
-    let row = StoredProject {
-        project_id: setup.project_id.clone(),
-        spec: ProjectSpec {
-            name: setup.name.clone(),
-            repositories: vec![],
-        },
+    let spec = ProjectSpec {
+        name: setup.name.clone(),
+        repositories: vec![],
     };
-    db.execute(
-        "INSERT INTO projects VALUES (?1,?2)",
-        params![project, serde_json::to_string(&row).unwrap()],
-    )
-    .unwrap();
-    db.execute(
+    let tx = db.unchecked_transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, &setup.project_id, &spec).unwrap(),
+        Outcome::Applied
+    );
+    tx.execute(
         "INSERT INTO project_setups VALUES (?1,?2)",
         params![project, serde_json::to_string(&setup).unwrap()],
     )
     .unwrap();
+    tx.commit().unwrap();
 }
 
 /// Runs git in `dir` with no global or system configuration. Inputs: the folder and the

@@ -3,7 +3,7 @@ use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{PipeWriter, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -79,6 +79,7 @@ pub struct ServerInfo {
 pub struct Servers {
     folder: PathBuf,
     idle: Duration,
+    start: Duration,
     grants: Arc<bridge::Grants>,
     socket: PathBuf,
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
@@ -116,24 +117,42 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The extension preparations under way, one lock per server extensions folder: a
+/// preparation that runs on after the IDE tab's timeout cut its open still holds its lock,
+/// so the next open of that project waits for it instead of installing beside it.
+static PREPARING: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// The lock of one server extensions folder's preparation, the same one for every caller
+/// while any holds it; locks nobody holds are dropped as another is handed out. Input: the
+/// extensions folder. Output: its lock.
+fn preparation(extensions: &Path) -> Arc<Mutex<()>> {
+    let mut preparing = locked(&PREPARING);
+    preparing.retain(|_, held| Arc::strong_count(held) > 1);
+    Arc::clone(preparing.entry(extensions.to_path_buf()).or_default())
+}
+
 impl Servers {
     /// The IDE servers of one engine, none running yet. Inputs: the engine's data folder,
-    /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched,
-    /// [`IDLE_LIMIT`] outside tests, the owner server's IDE capability grants and its owner
-    /// socket, `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach.
-    /// Output: the register.
+    /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched
+    /// and how long a launch may take to listen, [`IDLE_LIMIT`] and [`START_LIMIT`] outside
+    /// tests, the owner server's IDE capability grants and its owner socket,
+    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach. Output: the
+    /// register.
     pub(crate) fn new(
         data: &Path,
         idle: Duration,
+        start: Duration,
         grants: Arc<bridge::Grants>,
         socket: PathBuf,
     ) -> Self {
         assert!(!idle.is_zero());
+        assert!(!start.is_zero());
         assert_eq!(socket.parent().and_then(Path::parent), Some(data));
         assert_eq!(socket.file_name(), Some(std::ffi::OsStr::new("owner.sock")));
         Self {
             folder: data.join(super::FOLDER),
             idle,
+            start,
             grants,
             socket,
             slots: Mutex::default(),
@@ -302,8 +321,9 @@ impl Servers {
             ready: false,
             proxy,
         });
-        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle));
-        if let Err(error) = ready(&slot, launch, server_port, group, &self.closed).await {
+        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle, self.start));
+        let listening = ready(&slot, launch, server_port, group, self.start, &self.closed).await;
+        if let Err(error) = listening {
             stop_launch(&slot, launch).await;
             return Err(error);
         }
@@ -408,8 +428,9 @@ impl Servers {
     /// [`command`] wrote the pin list into its Remote settings: the built-in extension
     /// installed and listed ([`bridge::install_extension`]), every approved extension
     /// installed from its verified VSIX and every other one but the built-in removed
-    /// ([`extensions::on_server_start`]), off the async runtime. A failure stops the start.
-    /// Inputs: the build root and the project's IDE folder. Output: Ok, or a plain refusal.
+    /// ([`extensions::on_server_start`]), off the async runtime and after any preparation of
+    /// the same folder still running ([`preparation`]). A failure stops the start. Inputs:
+    /// the build root and the project's IDE folder. Output: Ok, or a plain refusal.
     async fn prepare_extensions(&self, build: &Path, folder: &Path) -> Result<(), EngineError> {
         let data = self
             .folder
@@ -423,6 +444,8 @@ impl Servers {
             folder.join(SERVER_DATA),
         );
         tokio::task::spawn_blocking(move || {
+            let preparing = preparation(&extensions);
+            let _preparing = locked(&preparing);
             bridge::install_extension(&extensions)?;
             extensions::on_server_start(
                 &data,
@@ -525,15 +548,16 @@ async fn reuse(slot: &Slot) -> Option<ServerInfo> {
 }
 
 /// Waits until a launch listens on its port, the launch ends, [`Servers::stop_all`] began
-/// (`closed`) or [`START_LIMIT`] passes.
+/// (`closed`) or its `start` limit passes.
 async fn ready(
     slot: &Slot,
     launch: u64,
     port: u16,
     group: Pid,
+    start: Duration,
     closed: &AtomicBool,
 ) -> Result<(), EngineError> {
-    let deadline = Instant::now() + START_LIMIT;
+    let deadline = Instant::now() + start;
     loop {
         if closed.load(Ordering::SeqCst) {
             return Err(failure("ide_servers_closed"));
@@ -563,22 +587,22 @@ async fn ready(
 }
 
 /// Stops a launch once it exited, went untouched for `idle`, or was not ready within
-/// [`START_LIMIT`] of its start because the open that started it was cut, checking again
-/// under the start lock so an open that is still starting or just reused it keeps it.
-/// Runs from the moment the launch is stored and ends with the launch.
-async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
+/// `start` of its start because the open that started it was cut, checking again under the
+/// start lock so an open that is still starting or just reused it keeps it. Runs from the
+/// moment the launch is stored and ends with the launch.
+async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration, start: Duration) {
     loop {
-        tokio::time::sleep(WATCH_POLL.min(idle)).await;
+        tokio::time::sleep(WATCH_POLL.min(idle).min(start)).await;
         let Some(slot) = weak.upgrade() else {
             return;
         };
-        match due(&slot, launch, idle) {
+        match due(&slot, launch, idle, start) {
             None => return,
             Some(false) => continue,
             Some(true) => {}
         }
         let _start = slot.start.lock().await;
-        match due(&slot, launch, idle) {
+        match due(&slot, launch, idle, start) {
             None => return,
             Some(false) => continue,
             Some(true) => {
@@ -590,13 +614,13 @@ async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
 }
 
 /// Whether a launch should stop: none when the slot holds another launch or none, else
-/// whether it exited, went untouched for `idle`, or is still not ready [`START_LIMIT`]
-/// after it started.
-fn due(slot: &Slot, launch: u64, idle: Duration) -> Option<bool> {
+/// whether it exited, went untouched for `idle`, or is still not ready `start` after it
+/// started.
+fn due(slot: &Slot, launch: u64, idle: Duration, start: Duration) -> Option<bool> {
     let mut state = locked(&slot.state);
     let running = state.as_mut().filter(|running| running.launch == launch)?;
     let exited = !matches!(running.child.try_wait(), Ok(None));
-    let unready = !running.ready && running.started.elapsed() >= START_LIMIT;
+    let unready = !running.ready && running.started.elapsed() >= start;
     Some(exited || unready || running.touched.elapsed() >= idle)
 }
 

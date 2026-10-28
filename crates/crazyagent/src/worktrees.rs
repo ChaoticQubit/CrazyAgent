@@ -69,6 +69,8 @@ pub const REMOTE_REFUSAL: &str =
 
 #[cfg(unix)]
 const GIT_TRUE: &[&str] = &["true", "yes", "on", "1"];
+#[cfg(unix)]
+const WORKTREE_CONFIG_TRIES: usize = 3;
 
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
@@ -2103,21 +2105,30 @@ fn replace_lock(metadata: &Path) -> Result<(), EngineError> {
 }
 
 /// Turns `extensions.worktreeConfig` on in a repository's own config when it is off, so Git
-/// reads each worktree's `config.worktree`. Input: the repository. Output: success, or the
-/// refusal code.
+/// reads each worktree's `config.worktree`. A write that loses `.git/config.lock` to another
+/// git, such as a second first-time setup or the owner's own git, reads the switch again
+/// and writes again, at most [`WORKTREE_CONFIG_TRIES`] writes. Input: the repository.
+/// Output: success, or the refusal code.
 #[cfg(unix)]
 fn turn_on_worktree_config(repository: &Path) -> Result<(), EngineError> {
-    let listing = git(
-        repository,
-        &["config", "--local", "--no-includes", "--null", "--list"],
-    )?;
-    if !worktree_config_on(&listing) {
-        git(
+    let mut tries = 0;
+    loop {
+        let listing = git(
+            repository,
+            &["config", "--local", "--no-includes", "--null", "--list"],
+        )?;
+        if worktree_config_on(&listing) {
+            return Ok(());
+        }
+        tries += 1;
+        let written = git(
             repository,
             &["config", "--local", "extensions.worktreeConfig", "true"],
-        )?;
+        );
+        if written.is_ok() || tries >= WORKTREE_CONFIG_TRIES {
+            return written.map(drop);
+        }
     }
-    Ok(())
 }
 
 /// Leaves a worktree's Git metadata holding exactly [`REMOTE_LOCK`]: a lock in place is
@@ -2918,6 +2929,40 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(listing)
             );
+        }
+    }
+
+    const WORKTREE_CONFIG_RACERS: usize = 8;
+    const WORKTREE_CONFIG_ROUNDS: usize = 10;
+
+    /// First-time setups of one repository that turn `extensions.worktreeConfig` on at the
+    /// same moment all succeed: one that loses `.git/config.lock` to another reads the switch
+    /// again and finds it on, so no lease or worktree fails on the race.
+    #[cfg(unix)]
+    #[test]
+    fn first_time_worktree_config_writes_that_race_all_succeed() {
+        for _ in 0..WORKTREE_CONFIG_ROUNDS {
+            let temporary = tempfile::tempdir().unwrap();
+            let repository = committed_repository(temporary.path());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(WORKTREE_CONFIG_RACERS));
+            let racers: Vec<_> = (0..WORKTREE_CONFIG_RACERS)
+                .map(|_| {
+                    let (repository, barrier) = (repository.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        turn_on_worktree_config(&repository)
+                    })
+                })
+                .collect();
+            for racer in racers {
+                assert_eq!(racer.join().unwrap(), Ok(()));
+            }
+            let listing = git(
+                &repository,
+                &["config", "--local", "--no-includes", "--null", "--list"],
+            )
+            .unwrap();
+            assert!(worktree_config_on(&listing));
         }
     }
 }

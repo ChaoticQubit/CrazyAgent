@@ -169,39 +169,38 @@ fn written_remote_settings_hold_every_locked_key() {
     );
 }
 
+/// Keys an earlier server left in the Remote settings file are never carried forward:
+/// each start writes only the engine's keys, and a file holding any other key is set aside
+/// once, never dropped; an unreadable file is kept aside and a link replaced.
 #[test]
-fn owner_settings_outside_the_locked_keys_are_kept() {
+fn keys_the_engine_does_not_write_are_set_aside_never_carried_forward() {
     let case = Case::new();
     write(&case.folder, &case.server_data, &case.data(), None).unwrap();
-    std::fs::write(
-        case.machine(),
-        r#"{"editor.fontSize": 15, "workbench.preferredDarkColorTheme": "Solarized Dark", "chat.disableAIFeatures": false, "update.mode": "start", "extensions.allowed": {"*": true}}"#,
-    )
-    .unwrap();
+    let earlier = r#"{"editor.fontSize": 15, "terminal.integrated.env.osx": {"PATH": "/x"}, "chat.disableAIFeatures": false, "update.mode": "start", "extensions.allowed": {"*": true}}"#;
+    std::fs::write(case.machine(), earlier).unwrap();
 
     let written = write(&case.folder, &case.server_data, &case.data(), None).unwrap();
-    let machine = read(&written.machine);
-    assert_eq!(machine["editor.fontSize"], json!(15));
     assert_eq!(
-        machine["workbench.preferredDarkColorTheme"],
-        json!("Solarized Dark"),
-        "a theme the owner chose stays"
+        read(&written.machine),
+        expected_machine(&case),
+        "only the engine's keys are written"
     );
-    assert_eq!(machine["chat.disableAIFeatures"], json!(true));
-    assert_eq!(machine["update.mode"], json!("none"));
     assert_eq!(
-        machine["extensions.allowed"],
-        expected_machine(&case)["extensions.allowed"],
-        "the engine's pin list replaces the owner's own"
+        std::fs::read_to_string(case.machine().with_file_name(PREVIOUS)).unwrap(),
+        earlier,
+        "a file holding other keys is set aside, never dropped"
     );
-    let mut expected = expected_machine(&case);
-    expected["editor.fontSize"] = json!(15);
-    expected["workbench.preferredDarkColorTheme"] = json!("Solarized Dark");
-    assert_eq!(machine, expected);
     assert_eq!(
         read(&written.locked),
         expected_locks(),
-        "owner keys never join the lock"
+        "other keys never join the lock"
+    );
+    std::fs::remove_file(case.machine().with_file_name(PREVIOUS)).unwrap();
+    let written = write(&case.folder, &case.server_data, &case.data(), None).unwrap();
+    assert_eq!(read(&written.machine), expected_machine(&case));
+    assert!(
+        !case.machine().with_file_name(PREVIOUS).exists(),
+        "a file holding only the engine's keys is not set aside"
     );
 
     let unreadable = "// my notes\n{\"editor.fontSize\": 16,}\n";
