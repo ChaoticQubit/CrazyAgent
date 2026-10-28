@@ -2418,8 +2418,11 @@ async fn runner_control(
     .map_err(|_| failure("runner_control_outcome_unknown"))?
 }
 
+/// Opens a sealed dispatch folder without following links and checks its owner and mode.
+/// Input: the canonical folder path. Output: its live (device, inode) pair, which the
+/// caller compares with the seal under the whole-volume renumber rule.
 #[cfg(unix)]
-fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), EngineError> {
+fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
     if !path.is_absolute()
         || path.components().count() > 64
         || std::fs::canonicalize(path).map_err(io_error)? != path
@@ -2447,12 +2450,10 @@ fn dispatch_directory(path: &Path, expected: &LeaseIdentity) -> Result<(), Engin
     if !metadata.is_dir()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o022 != 0
-        || metadata.dev() != expected.device
-        || metadata.ino() != expected.inode
     {
         return Err(failure("dispatch_filesystem_identity_changed"));
     }
-    Ok(())
+    Ok((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(unix)]
@@ -2565,9 +2566,21 @@ fn dispatch_config(path: &Path) -> Result<(), EngineError> {
 fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     let repository = Path::new(&seal.repository);
     let target = Path::new(&seal.path);
-    dispatch_directory(repository, &seal.admission_root)?;
-    dispatch_directory(&repository.join(".git"), &seal.admission_metadata)?;
-    dispatch_directory(target, &seal.directory)?;
+    let pinned = [
+        &seal.admission_root,
+        &seal.admission_metadata,
+        &seal.directory,
+        &seal.metadata,
+    ]
+    .map(|identity| (identity.device, identity.inode));
+    let mut live = vec![
+        dispatch_directory(repository)?,
+        dispatch_directory(&repository.join(".git"))?,
+        dispatch_directory(target)?,
+    ];
+    if !crate::file_identity::same_files(&pinned[..live.len()], &live) {
+        return Err(failure("dispatch_filesystem_identity_changed"));
+    }
     dispatch_config(repository)?;
     let pointer = dispatch_file(&target.join(".git"), 4096)?;
     let pointer = std::str::from_utf8(&pointer).map_err(io_error)?;
@@ -2580,7 +2593,10 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     if metadata.parent() != Some(repository.join(".git/worktrees").as_path()) {
         return Err(failure("dispatch_git_metadata_escape"));
     }
-    dispatch_directory(&metadata, &seal.metadata)?;
+    live.push(dispatch_directory(&metadata)?);
+    if !crate::file_identity::same_files(&pinned, &live) {
+        return Err(failure("dispatch_filesystem_identity_changed"));
+    }
     crate::worktrees::validate_admin(repository, &metadata)?;
     if dispatch_file(&metadata.join("commondir"), 32)? != b"../..\n"
         || dispatch_file(&metadata.join("gitdir"), 4096)?
