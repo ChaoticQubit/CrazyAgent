@@ -898,7 +898,7 @@ fn the_finished_box_keeps_the_picked_agent_drawn_when_the_list_is_longer_than_th
             ..stopped.clone()
         })
         .collect();
-    let mut shell = fresh(120, 20);
+    let mut shell = fresh(120, 24);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
         result: Ok(graph()),
