@@ -608,6 +608,9 @@ fn an_agent_gets_no_claude_copy_for_a_malformed_or_inference_less_scope_set() {
         json!(["user:profile"]),
         json!(["user:inference", 123]),
         json!([" org:create_api_key ", "user:inference"]),
+        json!(["ORG:create_api_key", "user:inference"]),
+        json!(["Org:create_api_key", "user:inference"]),
+        json!(["oRg:create_api_key", "user:inference"]),
     ] {
         let mut case = UseCase::with_harness("claude-code");
         let expires = (now() + 8 * 3600) * 1000;

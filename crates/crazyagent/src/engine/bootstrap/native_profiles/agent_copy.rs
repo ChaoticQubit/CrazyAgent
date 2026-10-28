@@ -442,7 +442,7 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
 /// Builds the agent's Claude Code `.credentials.json`: only the fields Claude Code reads
 /// from the account's OAuth record, with no refresh token and none of the other records
 /// the account keeps. Claude Code empties both tokens when its provider refuses a refresh.
-/// Each scope is trimmed and must be a string; the record is refused when any is in the
+/// Each scope is trimmed, case-folded to lowercase and must be a string; the record is refused when any is in the
 /// [`AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX`] family or when none is
 /// [`AGENT_CLAUDE_REQUIRED_SCOPE`] (an empty or inference-less list is not a usable sign-in),
 /// so an agent never receives a Console credential that can create API keys or grant
@@ -469,7 +469,11 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         .ok_or_else(unavailable)?;
     let mut has_required = false;
     for scope in scopes {
-        let scope = scope.as_str().ok_or_else(wide_scope)?.trim();
+        let scope = scope
+            .as_str()
+            .ok_or_else(wide_scope)?
+            .trim()
+            .to_ascii_lowercase();
         if scope.starts_with(AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX) {
             return Err(wide_scope());
         }
