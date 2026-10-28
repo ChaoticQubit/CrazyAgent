@@ -271,7 +271,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     crate::agent_home::prepare(&home, crate::agent_home::Harness::Codex, &launch, &given).unwrap();
-    crate::agent_home::record_skills(&home, &[]).unwrap();
+    crate::agent_home::record_skills(&launch.data, &home, &[]).unwrap();
     let Ok(ProcessReply::Agent(view)) = native.process(asked.clone()).await.result else {
         panic!("the launched agent's view is read through the engine");
     };

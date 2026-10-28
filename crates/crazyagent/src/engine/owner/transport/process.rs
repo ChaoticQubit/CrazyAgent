@@ -111,9 +111,9 @@ enum Reply {
 }
 
 /// What one team agent received at its last launch: the agent id, its harness, whether it
-/// has launched, the text of its harness's instruction file (empty when none was given) and
-/// the names of the skills installed for it, read back from its private home, and the
-/// engine's own record of the instruction files it found, kept outside that home; then
+/// has launched and the text of its harness's instruction file (empty when none was given),
+/// read back from its private home, then the engine's own records, kept outside that home,
+/// of the names of the skills installed for it and of the instruction files it found; then
 /// what its harness reported in its own session records: how many were read, the
 /// instruction files it loaded and the skills it invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -685,11 +685,13 @@ fn agent_instructions(
     let received =
         crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
     let launched = received.is_some();
-    let files = match launched {
-        true => {
-            crate::agent_home::given_files(root, &home).map_err(|problem| EngineError(problem.0))?
-        }
-        false => Vec::new(),
+    let recorded = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+    let (skills, files) = match launched {
+        true => (
+            crate::agent_home::given_skills(root, &home).map_err(recorded)?,
+            crate::agent_home::given_files(root, &home).map_err(recorded)?,
+        ),
+        false => (Vec::new(), Vec::new()),
     };
     let received = received.unwrap_or_default();
     let seen = match launched {
@@ -701,7 +703,7 @@ fn agent_instructions(
         harness,
         launched,
         text: received.text,
-        skills: received.skills,
+        skills,
         sessions: u32::try_from(seen.records).map_err(|_| failure("process_reply_bounds"))?,
         loaded: seen.loaded,
         skills_used: seen.used,

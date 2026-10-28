@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::agent_git::Layout;
-use crazyagent::agent_home::{self, Harness};
+use crazyagent::agent_home;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
@@ -629,17 +629,17 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     );
     assert!(!mcp_path.exists());
     assert!(!codex_skills.exists());
-    let received = |home: &Path, harness| {
-        let received = agent_home::received(home, harness).unwrap().unwrap();
-        received.skills.into_iter().collect::<BTreeSet<_>>()
+    let received = |home: &Path| {
+        let received = agent_home::given_skills(case.root.path(), home).unwrap();
+        received.into_iter().collect::<BTreeSet<_>>()
     };
     assert_eq!(
-        received(&codex_home, Harness::Codex),
+        received(&codex_home),
         BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()]),
         "the skill names of the last launch outlive its copies"
     );
     assert_eq!(
-        received(&claude_home, Harness::Claude),
+        received(&claude_home),
         BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()])
     );
 
@@ -668,7 +668,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(!off_home.join("skills/crazyagent").exists());
     drop(off_files);
     assert_eq!(
-        received(&off_home, Harness::Codex),
+        received(&off_home),
         BTreeSet::new(),
         "tools off installs and records no skill"
     );

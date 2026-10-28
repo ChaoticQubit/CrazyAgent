@@ -447,7 +447,10 @@ impl AgentContext {
                 .collect(),
             false => Vec::new(),
         };
-        crate::agent_home::record_skills(home, &names).map_err(|problem| LaunchError(problem.0))?;
+        if let Some(process) = &self.process {
+            crate::agent_home::record_skills(&process.project.data, home, &names)
+                .map_err(|problem| LaunchError(problem.0))?;
+        }
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);

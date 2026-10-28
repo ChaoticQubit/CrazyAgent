@@ -216,9 +216,9 @@ export function fileStateWords(state: InstructionState): string {
   return FILE_STATES[state];
 }
 
-/** What one team agent received at its last launch: its harness, whether it has launched,
- * the instruction file text and the installed skill names, read back from its private home,
- * and the engine's own record of each instruction file it found, kept outside that home;
+/** What one team agent received at its last launch: its harness, whether it has launched
+ * and the instruction file text, read back from its private home, then the engine's own
+ * records, kept outside that home, of the installed skill names and each instruction file;
  * then what its harness reported in its own session records: how many were read, the
  * instruction files it loaded and the skills it invoked. */
 export interface AgentInstructions {

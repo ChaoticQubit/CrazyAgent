@@ -18,7 +18,7 @@ pub const PROCESS_BYTES_MAX: usize = TITLE.len()
     + PROJECT_HEADING.len()
     + 2 * (TEXT_BYTES_MAX + 1)
     + crate::instruction_files::SECTION_BYTES_MAX;
-pub const SKILLS_FILE: &str = "crazyagent-skills";
+const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
@@ -290,7 +290,35 @@ fn record_files(
     {
         return Err(failure("agent_files_invalid"));
     }
-    let (folder, name) = files_record(data, home)?;
+    let record: String = files
+        .iter()
+        .map(|file| format!("{}\t{}\t{}\n", file.state.as_str(), file.bytes, file.name))
+        .collect();
+    assert!(record.len() <= FILES_RECORD_BYTES_MAX);
+    write_record(data, FILES_FOLDER, home, &record)
+}
+
+/// Names where the engine keeps one kind of launch record for one agent home: a file
+/// named by the SHA-256 of the home's real path in the folder `kind` of the engine data
+/// root's real path, outside every folder an agent may write. Inputs: the engine data
+/// root, the record's folder name and the agent's home. Output: the folder and the file
+/// name, or `agent_instructions_unreadable`.
+fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
+    assert!(kind == FILES_FOLDER || kind == SKILLS_FOLDER);
+    let real =
+        |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
+    let home = real(home)?;
+    let name = format!("{:x}", Sha256::digest(home.as_os_str().as_encoded_bytes()));
+    assert_eq!(name.len(), 64);
+    Ok((real(data)?.join(kind), name))
+}
+
+/// Writes one launch's record for an agent home into the engine's 0700 folder `kind`,
+/// replacing the last launch's record and any entry planted under its name.
+/// Inputs: the engine data root, the record's folder name, the agent's home and the
+/// record text. Output: unit, or a plain code.
+fn write_record(data: &Path, kind: &str, home: &Path, record: &str) -> Result<(), AgentHomeError> {
+    let (folder, name) = record_place(data, kind, home)?;
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -301,25 +329,26 @@ fn record_files(
         _ => real_folder(&folder)?,
     }
     remove_folder(&folder.join(&name))?;
-    let record: String = files
-        .iter()
-        .map(|file| format!("{}\t{}\t{}\n", file.state.as_str(), file.bytes, file.name))
-        .collect();
-    assert!(record.len() <= FILES_RECORD_BYTES_MAX);
     write_whole(&folder, &name, record.as_bytes())
 }
 
-/// Names where the engine keeps one agent home's instruction files record: a file named
-/// by the SHA-256 of the home's real path in a folder of the engine data root's real path,
-/// outside every folder an agent may write. Inputs: the engine data root and the agent's home.
-/// Output: the folder and the file name, or `agent_instructions_unreadable`.
-fn files_record(data: &Path, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
-    let real =
-        |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
-    let home = real(home)?;
-    let name = format!("{:x}", Sha256::digest(home.as_os_str().as_encoded_bytes()));
-    assert_eq!(name.len(), 64);
-    Ok((real(data)?.join(FILES_FOLDER), name))
+/// Reads one launch record the engine keeps for an agent home, empty before a launch
+/// wrote one. Inputs: the engine data root, the record's folder name, the agent's home and
+/// the record's bound. Output: the text, or a plain code.
+fn read_record(
+    data: &Path,
+    kind: &str,
+    home: &Path,
+    bytes_max: usize,
+) -> Result<String, AgentHomeError> {
+    let (folder, name) = record_place(data, kind, home)?;
+    match fs::symlink_metadata(&folder) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(_) => return Err(failure("agent_instructions_unreadable")),
+        Ok(metadata) if !metadata.is_dir() => return Err(failure("agent_instructions_unsafe")),
+        Ok(_) => {}
+    }
+    read_home_file(&folder.join(name), bytes_max)
 }
 
 /// Reads the engine's own record of the instruction files one agent's last launch found,
@@ -330,14 +359,12 @@ pub fn given_files(
     data: &Path,
     home: &Path,
 ) -> Result<Vec<crate::instruction_files::Record>, AgentHomeError> {
-    let (folder, name) = files_record(data, home)?;
-    match fs::symlink_metadata(&folder) {
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(failure("agent_instructions_unreadable")),
-        Ok(metadata) if !metadata.is_dir() => return Err(failure("agent_instructions_unsafe")),
-        Ok(_) => {}
-    }
-    parse_files(&read_home_file(&folder.join(name), FILES_RECORD_BYTES_MAX)?)
+    parse_files(&read_record(
+        data,
+        FILES_FOLDER,
+        home,
+        FILES_RECORD_BYTES_MAX,
+    )?)
 }
 
 /// Reads back the instruction files record one launch left. Input: the record text.
@@ -388,36 +415,52 @@ pub fn import_global(home: &Path) -> Result<String, AgentHomeError> {
 }
 
 /// What one agent was given at its last launch, read back from its private home: the
-/// text of its harness's instruction file and the names of the skills installed for it.
+/// text of its harness's instruction file.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Received {
     pub text: String,
-    pub skills: Vec<String>,
 }
 
-/// Records the names of the skills one launch installed in the agent's home, one per
-/// line, replacing the last launch's list and any entry planted under its name.
-/// Inputs: the agent's 0700 home and the names. Output: unit, or `agent_skills_invalid`
-/// for more than `SKILLS_RECORD_MAX` names or a name outside the skill name rule.
-pub fn record_skills(home: &Path, names: &[&str]) -> Result<(), AgentHomeError> {
+/// Records the names of the skills one launch installed for an agent home, one per line,
+/// in the engine's 0700 folder that no agent can write, replacing the last launch's list.
+/// Inputs: the engine data root, the agent's 0700 home and the names. Output: unit, or
+/// `agent_skills_invalid` for more than `SKILLS_RECORD_MAX` names or a name outside the
+/// skill name rule.
+pub fn record_skills(data: &Path, home: &Path, names: &[&str]) -> Result<(), AgentHomeError> {
     if names.len() > SKILLS_RECORD_MAX || !names.iter().all(|name| skill_name(name)) {
         return Err(failure("agent_skills_invalid"));
     }
+    assert!(data.is_absolute());
     if !home.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
     real_folder(home)?;
-    remove_folder(&home.join(SKILLS_FILE))?;
     let record: String = names.iter().map(|name| format!("{name}\n")).collect();
     assert!(record.len() <= SKILLS_RECORD_BYTES_MAX);
-    write_whole(home, SKILLS_FILE, record.as_bytes())
+    write_record(data, SKILLS_FOLDER, home, &record)
 }
 
-/// Reads back what one agent's last launch left in its home: its harness's instruction
-/// file and the recorded skill names. Each must be a plain single-link file of this user,
-/// opened without following a link or waiting on a pipe, and within its bound.
+/// Reads the engine's own record of the skills one agent's last launch installed, kept
+/// outside the agent's home, so nothing the agent writes changes what its card lists.
+/// Inputs: the engine data root and the agent's home. Output: the names, empty before a
+/// launch recorded any, or a plain code for a record the engine never writes.
+pub fn given_skills(data: &Path, home: &Path) -> Result<Vec<String>, AgentHomeError> {
+    let record = read_record(data, SKILLS_FOLDER, home, SKILLS_RECORD_BYTES_MAX)?;
+    let skills: Vec<String> = record.split_terminator('\n').map(str::to_owned).collect();
+    if skills.len() > SKILLS_RECORD_MAX {
+        return Err(failure("agent_instructions_too_large"));
+    }
+    if !skills.iter().all(|name| skill_name(name)) {
+        return Err(failure("agent_instructions_invalid"));
+    }
+    Ok(skills)
+}
+
+/// Reads back the instruction file one agent's last launch left in its home. It must be
+/// a plain single-link file of this user, opened without following a link or waiting on a
+/// pipe, and within its bound.
 /// Inputs: the agent's home and its harness. Output: none before the first launch made
-/// the home, else the text (empty when none was given) and the names, or a plain code.
+/// the home, else the text (empty when none was given), or a plain code.
 pub fn received(home: &Path, harness: Harness) -> Result<Option<Received>, AgentHomeError> {
     match fs::symlink_metadata(home) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -426,15 +469,7 @@ pub fn received(home: &Path, harness: Harness) -> Result<Option<Received>, Agent
         Ok(_) => {}
     }
     let text = read_home_file(&home.join(harness.instruction_file()), PROCESS_BYTES_MAX)?;
-    let record = read_home_file(&home.join(SKILLS_FILE), SKILLS_RECORD_BYTES_MAX)?;
-    let skills: Vec<String> = record.split_terminator('\n').map(str::to_owned).collect();
-    if skills.len() > SKILLS_RECORD_MAX {
-        return Err(failure("agent_instructions_too_large"));
-    }
-    if !skills.iter().all(|name| skill_name(name)) {
-        return Err(failure("agent_instructions_invalid"));
-    }
-    Ok(Some(Received { text, skills }))
+    Ok(Some(Received { text }))
 }
 
 fn skill_name(name: &str) -> bool {
