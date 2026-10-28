@@ -3572,7 +3572,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         refused.contains("the project is Sandboxed now"),
         "{refused}"
     );
-    assert!(refused.contains(&crate::protocol::plain_code("agent_access_lowered")));
+    assert!(refused.contains(crate::protocol::plain_code("agent_access_lowered")));
 }
 
 #[cfg(target_os = "macos")]
