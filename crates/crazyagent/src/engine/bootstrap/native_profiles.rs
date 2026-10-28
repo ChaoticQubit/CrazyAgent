@@ -96,22 +96,12 @@ impl RootIdentity {
     }
 }
 
-/// Tells whether pinned file identities still name the live files. Every inode must match,
-/// and every device too, unless the one volume holding all of them was renumbered at mount
-/// (macOS can give a volume another st_dev after a restart): then all pinned devices share
-/// one value and all live devices share another. Inputs: pinned and live identities, in
-/// the same order. Output: true when they name the same files.
+/// Applies the crate-wide whole-volume renumber rule (`file_identity::same_files`) to
+/// custody identities. Inputs: pinned and live identities, in the same order. Output: true
+/// when they name the same files.
 fn same_files<const N: usize>(pinned: &[Identity; N], live: &[Identity; N]) -> bool {
-    let one_device = |identities: &[Identity; N]| {
-        identities
-            .iter()
-            .all(|identity| identity.device == identities[0].device)
-    };
-    pinned
-        .iter()
-        .zip(live)
-        .all(|(pinned, live)| pinned.inode == live.inode)
-        && (pinned == live || (one_device(pinned) && one_device(live)))
+    let pair = |identity: Identity| (identity.device, identity.inode);
+    crate::file_identity::same_files(&pinned.map(pair), &live.map(pair))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
