@@ -752,6 +752,7 @@ export interface TeamStatus {
   turn_limit_secs?: number | null;
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
+  partial?: boolean;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;

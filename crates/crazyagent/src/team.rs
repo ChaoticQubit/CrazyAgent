@@ -1683,6 +1683,8 @@ pub struct TeamStatus {
     pub messages: Vec<TeamMessage>,
     pub plan: Vec<PlanStep>,
     pub events: events::EventsView,
+    #[serde(default)]
+    pub partial: bool,
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -1915,9 +1917,9 @@ pub(crate) fn paused_until(
         .optional()
 }
 
-/// The project's team status as the owner reads it: `status`, with task and message texts
-/// cut until it fits one owner reply. Takes a connection and the stored setup. Returns the
-/// status, or `team_status_bounds` when even the shortest texts do not fit.
+/// The project's team status as the owner reads it: `status`, fitted to one owner reply by
+/// `fit_status`. Takes a connection and the stored setup. Returns the status, partial when
+/// older history had to go, or `team_status_bounds` when even an empty view does not fit.
 pub fn owner_status(
     connection: &Connection,
     stored: &StoredSetup,
@@ -1925,9 +1927,9 @@ pub fn owner_status(
     fit_status(status(connection, stored)?, encoded_len::<TeamStatus>)
 }
 
-/// The project's team graph as the owner reads it, built from a status whose texts are cut
+/// The project's team graph as the owner reads it, built from a status `fit_status` fitted
 /// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
-/// the graph, or `team_status_bounds` when even the shortest texts do not fit.
+/// the graph, or `team_status_bounds` when even an empty view does not fit.
 pub fn owner_graph(
     connection: &Connection,
     stored: &StoredSetup,
@@ -1938,35 +1940,129 @@ pub fn owner_graph(
     Ok(graph(&status))
 }
 
-/// Cuts every task prompt, result and problem and every message text to one shared cap,
-/// halving it until `size` of the status fits `STATUS_REPLY_BYTES_MAX`; a cut text says how
-/// many bytes it left out and no task or message is dropped. Takes the status and the size
-/// measure. Returns the status, or `team_status_bounds` when the shortest cap still does not fit.
+/// Fits a status to one owner reply. First every free-form text is cut to one shared cap,
+/// halved until `size` of the status fits `STATUS_REPLY_BYTES_MAX`; a cut text says how many
+/// bytes it left out. When the shortest cap still does not fit, the oldest finished history
+/// goes, then anything oldest first, and the status is marked partial. Takes the status and
+/// the size measure. Returns the status, or `team_status_bounds` when an empty view does not fit.
 fn fit_status(
-    mut status: TeamStatus,
+    status: TeamStatus,
     size: impl Fn(&TeamStatus) -> Result<usize, EngineError>,
 ) -> Result<TeamStatus, EngineError> {
     if size(&status)? <= STATUS_REPLY_BYTES_MAX {
         return Ok(status);
     }
-    let tasks = status.tasks.clone();
-    let messages = status.messages.clone();
     for cap in STATUS_TEXT_CAPS {
-        for (task, whole) in status.tasks.iter_mut().zip(&tasks) {
-            task.prompt = cut_text(&whole.prompt, cap);
-            task.result = whole.result.as_deref().map(|text| cut_text(text, cap));
-            task.problem = whole.problem.as_deref().map(|text| cut_text(text, cap));
+        let mut cut = status.clone();
+        cut_texts(&mut cut, cap);
+        if size(&cut)? <= STATUS_REPLY_BYTES_MAX {
+            assert_eq!(cut.tasks.len(), status.tasks.len());
+            assert_eq!(cut.messages.len(), status.messages.len());
+            return Ok(cut);
         }
-        for (message, whole) in status.messages.iter_mut().zip(&messages) {
-            message.text = cut_text(&whole.text, cap);
-        }
-        if size(&status)? <= STATUS_REPLY_BYTES_MAX {
-            assert_eq!(status.tasks.len(), tasks.len());
-            assert_eq!(status.messages.len(), messages.len());
-            return Ok(status);
+    }
+    let mut cut = status;
+    cut_texts(&mut cut, STATUS_TEXT_CAPS[STATUS_TEXT_CAPS.len() - 1]);
+    cut.partial = true;
+    for every in [false, true] {
+        while drop_history(&mut cut, every) {
+            if size(&cut)? <= STATUS_REPLY_BYTES_MAX {
+                return Ok(cut);
+            }
         }
     }
     Err(error("team_status_bounds"))
+}
+
+/// Cuts every free-form text of a status to `cap` bytes with `cut_text`: task prompts,
+/// results and problems, messages, agent problems, plan prompts, the live master problem,
+/// events, waiting questions and notifications. Takes the status and the cap.
+fn cut_texts(status: &mut TeamStatus, cap: usize) {
+    let cut = move |text: &mut String| *text = cut_text(text, cap);
+    for task in &mut status.tasks {
+        cut(&mut task.prompt);
+        task.result
+            .iter_mut()
+            .chain(task.problem.iter_mut())
+            .for_each(cut);
+    }
+    status.messages.iter_mut().for_each(|m| cut(&mut m.text));
+    status
+        .agents
+        .iter_mut()
+        .filter_map(|agent| agent.problem.as_mut())
+        .for_each(cut);
+    status
+        .plan
+        .iter_mut()
+        .for_each(|step| cut(&mut step.prompt));
+    status.live_problem.iter_mut().for_each(cut);
+    let events = &mut status.events;
+    events
+        .recent
+        .iter_mut()
+        .for_each(|event| cut(&mut event.text));
+    events
+        .waiting
+        .iter_mut()
+        .for_each(|agent| cut(&mut agent.text));
+    events
+        .notifications
+        .iter_mut()
+        .for_each(|item| cut(&mut item.text));
+}
+
+/// Drops the older half of one list of a status, at least one entry, in this order: events,
+/// seen notifications, finished messages, finished tasks and stopped agents; with `every`
+/// also unseen notifications, waiting messages, live tasks and agents, the plan and the
+/// waiting questions. Takes the status and whether live work may go. Returns whether
+/// anything was dropped.
+fn drop_history(status: &mut TeamStatus, every: bool) -> bool {
+    let waiting = |state: MessageState| matches!(state, MessageState::Pending | MessageState::Sent);
+    let events = &mut status.events;
+    drop_older(&mut events.recent, false, |_| true)
+        || drop_older(&mut events.notifications, true, |item| {
+            every || item.seen_ms.is_some()
+        })
+        || drop_older(&mut status.messages, false, |message| {
+            every || !waiting(message.state)
+        })
+        || drop_older(&mut status.tasks, false, |task| {
+            every || task.status.finished()
+        })
+        || drop_older(&mut status.agents, false, |agent| {
+            every || !agent.status.live()
+        })
+        || (every
+            && (drop_older(&mut status.plan, false, |_| true)
+                || drop_older(&mut events.waiting, false, |_| true)))
+}
+
+/// Drops the older half, at least one, of the entries of `items` that `droppable` picks.
+/// Takes the list, whether it is ordered newest first, and the pick. Returns whether
+/// anything was dropped.
+fn drop_older<T>(items: &mut Vec<T>, newest_first: bool, droppable: impl Fn(&T) -> bool) -> bool {
+    let picked: Vec<usize> = (0..items.len())
+        .filter(|at| droppable(&items[*at]))
+        .collect();
+    let count = picked.len().div_ceil(2);
+    if count == 0 {
+        return false;
+    }
+    let gone = if newest_first {
+        &picked[picked.len() - count..]
+    } else {
+        &picked[..count]
+    };
+    let before = items.len();
+    let mut at = 0;
+    items.retain(|_| {
+        let kept = gone.binary_search(&at).is_err();
+        at += 1;
+        kept
+    });
+    assert_eq!(items.len(), before - count);
+    true
 }
 
 /// Cuts text to `cap` bytes on a character boundary and, when anything was cut, ends it with
@@ -2094,6 +2190,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         messages,
         plan: steps,
         events: events::view(connection, project)?,
+        partial: false,
     })
 }
 

@@ -1096,6 +1096,11 @@ impl TeamView {
                 .push("  ", Style::new())
                 .push("auto-wake paused", look.warning);
         }
+        if status.partial {
+            left = left
+                .push("  ", Style::new())
+                .push("older history hidden", look.muted);
+        }
         let right = Row::of("Keep warm  ", look.muted)
             .push(if status.keep_warm { "On" } else { "Off" }, look.fg)
             .push("  Task  ", look.muted)

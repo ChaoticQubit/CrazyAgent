@@ -171,6 +171,7 @@ fn team() -> TeamStatus {
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     }
 }
 
@@ -1433,4 +1434,17 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
         }),
         "past 1 h the idle stop goes Off"
     );
+}
+
+/// A team view the engine shortened to fit one reply says older history is hidden.
+#[test]
+fn a_shortened_team_view_says_older_history_is_hidden() {
+    let view = loaded();
+    assert!(!find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
+    let mut partial = team();
+    partial.partial = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
+    assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
 }

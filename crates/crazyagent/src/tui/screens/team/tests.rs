@@ -867,6 +867,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     };
     let mut shell = fresh(160, 40);
     shell.arrive(Arrival::TeamGraph {
@@ -1179,6 +1180,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
         messages: Vec::new(),
         plan: Vec::new(),
         events: crate::team::events::EventsView::default(),
+        partial: false,
     };
     Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
         crate::tui::client::SetupEvent {

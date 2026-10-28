@@ -1337,3 +1337,72 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     drop(owner);
     engine.stop().await;
 }
+
+/// A team whose full status no longer fits one owner reply, from 120 long tasks, 80 stopped
+/// sub-agents with long problems and long escalations, still reads, and the owner still
+/// pauses it, cancels its tasks and turns the live master off.
+#[tokio::test]
+async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(ENGINE_WAIT).unwrap();
+    for sql in [
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120)
+         INSERT INTO team_tasks(project,source,harness,tools,prompt,status,attempts,result,delivered,created_ms,started_ms,finished_ms)
+         SELECT ?1,'owner','codex',0,i||' '||hex(zeroblob(2000)),'done',1,hex(zeroblob(2000)),1,i,i,i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<80)
+         INSERT INTO team_agents(project,role,harness,tools,status,error,created_ms,heartbeat_ms,stopped_ms)
+         SELECT ?1,'sub','codex',0,'stopped',hex(zeroblob(1000)),i,i,i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<25)
+         INSERT INTO team_notifications(project,kind,text,created_ms)
+         SELECT ?1,'escalation',hex(zeroblob(1000)),i FROM n",
+    ] {
+        assert!(connection.execute(sql, ["setup-pooled"]).unwrap() > 0, "{sql}");
+    }
+    drop(connection);
+    let status = owner.team_status(project.clone()).await.unwrap();
+    assert!(status.partial, "the read left older history out to fit");
+    for (generation, action) in [
+        (
+            2,
+            crate::team::TeamAction::Pause {
+                project_id: project.clone(),
+            },
+        ),
+        (
+            3,
+            crate::team::TeamAction::Cancel {
+                project_id: project.clone(),
+                task: None,
+            },
+        ),
+        (
+            4,
+            crate::team::TeamAction::LiveMaster {
+                project_id: project.clone(),
+                on: false,
+            },
+        ),
+    ] {
+        let response = owner.team_action(action.clone(), generation).await.unwrap();
+        assert_eq!(result(response), OwnerResult::Applied, "{action:?}");
+    }
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_paused_projects WHERE project='setup-pooled'"),
+        1
+    );
+    drop(owner);
+    engine.stop().await;
+}

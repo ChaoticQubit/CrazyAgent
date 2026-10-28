@@ -239,7 +239,7 @@ impl NativeBridge {
             .map_err(|_| failure("team_action_invalid"))?;
         if let Some(project_id) = action.project() {
             self.controller()?
-                .team_status(project_id.clone())
+                .project_setup(project_id.clone())
                 .await
                 .map_err(|e| read_failure(&e.0))?;
         }

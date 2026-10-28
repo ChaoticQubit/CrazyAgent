@@ -8,8 +8,10 @@ use crazyagent::protocol::ProjectSpec;
 use crazyagent::team::{MessageAuthor, MessageState, TaskSource, TaskStatus};
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 const COMMANDS: [&str; 10] = [
@@ -278,6 +280,104 @@ async fn desktop_reads_the_team_and_sends_team_actions_through_the_real_engine()
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(20), flow(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+/// Fills one project's team with history no single owner reply can carry whole: 120 long
+/// finished tasks, 80 stopped sub-agents with long problems and 25 long escalations, written
+/// by the real sqlite3 tool into the engine database. Takes the engine root and the project.
+fn crowd(root: &Path, project: &str) {
+    assert!(
+        project
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    );
+    let sql = format!(
+        ".timeout 10000
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<120)
+INSERT INTO team_tasks(project,source,harness,tools,prompt,status,attempts,result,delivered,created_ms,started_ms,finished_ms)
+SELECT '{project}','owner','codex',0,i||' '||hex(zeroblob(2000)),'done',1,hex(zeroblob(2000)),1,i,i,i FROM n;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<80)
+INSERT INTO team_agents(project,role,harness,tools,status,error,created_ms,heartbeat_ms,stopped_ms)
+SELECT '{project}','sub','codex',0,'stopped',hex(zeroblob(1000)),i,i,i FROM n;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<25)
+INSERT INTO team_notifications(project,kind,text,created_ms)
+SELECT '{project}','escalation',hex(zeroblob(1000)),i FROM n;
+SELECT count(*) FROM team_tasks WHERE project='{project}';
+"
+    );
+    let mut child = Command::new("/usr/bin/sqlite3")
+        .arg(root.join("engine.db"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(sql.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "120");
+}
+
+async fn crowded(root: &Path) -> Result<(), Box<dyn Error>> {
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Chores".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 2).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    crowd(root, &id);
+    let team = bridge.team_status(&id).await?;
+    assert!(team.partial, "the read left older history out to fit");
+    let paused = bridge.team_pause(&id, true, 3).await?;
+    assert!(
+        matches!(paused.outcome, ActionOutcome::Applied),
+        "{paused:?}"
+    );
+    let cancelled = bridge.team_cancel(&id, None, 4).await?;
+    assert!(
+        matches!(cancelled.outcome, ActionOutcome::Applied),
+        "{cancelled:?}"
+    );
+    let live = bridge.team_live_master(&id, false, 5).await?;
+    assert!(matches!(live.outcome, ActionOutcome::Applied), "{live:?}");
+    assert!(bridge.team_status(&id).await?.paused);
+    Ok(())
+}
+
+/// A team whose full status passes one owner reply still reads in the desktop, and Pause,
+/// Cancel and live master off still go through to the real engine.
+#[tokio::test]
+async fn desktop_pauses_and_cancels_a_team_whose_full_status_passes_one_reply() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-crowd-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(30), crowded(root.path())).await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();
