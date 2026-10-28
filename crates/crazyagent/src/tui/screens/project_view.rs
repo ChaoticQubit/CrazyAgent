@@ -1771,6 +1771,7 @@ fn context(
         ("v", "Edit file"),
         TABS,
         ("Esc", "Home"),
+        ("O", "Open in IDE"),
     ];
     let mut lines = vec![
         spread(

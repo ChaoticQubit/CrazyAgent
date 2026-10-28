@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { keyLabel, shortcutKey } from "./keys";
 import { Dialog } from "./overlay";
-import { formatRoute, navigate, PROJECT_TABS, type Route } from "./router";
+import { formatRoute, navigate, type Route } from "./router";
 
 export const GO_TO_ROWS_MAX = 8;
 export const GO_TO_QUERY_MAX = 100;
@@ -23,7 +23,7 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Cmd+N", "New project"],
   ["Cmd+,", "Settings"],
   ["Cmd+[  Cmd+]", "Back, forward"],
-  [`Cmd+1 to Cmd+${Math.min(PROJECT_TABS.length, 9)}`, "Project tabs"],
+  ["Cmd+1  Cmd+2  ...", "Project tabs, in the order shown"],
   ["Enter", "Send a message or prompt"],
   ["Shift+Enter", "New line in a message or prompt"],
   ["Esc", "Close a dialog or panel"],

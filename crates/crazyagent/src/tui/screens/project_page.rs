@@ -1062,6 +1062,7 @@ impl ProjectPage {
             && self.screen.general.is_none()
             && !self.screen.confirm_remove
             && !self.screen.changes.editing()
+            && !self.typing()
     }
 
     fn changes_have_keys(&self) -> bool {

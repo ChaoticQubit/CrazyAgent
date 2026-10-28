@@ -1961,8 +1961,19 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('O') => {
-                if let Some(target) = item.and_then(|item| self.ide_target(&item.path)) {
-                    return ProjectReply::Reveal(target);
+                if let Some(item) = item {
+                    match self.ide_target(&item.path) {
+                        Some(target) => return ProjectReply::Reveal(target),
+                        None if self.setup.is_none() => {
+                            self.problem = Some("Still loading the project. Try again.".into());
+                        }
+                        None => {
+                            self.problem = Some(
+                                "This file is outside the project folder, so the IDE can't open it."
+                                    .into(),
+                            );
+                        }
+                    }
                 }
             }
             KeyCode::Char('a') => {

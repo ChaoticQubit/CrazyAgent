@@ -2892,6 +2892,56 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
     );
 }
 
+#[test]
+fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_cannot_open_the_file() {
+    use crate::ide::bridge::reveal::RevealTarget;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    let listed = |folder: &str| ProjectContext {
+        project_id: project.clone(),
+        folder: folder.into(),
+        items: vec![ContextItem {
+            path: "context/documents/spec.md".into(),
+            kind: ContextKind::Document,
+            bytes: 20,
+        }],
+    };
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(
+        drawn.help.contains(&("O", "Open in IDE")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('O'))),
+        ProjectReply::Reveal(RevealTarget::Project {
+            path: ".crazyagent/context/documents/spec.md".into(),
+        })
+    );
+    assert_eq!(screen.problem, None);
+
+    screen.context = Some(listed("/private/tmp/ca-elsewhere/.crazyagent"));
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is outside the project folder, so the IDE can't open it."),
+        "a context folder outside the project folder has no IDE path, and the owner is told"
+    );
+
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    screen.setup = None;
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project. Try again."),
+        "before the project folder is read the key says so instead of doing nothing"
+    );
+}
+
 #[tokio::test]
 async fn settings_plan_roadmap_now_starts_the_job() {
     let root = tempfile::Builder::new()
