@@ -2505,3 +2505,40 @@ fn a_clone_that_borrows_another_object_store_is_refused_and_imports_nothing() {
     assert_eq!(case.owner_refs("refs/heads"), heads);
     assert_eq!(case.owner_refs("refs/crazyagent"), "");
 }
+
+/// A clone holding more object bytes than the change bounds allow is refused before the
+/// engine fetches, so none of its objects reach the project's store (DEC102-F2).
+#[test]
+fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project() {
+    let case = Case::own_branch();
+    let bounds = crate::worktrees::TreeBounds {
+        files: 64,
+        bytes: 1024,
+        components: 8,
+    };
+    let mut noise = String::new();
+    let mut digest = Sha256::digest(b"noise");
+    while noise.len() < 16 * 1024 {
+        noise.push_str(&format!("{digest:x}\n"));
+        digest = Sha256::digest(digest);
+    }
+    case.edit("big.txt", &noise);
+    case.agent_commit("Add a big file");
+    let blob = case.blob_id(&noise);
+    assert_eq!(
+        refused(flow::record(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn(),
+            &bounds,
+            NOW_MS
+        )),
+        "changes_too_large"
+    );
+    assert!(
+        !case.owner_has(&blob),
+        "a refused clone's object reached the project"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+}

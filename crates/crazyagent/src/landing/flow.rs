@@ -932,7 +932,12 @@ pub(super) fn start(
     let _held = hold(repository);
     let head = match check_places(repository, worktree, git_dir)? {
         Layout::Linked => open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head()?,
-        Layout::Clone => clone::fetch(&shared(repository)?, repository, worktree)?,
+        Layout::Clone => clone::fetch(
+            &shared(repository)?,
+            repository,
+            worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?,
     };
     store::set_base(db, worktree, &head)
 }
@@ -940,8 +945,10 @@ pub(super) fn start(
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
 /// one above the base recorded for the worktree, else its HEAD, so commits the agent
 /// made itself are part of it. An agent's own clone is never committed in: its change
-/// set is the branch it committed on, fetched into the owner repository, and that branch
-/// must hold the set's base. The whole set, agent commits and staged files included,
+/// set is the branch it committed on, fetched into the owner repository before the
+/// repository hold is taken, so a slow agent-sized fetch never stalls the owner's landing,
+/// and that branch must hold the set's base. The whole set, agent commits and staged
+/// files included,
 /// must stay within the bounds before anything is stored. The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
 /// commits the same tree again.
@@ -966,6 +973,16 @@ pub(super) fn record(
     let agent_id = name(&workspace.agent.id)?;
     let turn_id = name(&turn.turn)?;
     let worktree = workspace.worktree.to_str().ok_or_else(invalid)?;
+    let shared = shared(&workspace.repository)?;
+    let fetched = match layout {
+        Layout::Clone => Some(clone::fetch(
+            &shared,
+            &workspace.repository,
+            &workspace.worktree,
+            bounds,
+        )?),
+        Layout::Linked => None,
+    };
     let _held = hold(&workspace.repository);
     let open = store::open_for(db, worktree)?;
     if open
@@ -974,22 +991,21 @@ pub(super) fn record(
     {
         return Err(failure("changes_agent_has_pending"));
     }
-    let shared = shared(&workspace.repository)?;
-    let agent = match layout {
-        Layout::Linked => Some(open_agent(
-            db,
-            workspace.agent.kind,
-            &workspace.repository,
-            &workspace.worktree,
-            &workspace.git_dir,
-        )?),
-        Layout::Clone => None,
+    let (agent, head) = match fetched {
+        Some(tip) => (None, tip),
+        None => {
+            let agent = open_agent(
+                db,
+                workspace.agent.kind,
+                &workspace.repository,
+                &workspace.worktree,
+                &workspace.git_dir,
+            )?;
+            let head = agent.head()?;
+            (Some(agent), head)
+        }
     };
     let repo = agent.as_ref().map_or(&shared, |agent| &agent.repo);
-    let head = match &agent {
-        Some(agent) => agent.head()?,
-        None => clone::fetch(&shared, &workspace.repository, &workspace.worktree)?,
-    };
     let base = match store::base_of(db, worktree)? {
         Some(base) if repo.commit_of(&base)?.as_deref() == Some(base.as_str()) => base,
         _ => head.clone(),

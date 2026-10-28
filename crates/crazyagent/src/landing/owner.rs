@@ -385,7 +385,12 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let git_dir = repository.join(".git");
     let agent = if flow::in_clone(&record) {
         flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
-        let fetched = clone::fetch(&shared(&repository)?, &repository, &record.worktree)?;
+        let fetched = clone::fetch(
+            &shared(&repository)?,
+            &repository,
+            &record.worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?;
         if fetched != record.head {
             return Err(failure("changes_agent_busy"));
         }

@@ -2,6 +2,7 @@ use super::flow::{bounded_read, set_engine_ref};
 use super::git::{Repo, failure};
 use crate::agent_git;
 use crate::engine::EngineError;
+use crate::worktrees::TreeBounds;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
@@ -108,9 +109,12 @@ fn alternate_line(repository: &Path) -> Option<String> {
 /// are real folders, its alternates file is a plain file with one link holding exactly the
 /// line `add` wrote, it has no HTTP alternates, and every pack file and loose object is a
 /// plain file with one link, never a link into another store. The Own branch sandbox keeps
-/// the agent from changing these while the fetch runs. Inputs: the owner checkout root and
-/// the clone's git folder. Output: Ok, else `changes_workspace_invalid`.
-fn check_store(repository: &Path, git_dir: &Path) -> Result<(), EngineError> {
+/// the agent from changing these while the fetch runs. Those files also bound what the
+/// fetch can carry into the project (DEC102-F2): at most `bounds.files` of them, of at most
+/// `bounds.bytes` together, objects the project already has included until the agent's git
+/// repacks them away. Inputs: the owner checkout root, the clone's git folder and the
+/// bounds. Output: Ok, else `changes_workspace_invalid` or `changes_too_large`.
+fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
     let objects = git_dir.join("objects");
     let info = objects.join("info");
     let pack = objects.join("pack");
@@ -138,6 +142,7 @@ fn check_store(repository: &Path, git_dir: &Path) -> Result<(), EngineError> {
             stored.push(entry.path());
         }
     }
+    let (mut files, mut bytes) = (0_usize, 0_u64);
     for held in &stored {
         if !folder(held) {
             return Err(invalid());
@@ -149,26 +154,34 @@ fn check_store(repository: &Path, git_dir: &Path) -> Result<(), EngineError> {
             if !found.is_file() || found.nlink() != 1 {
                 return Err(invalid());
             }
+            files += 1;
+            bytes = bytes.saturating_add(found.len());
+            if files > bounds.files || bytes > bounds.bytes {
+                return Err(failure("changes_too_large"));
+            }
         }
     }
     Ok(())
 }
 
-/// Copies an agent's branch from its own clone into the owner repository under the
-/// engine's incoming ref and reads its tip, then drops that ref. Git's upload-pack serves
-/// the clone, the one git command safe on a repository the agent configured, and the
-/// owner repository's fetch hashes every object it receives again and checks it with
-/// fsck, so a planted or mislabelled object in the clone is refused rather than stored.
-/// Nothing in the clone is written and no owner branch moves. The clone's object store is
-/// checked first (`check_store`), so git never reads objects from a store the agent named
-/// or linked in. Inputs: the owner
-/// repository opened for object work, its root and the agent's worktree. Output: the
-/// tip, else `changes_workspace_invalid` for a clone that is not a real folder or
+/// Copies an agent's branch from its own clone into the owner repository under an
+/// incoming ref of this fetch alone and reads its tip, then drops that ref, so fetches of
+/// one clone never meet on a ref and need no repository hold. Git's upload-pack serves the
+/// clone, the one git command safe on a repository the agent configured, and the owner
+/// repository's fetch hashes every object it receives again and checks it with fsck, so a
+/// planted or mislabelled object in the clone is refused rather than stored. Nothing in
+/// the clone is written and no owner branch moves. The clone's object store is checked
+/// and measured first (`check_store`), so git never reads objects from a store the agent
+/// named or linked in, nor carries more than the bounds allow. Inputs: the owner
+/// repository opened for object work, its root, the agent's worktree and the bounds.
+/// Output: the tip, else `changes_workspace_invalid` for a clone that is not a real folder
+/// or whose store reaches elsewhere, `changes_too_large` past the bounds or
 /// `changes_agent_branch_invalid` for a branch git cannot fetch.
 pub(super) fn fetch(
     shared: &Repo,
     repository: &Path,
     worktree: &Path,
+    bounds: &TreeBounds,
 ) -> Result<String, EngineError> {
     let branch = agent_git::branch(worktree).ok_or_else(invalid)?;
     let folder = branch.trim_start_matches("agent/");
@@ -179,9 +192,12 @@ pub(super) fn fetch(
     {
         return Err(invalid());
     }
-    check_store(repository, &source)?;
+    check_store(repository, &source, bounds)?;
     let source = source.to_str().ok_or_else(invalid)?;
-    let incoming = format!("refs/crazyagent/incoming/{folder}");
+    let mut nonce = [0_u8; 8];
+    getrandom::fill(&mut nonce).map_err(|_| failure("changes_unavailable"))?;
+    let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let incoming = format!("refs/crazyagent/incoming/{folder}-{nonce}");
     let refspec = format!("+refs/heads/{branch}:{incoming}");
     let fetched = shared.exec(
         &[
