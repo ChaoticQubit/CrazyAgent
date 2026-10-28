@@ -2896,6 +2896,19 @@ fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
 
 const WAKE_IDLE: Duration = Duration::from_secs(2);
 
+/// Stores the project's idle stop as `idle`, shorter than any owner choice, so a finished
+/// sub-agent stops within the test. Inputs: the fixture and the idle time.
+fn idle_stop(fixture: &Fixture, idle: Duration) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,NULL,NULL,?2)
+             ON CONFLICT(project) DO UPDATE SET idle_secs=excluded.idle_secs",
+            params![PROJECT, i64::try_from(idle.as_secs()).unwrap()],
+        )
+        .unwrap();
+}
+
 fn subs(fixture: &Fixture) -> Vec<i64> {
     fixture
         .connection
@@ -3242,15 +3255,8 @@ fn wake_call(
 fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let mut team = limited_runtime(
-        &fixture,
-        &host,
-        RESUMING_CODEX,
-        TeamLimits {
-            idle_stop: WAKE_IDLE,
-            ..TeamLimits::default()
-        },
-    );
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    idle_stop(&fixture, WAKE_IDLE);
     delegate_page(&fixture);
     fixture.until(
         &mut team,
@@ -3375,16 +3381,9 @@ fn the_owner_restart_of_a_finished_sub_agent_wakes_the_same_agent() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let agents = Arc::new(Agents::open(&fixture.base).unwrap());
-    let mut team = limited_runtime(
-        &fixture,
-        &host,
-        RESUMING_CODEX,
-        TeamLimits {
-            idle_stop: WAKE_IDLE,
-            ..TeamLimits::default()
-        },
-    )
-    .with_agents(agents.clone());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    idle_stop(&fixture, WAKE_IDLE);
     delegate_page(&fixture);
     fixture.until(
         &mut team,
