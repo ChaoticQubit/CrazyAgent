@@ -829,6 +829,106 @@ fn accepting_a_link_whose_step_the_volume_folds_onto_another_link_is_refused() {
     assert_eq!(rows.to_vec(), refusals);
 }
 
+/// Commits the owner's links on the owner's branch, starts an agent from it, records the
+/// agent's links and accepts their change set. Inputs: the owner's and the agent's links.
+/// Output: the refusal code at turn end or Accept, else "landed" once the agent's first
+/// link is on the owner's branch.
+fn owner_then_agent_outcome(owner: &[(&str, &str)], agent: &[(&str, &str)]) -> String {
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    plant_links(&case.repo, owner);
+    for (link, _) in owner {
+        case.owner(&["add", link]);
+    }
+    case.owner(&["commit", "-q", "-m", "Owner links"]);
+    let workspace = second_agent(&case);
+    plant_links(&workspace.worktree, agent);
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let id = match record_turn_end(&case.db, &workspace, &turn) {
+        Err(error) => return error.0,
+        Ok(None) => return "no change set".to_owned(),
+        Ok(Some(id)) => id,
+    };
+    match case.accept(&id) {
+        Err(error) => error.0,
+        Ok(AcceptOutcome::Landed { .. }) if case.repo.join(agent[0].0).is_symlink() => {
+            "landed".to_owned()
+        }
+        Ok(other) => format!("accepted {other:?} without the link"),
+    }
+}
+
+#[test]
+fn a_non_ascii_owner_link_leaves_an_agent_link_it_cannot_fold_onto_to_land() {
+    let cafe: &[(&str, &str)] = &[("caf\u{E9}", "README")];
+    let rows: [(&str, String); 3] = [
+        (
+            "an unrelated link beside the owner's caf\u{E9}",
+            owner_then_agent_outcome(cafe, &[("docs/n", "../README")]),
+        ),
+        (
+            "a link to cafe, which the volume keeps apart from caf\u{E9}",
+            owner_then_agent_outcome(cafe, &[("docs/n", "../cafe")]),
+        ),
+        (
+            "an agent link beside an owner link through a caf\u{E9} step",
+            owner_then_agent_outcome(&[("o", "caf\u{E9}/x")], &[("n", "README")]),
+        ),
+    ];
+    let landed: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "landed".to_owned()))
+        .collect();
+    assert_eq!(rows.to_vec(), landed);
+}
+
+#[test]
+fn accepting_a_link_through_a_name_the_volume_folds_onto_several_ascii_letters_is_refused() {
+    let rows: [(&str, String); 4] = [
+        (
+            "the owner's branch holds U+00DF SHARP S, which folds onto ss",
+            sibling_link_outcome(
+                &[("\u{DF}", ".crazyagent")],
+                &[],
+                &[("o", "ss/worktrees/agent-3/target/bare")],
+            ),
+        ),
+        (
+            "the owner's branch holds U+FB03 LIGATURE FFI, which folds onto ffi",
+            sibling_link_outcome(
+                &[("\u{FB03}", ".crazyagent")],
+                &[],
+                &[("o", "FFI/worktrees/agent-3/target/bare")],
+            ),
+        ),
+        (
+            "the owner's branch holds a link through a U+1E9E CAPITAL SHARP S step",
+            sibling_link_outcome(
+                &[("o", "\u{1E9E}/worktrees/agent-3/target/bare")],
+                &[],
+                &[("ss", ".crazyagent")],
+            ),
+        ),
+        (
+            "the owner's branch holds a link through a U+037E GREEK QUESTION MARK step",
+            sibling_link_outcome(
+                &[("o", "a\u{37E}/worktrees/agent-3/target/bare")],
+                &[],
+                &[("a;", ".crazyagent")],
+            ),
+        ),
+    ];
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(rows.to_vec(), refusals);
+}
+
 #[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();
