@@ -188,6 +188,9 @@ const copy: Record<string, string> = {
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
   team_agent_unknown: "That agent is not running anymore.",
+  team_agent_running: "That agent is already running.",
+  team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",
+  team_agents_unavailable: "Team agents can't run on this system in this version.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -370,6 +373,13 @@ export function cancelTeamTask(id: string, task: number | null, generation: numb
  * Inputs: the project id, the team agent id, the new handle and a generation. Output: the engine receipt. */
 export function renameTeamAgent(id: string, agent: number, handle: string, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
+}
+
+/** Wakes a finished sub-agent by its team id (DEC-102): the same agent comes back in its own
+ * worktree and harness session. Inputs: the project id, the team agent id and a generation.
+ * Output: the engine receipt. */
+export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
 export const RESEARCH_LOG_LINES_MAX = 200;

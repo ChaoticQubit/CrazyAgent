@@ -36,6 +36,8 @@ pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
 const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
 pub const DELEGATE_MARKER: &str = "DELEGATE";
+pub const WAKE_MARKER: &str = "WAKE";
+pub const WAKE_NAME_BYTES_MAX: usize = 64;
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
@@ -386,6 +388,14 @@ pub enum TeamAction {
         agent: i64,
         handle: String,
     },
+    FinishedAgents {
+        project_id: ProjectId,
+        show: bool,
+    },
+    WakeAgent {
+        project_id: ProjectId,
+        agent: i64,
+    },
 }
 
 impl TeamAction {
@@ -443,7 +453,14 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::WakeAgent { agent, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                Ok(())
+            }
             Self::KeepWarm { .. }
+            | Self::FinishedAgents { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -459,6 +476,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::FinishedAgents { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -469,7 +487,9 @@ impl TeamAction {
                 events::RuleTarget::Project { project_id }
                 | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
             },
-            Self::Rename { project_id, .. } => Some(project_id),
+            Self::Rename { project_id, .. } | Self::WakeAgent { project_id, .. } => {
+                Some(project_id)
+            }
         }
     }
 }
@@ -643,14 +663,7 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if found.len() == DELEGATIONS_PER_REPLY_MAX {
             break;
         }
-        let line = line
-            .trim()
-            .trim_start_matches(|c: char| {
-                c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
-            })
-            .trim()
-            .trim_end_matches('`')
-            .trim();
+        let line = reply_line(line);
         let Some(head) = line.get(..DELEGATE_MARKER.len()) else {
             continue;
         };
@@ -663,6 +676,63 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
             found.push(delegation);
         }
+    }
+    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
+    found
+}
+
+/// Strips the list bullets, quotes and backticks a model puts around a reply line.
+/// Takes the line. Returns its text.
+fn reply_line(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches(|c: char| {
+            c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
+        })
+        .trim()
+        .trim_end_matches('`')
+        .trim()
+}
+
+/// One finished sub-agent a master that is not live asked in its reply to wake (WK-R5): the
+/// name or number it gave and the text for the agent's next task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeLine {
+    pub agent: String,
+    pub text: String,
+}
+
+/// Reads wake lines from a master reply: `WAKE <name or Sub-agent number>: <text>`.
+/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
+/// Returns at most eight wakes, each with a name of up to `WAKE_NAME_BYTES_MAX` bytes and a
+/// task text within bounds.
+pub fn parse_wakes(reply: &str) -> Vec<WakeLine> {
+    let mut found = Vec::new();
+    for line in reply.lines() {
+        if found.len() == DELEGATIONS_PER_REPLY_MAX {
+            break;
+        }
+        let line = reply_line(line);
+        let Some(head) = line.get(..WAKE_MARKER.len()) else {
+            continue;
+        };
+        let rest = &line[WAKE_MARKER.len()..];
+        if !head.eq_ignore_ascii_case(WAKE_MARKER) || !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((agent, text)) = rest.split_once(':') else {
+            continue;
+        };
+        let (agent, text) = (agent.trim(), text.trim().trim_matches('`').trim());
+        if agent.is_empty()
+            || agent.len() > WAKE_NAME_BYTES_MAX
+            || !text_valid(text, TASK_PROMPT_BYTES_MAX)
+        {
+            continue;
+        }
+        found.push(WakeLine {
+            agent: agent.to_owned(),
+            text: text.to_owned(),
+        });
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
     found
@@ -753,6 +823,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 keep_warm INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_finished_view (
+                project TEXT PRIMARY KEY,
+                show INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
                 until_ms INTEGER NOT NULL
@@ -776,6 +850,24 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 repository TEXT NOT NULL,
                 worktree TEXT NOT NULL,
                 git_dir TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_wake_requests (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                requested_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_owner_stops (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                stopped_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_conversations (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                connection TEXT NOT NULL,
+                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),
+                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)
             );
             CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1135,6 +1227,63 @@ pub fn admit_resolve(
     Ok(Ok(()))
 }
 
+/// Wakes a finished sub-agent for its master (DEC-102): the message becomes a task pinned
+/// to that agent, so the runtime starts the same agent again under its own id and name, in
+/// its own worktree, with the message as its first input, and the master hears how it ends.
+/// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes,
+/// and never one the owner stopped (AW-1): only the owner's Wake or restart starts that one.
+/// Takes the transaction, live access, the setup, the agent, the message and the time.
+/// Returns the task id, or a plain refusal code: `team_agent_not_found`,
+/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`, or one of
+/// `admit`'s.
+pub fn admit_wake(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    agent: i64,
+    prompt: &str,
+    now: i64,
+) -> Result<Result<i64, &'static str>, EngineError> {
+    let project = &stored.project_id;
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    if owner_stopped(tx, agent)? {
+        return Ok(Err(OWNER_STOPPED));
+    }
+    let harness: String = tx
+        .query_row(
+            "SELECT harness FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let task = match admit(
+        tx,
+        access,
+        stored,
+        Some(&harness),
+        prompt,
+        TaskSource::Master,
+        None,
+        now,
+    )? {
+        Ok(task) => task,
+        Err(code) => return Ok(Err(code)),
+    };
+    tx.execute(
+        "DELETE FROM team_task_pins WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        params![task, project.as_str(), agent],
+    )
+    .map_err(error)?;
+    Ok(Ok(task))
+}
+
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
 /// project's team (DEC-093) as the owner's own tasks: each passes `admit` against the team
 /// plan and pool, and the refused ones are listed in one engine note in the Team view, never
@@ -1387,6 +1536,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::FinishedAgents { show, .. } => {
+            tx.execute(
+                "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET show=excluded.show",
+                params![project.as_str(), show],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -1447,7 +1605,102 @@ pub fn execute(
                 Err(code) => rejected(code),
             })
         }
+        TeamAction::WakeAgent { agent, .. } => Ok(match request_wake(tx, project, *agent, now)? {
+            Ok(()) => Outcome::Applied,
+            Err(code) => rejected(code),
+        }),
     }
+}
+
+/// Words why a finished agent's Wake is off, for the button the owner sees. Takes the refusal
+/// code from [`wake_refusal`]. Returns the line.
+fn wake_note(code: &str) -> String {
+    match code {
+        "team_agent_running" => "Already running.".into(),
+        "team_agent_no_worktree" => {
+            "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                .into()
+        }
+        "team_agents_unavailable" => {
+            crate::research::runner::confined_unavailable(std::env::consts::OS)
+                .unwrap_or("Team agents cannot run on this system.")
+                .into()
+        }
+        _ => "That agent is no longer part of this team.".into(),
+    }
+}
+
+/// Tells why a sub-agent cannot be woken now (DEC-102), or none when it can: it must be a
+/// sub-agent of the project that stopped or failed, whose worktree is still recorded, on a
+/// system where team agents run. Takes a connection, the project and the agent. Returns the
+/// refusal code: `team_agent_not_found`, `team_agent_running`, `team_agent_no_worktree` or
+/// `team_agents_unavailable`.
+pub fn wake_refusal(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<&'static str>, EngineError> {
+    let found: Option<(String, String, bool)> = connection
+        .query_row(
+            "SELECT a.role,a.status,EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+             FROM team_agents a WHERE a.id=?1 AND a.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, status, kept)) = found else {
+        return Ok(Some("team_agent_not_found"));
+    };
+    Ok(if AgentRole::parse(&role) != Some(AgentRole::Sub) {
+        Some("team_agent_not_found")
+    } else if AgentStatus::parse(&status).is_none_or(AgentStatus::live) {
+        Some("team_agent_running")
+    } else if !kept {
+        Some("team_agent_no_worktree")
+    } else if crate::research::runner::confined_unavailable(std::env::consts::OS).is_some() {
+        Some("team_agents_unavailable")
+    } else {
+        None
+    })
+}
+
+/// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
+pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
+
+/// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
+/// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
+/// whether it was the owner's stop, or a SQLite failure.
+pub fn owner_stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1)",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
+/// on its next tick through the same wake as the master's: the agent starts again under its
+/// own id, name and worktree, continuing its harness conversation where it can. A second
+/// Wake before the first is served changes nothing. Takes the transaction, project, agent
+/// and the time. Returns a plain refusal code from [`wake_refusal`] when it cannot wake.
+fn request_wake(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO team_wake_requests(agent,project,requested_ms) VALUES (?1,?2,?3)",
+        params![agent, project.as_str(), now],
+    )
+    .map_err(error)?;
+    Ok(Ok(()))
 }
 
 fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
@@ -1549,6 +1802,31 @@ pub struct TeamAgent {
     pub persona: Option<String>,
     #[serde(default)]
     pub handle: Option<String>,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub wakeable: bool,
+    #[serde(default)]
+    pub wake_note: Option<String>,
+}
+
+impl TeamAgent {
+    /// Tells whether this agent belongs in the Finished fold-out rather than the agents
+    /// list and team graph (DEC-102): a stopped or failed sub-agent, or an idle one that ran
+    /// a turn since it last started, holding no task and with no question waiting for the
+    /// master. The master, every starting or working agent and an idle agent still waiting
+    /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
+    /// questions the agent has waiting. Returns true for a finished agent.
+    pub fn finished_with(&self, questions: u16) -> bool {
+        self.role == AgentRole::Sub
+            && questions == 0
+            && self.task.is_none()
+            && match self.status {
+                AgentStatus::Idle => self.turns > 0,
+                AgentStatus::Stopped | AgentStatus::Failed => true,
+                AgentStatus::Starting | AgentStatus::Working => false,
+            }
+    }
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1610,6 +1888,8 @@ pub struct PlanStep {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    #[serde(default)]
+    pub show_finished: bool,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -1660,6 +1940,9 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         stopped_ms: row.get(13)?,
         persona,
         handle,
+        finished: false,
+        wakeable: false,
+        wake_note: None,
     })
 }
 
@@ -1713,6 +1996,22 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
     connection
         .query_row(
             "SELECT keep_warm FROM team_settings WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(error)
+}
+
+/// Tells whether the owner chose to show finished agents (idle, stopped and failed
+/// sub-agents) in the agents list and team graph instead of their Finished fold-out.
+/// Takes a connection and the project.
+/// Returns false, the Hide default, until the owner picks Show.
+pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT show FROM team_finished_view WHERE project=?1",
             [project.as_str()],
             |row| row.get(0),
         )
@@ -1858,7 +2157,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             STATUS_AGENTS_MAX,
         ))
         .map_err(error)?;
-    let agents = statement
+    let mut agents = statement
         .query_map([project.as_str()], agent_row)
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
@@ -1931,10 +2230,39 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         None => Vec::new(),
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
+    let events = events::view(connection, project)?;
+    for agent in &mut agents {
+        let questions = events
+            .questions
+            .iter()
+            .find(|item| item.agent == agent.id)
+            .map_or(0, |item| item.count);
+        agent.finished = agent.finished_with(questions);
+    }
+    let waking: BTreeSet<i64> = {
+        let mut statement = connection
+            .prepare("SELECT agent FROM team_wake_requests WHERE project=?1")
+            .map_err(error)?;
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for agent in agents.iter_mut().filter(|agent| agent.finished) {
+        let refusal = wake_refusal(connection, project, agent.id)?;
+        agent.wakeable = refusal.is_none() && !waking.contains(&agent.id);
+        agent.wake_note = if waking.contains(&agent.id) {
+            Some("Waking.".into())
+        } else {
+            refusal.map(wake_note)
+        };
+    }
     let (live_master, live_problem) = master::switch(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        show_finished: show_finished(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
         live_problem,
@@ -1945,7 +2273,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         tasks,
         messages,
         plan: steps,
-        events: events::view(connection, project)?,
+        events,
     })
 }
 

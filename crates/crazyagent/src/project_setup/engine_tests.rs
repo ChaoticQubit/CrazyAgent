@@ -1192,10 +1192,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
     );
     rusqlite::Connection::open(engine.root.path().join("engine.db"))
         .unwrap()
-        .execute(
+        .execute_batch(
             "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms)
-            VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0)",
-            [],
+            VALUES ('setup-pooled',1,NULL,'codex','Check the login page',0);
+            INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
+            VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');",
         )
         .unwrap();
 
@@ -1218,6 +1219,11 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM team_owner_prompts WHERE project='setup-pooled'"),
         0,
         "the owner's prompts to its agents go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agent_conversations WHERE project='setup-pooled'"),
+        0,
+        "its agents' kept conversations go with it"
     );
     assert!(
         Path::new(&folder)

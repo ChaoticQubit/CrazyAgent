@@ -246,6 +246,15 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         crate::landing::AcceptOutcome::Landed { .. }
     ));
     case.agent(3, "master", "stopped");
+    for id in [1, 3] {
+        case.db
+            .execute(
+                "INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
+                 VALUES (?1,?2,'codex','connection-1','conversation-1','/tmp/record.jsonl')",
+                params![id, case.project.as_str()],
+            )
+            .unwrap();
+    }
     let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
     assert_eq!(
         listed.iter().map(|agent| agent.id).collect::<Vec<_>>(),
@@ -274,6 +283,19 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 3);
+    let conversations: Vec<i64> = case
+        .db
+        .prepare("SELECT agent FROM team_agent_conversations ORDER BY agent")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        conversations,
+        [3],
+        "a removed agent's kept conversation goes with it, a kept agent keeps its own"
+    );
     assert!(case.retiring().is_empty());
     assert_eq!(
         git_in(&case.home, &case.repo, &["status", "--porcelain"]),
