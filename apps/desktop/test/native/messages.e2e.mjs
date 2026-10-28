@@ -130,7 +130,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     await withPage(async (page) => {
       const me = owner(page, evidence);
       const at = (tab) => `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/${tab}`;
-      const checked = (field) => page.evaluate(`document.querySelector('[role=radiogroup][aria-label=${JSON.stringify(field.label)}] [aria-checked="true"]')?.textContent ?? null`);
+      const checked = (field) => page.evaluate(`document.querySelector(${JSON.stringify(`[role=radiogroup][aria-label=${JSON.stringify(field.label)}] [aria-checked="true"]`)})?.textContent ?? null`);
       const messagesSection = async () => {
         await me.waitFor("the project settings", (text) => text.includes("Agent access") && text.includes("Messages"));
         await me.click("Messages", ".pj-subnav button");
