@@ -10,7 +10,8 @@ use crate::engine::owner::{
 };
 use crate::harnesses::HarnessEntry;
 use crate::memory::library::{
-    LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory,
+    AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
+    SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
@@ -50,6 +51,13 @@ pub(in crate::tui) enum SettingsJob {
     DeleteMemory {
         memory: RequestId,
         generation: u64,
+    },
+    ApproveMemory {
+        memory: RequestId,
+        generation: u64,
+    },
+    AgentWrites {
+        set: Option<(AgentWrites, u64)>,
     },
     AddMemory {
         scope: MemoryScope,
@@ -158,6 +166,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
             Self::DeleteMemory { .. } => "DeleteMemory",
+            Self::ApproveMemory { .. } => "ApproveMemory",
+            Self::AgentWrites { .. } => "AgentWrites",
             Self::AddMemory { .. } => "AddMemory",
             Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
@@ -267,6 +277,8 @@ pub(in crate::tui) enum SettingsEvent {
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
+    MemoryApproved(Result<(), String>),
+    AgentWrites(Result<AgentWrites, String>),
     MemoryAdded(Result<(), String>),
     MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
@@ -301,6 +313,8 @@ impl SettingsEvent {
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
+            SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
+            SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
             SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
@@ -572,6 +586,20 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
+            SettingsJob::ApproveMemory { memory, generation } => {
+                let action = LibraryAction::Approve { memory_id: memory };
+                SettingsEvent::MemoryApproved(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.change_memory(action, generation).await,
+                        "memory_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::AgentWrites { set } => {
+                SettingsEvent::AgentWrites(self.agent_writes(set, lost).await)
+            }
         }
     }
 
@@ -778,6 +806,32 @@ impl NativeOwner {
         memories.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
         memories.truncate(LIBRARY_ITEMS_MAX);
         Ok(memories)
+    }
+
+    /// Saves the owner's Agent memory writes setting when asked, then reads it back.
+    /// Inputs: the choice with its client generation, if any, and the lost-connection
+    /// flag. Output: the setting the engine now holds, or the plain problem code.
+    pub(super) async fn agent_writes(
+        &mut self,
+        set: Option<(AgentWrites, u64)>,
+        lost: &mut bool,
+    ) -> Result<AgentWrites, String> {
+        let controller = self.settings_controller()?;
+        if let Some((writes, generation)) = set {
+            applied(
+                controller
+                    .change_memory(LibraryAction::AgentWrites { writes }, generation)
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            )?;
+        }
+        let controller = self.settings_controller()?;
+        controller
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .map(|page| page.agent_writes)
+            .map_err(|error| problem(&error, lost))
     }
 
     /// Reads every saved memory in one scope, newest first, page by page.

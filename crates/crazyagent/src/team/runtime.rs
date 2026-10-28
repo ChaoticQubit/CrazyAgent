@@ -2144,23 +2144,34 @@ impl TeamRuntime {
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
     }
 
-    /// Answers the past-conversation calls a project's sub-agents made since the last tick,
-    /// from each running sub-agent's own mailbox; any other call from a sub-agent is refused.
+    /// Answers the past-conversation and saved-memory calls a project's sub-agents made
+    /// since the last tick, from each running sub-agent's own mailbox, with the sub-agent's
+    /// label as the origin of what it saves; any other call from a sub-agent is refused.
     /// Takes the project.
-    fn serve_agent_calls(&self, project: &ProjectId) {
+    fn serve_agent_calls(&mut self, project: &ProjectId) {
         if self.delegation_tool.is_none() {
             return;
         }
         let agents = self.state.join("agents");
-        for (id, worker) in &self.workers {
-            if &worker.project == project && worker.role == AgentRole::Sub && worker.tools {
-                super::history::serve_agent_calls(
-                    &self.connection,
-                    project,
-                    &agents,
-                    &self.mailbox(*id),
-                );
-            }
+        let subs: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.role == AgentRole::Sub && worker.tools
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in subs {
+            let label = super::events::label(&self.connection, id)
+                .unwrap_or_else(|_| AgentRole::Sub.agent_label(id));
+            let mailbox = self.mailbox(id);
+            super::history::serve_agent_calls(
+                &mut self.connection,
+                project,
+                &label,
+                &agents,
+                &mailbox,
+            );
         }
     }
 
@@ -4394,7 +4405,7 @@ fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     let how = if team_tool {
-        how + tool::HISTORY_LINE
+        how + tool::HISTORY_LINE + tool::MEMORY_LINE
     } else {
         how
     };

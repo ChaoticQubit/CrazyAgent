@@ -579,6 +579,31 @@ async fn desktop_delete_memory(
 }
 
 #[tauri::command]
+async fn desktop_approve_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.approve_memory(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_set_agent_memory_writes(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    writes: crazyagent::memory::library::AgentWrites,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_agent_memory_writes(writes, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_forget_memory(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2595,6 +2620,8 @@ pub fn run() {
             desktop_import_memory,
             desktop_promote_memory,
             desktop_delete_memory,
+            desktop_approve_memory,
+            desktop_set_agent_memory_writes,
             desktop_forget_memory,
             desktop_remember_research,
             desktop_save_selection_to_memory,

@@ -400,7 +400,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -599,14 +599,18 @@ export type SavedMemory = {
   text: string;
   scope: "global" | "project";
   project_id: string | null;
-  origin: "written" | "promoted" | "selected" | "imported";
+  origin: "written" | "promoted" | "selected" | "imported" | "agent" | "requested";
   from_project_id: string | null;
   source_path: string | null;
+  agent: string | null;
 };
+
+export type AgentMemoryWrites = "save" | "ask";
 
 export type SavedMemoryPage = {
   items: SavedMemory[];
   next: number | null;
+  agent_writes: AgentMemoryWrites;
 };
 
 export type ApprovedMemory = {

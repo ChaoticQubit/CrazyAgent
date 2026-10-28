@@ -4,7 +4,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::memory::library::{
-    MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
+    AgentWrites, MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob, Suggestion};
@@ -22,14 +22,13 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 const FILTER_CHARS_MAX: usize = 96;
-const HEAD_ROWS: usize = 5;
+const HEAD_ROWS: usize = 6;
 const CHROME_ROWS: usize = 4 + 1;
 const DETAIL_ROWS: usize = 3;
 const MODAL_WIDTH: u16 = 66;
 const COMPOSER_WIDTH: usize = 72;
 const FOLDER_CHARS_MAX: usize = 1024;
-const SUBTITLE: &str =
-    "Long-term memory every project can use. Nothing is saved without your click.";
+const SUBTITLE: &str = "Long-term memory every agent reads at launch, with who saved it.";
 const EMPTY: &str = "When agents find something worth keeping, the project shows it under \"Save to memory\". One click saves it here, and every project can use it.";
 
 /// A plain sentence for an engine problem code about memory.
@@ -48,6 +47,8 @@ pub fn memory_plain(code: &str) -> &'static str {
         "memory_import_invalid" => "A file in this folder can't be imported.",
         "memory_missing" | "knowledge_entry_missing" => "This memory no longer exists.",
         "memory_already_global" => "This memory is already saved for every project.",
+        "memory_not_requested" => "This memory is already approved.",
+        "memory_agent_invalid" => "The agent that saved this memory could not be named.",
         "knowledge_source_revoked" => "Its source was removed, so it can't be saved.",
         "knowledge_version_conflict"
         | "memory_changed"
@@ -66,10 +67,13 @@ fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
 }
 
 /// Where a saved memory came from, as the From column shows it.
-/// Inputs: the memory and context. Output: the project name, or "You" for a
-/// note the owner wrote for every project.
+/// Inputs: the memory and context. Output: the agent that saved it, the project
+/// name, or "You" for a note the owner wrote for every project.
 pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
+        (MemoryOrigin::Agent { agent } | MemoryOrigin::Requested { agent }, _) => {
+            printable(agent.clone())
+        }
         (MemoryOrigin::Promoted { project_id, .. }, _)
         | (_, MemoryScope::Project { project_id }) => project_name(project_id, ctx),
         (
@@ -82,7 +86,23 @@ pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
 /// One sentence on how a memory was saved and where agents get it.
 /// Inputs: the memory and context. Output: "Saved by you for every project." and so on.
 pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
+    let reach = |scope: &MemoryScope| match scope {
+        MemoryScope::Global => "every project".to_owned(),
+        MemoryScope::Project { project_id } => format!("{} only", project_name(project_id, ctx)),
+    };
     match (&memory.origin, &memory.scope) {
+        (MemoryOrigin::Requested { agent }, scope) => format!(
+            "Needs approval. {} asked to save this for {}; agents get it once you approve it.",
+            printable(agent.clone()),
+            reach(scope)
+        ),
+        (MemoryOrigin::Agent { agent }, scope) => {
+            format!(
+                "Saved by {} for {}.",
+                printable(agent.clone()),
+                reach(scope)
+            )
+        }
         (MemoryOrigin::Imported { file }, MemoryScope::Project { project_id }) => format!(
             "Imported from {} for {} only.",
             printable(file.clone()),
@@ -153,6 +173,9 @@ pub struct Memory {
     suggestions: Vec<Suggestion>,
     load: Load<()>,
     waiting: bool,
+    writes: Option<AgentWrites>,
+    setting: bool,
+    approving: bool,
     deleting: bool,
     suggesting: bool,
     adding: bool,
@@ -181,6 +204,9 @@ impl Memory {
             suggestions: Vec::new(),
             load: Load::Idle,
             waiting: false,
+            writes: None,
+            setting: false,
+            approving: false,
             deleting: false,
             suggesting: false,
             adding: false,
@@ -218,8 +244,73 @@ impl Memory {
                     scopes: self.scoped.clone(),
                 },
             );
+            if !self.setting {
+                send(ctx, SettingsJob::AgentWrites { set: None });
+            }
         }
         self.reload_suggestions(ctx);
+    }
+
+    fn toggle_writes(&mut self, ctx: &mut Ctx) {
+        if self.setting {
+            return;
+        }
+        let next = match self.writes.unwrap_or_default() {
+            AgentWrites::Save => AgentWrites::Ask,
+            AgentWrites::Ask => AgentWrites::Save,
+        };
+        self.setting = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AgentWrites {
+                set: Some((next, generation)),
+            },
+        );
+    }
+
+    fn approve(&mut self, ctx: &mut Ctx) {
+        let Some(memory) = self.focused(ctx).filter(|memory| memory.origin.waiting()) else {
+            return;
+        };
+        if self.approving {
+            return;
+        }
+        self.approving = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::ApproveMemory {
+                memory: memory.id,
+                generation,
+            },
+        );
+    }
+
+    fn writes_line(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
+        let theme = &ctx.theme;
+        let chosen = match self.writes {
+            None => "Loading",
+            Some(AgentWrites::Save) => "Save directly",
+            Some(AgentWrites::Ask) => "Ask me first",
+        };
+        let mut line = join([
+            styled("Agent memory writes  ", Role::Heading, theme),
+            Line::raw(format!("{} {chosen} {}", ctx.glyphs.left, ctx.glyphs.right)),
+        ]);
+        if self.setting {
+            line = join([line, styled("  Saving", Role::Muted, theme)]);
+        } else {
+            line = join([line, styled("  w to change", Role::Muted, theme)]);
+        }
+        if line.width() > limit {
+            return Line::raw(cut(
+                &format!("Agent memory writes: {chosen}"),
+                limit,
+                ctx.glyphs.ellipsis,
+            ));
+        }
+        line
     }
 
     fn reload_suggestions(&mut self, ctx: &mut Ctx) {
@@ -672,6 +763,14 @@ impl Memory {
         let kept = self.open().filter(|item| item.kept).count();
         let waiting = self.open().count() - kept;
         let mut counts = format!("{} saved", self.memories.len());
+        let asked = self
+            .memories
+            .iter()
+            .filter(|memory| memory.origin.waiting())
+            .count();
+        if asked > 0 {
+            counts.push_str(&format!("   {asked} need approval"));
+        }
         if waiting > 0 {
             counts.push_str(&format!("   {waiting} suggested"));
         }
@@ -689,6 +788,7 @@ impl Memory {
             Role::Muted,
             theme,
         ));
+        lines.push(self.writes_line(limit, ctx));
         let mut cursor = None;
         if self.filtering {
             let shown = cut(
@@ -743,10 +843,12 @@ impl Memory {
                 (Line::raw(printable(item.text.clone())), from)
             })
             .chain(visible.iter().map(|memory| {
-                (
-                    Line::raw(printable(memory.text.clone())),
-                    Line::raw(source(memory, ctx)),
-                )
+                let from = if memory.origin.waiting() {
+                    status("Needs approval", theme, glyphs)
+                } else {
+                    Line::raw(source(memory, ctx))
+                };
+                (Line::raw(printable(memory.text.clone())), from)
             }))
             .collect();
         let rows: Vec<Line<'static>> = entries
@@ -887,10 +989,16 @@ impl Screen for Memory {
         let mut hints = match self.picked(ctx) {
             Some(Picked::Suggested(item)) if item.kept => vec![hint("Enter", "Use everywhere")],
             Some(Picked::Suggested(_)) => vec![hint("Enter", "Save or dismiss")],
+            Some(Picked::Saved(memory)) if memory.origin.waiting() => vec![
+                hint("y", "Approve"),
+                hint("Enter", "View"),
+                hint("d", "Delete"),
+            ],
             Some(Picked::Saved(_)) => vec![hint("Enter", "View"), hint("d", "Delete")],
             None => Vec::new(),
         };
         hints.push(hint("a", "Add"));
+        hints.push(hint("w", "Agent memory writes"));
         hints.push(hint("i", "Import"));
         if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
@@ -917,6 +1025,10 @@ impl Screen for Memory {
                             delete_focused: false,
                         }
                     }
+                    Key::Char('y') => {
+                        self.approve(ctx);
+                        self.mode = Mode::List;
+                    }
                     Key::Esc | Key::Enter => self.mode = Mode::List,
                     _ => {}
                 }
@@ -937,6 +1049,8 @@ impl Screen for Memory {
         match key {
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char('a') if ready && !self.adding => self.open_composer(),
+            Key::Char('w') if ready => self.toggle_writes(ctx),
+            Key::Char('y') if saved => self.approve(ctx),
             Key::Char('i') if ready && !self.importing => self.open_importer(ctx),
             Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
                 self.filtering = true
@@ -1000,6 +1114,42 @@ impl Screen for Memory {
                     Err(code) => {
                         ctx.say(Message::error("Could not delete this memory.", plain(code)))
                     }
+                }
+            }
+            Some(SettingsEvent::AgentWrites(result)) => {
+                let asked = std::mem::take(&mut self.setting);
+                match result {
+                    Ok(writes) => {
+                        self.writes = Some(*writes);
+                        if asked {
+                            let lead = match writes {
+                                AgentWrites::Save => "Agents now save memories directly.",
+                                AgentWrites::Ask => "Agents now ask you before a memory is saved.",
+                            };
+                            ctx.say(Message::success(lead, ""));
+                        }
+                    }
+                    Err(code) if asked => ctx.say(Message::error(
+                        "Could not change Agent memory writes.",
+                        memory_plain(code),
+                    )),
+                    Err(_) => {}
+                }
+            }
+            Some(SettingsEvent::MemoryApproved(result)) if self.approving => {
+                self.approving = false;
+                match result {
+                    Ok(()) => {
+                        ctx.say(Message::success(
+                            "Memory approved. Agents get it from their next launch.",
+                            "",
+                        ));
+                        self.reload(ctx);
+                    }
+                    Err(code) => ctx.say(Message::error(
+                        "Could not approve this memory.",
+                        memory_plain(code),
+                    )),
                 }
             }
             Some(SettingsEvent::MemoryAdded(result)) if self.adding => {
@@ -1105,7 +1255,15 @@ impl Screen for Memory {
                         body,
                         top: None,
                     },
-                    vec![hint("d", "Delete"), hint("Esc", "Close")],
+                    if memory.origin.waiting() {
+                        vec![
+                            hint("y", "Approve"),
+                            hint("d", "Delete"),
+                            hint("Esc", "Close"),
+                        ]
+                    } else {
+                        vec![hint("d", "Delete"), hint("Esc", "Close")]
+                    },
                 ))
             }
             Mode::Delete { delete_focused } => {
@@ -1164,6 +1322,8 @@ impl Screen for Memory {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.waiting
+            || self.setting
+            || self.approving
             || self.deleting
             || self.adding
             || self.importing

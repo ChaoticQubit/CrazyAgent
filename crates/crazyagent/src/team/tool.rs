@@ -33,12 +33,16 @@ pub const ESCALATE_TOOL: &str = "escalate";
 pub const WAKE_TOOL: &str = "wake";
 pub const SESSIONS_TOOL: &str = "sessions";
 pub const SESSION_TOOL: &str = "session";
+pub const REMEMBER_TOOL: &str = "remember";
+pub const RECALL_TOOL: &str = "recall";
 /// The engine subcommand that serves a sub-agent's team tools, `AGENT_TOOLS`.
 pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
 /// The team tools a sub-agent gets; a live master gets them with its own.
-pub const AGENT_TOOLS: [&str; 2] = [SESSIONS_TOOL, SESSION_TOOL];
+pub const AGENT_TOOLS: [&str; 4] = [SESSIONS_TOOL, SESSION_TOOL, REMEMBER_TOOL, RECALL_TOOL];
 /// The one instructions line that names the past-conversation tools.
 pub const HISTORY_LINE: &str = "Past conversations: sessions(query) in the crazyagent-team MCP server searches every earlier master and sub-agent conversation of this project, of any age, and session(id, offset) reads one page by page.\n";
+/// The one instructions line that names the saved-memory tools.
+pub const MEMORY_LINE: &str = "Saved memory: remember(text, scope) in the crazyagent-team MCP server keeps one fact, decision or lesson for later sessions, scope project or app, and recall(query) searches the saved memories. The owner sees each one with your name and may have to approve it first.\n";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -62,6 +66,9 @@ const SESSIONS_INVALID: &str =
     "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
 const SESSION_INVALID: &str =
     "Not read: give a conversation id from sessions() and a message number from 0.";
+const REMEMBER_INVALID: &str =
+    "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
+const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -76,8 +83,9 @@ const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
 /// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
 /// and `changes` read the team and its pending change sets, `escalate` raises an app
-/// notification for a decision only the owner makes, and `sessions` and `session` search
-/// and read the project's past conversations, the only calls a sub-agent makes.
+/// notification for a decision only the owner makes, `sessions` and `session` search and
+/// read the project's past conversations, and `remember` and `recall` save and search
+/// memories; those four are the only calls a sub-agent makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -110,6 +118,30 @@ pub enum Call {
         id: String,
         offset: u64,
     },
+    Remember {
+        text: String,
+        scope: MemoryReach,
+    },
+    Recall {
+        query: String,
+    },
+}
+
+/// Where a memory an agent saves applies: its own project, or every project of the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReach {
+    Project,
+    App,
+}
+
+impl MemoryReach {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::App => "app",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -343,6 +375,16 @@ fn live_tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false},
         },
         {
+            "name": REMEMBER_TOOL,
+            "description": "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false},
+        },
+        {
+            "name": RECALL_TOOL,
+            "description": "Search the saved memories of this project and the app-wide ones, newest first. Leave the query empty for the newest.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Words the memory holds, on one line of up to 100 bytes."}}, "additionalProperties": false},
+        },
+        {
             "name": ESCALATE_TOOL,
             "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
@@ -459,6 +501,35 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 _ => Err(SESSION_INVALID),
             }
         }
+        REMEMBER_TOOL => {
+            let scope = match argument("scope").map(str::trim) {
+                None | Some("" | "project") => Some(MemoryReach::Project),
+                Some("app") => Some(MemoryReach::App),
+                Some(_) => None,
+            };
+            match (argument("text"), scope) {
+                (Some(text), Some(scope))
+                    if super::text_valid(text, crate::memory::library::NOTE_BYTES_MAX) =>
+                {
+                    Ok(Call::Remember {
+                        text: text.trim().to_owned(),
+                        scope,
+                    })
+                }
+                _ => Err(REMEMBER_INVALID),
+            }
+        }
+        RECALL_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= crate::memory::library::SEARCH_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Recall {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(RECALL_INVALID),
+        },
         _ => return None,
     })
 }
@@ -483,6 +554,11 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
         Call::Sessions { query } => (SESSIONS_TOOL, json!({"query": query})),
         Call::Session { id, offset } => (SESSION_TOOL, json!({"id": id, "offset": offset})),
+        Call::Remember { text, scope } => (
+            REMEMBER_TOOL,
+            json!({"text": text, "scope": scope.as_str()}),
+        ),
+        Call::Recall { query } => (RECALL_TOOL, json!({"query": query})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {

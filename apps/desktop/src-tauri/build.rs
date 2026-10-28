@@ -82,6 +82,8 @@ fn main() {
         "desktop_import_memory",
         "desktop_promote_memory",
         "desktop_delete_memory",
+        "desktop_approve_memory",
+        "desktop_set_agent_memory_writes",
         "desktop_forget_memory",
         "desktop_remember_research",
         "desktop_save_selection_to_memory",
