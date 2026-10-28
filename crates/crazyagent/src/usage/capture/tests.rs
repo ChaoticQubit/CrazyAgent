@@ -955,7 +955,7 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
                 .unwrap();
         }
     }
-    let (found, cut, _) = records(home.path(), Format::Claude);
+    let (found, _, cut) = records(home.path(), Format::Claude);
     assert!(
         cut,
         "a walk stopped at the entry bound says the home was cut"
