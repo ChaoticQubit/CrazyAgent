@@ -165,14 +165,19 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
         "review your own diff",
         "No comments in code, except a short docstring",
         "Never use an em dash",
-        "never commit, and never write inside `.git`",
-        "CrazyAgent turns them into a change set",
+        "never write inside the project folder's `.git` or rewrite history",
+        "Commit or leave your edits as the \"How your work lands\" section CrazyAgent gives you says",
+        "The owner accepts your work in the project's Changes view",
         "Never put a secret",
         "asks the master",
         "escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions",
     ] {
         assert!(text.contains(rule), "the default process misses: {rule}");
     }
+    assert!(
+        !text.contains("never commit"),
+        "an Own branch agent lands only its commits, so the seed defers to the layout rule"
+    );
     for tool in [
         "graphify",
         "context-mode",
