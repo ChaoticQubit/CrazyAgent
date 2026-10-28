@@ -13,6 +13,7 @@ export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
 const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
+export const PARTIAL_LINE = "Older team history is hidden so the team fits in one view. Queued and running work stays listed.";
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
  * "Any sub-agent" first. Inputs: the team status and a harness name lookup. Output: options. */
@@ -167,6 +168,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   }
 
   return <section className="tg-controls" aria-label="Team controls">
+    {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
     <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
       onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
     <div className="tg-limits" role="group" aria-label="Time limits">

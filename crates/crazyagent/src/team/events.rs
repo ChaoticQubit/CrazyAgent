@@ -1607,8 +1607,8 @@ pub fn view(connection: &Connection, project: &ProjectId) -> Result<EventsView, 
 }
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
-/// Takes the connection. Returns the view with the unseen count for the badge and the
-/// unseen count of each project for the sidebar.
+/// Takes the connection. Returns the view fitted to one owner reply by `fit_app`, with the
+/// unseen count for the badge and the unseen count of each project for the sidebar.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -1621,13 +1621,46 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
             |row| row.get(0),
         )
         .map_err(error)?;
-    Ok(AppEvents {
+    fit_app(AppEvents {
         rule,
         effective: rule.unwrap_or_default(),
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
     })
+}
+
+/// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
+/// the texts are cut to one shared cap, halved until the view fits, then the oldest go. The
+/// unseen counts stay whole. Takes the view. Returns it, or `team_events_bounds` when even
+/// an empty list does not fit.
+fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
+    let fits = |view: &AppEvents| -> Result<bool, EngineError> {
+        Ok(super::encoded_len(view)? <= super::STATUS_REPLY_BYTES_MAX)
+    };
+    while !fits(&view)? {
+        if !super::drop_older(&mut view.notifications, true, |item| item.seen_ms.is_some()) {
+            break;
+        }
+    }
+    if fits(&view)? {
+        return Ok(view);
+    }
+    let whole = view.notifications.clone();
+    for cap in super::STATUS_TEXT_CAPS {
+        for (item, kept) in view.notifications.iter_mut().zip(&whole) {
+            item.text = super::cut_text(&kept.text, cap);
+        }
+        if fits(&view)? {
+            return Ok(view);
+        }
+    }
+    while super::drop_older(&mut view.notifications, true, |_| true) {
+        if fits(&view)? {
+            return Ok(view);
+        }
+    }
+    Err(error("team_events_bounds"))
 }
 
 /// Sets or clears the wake rule at one level; clearing returns that level to the level

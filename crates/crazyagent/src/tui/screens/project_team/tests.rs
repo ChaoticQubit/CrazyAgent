@@ -176,6 +176,7 @@ fn team() -> TeamStatus {
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     }
 }
 
@@ -1486,4 +1487,17 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
             mode: crate::team::SwitchMode::Carry,
         })
     );
+}
+
+/// A team view the engine shortened to fit one reply says older history is hidden.
+#[test]
+fn a_shortened_team_view_says_older_history_is_hidden() {
+    let view = loaded();
+    assert!(!find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
+    let mut partial = team();
+    partial.partial = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
+    assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
 }

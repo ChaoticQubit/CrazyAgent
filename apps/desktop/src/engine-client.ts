@@ -762,6 +762,7 @@ export interface TeamStatus {
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
+  partial?: boolean;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;

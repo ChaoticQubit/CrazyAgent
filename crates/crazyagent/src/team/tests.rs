@@ -3141,3 +3141,144 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         "team_time_limits_invalid"
     );
 }
+
+/// Fills a project's team with long history: `before` finished tasks, two queued tasks,
+/// `after` more finished tasks, 80 stopped sub-agents with long problems, 50 long messages,
+/// 25 long unseen escalations, 50 long events and three long waiting questions; every long
+/// text is 2000 or 4000 bytes. Takes the connection, the project and the task counts.
+fn crowd(connection: &Connection, project: &str, before: i64, after: i64) {
+    let finished = |from: i64, count: i64| {
+        connection
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT ?2 UNION ALL SELECT i+1 FROM n WHERE i<?2+?3-1)
+                 INSERT INTO team_tasks(project,source,harness,tools,prompt,status,attempts,result,delivered,created_ms,started_ms,finished_ms)
+                 SELECT ?1,'owner','codex',0,i||' '||hex(zeroblob(2000)),'done',1,hex(zeroblob(2000)),1,i,i,i FROM n",
+                params![project, from, count],
+            )
+            .unwrap()
+    };
+    assert_eq!(finished(1, before), before as usize);
+    for index in 0..2_i64 {
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms)
+                 VALUES (?1,'owner','codex',0,?2,'queued',?3)",
+                params![project, format!("Still queued {index}"), before + index + 1],
+            )
+            .unwrap();
+    }
+    assert_eq!(finished(before + 3, after), after as usize);
+    for sql in [
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<80)
+         INSERT INTO team_agents(project,role,harness,tools,status,error,created_ms,heartbeat_ms,stopped_ms)
+         SELECT ?1,'sub','codex',0,'stopped',hex(zeroblob(1000)),i,i,i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<50)
+         INSERT INTO team_messages(project,author,text,state,created_ms)
+         SELECT ?1,'owner',hex(zeroblob(2000)),'answered',i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<25)
+         INSERT INTO team_notifications(project,kind,text,created_ms)
+         SELECT ?1,'escalation',hex(zeroblob(1000)),i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<50)
+         INSERT INTO team_events(project,agent,kind,text,state,created_ms,delivered_ms)
+         SELECT ?1,1,'finished',hex(zeroblob(1000)),'delivered',i,i FROM n",
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3)
+         INSERT INTO team_event_waiting(agent,project,text,since_ms)
+         SELECT i,?1,hex(zeroblob(1000)),i FROM n",
+    ] {
+        assert!(connection.execute(sql, [project]).unwrap() > 0, "{sql}");
+    }
+}
+
+/// A team with 120 tasks, 80 stopped sub-agents and long escalations, events, waiting text,
+/// agent problems and messages still reads within one owner reply, status and graph. Texts
+/// are cut first, then the oldest finished history goes and the status says it is partial;
+/// the queued tasks and the unseen escalations stay.
+#[test]
+fn a_team_with_120_tasks_and_long_escalations_still_reads_within_one_owner_reply() {
+    let (_directory, connection) = database();
+    let setup = stored("crowded", Vec::new());
+    crowd(&connection, setup.project_id.as_str(), 60, 58);
+    let full = status(&connection, &setup).unwrap();
+    assert_eq!(full.tasks.len(), 100);
+    assert!(!full.partial);
+    let read = owner_status(&connection, &setup).unwrap();
+    assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
+    assert!(read.partial, "older history was left out to fit");
+    assert!(read.tasks.len() < full.tasks.len());
+    let queued: Vec<&str> = read
+        .tasks
+        .iter()
+        .filter(|task| task.status == TaskStatus::Queued)
+        .map(|task| task.prompt.as_str())
+        .collect();
+    assert_eq!(queued, ["Still queued 0", "Still queued 1"]);
+    assert_eq!(
+        read.events.notifications.len(),
+        full.events.notifications.len(),
+        "unseen escalations are never left out before the history"
+    );
+    for text in read
+        .events
+        .notifications
+        .iter()
+        .map(|notification| notification.text.as_str())
+        .chain(
+            read.events
+                .waiting
+                .iter()
+                .map(|waiting| waiting.text.as_str()),
+        )
+        .chain(
+            read.agents
+                .iter()
+                .filter_map(|agent| agent.problem.as_deref()),
+        )
+        .chain(read.events.recent.iter().map(|event| event.text.as_str()))
+    {
+        assert!(
+            text.len() < 2000 && text.ends_with(" more bytes]"),
+            "{text}"
+        );
+    }
+    let graph = owner_graph(&connection, &setup).unwrap();
+    assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
+}
+
+/// Fifty escalations of 2000 bytes across three projects, ten of them seen, still read as
+/// one app-wide reply: the seen ones go first, the rest are cut, and the unseen count stays
+/// whole.
+#[test]
+fn fifty_long_escalations_still_read_as_one_app_reply() {
+    let (_directory, connection) = database();
+    for index in 0..50_i64 {
+        connection
+            .execute(
+                "INSERT INTO team_notifications(project,kind,text,created_ms,seen_ms)
+                 VALUES (?1,'escalation',hex(zeroblob(1000)),?2,?3)",
+                params![
+                    format!("project-{}", index % 3),
+                    index,
+                    (index < 10).then_some(index)
+                ],
+            )
+            .unwrap();
+    }
+    let read = events::app(&connection).unwrap();
+    assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
+    assert_eq!(read.unseen, 40);
+    assert_eq!(
+        read.notifications.len(),
+        40,
+        "every unseen escalation is listed"
+    );
+    assert!(read.notifications.iter().all(|item| item.seen_ms.is_none()));
+    assert!(
+        read.notifications
+            .iter()
+            .all(|item| item.text.len() < 2000 && item.text.ends_with(" more bytes]"))
+    );
+    assert_eq!(
+        read.projects.iter().map(|item| item.unseen).sum::<i64>(),
+        40
+    );
+}

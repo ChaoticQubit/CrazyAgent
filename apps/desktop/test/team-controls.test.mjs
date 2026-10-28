@@ -102,3 +102,10 @@ test("the On master harness switch setting offers Carry over first and shows the
   const fresh = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ on_harness_switch: "fresh" }), reload() {} }));
   assert.match(fresh, /<option value="carry">Carry conversation over<\/option><option value="fresh" selected="">Start fresh<\/option>/);
 });
+
+test("a team view the engine shortened to fit says older history is hidden", () => {
+  const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.doesNotMatch(whole, /Older team history is hidden/);
+  const partial = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ partial: true }), reload() {} }));
+  assert.match(partial, /<p class="pj-note" role="status">Older team history is hidden so the team fits in one view\. Queued and running work stays listed\.<\/p>/);
+});
