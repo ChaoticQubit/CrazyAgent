@@ -676,3 +676,10 @@ fn recreating_a_project_clears_the_reused_ids_stale_skill_folder_at_once() {
         "the reused id's stale skill store is cleared at creation, before any trash sweep"
     );
 }
+
+#[test]
+#[should_panic(expected = "assertion failed")]
+fn a_dot_folder_part_never_reaches_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let _ = store_folder(root.path(), &["skills", "project", "."]);
+}
