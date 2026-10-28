@@ -168,8 +168,8 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
 }
 
 /** One agent in the Finished fold-out: its name, harness, status word, what it last worked on
- * with that task's full result, when it finished, how many tasks it ran and the agent register
- * entry its Wake button restarts (null when the engine names none). */
+ * with that task's full result, when it finished, how many tasks it ran, whether its Wake button
+ * can wake it and, when not, the engine's reason. */
 export interface FinishedRow {
   key: string;
   agent: number;
@@ -180,7 +180,8 @@ export interface FinishedRow {
   result: string | null;
   ended: string;
   tasks: number;
-  wake: string | null;
+  wakeable: boolean;
+  wakeNote: string | null;
 }
 
 /** The fold-out's toggle text. Input: how many agents it holds. Output: "Finished (N)". */
@@ -207,7 +208,8 @@ export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harne
       result: last?.result ?? null,
       ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
       tasks: own.length,
-      wake: agent.register ?? null,
+      wakeable: agent.wakeable === true,
+      wakeNote: agent.wakeable === true ? null : agent.wake_note ?? "This version of the engine can't wake agents.",
     };
   });
   return rows.sort((a, b) => b.agent - a.agent);

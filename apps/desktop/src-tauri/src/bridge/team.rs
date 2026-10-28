@@ -258,6 +258,22 @@ impl NativeBridge {
         self.team_action(action, generation).await
     }
 
+    /// Wakes a finished sub-agent (DEC-102) as a team action by its id, which the team runtime
+    /// serves wherever team agents run: the same agent comes back under its own name, worktree
+    /// and harness session. Takes the project id, the team agent id and the client generation.
+    /// Returns the actual commit receipt; a running agent, a cleaned-up worktree or a system
+    /// where team agents cannot run is a plain rejection.
+    pub async fn team_wake_agent(
+        &mut self,
+        id: &str,
+        agent: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::WakeAgent { project_id, agent }, generation)
+            .await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,

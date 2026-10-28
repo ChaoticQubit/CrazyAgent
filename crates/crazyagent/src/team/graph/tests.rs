@@ -21,8 +21,9 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         stopped_ms: None,
         persona: None,
         handle: None,
-        register: None,
         finished: false,
+        wakeable: false,
+        wake_note: None,
     }
 }
 
@@ -202,6 +203,14 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
     assert!(!agent(1, AgentRole::Master, "codex", AgentStatus::Stopped).finished_with(0));
     let idle = agent(6, AgentRole::Sub, "gemini", AgentStatus::Idle);
     assert!(idle.finished_with(0));
+    assert!(
+        !TeamAgent {
+            turns: 0,
+            ..idle.clone()
+        }
+        .finished_with(0),
+        "an idle agent with no turn since it started, as one just woken, stays"
+    );
     assert!(
         !idle.finished_with(1),
         "an agent with a question waiting stays"

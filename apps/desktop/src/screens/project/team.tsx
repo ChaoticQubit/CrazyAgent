@@ -1,8 +1,8 @@
-import { nextGeneration, restartAgent } from "../../api";
+import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, wakeTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -135,9 +135,9 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   </section>;
 }
 
-/** The Finished fold-out under the Team panel (DEC-102): idle, stopped and failed sub-agents,
- * newest first, each with its last task, that task's full result, how many tasks it ran and a
- * Wake button that restarts it through the agent register; the worktree cleanup sits inside.
+/** The Finished fold-out under the Team panel (DEC-102): finished sub-agents, newest first, each
+ * with its last task, that task's full result, how many tasks it ran and a Wake button that
+ * wakes the same agent by its team id, or says why it can't; the worktree cleanup sits inside.
  * Nothing shows while no agent is finished.
  * Inputs: the project data, the latest team read, the harness catalog, a reload and the cleanup.
  * Output: the fold-out, or nothing. */
@@ -153,14 +153,19 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
   if (rows.length === 0) return null;
 
   async function wake(row: FinishedRow) {
-    if (row.wake === null) return;
+    if (!row.wakeable) return;
     setWaking(row.agent);
-    const result = await restartAgent(row.wake);
+    const result = await wakeTeamAgent(data.id, row.agent, nextGeneration());
     setWaking(null);
-    if (result.kind === "ok") {
+    if (result.kind !== "ok") {
+      setNote(result.kind === "not_ready" ? "Not ready yet: waking agents isn't in this build." : failureCopy(result));
+      return reload();
+    }
+    const state = receiptState(result.value);
+    if (state.kind === "applied") {
       setNote("");
       data.notify(`Waking ${displayText(row.name)}.`);
-    } else setNote(result.kind === "not_ready" ? "Not ready yet: waking agents isn't in this build." : failureCopy(result));
+    } else setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm the wake. Check the list before trying again.");
     reload();
   }
 
@@ -172,10 +177,11 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
         <span className="pj-kind"><Icon name="bot" size={16} />{displayText(row.name)} <span className="pj-small pj-secondary">{displayText(row.harness)}</span></span>
         <span className="pj-row"><StatusBadge word={row.word} />
           {row.ended && <span className="pj-small pj-muted">{row.ended}</span>}
-          <button type="button" className="btn small" disabled={row.wake === null || waking !== null}
-            title={row.wake === null ? "CrazyAgent has no record to wake this agent from." : undefined}
+          <button type="button" className="btn small" disabled={!row.wakeable || waking !== null}
+            title={row.wakeNote ?? undefined}
             onClick={() => void wake(row)}>{waking === row.agent ? "Waking..." : "Wake"}</button></span>
       </span>
+      {row.wakeNote !== null && <span className="pj-small pj-muted">{displayText(row.wakeNote)}</span>}
       <span className="pj-secondary">{displayText(row.task)}</span>
       <span className="pj-small pj-muted">{row.tasks} {row.tasks === 1 ? "task" : "tasks"} run.</span>
       {row.result !== null && <span>

@@ -436,6 +436,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         show: bool,
     },
+    WakeAgent {
+        project_id: ProjectId,
+        agent: i64,
+    },
 }
 
 impl TeamAction {
@@ -511,6 +515,12 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_time_limits_invalid"))
             }
+            Self::WakeAgent { agent, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                Ok(())
+            }
             Self::KeepWarm { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
@@ -542,7 +552,9 @@ impl TeamAction {
                 events::RuleTarget::Project { project_id }
                 | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
             },
-            Self::Rename { project_id, .. } => Some(project_id),
+            Self::Rename { project_id, .. } | Self::WakeAgent { project_id, .. } => {
+                Some(project_id)
+            }
         }
     }
 }
@@ -863,6 +875,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 repository TEXT NOT NULL,
                 worktree TEXT NOT NULL,
                 git_dir TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_wake_requests (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                requested_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
@@ -1246,27 +1263,16 @@ pub fn admit_wake(
     now: i64,
 ) -> Result<Result<i64, &'static str>, EngineError> {
     let project = &stored.project_id;
-    let found: Option<(String, String, String, bool)> = tx
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    let harness: String = tx
         .query_row(
-            "SELECT a.role,a.harness,a.status,EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
-             FROM team_agents a WHERE a.id=?1 AND a.project=?2",
-            params![agent, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            "SELECT harness FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
         )
-        .optional()
         .map_err(error)?;
-    let Some((role, harness, status, kept)) = found else {
-        return Ok(Err("team_agent_not_found"));
-    };
-    if AgentRole::parse(&role) != Some(AgentRole::Sub) {
-        return Ok(Err("team_agent_not_found"));
-    }
-    if AgentStatus::parse(&status).is_none_or(AgentStatus::live) {
-        return Ok(Err("team_agent_running"));
-    }
-    if !kept {
-        return Ok(Err("team_agent_no_worktree"));
-    }
     let task = match admit(
         tx,
         access,
@@ -1638,7 +1644,86 @@ pub fn execute(
                 Err(code) => rejected(code),
             })
         }
+        TeamAction::WakeAgent { agent, .. } => Ok(match request_wake(tx, project, *agent, now)? {
+            Ok(()) => Outcome::Applied,
+            Err(code) => rejected(code),
+        }),
     }
+}
+
+/// Words why a finished agent's Wake is off, for the button the owner sees. Takes the refusal
+/// code from [`wake_refusal`]. Returns the line.
+fn wake_note(code: &str) -> String {
+    match code {
+        "team_agent_running" => "Already running.".into(),
+        "team_agent_no_worktree" => {
+            "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                .into()
+        }
+        "team_agents_unavailable" => {
+            crate::research::runner::confined_unavailable(std::env::consts::OS)
+                .unwrap_or("Team agents cannot run on this system.")
+                .into()
+        }
+        _ => "That agent is no longer part of this team.".into(),
+    }
+}
+
+/// Tells why a sub-agent cannot be woken now (DEC-102), or none when it can: it must be a
+/// sub-agent of the project that stopped or failed, whose worktree is still recorded, on a
+/// system where team agents run. Takes a connection, the project and the agent. Returns the
+/// refusal code: `team_agent_not_found`, `team_agent_running`, `team_agent_no_worktree` or
+/// `team_agents_unavailable`.
+pub fn wake_refusal(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<&'static str>, EngineError> {
+    let found: Option<(String, String, bool)> = connection
+        .query_row(
+            "SELECT a.role,a.status,EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+             FROM team_agents a WHERE a.id=?1 AND a.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, status, kept)) = found else {
+        return Ok(Some("team_agent_not_found"));
+    };
+    Ok(if AgentRole::parse(&role) != Some(AgentRole::Sub) {
+        Some("team_agent_not_found")
+    } else if AgentStatus::parse(&status).is_none_or(AgentStatus::live) {
+        Some("team_agent_running")
+    } else if !kept {
+        Some("team_agent_no_worktree")
+    } else if crate::research::runner::confined_unavailable(std::env::consts::OS).is_some() {
+        Some("team_agents_unavailable")
+    } else {
+        None
+    })
+}
+
+/// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
+/// on its next tick through the same wake as the master's: the agent starts again under its
+/// own id, name and worktree, continuing its harness conversation where it can. A second
+/// Wake before the first is served changes nothing. Takes the transaction, project, agent
+/// and the time. Returns a plain refusal code from [`wake_refusal`] when it cannot wake.
+fn request_wake(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO team_wake_requests(agent,project,requested_ms) VALUES (?1,?2,?3)",
+        params![agent, project.as_str(), now],
+    )
+    .map_err(error)?;
+    Ok(Ok(()))
 }
 
 fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
@@ -1741,25 +1826,29 @@ pub struct TeamAgent {
     #[serde(default)]
     pub handle: Option<String>,
     #[serde(default)]
-    pub register: Option<String>,
-    #[serde(default)]
     pub finished: bool,
+    #[serde(default)]
+    pub wakeable: bool,
+    #[serde(default)]
+    pub wake_note: Option<String>,
 }
 
 impl TeamAgent {
     /// Tells whether this agent belongs in the Finished fold-out rather than the agents
-    /// list and team graph (DEC-102): an idle, stopped or failed sub-agent that holds no
-    /// task and has no question waiting for the master. The master and every starting or
-    /// working agent stay in view. Takes the questions the agent has waiting.
-    /// Returns true for a finished agent.
+    /// list and team graph (DEC-102): a stopped or failed sub-agent, or an idle one that ran
+    /// a turn since it last started, holding no task and with no question waiting for the
+    /// master. The master, every starting or working agent and an idle agent still waiting
+    /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
+    /// questions the agent has waiting. Returns true for a finished agent.
     pub fn finished_with(&self, questions: u16) -> bool {
         self.role == AgentRole::Sub
             && questions == 0
             && self.task.is_none()
-            && matches!(
-                self.status,
-                AgentStatus::Idle | AgentStatus::Stopped | AgentStatus::Failed
-            )
+            && match self.status {
+                AgentStatus::Idle => self.turns > 0,
+                AgentStatus::Stopped | AgentStatus::Failed => true,
+                AgentStatus::Starting | AgentStatus::Working => false,
+            }
     }
 }
 
@@ -1882,8 +1971,9 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         stopped_ms: row.get(13)?,
         persona,
         handle,
-        register: None,
         finished: false,
+        wakeable: false,
+        wake_note: None,
     })
 }
 
@@ -2208,11 +2298,6 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let entries =
-        crate::agents::hosted_entries(connection, project, runtime::TEAM_HOST).map_err(error)?;
-    for agent in &mut agents {
-        agent.register = entries.get(&agent.id.to_string()).cloned();
-    }
     let mut statement = connection
         .prepare(&recent(
             &format!("SELECT {TASK_COLUMNS} FROM team_tasks WHERE project=?1"),
@@ -2289,6 +2374,25 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .find(|item| item.agent == agent.id)
             .map_or(0, |item| item.count);
         agent.finished = agent.finished_with(questions);
+    }
+    let waking: BTreeSet<i64> = {
+        let mut statement = connection
+            .prepare("SELECT agent FROM team_wake_requests WHERE project=?1")
+            .map_err(error)?;
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for agent in agents.iter_mut().filter(|agent| agent.finished) {
+        let refusal = wake_refusal(connection, project, agent.id)?;
+        agent.wakeable = refusal.is_none() && !waking.contains(&agent.id);
+        agent.wake_note = if waking.contains(&agent.id) {
+            Some("Waking.".into())
+        } else {
+            refusal.map(wake_note)
+        };
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
