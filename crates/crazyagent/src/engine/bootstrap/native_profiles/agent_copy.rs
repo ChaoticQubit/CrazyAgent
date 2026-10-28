@@ -314,8 +314,9 @@ pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineE
 }
 
 /// Builds the agent's Codex `auth.json` from the account's: the ChatGPT tokens with the
-/// refresh token emptied, no API key and nothing else. Input: the account's record.
-/// Output: the copy with its access token's expiry, or the unavailable refusal.
+/// refresh token emptied, no API key, and the id token's signature dropped so the agent
+/// reads its claims but cannot exchange it for a durable API key. Input: the account's
+/// record. Output: the copy with its access token's expiry, or the unavailable refusal.
 fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
     let tokens = record
@@ -330,7 +331,7 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
             .ok_or_else(unavailable)
     };
     let access = text("access_token")?;
-    let identity = text("id_token")?;
+    let identity = claims_only(text("id_token")?)?;
     let expires = Duration::from_secs(token_expiry(access)?);
     let copy = json!({
         "OPENAI_API_KEY": null,
@@ -345,6 +346,26 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let copy = serde_json::to_vec(&copy).map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
     Ok(Record { copy, expires })
+}
+
+/// Keeps a signed JWT's claims but drops its signature, so an agent reads the account
+/// claims its harness needs while the token can no longer be exchanged for a durable
+/// credential. A compact JWS is three non-empty dot-separated parts; this returns the
+/// header and payload unchanged with the signature emptied. Input: the account's id token.
+/// Output: the claims-only token, or the unavailable refusal when the input is not a
+/// three-part JWT.
+fn claims_only(token: &str) -> Result<String, EngineError> {
+    let mut parts = token.split('.');
+    let header = parts.next().filter(|part| !part.is_empty());
+    let payload = parts.next().filter(|part| !part.is_empty());
+    let signature = parts.next().filter(|part| !part.is_empty());
+    let (header, payload) = match (header, payload, signature, parts.next()) {
+        (Some(header), Some(payload), Some(_), None) => (header, payload),
+        _ => return Err(unavailable()),
+    };
+    let stripped = format!("{header}.{payload}.");
+    assert!(stripped.ends_with('.') && stripped.matches('.').count() == 2);
+    Ok(stripped)
 }
 
 /// Takes what a usage poll sends from an agent's copy of the account's credential: the
