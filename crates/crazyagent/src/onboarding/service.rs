@@ -51,6 +51,10 @@ const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
+/// The plain reason a step fails with when its stored onboarding state cannot be read, so
+/// it is not claimed again and again.
+const ROW_UNREADABLE: &str =
+    "The saved onboarding state could not be read; remove the project and add it again";
 #[cfg(unix)]
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
@@ -243,7 +247,8 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
-/// and counts the attempt. Returns `None` when nothing waits.
+/// and counts the attempt; a row whose pool or draft cannot be read fails with
+/// [`ROW_UNREADABLE`] instead. Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -281,6 +286,24 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         return Ok(None);
     };
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
+    let read = CredentialRef::new(pool)
+        .ok()
+        .zip(serde_json::from_str::<Drafted>(&drafted).ok());
+    let Some((pool, drafted)) = read else {
+        let changed = tx
+            .execute(
+                &format!(
+                    "UPDATE onboarding SET {0}_state='failed',{0}_reason=?2,updated_ms=?3
+                     WHERE project=?1 AND claimer IS NULL",
+                    kind.prefix()
+                ),
+                params![project, ROW_UNREADABLE, now],
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(changed, 1);
+        tx.commit().map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
     let changed = tx
         .execute(
             &format!(
@@ -297,8 +320,8 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     Ok(Some(Claimed {
         project,
         repo: PathBuf::from(repo),
-        pool: CredentialRef::new(pool).map_err(|problem| problem.0)?,
-        drafted: serde_json::from_str(&drafted).map_err(|error| error.to_string())?,
+        pool,
+        drafted,
         created_ms,
         runs: runs + 1,
         kind,
