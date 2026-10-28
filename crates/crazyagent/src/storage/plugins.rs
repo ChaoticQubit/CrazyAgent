@@ -48,6 +48,7 @@ pub(crate) enum Command {
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        secrets: Vec<EffectiveSecret>,
     },
     UpdateServer {
         id: String,
@@ -776,9 +777,12 @@ fn add_server(
     scope: Scope,
     name: String,
     spec: ServerSpec,
+    secrets: Vec<EffectiveSecret>,
 ) -> Result<ServerRecord, EngineError> {
     crate::plugins::validate_server_name(&name)?;
     spec.validate()?;
+    let names: Vec<&str> = secrets.iter().map(|secret| secret.name.as_str()).collect();
+    crate::plugins::validate_secret_names(&names)?;
     require_scope(tx, &scope)?;
     let key = scope_key(&scope);
     if count(tx, "server", &key)? >= SERVERS_PER_SCOPE_MAX {
@@ -794,7 +798,7 @@ fn add_server(
         spec,
         enabled: true,
         approved: None,
-        secrets: Vec::new(),
+        secrets,
         check: None,
         checks: 0,
     };
@@ -1020,8 +1024,13 @@ pub(super) fn run(
                 .map_err(error)?;
             ResultValue::SkillRemoved(root.join(&record.folder))
         }
-        Command::AddServer { scope, name, spec } => {
-            let record = add_server(tx, scope, name, spec)?;
+        Command::AddServer {
+            scope,
+            name,
+            spec,
+            secrets,
+        } => {
+            let record = add_server(tx, scope, name, spec, secrets)?;
             ResultValue::Server(Box::new(server_view(&record, root, None)))
         }
         Command::UpdateServer { id, spec } => {

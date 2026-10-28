@@ -130,8 +130,9 @@ impl NativeBridge {
             .map_err(plugin_failure)
     }
 
-    /// Adds an MCP server that waits for approval, then saves each secret through its own
-    /// private frame. Inputs: scope, name, command or URL, and secrets by name.
+    /// Adds an MCP server that waits for approval, with its secrets in the same request and
+    /// each value in a private frame of its own. Inputs: scope, name, command or URL, and
+    /// secrets by name.
     pub async fn add_mcp_server(
         &mut self,
         scope: Scope,

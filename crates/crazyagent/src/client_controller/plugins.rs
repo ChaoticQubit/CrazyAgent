@@ -144,9 +144,10 @@ impl OwnerController {
         self.plugins_client()?.remove_skill(id).await
     }
 
-    /// Adds an MCP server, then saves each secret through its own private frame.
-    /// Inputs: scope, name, command or URL, and secrets by name. Output: the server,
-    /// waiting for approval, with its secrets shown as saved.
+    /// Adds an MCP server with its secrets in one request, so the engine keeps the server
+    /// with every secret or keeps none of them. Inputs: scope, name, command or URL, and
+    /// secrets by name. Output: the server, waiting for approval, with its secrets shown
+    /// as saved.
     pub async fn add_mcp_server(
         &self,
         scope: Scope,
@@ -154,33 +155,9 @@ impl OwnerController {
         spec: ServerSpec,
         secrets: Vec<(String, AccountSecret)>,
     ) -> Result<ServerView, EngineError> {
-        for (index, (secret, _)) in secrets.iter().enumerate() {
-            crate::plugins::validate_secret_name(secret)?;
-            if secrets[..index]
-                .iter()
-                .any(|(earlier, _)| earlier == secret)
-            {
-                return Err(EngineError("server_secret_duplicate".into()));
-            }
-        }
-        if secrets.len() > crate::plugins::SECRETS_PER_SERVER_MAX {
-            return Err(EngineError("server_secret_limit".into()));
-        }
-        let client = self.plugins_client()?;
-        let mut server = client.add_mcp_server(scope, name, spec).await?;
-        for (secret, value) in secrets {
-            match client
-                .set_mcp_secret(server.id.clone(), secret, value)
-                .await
-            {
-                Ok(saved) => server = saved,
-                Err(problem) => {
-                    let _ = client.remove_mcp_server(server.id.clone()).await;
-                    return Err(problem);
-                }
-            }
-        }
-        Ok(server)
+        self.plugins_client()?
+            .add_mcp_server(scope, name, spec, secrets)
+            .await
     }
 
     /// Changes an MCP server's command or URL; it then waits for approval again.

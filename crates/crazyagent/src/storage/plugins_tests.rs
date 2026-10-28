@@ -21,6 +21,7 @@ fn server(connection: &mut Connection, root: &Path, name: &str, spec: &ServerSpe
             scope: Scope::Global,
             name: name.into(),
             spec: spec.clone(),
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {

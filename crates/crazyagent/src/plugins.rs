@@ -160,6 +160,22 @@ pub fn validate_server_name(name: &str) -> Result<(), EngineError> {
 /// Checks a secret's name, used as an environment variable for commands or a header for URLs.
 /// Input: the owner's name. Output: Ok for 1 to 64 letters, digits, _ or -, not starting
 /// with a digit or -.
+/// Checks the secrets a server is added with: each a valid secret name, none named twice
+/// and at most `SECRETS_PER_SERVER_MAX`. Input: the names. Output: Ok, or the name's own
+/// refusal, `server_secret_duplicate` or `server_secret_limit`.
+pub fn validate_secret_names(names: &[&str]) -> Result<(), EngineError> {
+    for (index, name) in names.iter().enumerate() {
+        validate_secret_name(name)?;
+        if names[..index].contains(name) {
+            return Err(error("server_secret_duplicate"));
+        }
+    }
+    if names.len() > SECRETS_PER_SERVER_MAX {
+        return Err(error("server_secret_limit"));
+    }
+    Ok(())
+}
+
 pub fn validate_secret_name(name: &str) -> Result<(), EngineError> {
     let valid = !name.is_empty()
         && name.len() <= SECRET_NAME_BYTES_MAX

@@ -267,6 +267,7 @@ fn install(
                 scope: Scope::Global,
                 name,
                 spec: spec.clone(),
+                secrets: Vec::new(),
             },
         )
         .map_err(taken)?;

@@ -255,6 +255,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
             command: "/usr/bin/true".into(),
             args: Vec::new(),
         },
+        Vec::new(),
     ));
     assert!(
         tokio::time::timeout(IN_FLIGHT, &mut added).await.is_err(),
