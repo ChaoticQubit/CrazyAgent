@@ -439,6 +439,11 @@ impl ResearchRunner {
         &self.database
     }
 
+    /// The attempt limit of this runner's jobs, which stale recovery obeys too.
+    pub fn attempts_max(&self) -> u32 {
+        self.limits.attempts_max
+    }
+
     /// The engine-owned folder holding this runner's sandbox profiles and
     /// agent state.
     pub(crate) fn state(&self) -> &Path {
@@ -2794,7 +2799,7 @@ mod tests {
             }
             std::thread::sleep(stale * 2);
             let waiting = !run.is_finished();
-            let recovered = jobs.recover_stale(stale.as_millis() as u64).unwrap();
+            let recovered = jobs.recover_stale(stale.as_millis() as u64, 2).unwrap();
             drop(held);
             let _ = run.join();
             (waiting, recovered)
