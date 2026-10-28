@@ -703,8 +703,9 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// folder as the working directory (the profile lets it read no folder above), stdout and
 /// stderr into the redacting `output` pipe, and its own process group. The git shim lets
 /// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
-/// at `root`'s agents root, and at its older one while the engine records an agent of
-/// `project` there ([`super::workspace::older_agents`]); a `root` holding a `:` is refused.
+/// at `root`'s agents root, and at its older one while an engine-made worktree of
+/// `project` stays there ([`super::workspace::older_agents`]); a `root` holding a `:` is
+/// refused.
 fn command(
     project: &ProjectId,
     build: &Path,

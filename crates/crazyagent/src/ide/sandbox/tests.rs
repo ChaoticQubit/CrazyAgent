@@ -1109,6 +1109,102 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
+/// INT1R3-L1 under the installed IDE profile: an older-layout project ran a research job,
+/// whose linked worktree stays at `<project>/worktrees/research-market-<job>-1` with no team
+/// record, and then gains a `.crazyagent` folder by hand. The engine's own answer for the
+/// older agents root keeps it in the ceiling, so the IDE's git in that folder finds no
+/// repository instead of acting on the project's, and the Project section keeps its own.
+#[test]
+fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("older");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root, &root.join("worktrees")] {
+        folder(path);
+    }
+    let project = crate::protocol::ProjectId::new("older").unwrap();
+    let job = crate::research::jobs::ResearchJobs::open(&data.join("engine.db"))
+        .unwrap()
+        .enqueue(project.as_str(), "market", "codex", false)
+        .unwrap();
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let name = format!("research-market-{job}-1");
+    let research = root.join("worktrees").join(&name);
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &name,
+            research.to_str().unwrap(),
+        ],
+    );
+    folder(&root.join(".crazyagent"));
+    assert_eq!(
+        crate::projects_home::state_folder(&root),
+        root.join(".crazyagent"),
+        "the project now reads as the newer layout"
+    );
+    let older_agents = crate::ide::workspace::older_agents(&data, &project, &root).unwrap();
+    assert!(
+        older_agents,
+        "the engine counts the research worktree left in the older agents root"
+    );
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let top = |dir: &Path| {
+        ide_git_recorded(
+            &profile,
+            &shim,
+            &home,
+            &root,
+            older_agents,
+            dir,
+            &["rev-parse", "--show-toplevel"],
+        )
+    };
+
+    let stopped = top(&research);
+    let said = String::from_utf8_lossy(&stopped.stderr);
+    assert!(
+        !stopped.status.success() && said.contains("not a git repository"),
+        "the IDE's git in the research worktree finds no repository: {said}"
+    );
+    let own = top(&root);
+    assert!(own.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&own.stdout).trim(),
+        root.to_str().unwrap()
+    );
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
 /// IN1-FN1 under the installed IDE profile: the IDE cannot read an agent worktree's `.git`,
 /// so git in the Project section sees the worktree as missing and a prune would drop its
 /// registration. Through the IDE's git, `worktree prune` and `worktree remove` are refused
