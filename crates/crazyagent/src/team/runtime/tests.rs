@@ -537,8 +537,12 @@ fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
             params![finished, PROJECT, format!("worktrees/agent-{finished}")],
         )
         .unwrap();
-    let listed =
-        super::super::events::finished_agents(&fixture.connection, &project, now_ms()).unwrap();
+    let listed: Vec<String> =
+        super::super::events::finished_agents(&fixture.connection, &project, now_ms())
+            .unwrap()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
     assert_eq!(listed.len(), 1, "{listed:?}");
     for team_tool in [false, true] {
         let framed = framing(&fixture.setup, team_tool, &[], &listed);
@@ -589,6 +593,99 @@ fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
         "The master's wakes:\n- Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.\n- Not woken: no finished sub-agent of this project is called Nobody. Wake one from the finished list by its name or Sub-agent number."
     );
     assert!(fixture.note(&heard), "{:#?}", fixture.status().messages);
+}
+
+/// A master that is not live and keeps its harness between messages, as on an endpoint
+/// account, hears on its next turn how to wake and which sub-agents it can wake once one
+/// finishes after its briefing (WKA2-1), and once per newly finished agent, not every turn.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_kept_master_hears_of_a_sub_agent_that_finished_after_its_briefing() {
+    use crate::protocol::Outcome;
+    use crate::team::TeamAction;
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    let say = |fixture: &mut Fixture, text: &str| {
+        let tx = fixture.connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &TeamAction::Message {
+                    project_id: project.clone(),
+                    text: text.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    let replies = |f: &Fixture| {
+        f.status()
+            .messages
+            .iter()
+            .filter(|message| message.author == MessageAuthor::Master)
+            .count()
+    };
+    let syntax = "WAKE <its name or Sub-agent number>: <the text>";
+
+    say(&mut fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    assert!(!typed(&fixture, master).contains(syntax));
+
+    let finished = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    assert!(
+        names::assign_role(&fixture.connection, &project, finished, "page-writer")
+            .unwrap()
+            .is_ok()
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![finished, PROJECT, format!("worktrees/agent-{finished}")],
+        )
+        .unwrap();
+    let label = super::super::events::label(&fixture.connection, finished).unwrap();
+    say(&mut fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        replies(f) == 2
+    });
+    let text = typed(&fixture, master);
+    let told = text
+        .find(syntax)
+        .unwrap_or_else(|| panic!("the kept master hears how to wake: {text}"));
+    assert!(text.find("Plan the page").unwrap() < told, "{text}");
+    assert!(told < text.find("Plan the title").unwrap(), "{text}");
+    assert!(
+        text.contains(&format!("- {label}, Sub-agent {finished} (")),
+        "{text}"
+    );
+
+    say(&mut fixture, "Plan the footer");
+    fixture.until(&mut team, "the master answers the third message", |f| {
+        replies(f) == 3
+    });
+    let text = typed(&fixture, master);
+    assert!(text.contains("Plan the footer"), "{text}");
+    assert_eq!(
+        text.matches(syntax).count(),
+        1,
+        "told once per newly finished agent: {text}"
+    );
+    assert_eq!(
+        launches(&fixture, master).len(),
+        1,
+        "the master kept its harness across the three messages"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
 }
 
 #[test]
@@ -3851,7 +3948,17 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
         })
         .collect();
 
-    let lines = super::super::events::finished_agents(&fixture.connection, &project, now).unwrap();
+    let finished =
+        super::super::events::finished_agents(&fixture.connection, &project, now).unwrap();
+    assert_eq!(
+        finished
+            .iter()
+            .map(|(id, _)| *id)
+            .take(4)
+            .collect::<Vec<_>>(),
+        [fresh, failed, hours, days]
+    );
+    let lines: Vec<String> = finished.into_iter().map(|(_, line)| line).collect();
     assert_eq!(lines.len(), super::super::events::FINISHED_LISTED_MAX);
     let label = |id: i64| {
         format!(

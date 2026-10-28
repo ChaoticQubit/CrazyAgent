@@ -1211,16 +1211,16 @@ fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Resu
 pub(crate) const FINISHED_LISTED_MAX: usize = 20;
 const FINISHED_TASK_BYTES_MAX: usize = 120;
 
-/// Lists a project's finished sub-agents a live master can wake, newest first and at most
+/// Lists a project's finished sub-agents a master can wake, newest first and at most
 /// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
 /// with its name and Sub-agent number, harness, last task on one line and when it finished.
-/// Takes the database, the project and now. Returns the lines, or none when no such agent
-/// exists.
+/// Takes the database, the project and now. Returns each agent's id with its line, or none
+/// when no such agent exists.
 pub(crate) fn finished_agents(
     connection: &Connection,
     project: &ProjectId,
     now: i64,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<Vec<(i64, String)>, EngineError> {
     let rows: Vec<(i64, String, Option<i64>, Option<String>)> = {
         let mut statement = connection
             .prepare(
@@ -1244,7 +1244,7 @@ pub(crate) fn finished_agents(
     assert!(rows.len() <= FINISHED_LISTED_MAX);
     rows.into_iter()
         .map(
-            |(id, harness, stopped, task)| -> Result<String, EngineError> {
+            |(id, harness, stopped, task)| -> Result<(i64, String), EngineError> {
                 let task = task
                     .map(|task| one_line(&task, FINISHED_TASK_BYTES_MAX))
                     .filter(|task| !task.is_empty())
@@ -1258,9 +1258,12 @@ pub(crate) fn finished_agents(
                 } else {
                     format!("{label}, {number}")
                 };
-                Ok(format!(
-                    "- {named} ({}): {task}; {when}",
-                    super::names::harness_name(&harness)
+                Ok((
+                    id,
+                    format!(
+                        "- {named} ({}): {task}; {when}",
+                        super::names::harness_name(&harness)
+                    ),
                 ))
             },
         )
@@ -1357,7 +1360,10 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     Ok(EventsStatus {
         project_id: project.clone(),
         agents,
-        finished: finished_agents(connection, project, super::now_ms())?,
+        finished: finished_agents(connection, project, super::now_ms())?
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect(),
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
