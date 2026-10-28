@@ -233,8 +233,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
 fn sqlite(root: &Path, sql: &str) -> Result<String, Box<dyn Error>> {
     let result = crazyagent::spawn_gate::output(
         std::process::Command::new("/usr/bin/sqlite3")
+            .arg("-cmd")
+            .arg(".timeout 5000")
             .arg(root.join("engine.db"))
-            .arg(format!("PRAGMA busy_timeout=5000; {sql}"))
+            .arg(sql)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
