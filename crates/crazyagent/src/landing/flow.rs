@@ -789,8 +789,9 @@ fn check_change(
         return Err(failure("changes_too_large"));
     }
     let mut fields = output.stdout.split(|byte| *byte == 0);
-    let (mut blobs, mut added, mut links) = (Vec::new(), Vec::new(), Vec::new());
-    let mut folders: BTreeSet<String> = BTreeSet::new();
+    let (mut blobs, mut added) = (Vec::new(), Vec::new());
+    let (mut folders, mut links): (BTreeSet<String>, BTreeSet<String>) =
+        (BTreeSet::new(), BTreeSet::new());
     let mut paths: usize = 0;
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
         let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
@@ -820,7 +821,7 @@ fn check_change(
         if status != "D" {
             layout_folders(&mut folders, path);
             if mode == "120000" {
-                links.push((path, id));
+                links.insert(path.to_owned());
             }
         }
     }
@@ -829,7 +830,7 @@ fn check_change(
         return Err(failure("changes_bare_repository"));
     }
     assert!(links.len() <= blobs.len());
-    check_links(repo, checkout, &links)?;
+    check_links(repo, checkout, to, &links)?;
     if blob_bytes(repo, &blobs)? > bounds.bytes {
         return Err(failure("changes_too_large"));
     }
@@ -865,14 +866,18 @@ fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
     }
 }
 
-/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1):
-/// Accept's merge can join a change set's half of a layout with the other half another
-/// change set already landed. A layout the merge makes holds a name the change added or
-/// changed, so the change's own kept paths name every folder to list.
-/// Inputs: the repository, the change's start and end commits and the merged tree.
-/// Output: Ok, else `changes_bare_repository` or the listing failure.
-pub(super) fn check_layout(
+/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1)
+/// or links the owner could follow out of the project (SR1-2): Accept's merge can join a
+/// change set's half of a layout or of a link chain with the other half another change set
+/// already landed. A layout the merge makes holds a name the change added or changed, and a
+/// chain the merge makes passes through a link the change added or changed, so the
+/// change's own kept paths name every folder and link to check.
+/// Inputs: the repository, the owner's checkout, the change's start and end commits and
+/// the merged tree. Output: Ok, else `changes_bare_repository`, `changes_link_outside` or
+/// the listing failure.
+pub(super) fn check_merged(
     repo: &Repo,
+    checkout: &Path,
     from: &str,
     to: &str,
     tree: &str,
@@ -882,7 +887,6 @@ pub(super) fn check_layout(
             "diff-tree",
             "-r",
             "-z",
-            "--name-only",
             "--no-renames",
             "--diff-filter=d",
             from,
@@ -898,19 +902,20 @@ pub(super) fn check_layout(
     if output.overflow {
         return Err(failure("changes_too_large"));
     }
-    let mut folders = BTreeSet::new();
-    for path in output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
+    let (mut folders, mut links) = (BTreeSet::new(), BTreeSet::new());
+    let mut fields = output.stdout.split(|byte| *byte == 0);
+    while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
+        let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
         let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
         layout_folders(&mut folders, path);
+        if header.split(|byte| *byte == b' ').nth(1) == Some(b"120000".as_slice()) {
+            links.insert(path.to_owned());
+        }
     }
     if repository_layout(repo, tree, &folders)? {
         return Err(failure("changes_bare_repository"));
     }
-    Ok(())
+    check_links(repo, checkout, tree, &links)
 }
 
 /// Tells whether a tree holds a folder git would open as a bare repository (SM-R1): a
@@ -963,54 +968,150 @@ fn repository_layout(
     Ok(false)
 }
 
-/// Refuses an added or changed link whose target is absolute or which, resolved by name
-/// from its own folder, leaves the tree or enters the agents' worktrees folder (SR1-2): an
-/// owner following it reaches a folder no landing check reads, such as a bare-repository
-/// layout in an ignored folder of an agent's worktree. One batched `cat-file` reads every
-/// target; one past `PATH_BYTES_MAX` is refused. Inputs: the repository, the owner's
-/// checkout and each changed link's path and blob id. Output: Ok, else
-/// `changes_link_outside` or `changes_git_failed`.
-fn check_links(repo: &Repo, checkout: &Path, links: &[(&str, &str)]) -> Result<(), EngineError> {
-    if links.is_empty() {
+/// Refuses a tree whose links an owner could follow out of the project or into the
+/// agents' worktrees folder (SR1-2), such as to a bare-repository layout in an ignored
+/// folder of an agent's worktree, which no landing check reads. Each link the change added
+/// or changed needs a relative, UTF-8 target of at most `PATH_BYTES_MAX` bytes with ASCII
+/// names and `..` only before its first name; resolved from the link's folder it stays in
+/// the tree, does not start with the agents' folder, and neither its folders nor any step
+/// of it is a link of the tree in any ASCII case. No other link of the tree may pass
+/// through or end at one of the change's links. Inputs: the repository, the owner's
+/// checkout, the tree that lands and the paths of the change's links. Output: Ok, else
+/// `changes_link_outside`, `changes_too_large` or `changes_git_failed`.
+fn check_links(
+    repo: &Repo,
+    checkout: &Path,
+    tree: &str,
+    changed: &BTreeSet<String>,
+) -> Result<(), EngineError> {
+    if changed.is_empty() {
         return Ok(());
     }
-    let agents = agents_root(checkout);
-    let input: String = links.iter().map(|(_, id)| format!("{id}\n")).collect();
-    let limit = links
-        .len()
-        .saturating_mul(PATH_BYTES_MAX + LINK_HEADER_BYTES_MAX);
-    let output = repo.exec(&["cat-file", "--batch"], Some(input.as_bytes()), &[], limit)?;
-    if output.overflow {
-        return Err(failure("changes_link_outside"));
+    let links = tree_links(repo, tree)?;
+    let every: BTreeSet<String> = links
+        .iter()
+        .map(|(path, _)| path.to_ascii_lowercase())
+        .collect();
+    let fresh: BTreeSet<String> = changed
+        .iter()
+        .map(|path| path.to_ascii_lowercase())
+        .collect();
+    if !fresh.is_subset(&every) {
+        return Err(failure("changes_git_failed"));
     }
+    let agents = agents_root(checkout);
+    let ids: Vec<&str> = links.iter().map(|(_, id)| id.as_str()).collect();
+    let targets = link_targets(repo, &ids)?;
+    assert_eq!(targets.len(), links.len());
+    for ((path, _), target) in links.iter().zip(&targets) {
+        let outside = if fresh.contains(&path.to_ascii_lowercase()) {
+            !fresh_link_inside(path, target.as_deref(), &agents, &every)
+        } else {
+            target
+                .as_deref()
+                .is_some_and(|target| passes_through(path, target, &fresh))
+        };
+        if outside {
+            return Err(failure("changes_link_outside"));
+        }
+    }
+    Ok(())
+}
+
+/// Lists every link of a tree with its blob id, from one bounded `ls-tree -r`.
+/// Inputs: the repository and the tree. Output: the paths and ids, else
+/// `changes_too_large` or `changes_git_failed`.
+fn tree_links(repo: &Repo, tree: &str) -> Result<Vec<(String, String)>, EngineError> {
+    let output = repo.exec(&["ls-tree", "-r", "-z", tree], None, &[], LISTING_BYTES_MAX)?;
     if output.code != 0 {
         return Err(failure("changes_git_failed"));
     }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
     let broken = || failure("changes_git_failed");
-    let mut rest: &[u8] = &output.stdout;
-    for (path, id) in links {
-        let end = rest
+    let mut links = Vec::new();
+    for entry in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+    {
+        let tab = entry
             .iter()
-            .position(|byte| *byte == b'\n')
+            .position(|byte| *byte == b'\t')
             .ok_or_else(broken)?;
-        let header = std::str::from_utf8(&rest[..end]).map_err(|_| broken())?;
-        let size = match header.split(' ').collect::<Vec<_>>()[..] {
-            [oid, "blob", size] if oid == *id => size.parse::<usize>().map_err(|_| broken())?,
-            _ => return Err(broken()),
+        let header = std::str::from_utf8(&entry[..tab]).map_err(|_| broken())?;
+        let [mode, _, id] = header.split(' ').collect::<Vec<_>>()[..] else {
+            return Err(broken());
         };
-        if size > PATH_BYTES_MAX {
-            return Err(failure("changes_link_outside"));
-        }
-        let target = rest.get(end + 1..end + 1 + size).ok_or_else(broken)?;
-        rest = rest.get(end + 2 + size..).ok_or_else(broken)?;
-        if !link_inside(path, target, &agents) {
-            return Err(failure("changes_link_outside"));
+        if mode == "120000" {
+            let path = String::from_utf8_lossy(&entry[tab + 1..]).into_owned();
+            links.push((path, id.to_owned()));
         }
     }
-    if !rest.is_empty() {
-        return Err(broken());
+    Ok(links)
+}
+
+/// Reads each link's target with one `cat-file --batch`, none for a target longer than
+/// `PATH_BYTES_MAX`, whose size `blob_sizes` reads first. Inputs: the repository and the
+/// link blob ids. Output: the targets in order, else `changes_git_failed`.
+fn link_targets(repo: &Repo, ids: &[&str]) -> Result<Vec<Option<Vec<u8>>>, EngineError> {
+    let sizes = blob_sizes(repo, ids)?;
+    let short: Vec<(&str, usize)> = ids
+        .iter()
+        .zip(&sizes)
+        .filter_map(|(id, size)| {
+            usize::try_from(*size)
+                .ok()
+                .filter(|size| *size <= PATH_BYTES_MAX)
+                .map(|size| (*id, size))
+        })
+        .collect();
+    let mut read: Vec<Vec<u8>> = Vec::new();
+    if !short.is_empty() {
+        let input: String = short.iter().map(|(id, _)| format!("{id}\n")).collect();
+        let limit = short
+            .iter()
+            .map(|(_, size)| size + LINK_HEADER_BYTES_MAX)
+            .sum::<usize>();
+        let output = repo.exec(&["cat-file", "--batch"], Some(input.as_bytes()), &[], limit)?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let broken = || failure("changes_git_failed");
+        let mut rest: &[u8] = &output.stdout;
+        for (id, size) in &short {
+            let end = rest
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or_else(broken)?;
+            let header = std::str::from_utf8(&rest[..end]).map_err(|_| broken())?;
+            let wanted = format!("{id} blob {size}");
+            if header != wanted {
+                return Err(broken());
+            }
+            read.push(
+                rest.get(end + 1..end + 1 + size)
+                    .ok_or_else(broken)?
+                    .to_vec(),
+            );
+            rest = rest.get(end + 2 + size..).ok_or_else(broken)?;
+        }
+        if !rest.is_empty() {
+            return Err(broken());
+        }
     }
-    Ok(())
+    let mut read = read.into_iter();
+    let targets: Vec<Option<Vec<u8>>> = sizes
+        .iter()
+        .map(|size| {
+            (*size <= PATH_BYTES_MAX as u64)
+                .then(|| read.next())
+                .flatten()
+        })
+        .collect();
+    assert!(read.next().is_none());
+    Ok(targets)
 }
 
 /// The agents' worktrees folder as path parts from the owner's checkout, lowercased:
@@ -1028,43 +1129,111 @@ fn agents_root(checkout: &Path) -> Vec<String> {
     parts
 }
 
-/// Tells whether a link at `path` with `target` stays in the tree and out of the agents'
-/// folder, resolving `.` and `..` by name from the link's folder; an absolute, empty or
-/// non-UTF-8 target does not. Inputs: the link's path, its target and the agents' folder
-/// parts. Output: true when it stays inside.
-fn link_inside(path: &str, target: &[u8], agents: &[String]) -> bool {
-    let Ok(target) = std::str::from_utf8(target) else {
+/// Tells whether one of the change's links stays inside under [`check_links`]'s rule.
+/// Inputs: the link's path, its target (none when too long), the agents' folder parts and
+/// every link path of the tree in ASCII lower case. Output: true when it stays inside.
+fn fresh_link_inside(
+    path: &str,
+    target: Option<&[u8]>,
+    agents: &[String],
+    links: &BTreeSet<String>,
+) -> bool {
+    let Some(Ok(target)) = target.map(std::str::from_utf8) else {
         return false;
     };
     if target.is_empty() || target.starts_with('/') {
         return false;
     }
-    let mut at: Vec<&str> = path.split('/').collect();
-    at.pop();
+    let mut walk: Vec<&str> = path.split('/').collect();
+    walk.pop();
+    let link = |walk: &[&str]| links.contains(&walk.join("/").to_ascii_lowercase());
+    if (1..=walk.len()).any(|end| link(&walk[..end])) {
+        return false;
+    }
+    let mut named = false;
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if named => return false,
+            ".." => {
+                if walk.pop().is_none() {
+                    return false;
+                }
+            }
+            name if !name.is_ascii() => return false,
+            name => {
+                walk.push(name);
+                named = true;
+                if link(&walk) {
+                    return false;
+                }
+            }
+        }
+    }
+    !entered(&walk, agents)
+}
+
+/// Tells whether a walk starts with the agents' folder. A compared part that is not ASCII
+/// counts as entering it, since the volume may fold it to an ASCII name. Inputs: the
+/// walk's parts and the agents' folder parts. Output: true when it enters.
+fn entered(walk: &[&str], agents: &[String]) -> bool {
+    for (part, agent) in walk.iter().zip(agents) {
+        if !part.is_ascii() {
+            return true;
+        }
+        if !part.eq_ignore_ascii_case(agent) {
+            return false;
+        }
+    }
+    walk.len() >= agents.len()
+}
+
+/// Tells whether another link of the tree, resolved by name from its folder, passes
+/// through or ends at one of the change's links, so the change would carry it to where
+/// the change's link points. Inputs: its path, its target and the change's link paths in
+/// ASCII lower case. Output: true when it does.
+fn passes_through(path: &str, target: &[u8], fresh: &BTreeSet<String>) -> bool {
+    let Ok(target) = std::str::from_utf8(target) else {
+        return false;
+    };
+    if target.starts_with('/') {
+        return false;
+    }
+    let mut walk: Vec<&str> = path.split('/').collect();
+    walk.pop();
     for part in target.split('/') {
         match part {
             "" | "." => {}
             ".." => {
-                if at.pop().is_none() {
+                if walk.pop().is_none() {
                     return false;
                 }
             }
-            name => at.push(name),
+            name => {
+                walk.push(name);
+                if fresh.contains(&walk.join("/").to_ascii_lowercase()) {
+                    return true;
+                }
+            }
         }
     }
-    let entered = at.len() >= agents.len()
-        && at
-            .iter()
-            .zip(agents)
-            .all(|(part, agent)| part.eq_ignore_ascii_case(agent));
-    !entered
+    false
 }
 
 /// Sums the sizes of blobs as git stores them. Inputs: the repository and the blob ids.
 /// Output: the bytes, or `changes_git_failed` when one is missing.
 fn blob_bytes(repo: &Repo, blobs: &[&str]) -> Result<u64, EngineError> {
+    Ok(blob_sizes(repo, blobs)?
+        .into_iter()
+        .fold(0, u64::saturating_add))
+}
+
+/// Reads the sizes of blobs as git stores them, with one `cat-file --batch-check`.
+/// Inputs: the repository and the blob ids. Output: the sizes in order, or
+/// `changes_git_failed` when one is missing.
+fn blob_sizes(repo: &Repo, blobs: &[&str]) -> Result<Vec<u64>, EngineError> {
     if blobs.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let mut input = blobs.join("\n");
     input.push('\n');
@@ -1088,7 +1257,7 @@ fn blob_bytes(repo: &Repo, blobs: &[&str]) -> Result<u64, EngineError> {
     if sizes.len() != blobs.len() {
         return Err(failure("changes_git_failed"));
     }
-    Ok(sizes.into_iter().fold(0, u64::saturating_add))
+    Ok(sizes)
 }
 
 /// Tells whether the owner's ignore rules exclude any of `paths`, tracked or not: the
