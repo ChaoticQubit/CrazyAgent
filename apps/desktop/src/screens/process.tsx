@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
   PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess, savedMessage,
   skillSegments, textBytes, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
-import { Button, Dialog, LoadError, NotReady, Notice, Panel, Skeleton, TextArea } from "../ui";
+import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, Panel, Skeleton, TextArea } from "../ui";
+import { navigate } from "../ui/router";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
@@ -19,13 +20,22 @@ export interface ProcessPreview {
 }
 
 /** Shows instructions text with each catalog skill name as a tag: hovering shows its one-line
- * description and clicking opens that skill in Settings. Inputs: the text and the catalog. */
-export function TaggedText({ text, skills }: { text: string; skills: readonly SkillEntry[] }) {
+ * description and clicking opens that skill in Settings, or hands it to `onOpen` when the
+ * page decides first. Inputs: the text, the catalog and the optional opener. */
+export function TaggedText({ text, skills, onOpen }: { text: string; skills: readonly SkillEntry[]; onOpen?: (skill: SkillEntry) => void }) {
   return <div className="process-text">
     {skillSegments(text, skills).map((segment, index) => segment.kind === "text"
       ? <span key={index}>{segment.text}</span>
-      : <SkillTag key={index} name={segment.name} skills={[segment]} />)}
+      : <SkillTag key={index} name={segment.name} skills={[segment]} onOpen={onOpen} />)}
   </div>;
+}
+
+/** The draft to show once the saved text is read again: the new text while the owner left
+ * the last read text untouched, else the owner's unsaved draft, so no reply or save made
+ * elsewhere replaces typing. Inputs: the draft, the text last read (null before the first
+ * read) and the text just read. Output: the draft. */
+export function keptDraft(draft: string, loaded: string | null, saved: string): string {
+  return loaded === null || draft === loaded ? saved : draft;
 }
 
 /** Writes a byte count the way the Process pages show sizes. Input: bytes. Output: the words. */
@@ -35,9 +45,10 @@ export function byteSize(bytes: number): string {
 
 /** The Process page as a pure view: the editor with Save, the text with skill tags, and at
  * app level the two seeds, each opening a preview first. Inputs: where it applies, the saved
- * text, the draft, the skill catalog, the last failure, what is running, the preview and the
- * actions. Nothing reads the owner's files or saves without the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry }: {
+ * text, the draft, the skill catalog, the last failure, what is running, the preview, the
+ * skill the owner asked to open over unsaved text and the actions. The editor is read-only
+ * while saving. Nothing reads the owner's files or saves without the matching click. */
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, leaving = null, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onOpenSkill, onLeave, onStay }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
@@ -45,6 +56,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   failure: string;
   busy: "save" | "import" | "default" | null;
   preview: ProcessPreview | null;
+  leaving?: SkillEntry | null;
   onDraft: (text: string) => void;
   onSave: () => void;
   onImport: () => void;
@@ -52,6 +64,9 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onUsePreview: () => void;
   onClosePreview: () => void;
   onRetry: () => void;
+  onOpenSkill?: (skill: SkillEntry) => void;
+  onLeave?: () => void;
+  onStay?: () => void;
 }) {
   const intro = scope.kind === "app"
     ? "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these."
@@ -71,7 +86,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
     {seeds}
     <Panel title="Instructions">
       <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed) onSave(); }}>
-        <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid}
+        <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
           helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
@@ -80,7 +95,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
         </span>
       </form>
     </Panel>
-    {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} /></Panel>}
+    {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></Panel>}
     <Dialog open={preview !== null} wide title={preview?.source === "import" ? "Your global instructions" : "CrazyAgent default process"}
       onClose={onClosePreview}
       footer={<>
@@ -90,8 +105,12 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       <p className="secondary">{preview?.source === "import"
         ? "Read from ~/.claude/CLAUDE.md. It replaces the editor's text; nothing is saved until you click Save."
         : "It replaces the editor's text; nothing is saved until you click Save."}</p>
-      {preview && <TaggedText text={preview.text} skills={skills} />}
+      {preview && <TaggedText text={preview.text} skills={skills} onOpen={onOpenSkill} />}
     </Dialog>
+    <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
+      cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
+      Your instructions changes will be lost.
+    </ConfirmDialog>
   </div>;
 }
 
@@ -114,8 +133,21 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<"save" | "import" | "default" | null>(null);
   const [preview, setPreview] = useState<ProcessPreview | null>(null);
+  const [leaving, setLeaving] = useState<SkillEntry | null>(null);
+  const loaded = useRef<string | null>(null);
   const savedText = saved.kind === "ok" ? saved.value : null;
-  useEffect(() => { if (savedText !== null) setDraft(savedText); }, [savedText]);
+  useEffect(() => {
+    if (savedText === null) return;
+    const before = loaded.current;
+    loaded.current = savedText;
+    setDraft((current) => keptDraft(current, before, savedText));
+  }, [savedText]);
+  const open = (skill: SkillEntry) => navigate({ name: "settings", tab: "plugins", skill: skill.id });
+  const openSkill = (skill: SkillEntry) => {
+    setPreview(null);
+    if (savedText !== null && draft !== savedText) setLeaving(skill);
+    else open(skill);
+  };
 
   const fail = (result: Result<unknown>) => { if (result.kind !== "ok") setFailure(processMessage(result)); };
   const seed = async (source: "import" | "default") => {
@@ -138,7 +170,8 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   };
   return <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview}
     onDraft={setDraft} onSave={() => void save()} onImport={() => void seed("import")} onDefault={() => void seed("default")}
-    onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload} />;
+    onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
+    leaving={leaving} onOpenSkill={openSkill} onLeave={() => { if (leaving) open(leaving); setLeaving(null); }} onStay={() => setLeaving(null)} />;
 }
 
 /** Settings, Process: the app-wide instructions every agent gets. */

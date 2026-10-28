@@ -169,3 +169,23 @@ test("a save a Claude master may refuse names what it takes and what agents now 
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
   assert.match(source, /showToast\(savedMessage\(result\.value\)\)/, "the page shows the line for the save it made");
 });
+
+test("unsaved instruction text survives a save reply, another client's save and a skill link", () => {
+  assert.equal(view.keptDraft("", null, "Saved.\n"), "Saved.\n", "the first read fills the editor");
+  assert.equal(view.keptDraft("Saved.\n", "Saved.\n", "From the TUI.\n"), "From the TUI.\n", "an untouched editor follows a save made elsewhere");
+  assert.equal(view.keptDraft("Mine, not saved.\n", "Saved.\n", "From the TUI.\n"), "Mine, not saved.\n", "unsaved typing is never replaced");
+  assert.equal(view.keptDraft("A then B", "Saved.\n", "A"), "A then B", "text typed after Save is not replaced by the saved part");
+
+  const saving = page({ draft: "Use tdd and code-review.\n", busy: "save" });
+  assert.match(saving, /<textarea[^>]*readonly=""/i, "the editor takes no typing while its text is being saved");
+  assert.doesNotMatch(page({ draft: "Use tdd and code-review.\n" }), /<textarea[^>]*readonly/i);
+
+  const asked = page({ draft: "Use tdd and code-review.\n", leaving: SKILLS[2] });
+  assert.match(asked, /<dialog/);
+  assert.match(asked, /Open code-review without saving\?/);
+  assert.match(asked, /Your instructions changes will be lost\./);
+  assert.match(asked, /Keep editing/);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /<TaggedText text=\{draft\} skills=\{skills\} onOpen=\{onOpenSkill\} \/>/, "a tag under the editor asks before leaving");
+  assert.match(source, /<TaggedText text=\{preview\.text\} skills=\{skills\} onOpen=\{onOpenSkill\} \/>/, "a tag in the preview asks before leaving");
+});
