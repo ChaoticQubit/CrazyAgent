@@ -42,10 +42,11 @@ fn wide_scope() -> EngineError {
     failure("native_profile_scope_too_wide")
 }
 
-/// The only Claude OAuth scopes an agent's copy may carry. A subscription sign-in holds
-/// these; a Console sign-in adds scopes that can create API keys or grant wider access,
-/// which an agent must never receive.
-const AGENT_CLAUDE_SCOPES: [&str; 2] = ["user:inference", "user:profile"];
+/// The Claude OAuth scope prefix an agent's copy may never carry. A Console sign-in holds
+/// `org:create_api_key`, which turns a copy into a durable API key, and the `org:` family
+/// grants organisation-wide access; a subscription sign-in holds only `user:` scopes
+/// (inference, profile, sessions, mcp_servers, file_upload), which stay turn-bounded.
+const AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX: &str = "org:";
 
 /// The harness whose credential record a managed account keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,11 +438,12 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
 /// Builds the agent's Claude Code `.credentials.json`: only the fields Claude Code reads
 /// from the account's OAuth record, with no refresh token and none of the other records
 /// the account keeps. Claude Code empties both tokens when its provider refuses a refresh.
-/// The record is refused when its scopes reach beyond [`AGENT_CLAUDE_SCOPES`], so an agent
-/// never receives a Console credential that can create API keys or grant wider access.
+/// The record is refused when any scope is in the [`AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX`]
+/// family, so an agent never receives a Console credential that can create API keys or grant
+/// organisation-wide access; a subscription's `user:` scopes are accepted and kept.
 /// Input: the account's record. Output: the copy with its access token's expiry,
 /// `native_profile_sign_in_revoked` for emptied tokens, `native_profile_scope_too_wide`
-/// for a wider sign-in, or the unavailable refusal.
+/// for an org sign-in, or the unavailable refusal.
 fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
     let oauth: &Map<String, Value> = record
@@ -459,10 +461,10 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         .get("scopes")
         .and_then(Value::as_array)
         .ok_or_else(unavailable)?;
-    if !scopes.iter().all(|scope| {
+    if scopes.iter().any(|scope| {
         scope
             .as_str()
-            .is_some_and(|scope| AGENT_CLAUDE_SCOPES.contains(&scope))
+            .is_some_and(|scope| scope.starts_with(AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX))
     }) {
         return Err(wide_scope());
     }

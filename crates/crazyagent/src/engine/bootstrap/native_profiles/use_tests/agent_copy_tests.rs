@@ -545,4 +545,60 @@ fn an_agent_gets_no_claude_copy_when_the_sign_in_can_create_api_keys() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_a_claude_copy_for_a_real_subscription_sign_in() {
+    let subscription = json!([
+        "user:inference",
+        "user:profile",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload"
+    ]);
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] = subscription.clone();
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(agent.join(".credentials.json")).unwrap()).unwrap();
+    assert_eq!(
+        written["claudeAiOauth"]["scopes"], subscription,
+        "the subscription's user scopes are kept, not narrowed away"
+    );
+    assert_eq!(written["claudeAiOauth"]["accessToken"], "sk-ant-oat01-unit");
+    assert_eq!(written["claudeAiOauth"]["refreshToken"], Value::Null);
+    drop(copy);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_any_org_scope() {
+    for scopes in [
+        json!(["org:create_api_key", "user:profile"]),
+        json!(["user:inference", "user:profile", "org:workspaces:create"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod renewal_tests;
