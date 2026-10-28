@@ -529,6 +529,28 @@ pub fn owner_typed(
     Ok(())
 }
 
+/// Reads when the owner last typed into a team agent's terminal: the newer of the
+/// in-memory signal and the time stored for that agent as a live master. Takes the engine
+/// database, the signal, if any, and the team agent id. Returns the time in milliseconds,
+/// none when no owner key was seen, or any SQLite failure.
+pub(crate) fn owner_key_ms(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    agent: i64,
+) -> Result<Option<i64>, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT MAX(typed_ms) FROM team_live_masters WHERE agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    let held = typing
+        .and_then(|typing| typing.get(agent))
+        .map(|typed| typed.at_ms);
+    Ok(stored.max(held))
+}
+
 /// The owner typing signal, kept in memory so a key the owner types into a team agent's
 /// terminal never waits on the engine database: per team agent, the time of the owner's
 /// last key and whether it left an unsent line. One background writer copies it to

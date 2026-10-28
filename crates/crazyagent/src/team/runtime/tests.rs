@@ -3912,6 +3912,23 @@ done
 #[cfg(target_os = "macos")]
 #[test]
 fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
+    master_question_box_leaves(true);
+}
+
+/// A logged question box that leaves its live master's screen with no owner key typed into
+/// that terminal since it was asked settles as dismissed, never as answered in terminal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_question_box_leaving_without_an_owner_key_is_dismissed() {
+    master_question_box_leaves(false);
+}
+
+/// Runs a live master whose harness asks the owner a question box in its terminal, checks
+/// it is logged once, then answers the box on that screen: as the owner, whose keys the
+/// owner typing signal records, when `owner_keyed`, otherwise as input no owner typed.
+/// Takes whether the owner typed. Checks how the question settles.
+#[cfg(target_os = "macos")]
+fn master_question_box_leaves(owner_keyed: bool) {
     let fixture = Fixture::new(1);
     std::fs::create_dir_all(
         fixture
@@ -3988,17 +4005,31 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
         "the logged question reaches questions.md"
     );
 
+    if owner_keyed {
+        let now = crate::team::now_ms();
+        super::super::master::owner_typed(&fixture.connection, master, b"2\r", now).unwrap();
+        assert_eq!(
+            super::super::master::owner_key_ms(&fixture.connection, None, master).unwrap(),
+            Some(now)
+        );
+    }
     host.input(&AgentId::team(master).unwrap(), b"2\r").unwrap();
-    fixture.until(
-        &mut team,
-        "the owner's answer in the terminal is noted",
-        |f| {
-            rows(f)
-                .first()
-                .is_some_and(|row| row.2 == "answered_in_terminal" && row.3.is_none())
-        },
-    );
+    let (settled, shown) = if owner_keyed {
+        (
+            "answered_in_terminal",
+            "Answered by the owner in that agent's terminal.",
+        )
+    } else {
+        ("dismissed", "Closed without an answer.")
+    };
+    fixture.until(&mut team, "the box leaving the terminal is noted", |f| {
+        rows(f)
+            .first()
+            .is_some_and(|row| row.2 == settled && row.3.is_none())
+    });
     assert!(logged(&fixture).is_empty());
+    let written = std::fs::read_to_string(&page).unwrap();
+    assert!(written.contains(shown), "{written}");
     let screen = String::from_utf8(host.screen(&AgentId::team(master).unwrap()).unwrap())
         .unwrap_or_default();
     assert!(screen.contains("Thanks, picked 2"), "{screen}");
@@ -4006,7 +4037,7 @@ fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
     assert_eq!(
         rows(&fixture).len(),
         1,
-        "an answered box is not logged again"
+        "a box that left is not logged again"
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();

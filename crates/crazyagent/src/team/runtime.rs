@@ -836,8 +836,9 @@ impl TeamRuntime {
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
-    /// asked in terminal, and marks it answered once its box leaves the screen, at most once
-    /// each `events::SCAN_EVERY`. A master whose questions cannot be read is skipped this
+    /// asked in terminal, and once its box leaves the screen marks it answered there when the
+    /// owner typed into that terminal since it was asked, or dismissed otherwise, at most
+    /// once each `events::SCAN_EVERY`. A master whose questions cannot be read is skipped this
     /// scan. Every master is served before the first failure or log refusal is returned.
     fn watch_master_questions(&mut self) -> Result<(), EngineError> {
         use super::screen_questions::{Change, Pending};
@@ -904,9 +905,14 @@ impl TeamRuntime {
                     crate::questions::ask(&self.connection, &project, &asker, &ask)
                         .map(|_| self.master_watch.logged(agent, &text))
                 }
-                Change::Answered(id) => {
-                    crate::questions::terminal_settled(&self.connection, id).map(|_| ())
-                }
+                Change::Left { id, agent } => super::master::owner_key_ms(
+                    &self.connection,
+                    self.agents.as_deref().map(Agents::typing),
+                    agent,
+                )
+                .and_then(|typed| {
+                    crate::questions::terminal_settled(&self.connection, id, typed).map(|_| ())
+                }),
             };
             if let Err(problem) = applied {
                 first.get_or_insert(problem);

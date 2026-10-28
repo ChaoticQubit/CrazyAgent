@@ -21,7 +21,7 @@ const FOOTER_HINTS: [&str; 4] = [
 ];
 /// The last screen rows, below the box's last option, one of which must be its footer.
 const FOOTER_ROWS: usize = 2;
-/// Scans in a row a logged question must be off its master's screen before it is answered.
+/// Scans in a row a logged question must be off its master's screen before it is closed.
 const MISSES_TO_CLOSE: u8 = 2;
 /// Terminal host refusals that mean the master's terminal no longer runs.
 const GONE: [&str; 2] = ["terminal_agent_unknown", "terminal_ended"];
@@ -58,7 +58,8 @@ pub struct Pending {
 }
 
 /// What one scan asks of the owner questions log: log a question a master asks in its
-/// terminal, or mark a pending one answered there because its box left the screen.
+/// terminal, or close a pending one, by id and its master's team agent id, because its box
+/// left the screen; whether the owner answered it is the caller's to decide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     Asked {
@@ -66,13 +67,16 @@ pub enum Change {
         agent: i64,
         text: String,
     },
-    Answered(u64),
+    Left {
+        id: u64,
+        agent: i64,
+    },
 }
 
 /// Reads live masters' screens for questions their harness asks the owner. A question on a
 /// screen unchanged since the last scan, so the harness waits, is asked until the caller
 /// reports it `logged` or the log holds it, and is not asked again while it stays on
-/// screen, even once the owner dismissed it; a logged one is answered after
+/// screen, even once the owner dismissed it; a logged one has left after
 /// MISSES_TO_CLOSE scans in a row without it on its master's screen. Masters that left are
 /// read until their questions are closed.
 #[derive(Debug, Default)]
@@ -123,7 +127,7 @@ impl MasterWatch {
     /// Reads each live master's screen once and compares it with the log's pending terminal
     /// questions of every master `askers` named. A master no longer live or whose terminal
     /// ended shows none; another unreadable screen changes nothing. Takes the host, the live
-    /// masters and the pending questions. Returns the questions to log and those to answer.
+    /// masters and the pending questions. Returns the questions to log and those that left.
     pub fn scan(
         &mut self,
         host: &dyn Host,
@@ -200,7 +204,10 @@ impl MasterWatch {
             *misses += 1;
             if *misses >= MISSES_TO_CLOSE {
                 self.misses.remove(&question.id);
-                changes.push(Change::Answered(question.id));
+                changes.push(Change::Left {
+                    id: question.id,
+                    agent: question.agent,
+                });
             }
         }
         let held: BTreeSet<u64> = pending.iter().map(|question| question.id).collect();
