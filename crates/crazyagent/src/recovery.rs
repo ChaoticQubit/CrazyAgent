@@ -11,7 +11,8 @@ mod store;
 #[cfg(all(test, unix))]
 mod tests;
 
-/// The most interrupted runs one project keeps and lists; older ones are dropped.
+/// The most resumed runs one project keeps, older ones dropped, and the most waiting and
+/// the most settled runs one listing of a project reads.
 pub const RUNS_PER_PROJECT_MAX: usize = 64;
 /// The most interrupted runs one scan returns, oldest first.
 pub const SCANNED_MAX: usize = 1024;
@@ -89,6 +90,16 @@ pub struct Interrupted {
     pub reason: Option<String>,
 }
 
+/// One project's interrupted runs as the owner is shown them: every run still waiting on its
+/// resume or on the owner's retry, holding its task or message, oldest first, how many more
+/// wait past those, and the newest settled runs, resumed or given up, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    pub waiting: Vec<Interrupted>,
+    pub more: usize,
+    pub settled: Vec<Interrupted>,
+}
+
 fn unavailable() -> EngineError {
     EngineError("recovery_unavailable".into())
 }
@@ -135,12 +146,14 @@ pub(crate) fn settle(db: &Connection) -> Result<(), EngineError> {
     store::settle(db)
 }
 
-/// Lists a project's newest interrupted runs in every state, oldest first, so the owner
-/// sees which resumed and which failed with their reasons.
-/// Inputs: the engine root and the project. Output: at most `RUNS_PER_PROJECT_MAX` runs.
-pub fn list(runtime: &Path, project: &ProjectId) -> Result<Vec<Interrupted>, EngineError> {
+/// Lists a project's interrupted runs so the owner sees which wait, which resumed and which
+/// failed with their reasons: the waiting runs by age, however many newer runs settled, so
+/// an old failed run that holds its task keeps its retry.
+/// Inputs: the engine root and the project. Output: at most `RUNS_PER_PROJECT_MAX` waiting
+/// and settled runs, with the waiting runs left out counted.
+pub fn list(runtime: &Path, project: &ProjectId) -> Result<Listed, EngineError> {
     let db = open(runtime)?;
-    store::newest(&db, project, RUNS_PER_PROJECT_MAX)
+    store::listed(&db, project, RUNS_PER_PROJECT_MAX)
 }
 
 /// Starts a failed resume again: the agent's newest failed run waits to resume once more,
