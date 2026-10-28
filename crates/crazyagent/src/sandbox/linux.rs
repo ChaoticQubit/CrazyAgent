@@ -44,8 +44,8 @@ const DNS_OVER_TCP: &str = "use-vc";
 const LIMITED_NETWORK_OFF: &str = "the Linux limited-network sockets setting is 'Do not start \
      limited-network agents'; choose 'TCP only' or 'TCP ports only' in Settings";
 const RESOLVER_NEEDS_UDP: &str = "this harness cannot look up names over TCP, which the Linux \
-     limited-network sockets setting 'TCP only' needs; choose 'TCP ports only' or leave limited \
-     network off";
+     limited-network sockets setting 'TCP only' needs; choose 'TCP ports only' in Settings, which \
+     lets UDP and other sockets reach any host";
 const HARNESS_UNCHECKED: &str = "this harness starts through a script CrazyAgent cannot check for \
      the Linux limited-network sockets setting 'TCP only'; start it from a program, or a script \
      whose first line names a program by its full path, or choose 'TCP ports only' in Settings, \

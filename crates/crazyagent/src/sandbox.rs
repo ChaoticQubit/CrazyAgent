@@ -2229,6 +2229,7 @@ mod linux_sockets_tests {
             "'TCP only'",
             "'TCP ports only'",
             "Settings",
+            "UDP and other sockets reach any host",
         ] {
             assert!(udp.contains(part), "{udp}");
         }

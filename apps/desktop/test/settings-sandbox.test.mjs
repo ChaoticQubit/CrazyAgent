@@ -71,7 +71,7 @@ test("loading, not ready and a failed read each say so", () => {
 });
 
 test("each Linux launch refusal reads plainly and names the setting", () => {
-  assert.match(knownError("linux_resolver_needs_udp"), /cannot look up names over TCP[\s\S]*'TCP only'[\s\S]*'TCP ports only'/);
+  assert.match(knownError("linux_resolver_needs_udp"), /cannot look up names over TCP[\s\S]*'TCP only'[\s\S]*'TCP ports only'[\s\S]*UDP and other sockets reach any host/);
   assert.match(knownError("linux_harness_unchecked"), /cannot check[\s\S]*'TCP only'[\s\S]*does not start[\s\S]*'TCP ports only'[\s\S]*reach any host/);
   assert.match(knownError("linux_limited_network_off"), /Linux limited-network sockets[\s\S]*does not start/);
 });

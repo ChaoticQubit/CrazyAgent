@@ -235,7 +235,7 @@ export function errorMessage(error: unknown): string {
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
     linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
-    linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings.",
+    linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
