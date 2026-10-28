@@ -9,6 +9,7 @@ import { harnessName } from "../new-project/team-editor";
 import { TerminalPanel } from "../team";
 import "../team/team-graph.css";
 import { ConversationTab } from "./conversation";
+import { SwitchDivider } from "./sessions";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -161,6 +162,7 @@ export function LiveMasterView({ data, harness, live, onSwitch }: { data: Projec
         </Button>
       </span>
     </div>
+    {!earlier && <SwitchDivider team={data.team.result} />}
     {earlier && <ConversationTab data={data} readOnly />}
     {!earlier && live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
