@@ -193,3 +193,198 @@ fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped(
         Some("skill_unreadable")
     );
 }
+
+#[test]
+fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('reused','{}')", [])
+        .unwrap();
+    let project = ProjectId::new("reused").unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec![],
+    };
+
+    let shared = server(&mut connection, root, "shared", &spec);
+    execute(
+        &mut connection,
+        root,
+        Command::Approve {
+            id: shared.clone(),
+            spec: spec.clone(),
+        },
+    )
+    .unwrap();
+    execute(
+        &mut connection,
+        root,
+        Command::Switch {
+            project: project.clone(),
+            id: shared.clone(),
+            on: false,
+        },
+    )
+    .unwrap();
+
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            name: "private".into(),
+            spec: spec.clone(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    let private = view.id;
+    attach(
+        &mut connection,
+        root,
+        &private,
+        "TOKEN",
+        b"super-secret-value",
+    );
+    execute(
+        &mut connection,
+        root,
+        Command::Approve {
+            id: private.clone(),
+            spec: spec.clone(),
+        },
+    )
+    .unwrap();
+    let reference = {
+        let tx = connection.transaction().unwrap();
+        let record: ServerRecord = load(&tx, "server", &private).unwrap();
+        record.secrets[0].reference.clone()
+    };
+
+    let skill_folder = Path::new("plugins")
+        .join("skills")
+        .join("project")
+        .join("reused")
+        .join("notes");
+    let absolute = root.join(&skill_folder);
+    std::fs::create_dir_all(&absolute).unwrap();
+    std::fs::write(
+        absolute.join("SKILL.md"),
+        "---\nname: notes\ndescription: Project notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-reused".into(),
+            name: "notes".into(),
+            description: "Project notes.".into(),
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/notes".into(),
+            folder: skill_folder.to_string_lossy().into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    {
+        let tx = connection.transaction().unwrap();
+        let before = effective(&tx, root, &project).unwrap();
+        assert_eq!(
+            before
+                .servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            ["private"],
+            "the project sees only its own server; the shared one is switched off"
+        );
+        assert_eq!(before.servers[0].secrets.len(), 1);
+        assert_eq!(
+            before
+                .skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            ["notes"]
+        );
+    }
+    assert!(absolute.is_dir(), "the project skill folder is on disk");
+    assert!(
+        secret_saved(root, &reference),
+        "the project secret file is on disk"
+    );
+
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::project_setup::execute(
+            &tx,
+            &config,
+            &crate::project_setup::SetupAction::Remove {
+                project_id: project.clone(),
+            },
+            2,
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+        tx.commit().unwrap();
+    }
+
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('reused','{}')", [])
+        .unwrap();
+    let items: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:reused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(items, 0, "the project's own items are gone");
+    let switches: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project='reused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(switches, 0, "the project's switches are gone");
+    assert!(!absolute.exists(), "the project skill folder is reclaimed");
+
+    {
+        let tx = connection.transaction().unwrap();
+        let after = effective(&tx, root, &project).unwrap();
+        assert!(after.skills.is_empty(), "no skill is inherited");
+        assert_eq!(
+            after
+                .servers
+                .iter()
+                .map(|server| server.name.as_str())
+                .collect::<Vec<_>>(),
+            ["shared"],
+            "the shared server is visible again and the project server is gone"
+        );
+    }
+
+    crate::storage::trash::sweep(&connection, root).unwrap();
+    assert!(
+        !secret_saved(root, &reference),
+        "the project secret file is reclaimed"
+    );
+}

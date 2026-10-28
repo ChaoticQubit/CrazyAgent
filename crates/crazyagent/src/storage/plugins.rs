@@ -423,6 +423,52 @@ pub(crate) fn remove_secrets(root: &Path, references: &[String]) -> Result<(), E
         .fold(Ok(()), Result::and)
 }
 
+/// Deletes every plugin item and switch scoped to one project when the project is removed,
+/// trashes each project MCP server's secret files and check folder, and removes the project's
+/// skill store folder, so a new project that reuses the removed project's id never inherits
+/// its MCP servers, secrets, skills or per-project switches. Inputs: the transaction, the
+/// optional engine root (none for an in-memory store, where only the rows are cleared) and
+/// the project. Output: any SQLite failure.
+pub(crate) fn remove_project(
+    tx: &Transaction<'_>,
+    root: Option<&Path>,
+    project: &ProjectId,
+) -> Result<(), EngineError> {
+    let scope = Scope::Project {
+        project_id: project.clone(),
+    };
+    let key = scope_key(&scope);
+    let servers: Vec<ServerRecord> = all::<ServerRecord>(tx, "server")?
+        .into_iter()
+        .filter(|server| server.scope == scope)
+        .collect();
+    for server in &servers {
+        for secret in &server.secrets {
+            super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
+        }
+        super::trash::put(tx, super::trash::MCP_CHECKS, &server.id)?;
+    }
+    tx.execute(
+        "DELETE FROM plugin_switches WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    let removed_items = tx
+        .execute("DELETE FROM plugin_items WHERE scope=?1", [&key])
+        .map_err(error)?;
+    assert!(removed_items >= servers.len());
+    if let Some(root) = root {
+        remove_folder(
+            &root
+                .join(STORE)
+                .join("skills")
+                .join("project")
+                .join(project.as_str()),
+        );
+    }
+    Ok(())
+}
+
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {
     tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
