@@ -153,9 +153,10 @@ impl TranscriptReader {
         self.consumed
     }
 
-    /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes.
-    /// Output: the facts in order, none while the record does not exist yet, or a plain
-    /// code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
+    /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
+    /// walking its lines by offset and draining the used ones once, so many short lines cost
+    /// one pass. Output: the facts in order, none while the record does not exist yet, or a
+    /// plain code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -181,9 +182,11 @@ impl TranscriptReader {
             .map_err(|_| failure("launch_transcript_unavailable"))?;
         self.consumed += count as u64;
         let mut events = Vec::new();
-        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = self.pending.drain(..=end).collect();
-            let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+        let mut used = 0;
+        while let Some(length) = self.pending[used..].iter().position(|byte| *byte == b'\n') {
+            let line = &self.pending[used..=used + length];
+            used += length + 1;
+            let Ok(value) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
             let facts = match self.source {
@@ -200,6 +203,7 @@ impl TranscriptReader {
                 break;
             }
         }
+        self.pending.drain(..used);
         if self.pending.len() > LINE_BYTES_MAX {
             return Err(failure("launch_transcript_line_too_long"));
         }
