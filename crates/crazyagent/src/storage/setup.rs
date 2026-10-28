@@ -605,11 +605,12 @@ fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
     tx.commit().map_err(error)
 }
 
-/// Adds the hooks an installed entry's plugin folder defines as global hooks that follow
-/// the entry's MCP server, or else its first skill, unless hooks already follow that item.
-/// An entry the owner's own item stands for, or one not installed, gets none. Inputs: the
-/// engine connection, the engine root, the entry id and its plugin folder. Output: nothing,
-/// or the plain reason, with the hooks' folder copy removed when they did not commit.
+/// Adds the hooks an installed, switched-on entry's plugin folder defines as global hooks
+/// that follow the entry's MCP server, or else its first skill (the owner's own item when
+/// the entry adopted one), unless hooks already follow that item or already exist under
+/// those names. An entry not installed or switched off gets none. Inputs: the engine
+/// connection, the engine root, the entry id and its plugin folder. Output: nothing, or the
+/// plain reason, with the hooks' folder copy removed when they did not commit.
 #[cfg(unix)]
 fn seed_hooks(
     connection: &mut Connection,
@@ -621,11 +622,14 @@ fn seed_hooks(
     let Some(record) = load_pack(&tx, id)? else {
         return Ok(());
     };
-    let follows = record
+    if !record.enabled {
+        return Ok(());
+    }
+    let Some(follows) = record
         .server
         .clone()
-        .or_else(|| record.skills.first().cloned());
-    let Some(follows) = follows.filter(|_| record.source != PRESENT) else {
+        .or_else(|| record.skills.first().cloned())
+    else {
         return Ok(());
     };
     if plugins::hooks_follow(&tx, &follows)? {
@@ -646,7 +650,14 @@ fn seed_hooks(
             error(problem)
         }),
         Ok(_) => Err(error("setup_record_invalid")),
-        Err(problem) if problem.0 == "hooks_none_found" => Ok(()),
+        Err(problem)
+            if matches!(
+                problem.0.as_str(),
+                "hooks_none_found" | "hooks_already_added"
+            ) =>
+        {
+            Ok(())
+        }
         Err(problem) => Err(problem),
     }
 }
