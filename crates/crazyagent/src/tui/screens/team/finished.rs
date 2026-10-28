@@ -292,7 +292,8 @@ impl Finished {
     }
 
     /// The box lines while it is open: the setting, then each finished agent with its
-    /// harness and status and, below it, what it last worked on; the picked one is marked.
+    /// harness and status and, below it, the engine's reason when it cannot wake and what it
+    /// last worked on; the picked one is marked.
     /// Rows past the box's height are counted in one "and N more" line.
     /// Inputs: the line width, the box's inner height and the context. Output: the title and
     /// at most `room` lines (one when `room` is zero), or None while closed.
@@ -331,7 +332,9 @@ impl Finished {
         let free = room.max(1);
         for (index, row) in rows.iter().enumerate() {
             let left = rows.len() - index;
-            if lines.len() + 2 + usize::from(left > 1) > free {
+            let note = row.note.as_ref().filter(|_| !row.wakeable);
+            let height = 2 + usize::from(note.is_some());
+            if lines.len() + height + usize::from(left > 1) > free {
                 lines.push(Line::raw(cut(
                     &format!("and {left} more"),
                     limit,
@@ -345,13 +348,8 @@ impl Finished {
                 .as_ref()
                 .filter(|_| index == self.cursor)
                 .map_or("", |_| "  waking...");
-            let note = row
-                .note
-                .as_ref()
-                .filter(|_| !row.wakeable)
-                .map_or(String::new(), |note| format!("  {note}"));
             let head = format!(
-                "{mark}{}  {}  {}{waking}{note}",
+                "{mark}{}  {}  {}{waking}",
                 row.label, row.harness, row.status
             );
             lines.push(if index == self.cursor {
@@ -359,6 +357,13 @@ impl Finished {
             } else {
                 Line::raw(cut(&head, limit, ctx.glyphs.ellipsis))
             });
+            if let Some(note) = note {
+                lines.push(styled(
+                    cut(&format!("  {note}"), limit, ctx.glyphs.ellipsis),
+                    Role::Warning,
+                    theme,
+                ));
+            }
             lines.push(styled(
                 cut(&format!("  {}", row.task), limit, ctx.glyphs.ellipsis),
                 Role::Muted,
