@@ -6,6 +6,10 @@ use crate::memory::{KnowledgeStatus, ReviewDecision};
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
+/// One end-to-end test per option of each agent Messages timeline setting, through a real
+/// engine, its owner connection and a real tmux pane.
+mod message_timeline;
+
 /// How long these engine tests let the engine and its owner client wait for
 /// one answer. Every test engine in the lib test binary shares one
 /// process-wide git setup lock, so parallel New Projects queue behind each
