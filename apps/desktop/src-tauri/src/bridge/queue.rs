@@ -23,10 +23,10 @@ const _: () =
 /// once, and file listings let it go once started, at most `LISTINGS_MAX` at once.
 /// Each takes one engine connection, so with the connections they are still closing
 /// the `BRIDGE_READERS_MAX` of them take at most half of the engine's
-/// `OWNER_CLIENTS_MAX` and leave the rest to the terminal app and agents' team tools. Calls wait their turn first come
-/// first served, so a read asked after a change sees it, for at most `BRIDGE_WAIT`,
-/// with at most `BRIDGE_WAITERS_MAX` calls waiting at once. Past either bound the
-/// call is refused with `busy` before it does anything.
+/// `OWNER_CLIENTS_MAX` and leave the rest to the terminal app and agents' team tools.
+/// Calls wait their turn first come first served, so a read asked after a change sees
+/// it, for at most `BRIDGE_WAIT`, with at most `BRIDGE_WAITERS_MAX` calls waiting at
+/// once. Past either bound the call is refused with `busy` before it does anything.
 pub struct BridgeQueue {
     bridge: Arc<RwLock<NativeBridge>>,
     waiting: AtomicUsize,
