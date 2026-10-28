@@ -2535,3 +2535,33 @@ fn the_general_form_keeps_stack_entries_holding_commas_when_the_stack_is_untouch
         other => panic!("the form sends an update: {other:?}"),
     }
 }
+
+/// Appending to a stack whose saved entry holds a comma keeps that entry whole: only the
+/// text the owner typed splits on commas.
+#[test]
+fn editing_the_stack_keeps_saved_entries_holding_commas_whole() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    screen.key(key(KeyCode::Tab));
+    screen.key(key(KeyCode::Tab));
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 2);
+    assert_eq!(screen.paste(", go, kotlin"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the stack change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update { setup: sent, .. } => {
+            assert_eq!(sent.tech_stack, ["C, C++ interop", "rust", "go", "kotlin"]);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}

@@ -405,25 +405,13 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form. The stack field lists entries split by commas;
-    /// while it still shows the saved stack, the saved entries are kept as they are, so an
-    /// entry holding a comma is not split.
+    /// Builds the engine edit from the form, with the stack read by [`stack_entries`].
     /// Takes the form and the setup it edits.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
         let about = self.about.value().trim().to_owned();
-        let stack = self.stack.value();
-        let tech_stack: Vec<String> = if stack == setup.tech_stack.join(", ") {
-            setup.tech_stack.clone()
-        } else {
-            stack
-                .split(',')
-                .map(str::trim)
-                .filter(|entry| !entry.is_empty())
-                .map(str::to_owned)
-                .collect()
-        };
+        let tech_stack = stack_entries(self.stack.value(), &setup.tech_stack);
         let platforms: Vec<Platform> = Platform::ALL
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))
@@ -455,6 +443,47 @@ impl GeneralEdit {
             },
         })
     }
+}
+
+/// Reads the stack field: entries split by commas, where a saved entry that holds a comma
+/// and still shows whole between separators stays one entry, so editing the field never
+/// splits an entry the owner did not touch. Inputs: the field text and the saved entries.
+/// Output: the trimmed entries without empty ones, or the saved entries themselves while
+/// the field still shows them as the form wrote them.
+fn stack_entries(text: &str, saved: &[String]) -> Vec<String> {
+    if text == saved.join(", ") {
+        return saved.to_vec();
+    }
+    let mut whole: Vec<&str> = saved
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| entry.contains(','))
+        .collect();
+    whole.sort_by_key(|entry| std::cmp::Reverse(entry.len()));
+    let mut entries = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        let kept = whole.iter().copied().find(|entry| {
+            rest.strip_prefix(*entry).is_some_and(|after| {
+                let after = after.trim_start();
+                after.is_empty() || after.starts_with(',')
+            })
+        });
+        let (entry, after) = match kept {
+            Some(entry) => (entry, &rest[entry.len()..]),
+            None => rest.split_once(',').unwrap_or((rest, "")),
+        };
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            entries.push(entry.to_owned());
+        }
+        rest = after;
+    }
+    entries
 }
 
 fn sorted<T: Ord + Copy>(list: &[T]) -> Vec<T> {
