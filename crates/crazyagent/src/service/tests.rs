@@ -759,21 +759,31 @@ fn installable_runs_a_private_engine_in_place_and_copies_one_from_the_appimage_m
 
 #[cfg(unix)]
 #[test]
-fn installable_copies_an_engine_other_users_can_change_and_the_copy_installs_cleanly() {
+fn installable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
     let temp = durable_folder();
     let shared = shared_folder(&temp.path().join("shared"), 0o777);
     let bundled = bundle(&shared);
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
-    let installed = installable(&bundled, &layout, "2.0.0", None).unwrap();
     assert_eq!(
-        installed,
-        layout.root().join("bin").join("2.0.0").join("crazyagent")
+        installable(&bundled, &layout, "2.0.0", None).unwrap(),
+        bundled
     );
-    assert_eq!(changeable_by_others(&installed), None);
-    assert_eq!(
-        std::fs::read_to_string(&installed).unwrap(),
-        "crazyagent bytes"
+    assert!(!layout.root().exists());
+    let mut linux = service(Platform::Linux);
+    linux.executable = bundled.clone();
+    linux.root = layout.root().to_path_buf();
+    linux.definition = temp.path().join("units").join(SYSTEMD_UNIT);
+    let error = linux.install().unwrap_err();
+    assert!(
+        error.0.starts_with(&format!(
+            "{}: other users can change {}",
+            bundled.display(),
+            shared.display()
+        )),
+        "{error}"
     );
+    assert!(!layout.root().exists());
+    assert!(!linux.definition.exists());
 }
 
 #[cfg(unix)]

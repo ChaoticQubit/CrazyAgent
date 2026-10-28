@@ -680,12 +680,12 @@ pub fn changeable_by_others(_executable: &Path) -> Option<PathBuf> {
 }
 
 /// The engine executable a login service may run for this app: the bundled `executable`
-/// itself when only this user and the system can change it and it is not inside the running
-/// AppImage's mount folder `appdir`, else a copy in `<data root>/bin/<version>`, private to
-/// this user, of the release executables beside it ([`crate::update::BINARIES`]), refreshed
-/// whenever a copied file differs. So a service never names a path that goes away with the
-/// app or that another user can take over. Inputs: the bundled engine, the layout, the app
-/// version and the AppImage mount folder when there is one. Output: the executable to run.
+/// itself unless it is inside the running AppImage's mount folder `appdir`, else a copy in
+/// `<data root>/bin/<version>`, private to this user, of the release executables beside it
+/// ([`crate::update::BINARIES`]), refreshed whenever a copied file differs. Nothing is copied
+/// from another folder, so an engine other users can change is returned as it is and
+/// [`Service::install`] refuses it. Inputs: the bundled engine, the layout, the app version
+/// and the AppImage mount folder when there is one. Output: the executable to run.
 pub fn installable(
     executable: &Path,
     layout: &Layout,
@@ -695,7 +695,7 @@ pub fn installable(
     let mounted = appdir
         .filter(|folder| folder.is_absolute())
         .is_some_and(|folder| canonical(executable).starts_with(canonical(folder)));
-    if !executable.is_file() || (!mounted && changeable_by_others(executable).is_none()) {
+    if !mounted || !executable.is_file() {
         return Ok(executable.to_path_buf());
     }
     let named = !version.is_empty()
