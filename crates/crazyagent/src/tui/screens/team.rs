@@ -14,6 +14,8 @@ use crate::tui::keys::Key;
 use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
 use crate::tui::screens::project_team::account_name;
+use crate::tui::screens::project_time::local_offset;
+use crate::tui::screens::team_messages::{ListKey, MASTER_ELSEWHERE, Messages};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -125,6 +127,7 @@ pub struct Team {
     cleanup: cleanup::Cleanup,
     finished: finished::Finished,
     instructions: Option<Instructions>,
+    messages: Option<Messages>,
 }
 
 impl Team {
@@ -148,6 +151,7 @@ impl Team {
             cleanup: cleanup::Cleanup::new(),
             finished: finished::Finished::new(),
             instructions: None,
+            messages: None,
         }
     }
 
@@ -512,6 +516,47 @@ impl Team {
         });
     }
 
+    /// Opens the Messages list of one card's sub-agent in the right box, the same list the
+    /// Team view opens; the master card says where the master's own conversation is.
+    /// Inputs: the node index and context. Output: none; the first page read is queued.
+    fn open_messages(&mut self, node: usize, ctx: &mut Ctx) {
+        let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
+            return;
+        };
+        if target.kind == NodeKind::Master {
+            ctx.say(Message::warning(
+                "The master has no Messages list.",
+                MASTER_ELSEWHERE,
+            ));
+            return;
+        }
+        let Some(agent) = AgentId::new(&target.id).ok().and_then(|id| id.team_agent()) else {
+            ctx.say(Message::warning(
+                "This card has no messages to show.",
+                "Only team sub-agents have a Messages list.",
+            ));
+            return;
+        };
+        let now = crate::tui::clock::now_ms();
+        self.task = None;
+        self.instructions = None;
+        self.messages = Some(Messages::new(
+            self.project.clone(),
+            agent,
+            &target.label,
+            local_offset(now),
+        ));
+        self.ask_messages(ctx);
+    }
+
+    /// Sends the open Messages list's next page read, if one is due.
+    fn ask_messages(&mut self, ctx: &mut Ctx) {
+        let now = crate::tui::clock::now_ms();
+        if let Some(query) = self.messages.as_mut().and_then(|list| list.next_query(now)) {
+            ctx.request(Request::Setup(query));
+        }
+    }
+
     fn take_instructions(&mut self, event: &ProcessEvent) {
         let Some(open) = self
             .instructions
@@ -728,6 +773,18 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some(list) = &self.messages {
+            let lines = list
+                .lines(limit, usize::from(inner.height))
+                .into_iter()
+                .map(|line| match line.role {
+                    Some(role) => styled(line.text, role, theme),
+                    None => Line::raw(line.text),
+                })
+                .collect();
+            boxed(frame, area, &list.title(), false, lines, ctx);
+            return None;
+        }
         if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
@@ -860,6 +917,13 @@ impl Screen for Team {
             hints.push(hint("r", "Refresh"));
             return hints;
         }
+        if let Some(list) = &self.messages {
+            return list
+                .help()
+                .into_iter()
+                .map(|(key, label)| hint(key, label))
+                .collect();
+        }
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
@@ -871,6 +935,7 @@ impl Screen for Team {
             hint(&vertical, "Move"),
             hint("Enter", "Open"),
             hint("i", "Instructions"),
+            hint("m", "Messages"),
         ];
         if self
             .attached
@@ -905,6 +970,13 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if let Some(list) = self.messages.as_mut() {
+            if list.key(key) == ListKey::Closed {
+                self.messages = None;
+            }
+            self.ask_messages(ctx);
+            return Flow::Handled;
         }
         if !self.cleanup.open()
             && let Some(flow) = self.finished.key(key, &self.project, ctx)
@@ -941,6 +1013,11 @@ impl Screen for Team {
                     self.read_instructions(*node, ctx);
                 }
             }
+            Key::Char('m') => {
+                if let Some(Item::Node(node)) = items.get(self.cursor) {
+                    self.open_messages(*node, ctx);
+                }
+            }
             Key::PageDown if self.instructions.is_some() => {
                 if let Some(open) = self.instructions.as_mut() {
                     open.top = open.top.saturating_add(PAGE_STEP);
@@ -973,6 +1050,17 @@ impl Screen for Team {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.cleanup.arrive(arrival, &self.project, ctx);
         self.finished.arrive(arrival, &self.project, ctx);
+        if let Some(list) = self.messages.as_mut() {
+            match arrival {
+                Arrival::Owner(event) => {
+                    if let OwnerEvent::Setup(event) = event.as_ref() {
+                        list.apply(&event.query, &event.result);
+                    }
+                }
+                Arrival::Disconnected(_) => list.forget_reads(),
+                _ => {}
+            }
+        }
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
@@ -987,6 +1075,7 @@ impl Screen for Team {
             },
             _ => {}
         }
+        self.ask_messages(ctx);
         self.sync(ctx);
         Flow::Handled
     }
