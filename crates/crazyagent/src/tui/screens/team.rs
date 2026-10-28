@@ -294,6 +294,11 @@ impl Team {
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char(code @ ('n' | 'l')) => {
+                ctx.sessions_key = Some((self.project.clone(), *code));
+                self.detach(ctx);
+                return Flow::Back;
+            }
             Key::Esc => {
                 self.detach(ctx);
                 return Flow::Back;
@@ -708,7 +713,7 @@ impl Team {
             (false, None) => MASTER_ON.to_owned(),
             (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
-        let control = format!("s {}", self.switch_control());
+        let control = format!("n New session  l Sessions  s {}", self.switch_control());
         let room = limit.saturating_sub(width(&control));
         if room < width(MASTER_OFF) + 2 {
             return styled(
@@ -855,6 +860,8 @@ impl Screen for Team {
             {
                 hints.push(hint("Enter", "Terminal"));
             }
+            hints.push(hint("n", "New session"));
+            hints.push(hint("l", "Sessions"));
             hints.push(hint("s", self.switch_control()));
             hints.push(hint("Esc", "Earlier conversation"));
             hints.push(hint("r", "Refresh"));

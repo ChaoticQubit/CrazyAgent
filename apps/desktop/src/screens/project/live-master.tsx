@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { loadTeamGraph, setLiveMaster } from "../../api";
 import type { Result } from "../../api";
-import { failureCopy, receiptState } from "../../api-projects";
+import { failureCopy, openMasterProject, readMaster, receiptState } from "../../api-projects";
 import type { GraphNode, TeamStatus } from "../../engine-client";
 import { Button, Icon } from "../../ui";
 import { displayText } from "../conversation";
@@ -10,7 +10,7 @@ import { TerminalPanel } from "../team";
 import "../team/team-graph.css";
 import { readMasterInput } from "../../state";
 import { ConversationTab } from "./conversation";
-import { SwitchDivider } from "./sessions";
+import { SessionsBar, SwitchDivider } from "./sessions";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -151,6 +151,37 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   return <LiveMasterView data={data} harness={harness} live={shown} onSwitch={(next) => void turn(next)} />;
 }
 
+/** The master ticket and live session the live master's New session and Sessions controls
+ * act on, opened once per project as the conversation opens them. Input: the project id.
+ * Output: the ticket, empty until opened, the live session id or null, and a re-read for
+ * after a switch. */
+export function useMasterSessions(projectId: string): { ticket: string; liveId: string | null; reread: () => Promise<void> } {
+  const [ticket, setTicket] = useState("");
+  const [liveId, setLiveId] = useState<string | null>(null);
+  const current = useRef(projectId);
+  current.current = projectId;
+
+  const read = async (opened: string, id: string) => {
+    const state = await readMaster(opened);
+    if (state.kind !== "ok" || current.current !== id) return;
+    setLiveId(state.value.session?.phase === "configured" ? state.value.session.session_id : null);
+  };
+
+  useEffect(() => {
+    setTicket("");
+    setLiveId(null);
+    const id = projectId;
+    void (async () => {
+      const opened = await openMasterProject(id);
+      if (opened.kind !== "ok" || opened.value.project_id !== id || current.current !== id) return;
+      setTicket(opened.value.ticket);
+      await read(opened.value.ticket, id);
+    })();
+  }, [projectId]);
+
+  return { ticket, liveId, reread: () => ticket ? read(ticket, projectId) : Promise.resolve() };
+}
+
 /** The word and tone the console head shows for one live master state. Input: the state.
  * Output: a short word and the tone that colors it. */
 export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "warn" | "danger" } {
@@ -164,7 +195,8 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 }
 
 /** The live master area in one state: one console whose head names the master, its state
- * and account and holds the switch, above the master's terminal filling the rest, typed into
+ * and account and holds the switch, then New session and Sessions, which restart the live
+ * terminal on a fresh or resumed conversation, above the master's terminal filling the rest, typed into
  * as the owner's Master input setting says, or a line while it starts, can't or is stopped; or the earlier engine-driven conversation, read-only,
  * behind a toggle. An engine that says the master has no terminal app gets today's
  * conversation instead. Inputs: the project data, the master harness id, the state and the
@@ -172,6 +204,7 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 export function LiveMasterView({ data, harness, live, onSwitch }: { data: ProjectData; harness: string; live: Live; onSwitch: (on: boolean) => void }) {
   const [earlier, setEarlier] = useState(false);
   const [input] = useState(readMasterInput);
+  const sessions = useMasterSessions(data.id);
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
@@ -202,6 +235,10 @@ export function LiveMasterView({ data, harness, live, onSwitch }: { data: Projec
         {toggle}
       </span>
     </div>
+    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} onSwitched={async () => {
+      await sessions.reread();
+      data.reloadTeam();
+    }} />}
     <SwitchDivider team={data.team.result} />
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
