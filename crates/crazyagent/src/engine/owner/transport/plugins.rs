@@ -769,22 +769,27 @@ fn check_profile(checks: &Path, id: &str) -> PathBuf {
     checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
 }
 
-/// Deletes a removed server's check folder, with whatever its checks wrote there while
-/// they held the server's secrets, and its check profile, on a blocking thread of its own,
-/// so a storage answer that comes after the owner's wait still clears them. Inputs: the
-/// engine's check folder and the server id. A failure other than a missing entry is logged.
-fn remove_check_folder(checks: PathBuf, id: String) {
-    drop(tokio::task::spawn_blocking(move || {
-        let removed = [
-            std::fs::remove_dir_all(checks.join(&id)),
-            std::fs::remove_file(check_profile(&checks, &id)),
-        ];
-        for problem in removed.into_iter().filter_map(Result::err) {
-            if problem.kind() != std::io::ErrorKind::NotFound {
+/// Clears a removed server's check folder, with whatever its checks wrote there while they
+/// held the server's secrets, and its check profile: the folder moves aside at once and is
+/// deleted on a blocking thread of its own that nothing waits for, so no check home size
+/// holds up the answer, and the start sweep deletes a moved folder a crash left. Inputs:
+/// the engine's check folder and the server id. A failure other than a missing entry is logged.
+fn remove_check_folder(checks: &Path, id: &str) {
+    match std::fs::remove_file(check_profile(checks, id)) {
+        Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("plugin_check_folder_not_removed cause={problem}");
+        }
+        _ => {}
+    }
+    match crate::storage::plugins::move_check_folder_aside(checks, id) {
+        Ok(Some(aside)) => drop(tokio::task::spawn_blocking(move || {
+            if let Err(problem) = std::fs::remove_dir_all(aside) {
                 eprintln!("plugin_check_folder_not_removed cause={problem}");
             }
-        }
-    }));
+        })),
+        Ok(None) => {}
+        Err(problem) => eprintln!("plugin_check_folder_not_removed cause={}", problem.0),
+    }
 }
 
 async fn handle(
@@ -998,7 +1003,7 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(checks, server);
+                            remove_check_folder(&checks, &server);
                             secrets
                         }
                         _ => Ok(()),
@@ -1294,7 +1299,15 @@ async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, Engine
     .map_err(|_| failure("server_secret_invalid"))?
 }
 
+/// The code a refused plugins request is answered with: the engine's code when it is plain
+/// lowercase words of at most 96 bytes, else `plugins_outcome_unknown`. A storage answer
+/// that did not come within the owner's wait, which the shared engine waits name after a
+/// native sign-in read, is this protocol's `plugins_outcome_unknown` too, so a plugins
+/// client is never told to read a sign-in operation. Input: the error. Output: the code.
 fn public_code(error: EngineError) -> String {
+    if error == crate::engine::owner::native_auth::outcome_unknown() {
+        return unknown().0;
+    }
     if error.0.len() <= 96
         && error
             .0

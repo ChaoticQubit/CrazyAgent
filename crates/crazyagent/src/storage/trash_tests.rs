@@ -5,7 +5,8 @@ use crate::plugins::{Scope, ServerSpec};
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::ACCOUNT_KEYS;
 use crate::storage::plugins::{
-    CHECK_FOLDER, Command, ResultValue, SECRETS, STORE, execute, new_secret_reference, store_secret,
+    CHECK_FOLDER, Command, ResultValue, SECRETS, STORE, execute, move_check_folder_aside,
+    new_secret_reference, store_secret,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -158,6 +159,46 @@ fn a_server_removed_with_no_settle_leaves_notes_the_sweep_deletes() {
     assert!(!secret_file(root, &first).exists());
     assert!(!secret_file(root, &second).exists());
     assert!(!checked.exists());
+    assert!(notes(&connection).is_empty());
+}
+
+#[test]
+fn a_check_folder_moved_aside_before_a_crash_is_swept_and_other_folders_stay() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let id = server(&mut connection, root, "tools");
+    let kept = server(&mut connection, root, "kept");
+    let checks = root.join(CHECK_FOLDER);
+    check_folder(root, &id);
+    let live = check_folder(root, &kept);
+    let ResultValue::Removed(_) = execute(
+        &mut connection,
+        root,
+        Command::RemoveServer { id: id.clone() },
+    )
+    .unwrap() else {
+        panic!("removed references required");
+    };
+    let moved = move_check_folder_aside(&checks, &id)
+        .unwrap()
+        .expect("the removed server's check folder moves aside");
+    assert!(!checks.join(&id).exists());
+    assert!(moved.join("project").join("written-by-check").exists());
+    let other = checks.join(format!(".removed-{id}-other-{}", "a".repeat(32)));
+    std::fs::create_dir_all(&other).unwrap();
+    assert_eq!(move_check_folder_aside(&checks, &id).unwrap(), None);
+    assert_eq!(
+        move_check_folder_aside(&checks, "../escape"),
+        Err(EngineError("plugin_check_folder_invalid".into()))
+    );
+
+    assert_eq!(sweep(&connection, root).unwrap(), 0);
+    assert!(!moved.exists(), "a moved folder a crash left is swept");
+    assert!(live.exists(), "a live server's check folder stays");
+    assert!(
+        other.exists(),
+        "another name's moved folder is not this note's"
+    );
     assert!(notes(&connection).is_empty());
 }
 
