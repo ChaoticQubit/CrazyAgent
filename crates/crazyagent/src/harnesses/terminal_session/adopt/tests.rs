@@ -308,7 +308,7 @@ fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
 
     let session =
         TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
-    assert_eq!(session.stop(), Ok(None));
+    assert_eq!(session.stop().unwrap(), None);
     assert!(
         !key.exists(),
         "stopping the adopted pane removes its key file"

@@ -56,7 +56,13 @@ impl CodexHost {
             .map_err(|_| EngineError("codex_host_sandbox_refused".into()))?;
         assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
         assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
-        let process = CodexHostProcess::spawn_guarded(command, &budget, Some(profile)).await?;
+        let process = CodexHostProcess::spawn_guarded(
+            command,
+            &budget,
+            Some(profile),
+            sandbox.is_unconfined(),
+        )
+        .await?;
         let mut host = Self {
             protocol,
             process,

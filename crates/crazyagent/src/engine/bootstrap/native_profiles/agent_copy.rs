@@ -76,9 +76,16 @@ impl AgentCredential {
     /// reaches the copy, and keeps the copy and the home's descriptor for the engine's life.
     /// Takes the credential. Returns nothing.
     pub(crate) fn retain(mut self) {
+        self.stop_renewing();
+        std::mem::forget(self);
+    }
+
+    /// Stops the keeper of a copy that processes of an agent may still read after its stop,
+    /// so no renewed token reaches the copy; the copy stays until the credential is dropped.
+    /// Takes the credential. Returns nothing.
+    pub(crate) fn stop_renewing(&mut self) {
         drop(self.keeper.take());
         assert!(self.keeper.is_none());
-        std::mem::forget(self);
     }
 }
 

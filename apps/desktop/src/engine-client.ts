@@ -1664,11 +1664,13 @@ export interface AgentView {
 }
 
 /** Something other than an agent that holds an account's sign-in while it runs: a master
- * conversation's turn, ended by closing that conversation, or a research job, ended by
- * cancelling it. */
+ * conversation's turn, ended by closing that conversation, a research job, ended by
+ * cancelling it, or processes a Full access agent left running, named by `report`, which
+ * signing the account out lets go of while they still run. */
 export type Holder =
   | { kind: "master"; project: string; session: string }
-  | { kind: "research"; project: string; job: number; title: string };
+  | { kind: "research"; project: string; job: number; title: string }
+  | { kind: "leftover"; report: string };
 
 /** Everything that holds one account's sign-in now: its running agents and other holders. */
 export interface AccountUse {

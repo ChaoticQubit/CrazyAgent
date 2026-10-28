@@ -39,30 +39,36 @@ export function canSignOut(account: AccountView): boolean {
 }
 
 /** Names what keeps an account from signing out, grouped by project: "Team sub-agent 3 and
- * the master conversation in Alpha are using this account." Inputs: the account's use and
- * the known projects. Output: the sentence. */
+ * the master conversation in Alpha are using this account.", followed by the report of each
+ * Full access stop that left processes running. Inputs: the account's use and the known
+ * projects. Output: the sentences. */
 export function inUseLine(used: AccountUse, projects: readonly ProjectRow[] | undefined): string {
   const named = [
     ...used.agents.map((agent) => ({ project: agent.project, name: displayText(agent.label) })),
-    ...used.holders.map((holder) => ({ project: holder.project, name: holder.kind === "master" ? "the master conversation" : displayText(holder.title) })),
+    ...used.holders.flatMap((holder) => holder.kind === "leftover" ? []
+      : [{ project: holder.project, name: holder.kind === "master" ? "the master conversation" : displayText(holder.title) }]),
   ];
+  const left = used.holders.flatMap((holder) => holder.kind === "leftover" ? [`${displayText(holder.report)}.`] : []);
+  if (named.length === 0) return left.join(" ");
   const groups = new Map<string, string[]>();
   for (const { project, name } of named) groups.set(project, [...groups.get(project) ?? [], name]);
   const parts = [...groups].map(([project, names]) =>
     `${andList(names)} in ${displayText(projects?.find((row) => row.id === project)?.name ?? "another project")}`);
   const line = `${andList(parts)} ${named.length === 1 ? "is" : "are"} using this account.`;
-  return line.charAt(0).toUpperCase() + line.slice(1);
+  return [line.charAt(0).toUpperCase() + line.slice(1), ...left].join(" ");
 }
 
 /** Names the one action that ends what uses an account and signs it out: agents and
- * research jobs stop, master conversations end. Input: the account's use. Output: the
- * action's label and its label while it runs. */
+ * research jobs stop, master conversations end, and what Full access agents left running is
+ * let go of while it still runs. Input: the account's use. Output: the action's label and
+ * its label while it runs. */
 export function releaseLabels(used: AccountUse): { label: string; pending: string } {
   const master = used.holders.some((holder) => holder.kind === "master");
   const others = used.agents.length > 0 || used.holders.some((holder) => holder.kind === "research");
   if (master && others) return { label: "Stop agents, end conversation and sign out", pending: "Ending..." };
   if (master) return { label: "End conversation and sign out", pending: "Ending conversation..." };
-  return { label: "Stop agents and sign out", pending: "Stopping agents..." };
+  if (others) return { label: "Stop agents and sign out", pending: "Stopping agents..." };
+  return { label: "Sign out anyway", pending: "Signing out..." };
 }
 
 /** Says why an account could not be signed out. When the engine named what uses it, offers

@@ -3,6 +3,7 @@ use super::launch::{
     LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, route,
     validate,
 };
+use super::leftovers::{Lineage, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
@@ -54,6 +55,7 @@ pub struct TerminalSession {
     stopped: bool,
     group_ended: bool,
     uncertain: bool,
+    unconfined: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -233,6 +235,7 @@ impl TerminalSession {
             stopped: false,
             group_ended: false,
             uncertain: false,
+            unconfined: request.unconfined,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -385,14 +388,20 @@ impl TerminalSession {
     /// Ends the pane and every process its harness started, then removes the key file and
     /// the generated context. On macOS the pane's keeper first has the run's warden kill every
     /// process in the sandbox, sessions of their own included; then every process left in the
-    /// pane's process group is killed, as a dev server started in the background. Output:
-    /// none, since a pane reports no exit code, or `harness_cleanup_uncertain` when the keeper
-    /// did not confirm in time, or the group outlived the wait or was found by an id no
-    /// longer proven to be this pane's.
-    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+    /// pane's process group is killed, as a dev server started in the background. A Full
+    /// access pane has no Seatbelt, so the processes found in its lineage before the end are
+    /// checked after it. Output: none, since a pane reports no exit code,
+    /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
+    /// the wait or was found by an id no longer proven to be this pane's, or
+    /// [`Unstopped::Left`] naming what a Full access pane left running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.unconfined.then(|| Lineage::of(self.pid));
         self.halt();
         if self.uncertain {
-            return Err(failure("harness_cleanup_uncertain"));
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
         }
         Ok(None)
     }
@@ -727,10 +736,11 @@ impl AgentSession {
         }
     }
 
-    /// Stops the agent and every process it started. Output: the exit code when known, or
-    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it or a
-    /// pane's process group was not confirmed gone.
-    pub fn stop(self) -> Result<Option<i32>, LaunchError> {
+    /// Stops the agent and every process it started. Output: the exit code when known,
+    /// [`Unstopped::Uncertain`] when a headless agent's warden did not confirm it or a pane's
+    /// process group was not confirmed gone, or [`Unstopped::Left`] naming what a Full access
+    /// agent left running.
+    pub fn stop(self) -> Result<Option<i32>, Unstopped> {
         match self {
             Self::Piped(session) => session.stop(),
             Self::Terminal(session) => session.stop(),
