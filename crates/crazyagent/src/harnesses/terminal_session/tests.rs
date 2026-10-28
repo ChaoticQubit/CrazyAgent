@@ -92,6 +92,16 @@ fn dropping_a_key_file_that_still_holds_its_key_removes_it() {
 }
 
 #[test]
+fn dropping_a_key_file_whose_path_now_holds_another_key_keeps_it() {
+    let folder = key_folder();
+    let path = folder.path().join(interactive::KEY_FILE);
+    let other = format!("{}b", &longest_key()[..longest_key().len() - 1]);
+    std::fs::write(&path, &other).unwrap();
+    drop(KeyFile::new(path.clone(), longest_key().as_bytes()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), other);
+}
+
+#[test]
 fn dropping_a_key_file_whose_path_now_holds_a_fifo_keeps_it_and_never_blocks() {
     let folder = key_folder();
     let path = folder.path().join(interactive::KEY_FILE);

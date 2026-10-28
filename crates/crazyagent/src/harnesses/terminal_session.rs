@@ -7,6 +7,7 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,13 +57,14 @@ pub struct TerminalSession {
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
 const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
 
-/// An account's key file and the exact bytes this launch wrote into it. The file is removed
-/// when the agent session holding it ends, and only while it still holds those bytes, so a
-/// refused or torn-down launch never deletes a key file another launch has since written for
-/// a different, still-running agent on the same account home.
+/// An account's key file and the SHA-256 of the exact bytes this launch wrote into it, so
+/// the guard keeps no copy of the key. The file is removed when the agent session holding it
+/// ends, and only while it still holds those bytes, so a refused or torn-down launch never
+/// deletes a key file another launch has since written for a different, still-running agent
+/// on the same account home.
 pub(super) struct KeyFile {
     path: PathBuf,
-    content: Vec<u8>,
+    digest: [u8; 32],
 }
 
 impl KeyFile {
@@ -72,7 +74,7 @@ impl KeyFile {
         assert!(content.len() as u64 <= KEY_FILE_BYTES_MAX);
         Self {
             path,
-            content: content.to_vec(),
+            digest: Sha256::digest(content).into(),
         }
     }
 }
@@ -83,7 +85,7 @@ impl Drop for KeyFile {
     /// path sits in the agent-writable account home. Input: the guard. Output: none.
     fn drop(&mut self) {
         if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
-            .is_some_and(|current| current.as_bytes() == self.content)
+            .is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
         {
             let _ = std::fs::remove_file(&self.path);
         }
