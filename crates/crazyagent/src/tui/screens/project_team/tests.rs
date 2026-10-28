@@ -1237,7 +1237,7 @@ fn a_long_notification_list_stays_inside_a_short_window() {
     view.key(press(KeyCode::Char('a')));
     let room = 24 - 4 - 2;
     let look = Look::plain();
-    let (lines, _) = view.rows(76, room, &accounts(), &look);
+    let (lines, _, _) = view.draw(76, room, &accounts(), &look);
     assert!(lines.len() <= room, "{} rows for {room}", lines.len());
     let text: Vec<String> = lines.iter().map(Row::text).collect();
     assert!(text.iter().any(|row| row.contains("Question number 20")));
