@@ -772,9 +772,10 @@ fn check_profile(checks: &Path, id: &str) -> PathBuf {
 /// Deletes a removed server's check folder, with whatever its checks wrote there while
 /// they held the server's secrets, and its check profile, on a blocking thread of its own,
 /// so a storage answer that comes after the owner's wait still clears them. Inputs: the
-/// engine's check folder and the server id. A failure other than a missing entry is logged.
-fn remove_check_folder(checks: PathBuf, id: String) {
-    drop(tokio::task::spawn_blocking(move || {
+/// engine's check folder and the server id. Output: the deletion, for a removal answered in
+/// time to wait for; dropped, it runs on. A failure other than a missing entry is logged.
+fn remove_check_folder(checks: PathBuf, id: String) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
         let removed = [
             std::fs::remove_dir_all(checks.join(&id)),
             std::fs::remove_file(check_profile(&checks, &id)),
@@ -784,7 +785,7 @@ fn remove_check_folder(checks: PathBuf, id: String) {
                 eprintln!("plugin_check_folder_not_removed cause={problem}");
             }
         }
-    }));
+    })
 }
 
 async fn handle(
@@ -991,6 +992,8 @@ async fn handle(
             let root = engine_root(authority)?;
             let checks = root.join(CHECK_FOLDER);
             let server = id.clone();
+            let deleting = Arc::new(std::sync::Mutex::new(None));
+            let started = deleting.clone();
             let removed = engine
                 .settled_job(
                     move |reply| Job::Plugins(Command::RemoveServer { id }, reply),
@@ -998,7 +1001,8 @@ async fn handle(
                         Ok(ResultValue::Removed(references)) => {
                             let secrets =
                                 crate::storage::plugins::remove_secrets(&root, references);
-                            remove_check_folder(checks, server);
+                            let deletion = remove_check_folder(checks, server);
+                            *started.lock().expect("check folder deletion slot") = Some(deletion);
                             secrets
                         }
                         _ => Ok(()),
@@ -1008,6 +1012,12 @@ async fn handle(
             let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
+            let deletion = deleting
+                .lock()
+                .expect("check folder deletion slot")
+                .take()
+                .expect("a removal answered in time started its check folder deletion");
+            deletion.await.map_err(|_| unknown())?;
             Reply::Done
         }
         Action::Switch { project, id, on } => {
