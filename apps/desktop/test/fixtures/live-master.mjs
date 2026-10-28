@@ -13,6 +13,7 @@ import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 let root = null;
 let menuRoot = null;
 let terminal = null;
+let seen = null;
 export const notes = [];
 export const typed = [];
 const switched = [];
@@ -212,6 +213,7 @@ export function menuView() {
  * xterm opens and the attach then fails. */
 export function mountPanel(name) {
   root = createRoot(page());
+  seen = null;
   retarget(name);
 }
 
@@ -221,13 +223,15 @@ export function retarget(name) {
   flushSync(() => root.render(createElement(TerminalPanel, { key: node.id, node: { ...node, terminal: name } })));
 }
 
-/** Waits until the panel's screen holds this many opened xterm terminals. */
-export async function terminalsOpen(count) {
-  const opened = () => document.querySelectorAll(".tg-terminal-screen .xterm").length;
-  for (let waited = 0; opened() < count; waited += 10) {
-    if (waited > 3000) throw new Error(`${opened()} of ${count} terminals opened`);
+/** Waits until the panel's screen holds an opened xterm terminal other than the one this
+ * last saw, whether or not the earlier one is still in the page, and remembers it. */
+export async function newTerminal() {
+  const fresh = () => [...document.querySelectorAll(".tg-terminal-screen .xterm")].find((element) => element !== seen);
+  for (let waited = 0; !fresh(); waited += 10) {
+    if (waited > 3000) throw new Error("no new terminal opened");
     await new Promise((done) => setTimeout(done, 10));
   }
+  seen = fresh();
 }
 
 /** Right-clicks the middle of the panel's terminal screen, as the owner does. */

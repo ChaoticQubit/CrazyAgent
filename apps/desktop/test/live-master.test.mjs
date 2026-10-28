@@ -232,11 +232,11 @@ test("a closed terminal panel detaches only the view its own attach opened", () 
 test("a terminal view that connects again drops the right-click menu the old view opened, so focus never lands on it", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountPanel("team-1")');
-    await evaluate("Fixture.terminalsOpen(1)");
+    await evaluate("Fixture.newTerminal()");
     await evaluate("Fixture.rightClick()");
     const open = await evaluate("Fixture.panelView()");
     await evaluate('Fixture.retarget("team-2")');
-    await evaluate("Fixture.terminalsOpen(2)");
+    await evaluate("Fixture.newTerminal()");
     await evaluate('Fixture.retarget("team-2")');
     await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
     return { open, after: await evaluate("Fixture.panelView()") };
