@@ -1052,7 +1052,21 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
 
 #[test]
 fn a_confined_agent_cannot_move_its_worktree_head_but_git_still_works_there() {
-    let (case, sandbox, profile, worktree) = git_case();
+    let (case, sandbox, profile, linked) = git_case();
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let worktree = worktrees.join("engine-one");
+    let placed = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "move",
+            linked.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert!(placed.status.success(), "{placed:?}");
     let moved = owner_git(
         &case.project,
         &case.home,
