@@ -137,15 +137,21 @@ async fn a_tab_request_that_cannot_take_the_owner_barrier_in_time_is_refused_bus
 /// replies to the workbench and its extension, the extension approvals, and a line only
 /// logged.
 const NOT_OPEN: &[&str] = &[
+    "ide_agent_message_outcome_unknown",
     "ide_capability_cleanup_failed",
     "ide_capability_refused",
     "ide_capability_replaced_preserved",
     "ide_capability_revoked",
+    "ide_comment_outcome_unknown",
     "ide_connection_closed",
     "ide_events_busy",
     "ide_events_lagged",
     "ide_extension_ask_missing",
+    "ide_extension_decide_outcome_unknown",
     "ide_extensions_full",
+    "ide_git_outcome_unknown",
+    "ide_memory_decide_outcome_unknown",
+    "ide_owner_edit_outcome_unknown",
     "ide_project_refused",
     "ide_reader_slow",
     "ide_reply_bounds",
