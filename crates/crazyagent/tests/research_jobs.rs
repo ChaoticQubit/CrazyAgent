@@ -246,11 +246,12 @@ fn an_interrupted_job_returns_to_the_queue_without_spending_an_attempt() {
         claimer: Some("other".into()),
         ..held.clone()
     };
-    assert!(jobs.release(&other).is_err());
-    jobs.release(&held).unwrap();
+    assert!(jobs.release(&other, None).is_err());
+    jobs.release(&held, None).unwrap();
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status, ResearchStatus::Queued);
     assert_eq!(job.attempts, 0);
+    assert_eq!(job.error, None);
     assert_eq!(
         jobs.claim("project-a", "runner", 1)
             .unwrap()
@@ -383,6 +384,28 @@ fn a_job_cancelled_while_its_run_prepares_stays_cancelled_when_the_run_fails_or_
 }
 
 #[test]
+fn a_job_queued_again_with_a_reason_shows_it_until_it_runs_again() {
+    const REASON: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+    let (_temp, path) = store();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let id = jobs.enqueue("project-a", "market", "codex", true).unwrap();
+    let held = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
+    assert!(jobs.release(&held, Some(" ")).is_err());
+    assert!(jobs.release(&held, Some("line\nbreak")).is_err());
+    jobs.release(&held, Some(REASON)).unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
+    assert_eq!(job.error.as_deref(), Some(REASON));
+    let again = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
+    assert_eq!((again.id, again.attempts, again.error), (id, 1, None));
+
+    assert!(jobs.request_cancel(id).unwrap());
+    jobs.release(&again, Some(REASON)).unwrap();
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!((job.status, job.error), (ResearchStatus::Cancelled, None));
+}
+
+#[test]
 fn a_run_whose_claim_stale_recovery_took_back_cannot_act_after_the_runner_claims_it_again() {
     let (_temp, path) = store();
     let jobs = ResearchJobs::open(&path).unwrap();
@@ -396,7 +419,7 @@ fn a_run_whose_claim_stale_recovery_took_back_cannot_act_after_the_runner_claims
     assert!(jobs.finish(&stale, "context/research/market.md").is_err());
     assert!(jobs.fail(&stale, "x", 3).is_err());
     assert!(jobs.needs_pool(&stale).is_err());
-    assert!(jobs.release(&stale).is_err());
+    assert!(jobs.release(&stale, None).is_err());
     assert!(jobs.cancelled(&stale).is_err());
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status, ResearchStatus::Running);

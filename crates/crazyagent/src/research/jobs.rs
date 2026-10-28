@@ -387,12 +387,18 @@ impl ResearchJobs {
     }
 
     /// Returns the job of the claim `held` to the queue without spending its
-    /// attempt, for a run the engine itself interrupted.
-    pub fn release(&self, held: &ResearchJob) -> Result<(), JobError> {
+    /// attempt, for a run the engine itself interrupted, with `reason` as the plain
+    /// line the queued job shows until it runs again; a job whose cancel was
+    /// requested ends cancelled instead, without the reason.
+    pub fn release(&self, held: &ResearchJob, reason: Option<&str>) -> Result<(), JobError> {
+        if let Some(reason) = reason {
+            bounded(reason, ERROR_BYTES_MAX)?;
+        }
         self.transition(
             held,
-            "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL",
-            &[],
+            "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL,
+             error = CASE WHEN cancel_requested = 1 THEN error ELSE ?4 END",
+            &[&reason],
         )
     }
 
@@ -408,7 +414,7 @@ impl ResearchJobs {
         account: &crate::protocol::CredentialRef,
     ) -> Result<(ResearchStatus, i64), JobError> {
         let until = crate::team::pause_account(&self.connection, account)?;
-        self.release(held)?;
+        self.release(held, None)?;
         let status = self
             .get(held.id)?
             .map_or(ResearchStatus::Queued, |job| job.status);
