@@ -16,6 +16,7 @@ import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab } from "./overview";
 import { ProcessEditor } from "../process";
+import { QuestionsTab } from "./questions";
 import { pauseSummary, shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
 import { valueOf } from "./shared";
@@ -30,6 +31,7 @@ export const TABS = [
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
+  { id: "questions", label: "Questions", icon: "inbox" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
   { id: "settings", label: "Settings", icon: "settings" },
@@ -199,6 +201,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
+      {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "settings" && <SettingsTab data={data} section={settingsSection} />}

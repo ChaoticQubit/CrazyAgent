@@ -1,13 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { keyLabel, shortcutKey } from "./keys";
 import { Dialog } from "./overlay";
-import { formatRoute, navigate, type Route } from "./router";
+import { formatRoute, navigate, PROJECT_TABS, type Route } from "./router";
 
 export const GO_TO_ROWS_MAX = 8;
 export const GO_TO_QUERY_MAX = 100;
 
 const PROJECT_TAB_LABELS = [
-  ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["changes", "Changes"], ["context", "Context"], ["settings", "Settings"],
+  ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["changes", "Changes"], ["questions", "Questions"], ["context", "Context"], ["settings", "Settings"],
 ] as const;
 const SETTINGS_LABELS = [
   ["accounts", "Accounts"], ["pools", "Pools"], ["harnesses", "Harnesses"], ["plugins", "Plugins and skills"], ["memory", "Memory"], ["profile", "Profile"],
@@ -23,7 +23,7 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Cmd+N", "New project"],
   ["Cmd+,", "Settings"],
   ["Cmd+[  Cmd+]", "Back, forward"],
-  ["Cmd+1 to Cmd+6", "Project tabs"],
+  [`Cmd+1 to Cmd+${Math.min(PROJECT_TABS.length, 9)}`, "Project tabs"],
   ["Enter", "Send a message or prompt"],
   ["Shift+Enter", "New line in a message or prompt"],
   ["Esc", "Close a dialog or panel"],

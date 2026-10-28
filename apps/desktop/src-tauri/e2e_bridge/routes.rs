@@ -1856,6 +1856,54 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.update_change(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_questions" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+                after: Option<u64>,
+            }
+            let Args { project_id, after } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.questions(project_id, after)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_answer_question" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: u64,
+                version: u64,
+                option: Option<u8>,
+                text: Option<String>,
+            }
+            let Args { id, version, option, text } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .answer_question(id, version, option, text)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_dismiss_question" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: u64,
+                version: u64,
+            }
+            let Args { id, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.dismiss_question(id, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_question_counts" => {
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.question_counts()?; call.await }.await;
+            routed(result)
+        }
         "desktop_process_text" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

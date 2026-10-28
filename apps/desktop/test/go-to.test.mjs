@@ -6,21 +6,22 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const goTo = await import("../src/ui/go-to.tsx");
 const { supportDetails, AppView } = await import("../src/app.tsx");
-const { formatRoute } = await import("../src/ui/router.ts");
+const { formatRoute, PROJECT_TABS } = await import("../src/ui/router.ts");
 
 const projects = [{ id: "harbor", name: "Harbor Notes" }, { id: "fieldnotes-mobile", name: "Fieldnotes Mobile" }];
 
 test("Go to lists every project and its tabs, Home, every Settings section, then the actions", () => {
   const targets = goTo.goToTargets(projects);
-  assert.deepEqual(targets.slice(0, 6).map((target) => [target.label, target.kind, formatRoute(target.route)]), [
+  assert.deepEqual(targets.slice(0, 7).map((target) => [target.label, target.kind, formatRoute(target.route)]), [
     ["Harbor Notes", "Project", "#/projects/harbor/overview"],
     ["Harbor Notes / Conversation", "Project tab", "#/projects/harbor/conversation"],
     ["Harbor Notes / Agents", "Project tab", "#/projects/harbor/agents"],
     ["Harbor Notes / Changes", "Project tab", "#/projects/harbor/changes"],
+    ["Harbor Notes / Questions", "Project tab", "#/projects/harbor/questions"],
     ["Harbor Notes / Context", "Project tab", "#/projects/harbor/context"],
     ["Harbor Notes / Settings", "Project tab", "#/projects/harbor/settings"],
   ]);
-  assert.deepEqual(targets.slice(12).map((target) => [target.label, formatRoute(target.route)]), [
+  assert.deepEqual(targets.slice(14).map((target) => [target.label, formatRoute(target.route)]), [
     ["Home", "#/home"],
     ["Settings / Accounts", "#/settings/accounts"],
     ["Settings / Pools", "#/settings/pools"],
@@ -66,6 +67,11 @@ test("the Go to and shortcuts dialogs stay closed until asked for and the shell 
   assert.doesNotMatch(renderToStaticMarkup(createElement(AppView, { session, route: { name: "settings", tab: "profile" } })), /Go to|Keyboard shortcuts/);
   assert.ok(goTo.SHORTCUTS.some(([keys, what]) => keys === "Cmd+K" && what === "Go to anything"));
   assert.ok(goTo.SHORTCUTS.some(([keys]) => keys === "Cmd+/"));
+});
+
+test("the shortcuts dialog names one number key per project tab", () => {
+  assert.ok(PROJECT_TABS.length >= 1 && PROJECT_TABS.length <= 9);
+  assert.deepEqual(goTo.SHORTCUTS.filter(([, what]) => what === "Project tabs"), [[`Cmd+1 to Cmd+${PROJECT_TABS.length}`, "Project tabs"]]);
 });
 
 test("support details name the problem, window and time, and nothing private", () => {

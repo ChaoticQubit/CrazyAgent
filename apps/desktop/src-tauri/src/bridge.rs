@@ -37,6 +37,7 @@ pub mod picker;
 mod plugins;
 mod process;
 pub mod project_setup;
+pub mod questions;
 mod queue;
 mod recovery;
 mod scheduling;

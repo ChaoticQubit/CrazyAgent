@@ -9,6 +9,7 @@ use bridge::intake::FolderSize;
 use bridge::memory::{MemoryList, MemoryNote};
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
+use bridge::questions::{QuestionCount, QuestionPage};
 use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
@@ -2153,6 +2154,56 @@ async fn desktop_update_change(
 }
 
 #[tauri::command]
+async fn desktop_questions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    after: Option<u64>,
+) -> Result<QuestionPage, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.questions(project_id, after)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_answer_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: u64,
+    version: u64,
+    option: Option<u8>,
+    text: Option<String>,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .answer_question(id, version, option, text)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_dismiss_question(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: u64,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.dismiss_question(id, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_question_counts(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<QuestionCount>, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.question_counts()?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_process_text(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2713,6 +2764,10 @@ pub fn run() {
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,
+            desktop_questions,
+            desktop_answer_question,
+            desktop_dismiss_question,
+            desktop_question_counts,
             desktop_process_text,
             desktop_save_process_text,
             desktop_import_global_instructions,
