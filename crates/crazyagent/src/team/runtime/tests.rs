@@ -3141,17 +3141,33 @@ fn delegated_run(
         crate::protocol::Outcome::Applied
     );
     tx.commit().unwrap();
+    worked_run(fixture, team, &[])
+}
+
+/// Waits for a sub-agent other than those in `before` to work on a task of the level-test
+/// project and to finish its stand-in script. Inputs: the fixture, the runtime and the
+/// agents to pass over. Output: the agent id, its worktree and the exit codes the script
+/// recorded there.
+#[cfg(target_os = "macos")]
+fn worked_run(
+    fixture: &mut Fixture,
+    team: &mut TeamRuntime,
+    before: &[i64],
+) -> (i64, PathBuf, BTreeMap<String, i32>) {
+    let working = |agent: &super::super::TeamAgent| {
+        agent.status == AgentStatus::Working && !before.contains(&agent.id)
+    };
     fixture.until(team, "a sub-agent works on the task", |f| {
         f.status()
             .agents
             .iter()
-            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+            .any(|agent| working(agent) && agent.process_group.is_some())
     });
     let member = fixture
         .status()
         .agents
         .into_iter()
-        .find(|agent| agent.status == AgentStatus::Working)
+        .find(|agent| working(agent))
         .unwrap()
         .id;
     let worktree: String = fixture
@@ -3182,6 +3198,57 @@ fn delegated_run(
         .map(|(name, code)| (name.to_owned(), code.trim().parse::<i32>().unwrap()))
         .collect();
     (member, worktree, codes)
+}
+
+/// Checks that the one task a narrowed sub-agent was working on waits again, with no
+/// attempt spent and no owner-cancel reason, and waits for the next sub-agent that takes it
+/// to finish its stand-in script. Inputs: the fixture, the runtime and the stopped agent.
+/// Output: as `worked_run`.
+#[cfg(target_os = "macos")]
+fn requeued_run(
+    fixture: &mut Fixture,
+    team: &mut TeamRuntime,
+    stopped: i64,
+) -> (i64, PathBuf, BTreeMap<String, i32>) {
+    type Task = (i64, String, Option<i64>, i64, Option<String>);
+    let task = |f: &Fixture| -> Task {
+        assert_eq!(
+            count(
+                &f.connection,
+                "SELECT COUNT(*) FROM team_tasks WHERE project=?1"
+            ),
+            1
+        );
+        f.connection
+            .query_row(
+                "SELECT id,status,agent,attempts,error FROM team_tasks WHERE project=?1",
+                [PROJECT],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let (id, status, agent, _, error) = task(fixture);
+    assert!(
+        status == "queued" || (status == "running" && agent != Some(stopped)),
+        "the narrowed agent's task waits again: {status} {agent:?} {error:?}"
+    );
+    assert_eq!(error, None, "no reason says the owner cancelled it");
+    let run = worked_run(fixture, team, &[stopped]);
+    let (again, status, agent, attempts, error) = task(fixture);
+    assert_eq!(
+        (again, status.as_str(), agent, error),
+        (id, "running", Some(run.0), None)
+    );
+    assert_eq!(attempts, 1, "the narrowed run spent no attempt");
+    run
 }
 
 #[cfg(target_os = "macos")]
@@ -3222,7 +3289,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
         "{reason:?}"
     );
 
-    let (next, _, codes) = delegated_run(&mut run.fixture, &mut run.team);
+    let (next, _, codes) = requeued_run(&mut run.fixture, &mut run.team, member);
     run.member = next;
     assert_eq!(codes["build"], 0, "{codes:?}");
     assert_eq!(
@@ -3278,7 +3345,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
         "{reason:?}"
     );
 
-    let (next, _, codes) = delegated_run(&mut run.fixture, &mut run.team);
+    let (next, _, codes) = requeued_run(&mut run.fixture, &mut run.team, member);
     run.member = next;
     assert_ne!(
         codes["build"], 0,

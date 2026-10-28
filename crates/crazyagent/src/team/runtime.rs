@@ -1387,7 +1387,8 @@ impl TeamRuntime {
     /// while its turn runs, since an idle one reads the level again in its next grant. With a
     /// toolchain the saved policy no longer allows any agent stops, since its sandbox profile
     /// was built once at its start; a pane whose record kept no toolchains counts as holding
-    /// every family. Every next start reads the policy again, so it starts
+    /// every family. A stopped agent is held, so its task or message waits again without a
+    /// spent attempt, and every next start reads the policy again, so it starts
     /// with the new level and without that toolchain. Each agent is checked once per saved
     /// policy; an unreadable policy or project folder counts as Sandboxed with no toolchain.
     /// Takes the project's stored setup.
@@ -1439,6 +1440,7 @@ impl TeamRuntime {
                 continue;
             };
             worker.stopping = true;
+            worker.held = true;
             worker.narrowed = Some(narrowed);
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
