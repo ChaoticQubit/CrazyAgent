@@ -180,14 +180,28 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
   </div>;
 }
 
-/** Drops the frontmatter block at the top of a SKILL.md, which the detail view shows as the
- * skill's name and description instead. Input: the file text. Output: the Markdown body. */
+/** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
+ * skill's name and description, plus any other header line agents read. Input: the file text.
+ * Output: the Markdown body. */
 export function skillBody(text: string): string {
   const source = text.replace(/^\uFEFF/, "");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   return end < 0 ? source : lines.slice(end + 1).join("\n").replace(/^(\s*\n)+/, "");
+}
+
+/** The SKILL.md header lines agents read that the detail view does not already show as the
+ * skill's name and description: every non-blank line of a closed frontmatter block other
+ * than the plain `name:` and `description:` lines. Inputs: the file text and the skill.
+ * Output: the lines in file order, none when the file has no closed header. */
+export function skillHeaderExtra(text: string, skill: { name: string; description: string }): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split("\n").map((line) => line.replace(/\r$/, ""));
+  if (lines[0]?.trimEnd() !== "---") return [];
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (end < 0) return [];
+  return lines.slice(1, end)
+    .filter((line) => line.trim() !== "" && line !== `name: ${skill.name}` && line !== `description: ${skill.description}`);
 }
 
 /** A file size as the detail view lists it. Input: bytes. Output: such as "812 B" or "4.2 KB". */
@@ -213,9 +227,12 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
   if (detail.kind === "error") return <LoadError message={detail.message} onRetry={onRetry} />;
   const { skill, text, files, files_more } = detail.value;
   const on = pluginSwitch(skill, projectId);
+  const extra = skillHeaderExtra(text, skill);
   return <div className="stack">
     <p className="secondary">{skill.description}</p>
     {skill.refused && <Notice tone="danger">{skillUnused(skill.refused)} Remove it in Settings, Plugins and skills.</Notice>}
+    {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
+      <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
       <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}

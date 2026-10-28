@@ -372,7 +372,8 @@ pub fn summary(
 /// Input: keys and the engine's usage report. Output: the summary page.
 pub struct UsagePage {
     range: UsageRange,
-    report: Option<Box<UsageReport>>,
+    report: Option<(UsageRange, Box<UsageReport>)>,
+    asked: Option<(UsageRange, Option<i64>)>,
     load: Load<()>,
     waiting: bool,
 }
@@ -389,6 +390,7 @@ impl UsagePage {
         Self {
             range: UsageRange::Week,
             report: None,
+            asked: None,
             load: Load::Idle,
             waiting: false,
         }
@@ -403,10 +405,12 @@ impl UsagePage {
         }
         self.waiting = true;
         let offset = local_offset();
+        let since_ms = self.range.start(now_ms(), offset);
+        self.asked = Some((self.range, since_ms));
         send(
             ctx,
             SettingsJob::Usage {
-                since_ms: self.range.start(now_ms(), offset),
+                since_ms,
                 offset_minutes: i32::try_from(offset / 60).unwrap_or(0),
             },
         );
@@ -433,15 +437,9 @@ impl UsagePage {
                 ),
                 Line::raw("Press r to try again."),
             ],
-            (_, Some(report)) => summary(
-                report,
-                self.range,
-                &Names::of(ctx),
-                now_ms,
-                offset,
-                limit,
-                ctx,
-            ),
+            (_, Some((range, report))) => {
+                summary(report, *range, &Names::of(ctx), now_ms, offset, limit, ctx)
+            }
             _ => vec![
                 title,
                 Line::default(),
@@ -453,12 +451,23 @@ impl UsagePage {
         }
     }
 
-    /// Applies the engine's answer to a usage read. Inputs: the answer and the context.
+    /// Applies the engine's answer to a usage read. A report for another range than the
+    /// last one asked is an earlier read's and is dropped, so totals always show under the
+    /// range they cover and the newer read's answer, a failure too, still lands.
+    /// Inputs: the answer and the context.
     pub fn apply(&mut self, result: &Result<Box<UsageReport>, String>, ctx: &mut Ctx) {
+        if let Ok(report) = result
+            && self
+                .asked
+                .is_none_or(|(_, since_ms)| since_ms != report.since_ms)
+        {
+            return;
+        }
         let asked = std::mem::take(&mut self.waiting);
         match result {
             Ok(report) => {
-                self.report = Some(report.clone());
+                let range = self.asked.map_or(self.range, |(range, _)| range);
+                self.report = Some((range, report.clone()));
                 self.load = Load::Ready(());
             }
             Err(code) if code == "usage_unavailable" => self.load = Load::NotReady,

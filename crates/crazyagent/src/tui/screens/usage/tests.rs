@@ -284,6 +284,63 @@ fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
     assert!(all.contains("No limits read yet."), "{all}");
 }
 
+fn asked_since(ctx: &mut Ctx) -> Option<i64> {
+    match ctx.next_request() {
+        Some(Request::Settings(job)) => match *job {
+            SettingsJob::Usage { since_ms, .. } => since_ms,
+            other => panic!("a usage read expected, got {other:?}"),
+        },
+        other => panic!("a usage read expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_reply_for_an_earlier_range_never_shows_under_the_new_label_and_the_newer_error_is_said() {
+    let mut ctx = ctx(100, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let week = asked_since(&mut ctx);
+    assert!(week.is_some());
+    page.key(&Key::Char('t'), &mut ctx);
+    let month = asked_since(&mut ctx);
+    page.key(&Key::Char('t'), &mut ctx);
+    assert_eq!(asked_since(&mut ctx), None, "the third range is all time");
+    assert!(month.is_some() && month < week);
+
+    let mut late = report();
+    late.since_ms = week;
+    page.apply(&Ok(Box::new(late)), &mut ctx);
+    let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
+    assert!(
+        !shown.contains("Tokens 6.3K"),
+        "the Last 7 days totals never show under All time: {shown}"
+    );
+    assert!(page.busy(&ctx), "the All time read is still awaited");
+
+    page.apply(&Err("usage_outcome_unknown".into()), &mut ctx);
+    let failed = text(&page.body(96, NOW, 0, &ctx)).join("\n");
+    assert!(failed.contains("Could not read usage."), "{failed}");
+    assert!(!failed.contains("Tokens 6.3K"), "{failed}");
+    assert!(!page.busy(&ctx));
+
+    page.key(&Key::Char('r'), &mut ctx);
+    let all = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(report())), &mut ctx);
+    assert_eq!(all, None);
+    let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
+    assert!(shown.contains("All time"), "{shown}");
+    assert!(shown.contains("Tokens 6.3K"), "{shown}");
+
+    page.key(&Key::Char('t'), &mut ctx);
+    asked_since(&mut ctx);
+    let waiting = text(&page.body(96, NOW, 0, &ctx)).join("\n");
+    assert!(
+        !waiting.contains("Today"),
+        "until Today's reply arrives the shown totals keep their own label: {waiting}"
+    );
+    assert!(waiting.contains("All time"), "{waiting}");
+}
+
 #[test]
 fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
     let mut ctx = ctx(100, 40);
@@ -309,8 +366,9 @@ fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
     assert!(!page.busy(&ctx));
 
     assert!(matches!(page.key(&Key::Char('t'), &mut ctx), Flow::Handled));
-    assert!(matches!(ctx.next_request(), Some(Request::Settings(_))));
-    page.apply(&Ok(Box::new(report())), &mut ctx);
+    let mut month = report();
+    month.since_ms = asked_since(&mut ctx);
+    page.apply(&Ok(Box::new(month)), &mut ctx);
     let shown = text(&page.body(96, NOW, 0, &ctx)).join("\n");
     assert!(shown.contains("Last 30 days"), "{shown}");
     assert!(shown.contains("Tokens 6.3K"), "{shown}");

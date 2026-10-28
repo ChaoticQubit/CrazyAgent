@@ -350,14 +350,8 @@ impl Team {
                 attached.started = true;
             }
             TerminalFrame::Output { bytes } => attached.pane.feed(bytes),
-            TerminalFrame::Closed { reason } => {
-                attached.closed = Some(reason.clone());
-                self.focus = Focus::Tree;
-            }
-            TerminalFrame::Rejected { code } => {
-                attached.closed = Some(code.clone());
-                self.focus = Focus::Tree;
-            }
+            TerminalFrame::Closed { reason } => attached.closed = Some(reason.clone()),
+            TerminalFrame::Rejected { code } => attached.closed = Some(code.clone()),
         }
     }
 
@@ -471,7 +465,6 @@ impl Team {
             });
         }
         attached.closed = Some(STOPPED.into());
-        self.focus = Focus::Tree;
     }
 
     fn show_task(&mut self, edge: usize) {
@@ -555,6 +548,10 @@ impl Team {
         }
     }
 
+    /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
+    /// master view, any other key goes to the open terminal. A terminal that closed keeps
+    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
+    /// view. Inputs: the key and the context. Output: handled.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
             self.focus = Focus::Tree;
@@ -565,7 +562,6 @@ impl Team {
             return Flow::Handled;
         };
         if attached.closed.is_some() {
-            self.focus = Focus::Tree;
             return Flow::Handled;
         }
         for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {

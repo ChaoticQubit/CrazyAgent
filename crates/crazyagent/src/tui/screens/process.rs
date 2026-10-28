@@ -26,6 +26,7 @@ const PAGE_STEP: usize = 10;
 const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
 const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
+const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,6 +259,9 @@ impl Editor {
         assert!(self.column <= self.width(self.row));
     }
 
+    /// Inserts text at the cursor and leaves the cursor after it. The new lines go in with
+    /// one pass over the lines below, so a many-line paste never shifts them once per line.
+    /// Input: the text, with CR LF and CR read as LF.
     fn insert(&mut self, text: &str) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut parts = text.split('\n');
@@ -266,11 +270,13 @@ impl Editor {
         let rest = self.lines[self.row].split_off(at);
         self.lines[self.row].push_str(first);
         self.column += first.chars().count();
-        for part in parts {
-            self.lines.insert(self.row + 1, part.to_owned());
-            self.row += 1;
-            self.column = part.chars().count();
+        let added: Vec<String> = parts.map(str::to_owned).collect();
+        if let Some(last) = added.last() {
+            self.column = last.chars().count();
         }
+        let below = self.row + 1;
+        self.row += added.len();
+        self.lines.splice(below..below, added);
         self.lines[self.row].push_str(&rest);
     }
 
@@ -414,12 +420,17 @@ impl ProcessPage {
         }
     }
 
+    /// Sends one request unless another is running. A read the full queue refuses leaves
+    /// the page failed with a retry, never loading for a reply that cannot come.
+    /// Inputs: the query and the context. Output: none.
     fn send(&mut self, query: ProcessQuery, ctx: &mut Ctx) {
         if self.pending.is_some() {
             return;
         }
         if ctx.try_request(Request::Process(Box::new(query.clone()))) {
             self.pending = Some(query);
+        } else if matches!(query, ProcessQuery::Read { .. }) {
+            self.state = State::Failed(READ_REFUSED.into());
         }
     }
 

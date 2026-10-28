@@ -262,8 +262,67 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
         "once the queue drains the same Ctrl-S saves"
     );
     assert!(shell.busy());
-    shell.arrive(reply(save, Ok("")));
+    shell.arrive(saved(save, 16));
     assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever() {
+    let mut ctx = ctx(80, 24);
+    let mut filled = 0;
+    while filled < 64 && {
+        ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+            },
+        })
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    let mut shell = Shell::with(ctx, Box::new(ProcessPage::new(Scope::App)));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "the refused read never queued"
+    );
+    assert!(!shell.busy(), "a refused read is not waiting on the engine");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Loading the instructions"), "{shown}");
+    assert!(shown.contains("Press r to try again."), "{shown}");
+
+    shell.key(Key::Char('r'));
+    let read = ProcessQuery::Read { project: None };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("Back.")));
+    assert!(screen(&mut shell).contains("│ █ack."));
+}
+
+#[test]
+fn a_many_line_paste_into_a_long_text_inserts_in_one_pass() {
+    let mut editor = Editor::new(&"\n".repeat(99_999));
+    assert_eq!(editor.lines.len(), 100_000);
+    let started = std::time::Instant::now();
+    editor.key(&Key::Paste("x\n".repeat(50_000)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a 50,000-line paste took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(editor.lines.len(), 150_000);
+    assert_eq!((editor.row, editor.column), (50_000, 0));
+    assert!(editor.lines[..50_000].iter().all(|line| line == "x"));
+    assert!(editor.lines[50_000..].iter().all(String::is_empty));
+    assert_eq!(
+        editor.text(),
+        format!("{}{}", "x\n".repeat(50_000), "\n".repeat(99_999))
+    );
+
+    let mut middle = Editor::new("ab\ncd");
+    middle.key(&Key::Right);
+    middle.key(&Key::Paste("1\r\n2\r3".into()));
+    assert_eq!(middle.text(), "a1\n2\n3b\ncd");
+    assert_eq!((middle.row, middle.column), (2, 1));
 }
 
 #[test]

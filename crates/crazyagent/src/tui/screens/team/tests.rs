@@ -528,14 +528,17 @@ fn a_rejected_attach_says_not_ready_and_gives_the_keys_back_to_the_tree() {
         format!("{:<43}", "This engine cannot stream agent terminals")
     );
     assert_eq!(chars(&rows[5], 34, 77), format!("{:<43}", "yet."));
-    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
-    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
+    assert!(rows[23].contains("Ctrl-] Back to the team"), "{}", rows[23]);
     shell.key(Key::Char('x'));
     assert!(
         requests(&mut shell)
             .iter()
             .all(|sent| input(sent).is_none())
     );
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
+    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
 }
 
 #[test]
@@ -641,8 +644,7 @@ fn an_ended_terminal_keeps_its_last_screen_says_the_run_finished_and_takes_no_ke
     assert_eq!(pane_row(&rows, 4), padded("ok"));
     assert_eq!(pane_row(&rows, 19), padded("This run finished."));
     assert_eq!(pane_row(&rows, 20), padded("Its last screen stays here."));
-    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
-    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
+    assert!(rows[23].contains("Ctrl-] Back to the team"), "{}", rows[23]);
     for key in [Key::Char('x'), Key::Tab, Key::Char('y')] {
         shell.key(key);
     }
@@ -650,6 +652,10 @@ fn an_ended_terminal_keeps_its_last_screen_says_the_run_finished_and_takes_no_ke
         requests(&mut shell).is_empty(),
         "no key reaches a terminal that ended"
     );
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
+    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
 }
 
 #[test]
@@ -706,7 +712,7 @@ fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     shell.key(Key::Char('x'));
     assert!(
         requests(&mut shell).is_empty(),
-        "keys go to the tree, not the stopped agent"
+        "keys typed after the stop never reach the stopped agent"
     );
     let rows = render(&mut shell);
     assert!(chars(&rows[3], 2, 32).contains("Master"), "{}", rows[3]);
@@ -714,6 +720,7 @@ fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     assert_eq!(pane_row(&rows, 3), padded("$ make"));
     assert_eq!(pane_row(&rows, 19), padded("This agent has stopped."));
 
+    shell.key(LEADER);
     shell.key(Key::Enter);
     assert!(
         requests(&mut shell).is_empty(),
@@ -760,10 +767,13 @@ fn a_terminal_lost_with_the_engine_opens_again_once_the_engine_is_back() {
     assert_eq!(pane_row(&rows, 3), padded("after restart"));
     assert_eq!(pane_row(&rows, 19), padded(""));
     assert_eq!(pane_row(&rows, 20), padded(""));
-    shell.key(Key::Tab);
     shell.key(Key::Char('x'));
     let sent = requests(&mut shell);
-    assert_eq!(input(&sent[0]), Some(("team-1", &b"x"[..])));
+    assert_eq!(
+        input(&sent[0]),
+        Some(("team-1", &b"x"[..])),
+        "the terminal kept the keys while the engine was away"
+    );
 }
 
 fn attach_frames_after_reconnect(shell: &mut Shell) {
@@ -1726,6 +1736,60 @@ fn a_failed_switch_read_never_starts_the_live_master() {
         rows[2].contains("Live master stopped."),
         "a failed read keeps the switch it had: {}",
         rows[2]
+    );
+}
+
+#[test]
+fn keys_typed_after_the_master_terminal_closes_never_turn_the_live_master_off() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    shell.key(Key::Char('y'));
+    let sent = requests(&mut shell);
+    assert_eq!(input(&sent[0]), Some(("team-1", &b"y"[..])));
+
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Closed {
+            reason: "owner_socket_replaced".into(),
+        },
+    });
+    for character in "es, ship it".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Esc);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.is_empty(),
+        "keys typed after the close reach neither the terminal nor the master's switch: {sent:?}"
+    );
+    let rows = render(&mut shell);
+    assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
+    assert!(rows[2].contains("s Stop live master"), "{}", rows[2]);
+    assert!(rows[23].contains("Ctrl-] Leave terminal"), "{}", rows[23]);
+
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("s Stop live master"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter()
+            .any(|request| live_master_change(request, false)),
+        "s still stops the live master once the owner left the terminal: {sent:?}"
     );
 }
 
