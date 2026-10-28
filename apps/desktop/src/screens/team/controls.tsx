@@ -10,6 +10,7 @@ import { displayText } from "../conversation";
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
 export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
+export const MASTER_IDLE_STOP_SECS = 900;
 const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
@@ -42,10 +43,10 @@ export function limitOptions(current: number | null, listed: readonly number[] =
 }
 
 /** Keeps the session limit not below the task limit, as the engine requires, after the owner
- * changed one of them; Off counts as no bound. Inputs: both limits, which one changed and its
+ * changed one of them; Off on either bounds nothing, so a session limit needs no task limit. Inputs: both limits, which one changed and its
  * new value. Output: the pair to send. */
 export function limitPair(turn: number | null, session: number | null, changed: "turn" | "session", value: number | null): { turn: number | null; session: number | null } {
-  const below = (a: number | null, b: number | null) => a !== null && (b === null || a < b);
+  const below = (a: number | null, b: number | null) => a !== null && b !== null && a < b;
   if (changed === "turn") return { turn: value, session: below(session, value) ? value : session };
   return { turn: below(value, turn) ? value : turn, session: value };
 }
@@ -179,7 +180,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
         helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
       <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
         onValue={(value) => void limit("idle", value)}
-        helper="Off keeps an idle sub-agent running until the team stops. The master is never stopped while its work is still going." />
+        helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
     </div>
     <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />

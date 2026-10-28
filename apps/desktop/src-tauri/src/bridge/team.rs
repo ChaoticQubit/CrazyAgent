@@ -135,8 +135,8 @@ impl NativeBridge {
     /// Sets the project team's task and session time limits and its sub-agent idle stop, in
     /// seconds from the listed choices, none for no limit. Takes the project id, the three
     /// limits and the client generation. Returns the actual commit receipt; a value outside
-    /// the choices, or a session limit below the task limit, is refused as
-    /// `team_action_invalid`.
+    /// the choices, or a session limit below a set task limit, is refused as
+    /// `team_action_invalid` with `team_time_limits_invalid` behind it.
     pub async fn team_time_limits(
         &mut self,
         id: &str,
@@ -282,7 +282,7 @@ impl NativeBridge {
         self.ready_for_intent(generation)?;
         action
             .validate()
-            .map_err(|_| failure("team_action_invalid"))?;
+            .map_err(|error| caused("team_action_invalid", &error.0))?;
         if let Some(project_id) = action.project() {
             self.controller()?
                 .project_setup(project_id.clone())

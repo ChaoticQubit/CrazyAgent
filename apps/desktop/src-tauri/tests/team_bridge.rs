@@ -253,14 +253,14 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         (Some(3600), Some(14_400), None),
         "an idle stop of None is Off"
     );
+    let refused = bridge
+        .team_time_limits(&id, Some(7200), Some(3600), Some(600), 16)
+        .await
+        .unwrap_err();
     assert_eq!(
-        bridge
-            .team_time_limits(&id, Some(7200), Some(3600), Some(600), 16)
-            .await
-            .unwrap_err()
-            .code,
-        "team_action_invalid",
-        "a session limit below the task limit is refused"
+        (refused.code, refused.cause.as_deref()),
+        ("team_action_invalid", Some("team_time_limits_invalid")),
+        "a session limit below the task limit is refused and names the engine's reason"
     );
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,

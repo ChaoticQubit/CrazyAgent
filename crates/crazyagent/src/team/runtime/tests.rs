@@ -5511,3 +5511,52 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+/// The session limit counts from when the agent's terminal started, also across an engine
+/// restart: a sub-agent the next engine adopts keeps the time it ran before, so a session
+/// it already passed ends it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_agent_keeps_the_session_time_it_ran_before_the_engine_restarted() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut record = fixture.pane(&host, sub);
+    record.since_ms -= 3_600_000;
+    fixture.keep(sub, &record);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,NULL,7200,0)",
+            [PROJECT],
+        )
+        .unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the sub-agent is adopted", |f| {
+        f.agent_status(sub).0 == AgentStatus::Idle && f.recorded(sub)
+    });
+    let watched = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < watched {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fixture.agent_status(sub).0,
+        AgentStatus::Idle,
+        "an hour into a 2 h session the adopted agent keeps running"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET session_secs=1800 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the 30 min session it passed before the restart ends it",
+        |f| f.agent_status(sub).0 == AgentStatus::Stopped,
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}

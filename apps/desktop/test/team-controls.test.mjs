@@ -86,8 +86,8 @@ test("a changed limit keeps the session limit not below the task limit", () => {
   assert.deepEqual(controls.limitPair(null, null, "turn", 3600), { turn: 3600, session: null });
   assert.deepEqual(controls.limitPair(3600, 7200, "turn", 14_400), { turn: 14_400, session: 14_400 });
   assert.deepEqual(controls.limitPair(3600, 7200, "session", 1800), { turn: 1800, session: 1800 });
-  assert.deepEqual(controls.limitPair(null, null, "session", 7200), { turn: 7200, session: 7200 });
-  assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: null });
+  assert.deepEqual(controls.limitPair(null, null, "session", 7200), { turn: null, session: 7200 }, "a session limit needs no task limit");
+  assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: 7200 }, "a task limit turned Off leaves the session limit");
   assert.deepEqual(controls.limitPair(3600, 7200, "session", null), { turn: 3600, session: null });
 });
 
@@ -108,4 +108,9 @@ test("a team view the engine shortened to fit says older history is hidden", () 
   assert.doesNotMatch(whole, /Older team history is hidden/);
   const partial = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ partial: true }), reload() {} }));
   assert.match(partial, /<p class="pj-note" role="status">Older team history is hidden so the team fits in one view\. Queued and running work stays listed\.<\/p>/);
+});
+
+test("the idle stop says when an idle master stops, which no setting changes", () => {
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
 });

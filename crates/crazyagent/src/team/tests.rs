@@ -3154,7 +3154,6 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     for refused in [
         limits(Some(60), None, None),
         limits(Some(3600), Some(1800), None),
-        limits(None, Some(3600), None),
         limits(Some(3600), Some(86_400), None),
         limits(None, None, Some(300)),
     ] {
@@ -3164,6 +3163,10 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
             "{refused:?}"
         );
     }
+    assert!(
+        limits(None, Some(3600), None).validate().is_ok(),
+        "a session limit needs no task limit"
+    );
     let pool = access("team-limits", &["local-a"]);
     let tx = connection.transaction().unwrap();
     assert_eq!(
