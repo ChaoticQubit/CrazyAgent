@@ -910,7 +910,7 @@ impl Host for Tmux {
         let pid = pid
             .parse::<u32>()
             .ok()
-            .filter(|pid| *pid > 0 && pane.starts_with('%'))
+            .filter(|pid| *pid > 1 && pane.starts_with('%'))
             .ok_or_else(|| failure("terminal_command_failed"))?;
         Ok(PaneRef {
             agent: agent.clone(),

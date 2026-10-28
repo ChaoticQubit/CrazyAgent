@@ -95,7 +95,7 @@ impl PaneRecord {
             .resumed
             .as_ref()
             .is_none_or(|(file, _)| file.is_absolute());
-        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0 && key && resumed)
+        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 1 && key && resumed)
             .then_some(record)
     }
 
@@ -205,6 +205,7 @@ impl TerminalSession {
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: None,

@@ -8,6 +8,8 @@ use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
 };
+#[cfg(unix)]
+use crate::harnesses::launch::{await_group_exit, kill_group};
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
@@ -57,8 +59,6 @@ const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const SETUP_TIMED_OUT: &str = "setup_timed_out";
-#[cfg(unix)]
-const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
@@ -2108,7 +2108,7 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
-    stop_group(group);
+    kill_group(group);
     let _ = child.wait();
     await_group_exit(group);
 }
@@ -2161,7 +2161,7 @@ impl AgentProcess {
             Ok(lifeline) => lifeline,
             Err(error) => {
                 let mut child = child;
-                stop_group(group);
+                kill_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
                 let _ = crate::sandbox::warden::fire_reported(warden, "agent");
@@ -2186,7 +2186,7 @@ impl AgentProcess {
     #[cfg(unix)]
     pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
         if !self.stopped {
-            stop_group(self.group);
+            kill_group(self.group);
             let _ = self.child.wait();
             await_group_exit(self.group);
             self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
@@ -2272,39 +2272,6 @@ impl Drop for Lifeline {
     /// Releases the lifeline if the run did not already.
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-#[cfg(unix)]
-fn stop_group(group: u32) {
-    let Ok(raw) = i32::try_from(group) else {
-        return;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        return;
-    };
-    assert!(pid.as_raw_nonzero().get() > 1);
-    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-}
-
-/// Waits until no process of a killed agent's group is left, killing again
-/// any member that is still there. Takes the group id; returns once the group
-/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
-/// stopped while one of its processes still lingers unnoticed.
-#[cfg(unix)]
-fn await_group_exit(group: u32) {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
-    let started = Instant::now();
-    while rustix::process::test_kill_process_group(pid).is_ok()
-        && started.elapsed() < GROUP_EXIT_WAIT
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -3144,7 +3111,7 @@ mod tests {
             group_members(kept_group) >= 2,
             "a released lifeline killed the agent's group"
         );
-        stop_group(kept_group);
+        kill_group(kept_group);
         kept.wait().unwrap();
         await_group_exit(kept_group);
         let mut orphan = spawn();

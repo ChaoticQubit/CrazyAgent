@@ -233,6 +233,12 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let mut no_process = record.clone();
     no_process.pid = 0;
     assert_eq!(PaneRecord::decode(&no_process.encode().unwrap()), None);
+    no_process.pid = 1;
+    assert_eq!(
+        PaneRecord::decode(&no_process.encode().unwrap()),
+        None,
+        "a stored pane never names pid 1, whose group a stop would kill"
+    );
     assert_eq!(PaneRecord::decode("{\"source\":1}"), None);
     let mut long = record;
     long.cwd = PathBuf::from(format!("/{}", "a".repeat(RECORD_BYTES_MAX)));

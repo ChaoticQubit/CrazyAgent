@@ -23,6 +23,7 @@ const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
+const GROUP_FRESH: Duration = Duration::from_secs(5);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
@@ -47,6 +48,7 @@ pub struct TerminalSession {
     facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
+    group_ended: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -220,6 +222,7 @@ impl TerminalSession {
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -365,8 +368,9 @@ impl TerminalSession {
         }
     }
 
-    /// Ends the pane and every process in it, then removes the key file and the
-    /// generated context. Output: none, since a pane reports no exit code.
+    /// Ends the pane, then every process its harness left in the pane's process group, as a
+    /// dev server started in the background, then removes the key file and the generated
+    /// context. Output: none, since a pane reports no exit code.
     pub fn stop(mut self) -> Option<i32> {
         self.halt();
         None
@@ -403,6 +407,7 @@ impl TerminalSession {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.exited = true;
+                        self.end_group(true);
                         return Err(failure("launch_closed"));
                     }
                 }
@@ -465,7 +470,7 @@ impl TerminalSession {
             self.queue.push_back(event);
         }
         if self.checked.elapsed() >= ALIVE_EVERY {
-            self.checked = Instant::now();
+            let seen = self.checked.elapsed() <= GROUP_FRESH;
             let alive = match self.host.alive() {
                 Ok(alive) => alive,
                 Err(problem) => {
@@ -473,9 +478,11 @@ impl TerminalSession {
                     return Err(host_failure(problem));
                 }
             };
+            self.checked = Instant::now();
             if !alive.contains(&self.agent) {
                 self.exited = true;
                 self.turn = false;
+                self.end_group(seen);
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
@@ -488,7 +495,29 @@ impl TerminalSession {
         }
         self.stopped = true;
         self.turn = false;
+        let seen = !self.group_ended
+            && (self.checked.elapsed() <= GROUP_FRESH
+                || self
+                    .host
+                    .alive()
+                    .is_ok_and(|alive| alive.contains(&self.agent)));
         let _ = self.host.kill(&self.agent);
+        self.end_group(seen);
+    }
+
+    /// Kills what the harness left in the pane's process group once the pane is gone, as a
+    /// dev server started in the background. `seen` tells the pane was alive within
+    /// `GROUP_FRESH`: its id then still names this pane's group, which keeps the id while
+    /// any member lives. An id unseen for longer may name a reused group and is left alone.
+    fn end_group(&mut self, seen: bool) {
+        if std::mem::replace(&mut self.group_ended, true) || !seen {
+            return;
+        }
+        #[cfg(unix)]
+        {
+            super::launch::kill_group(self.pid);
+            super::launch::await_group_exit(self.pid);
+        }
     }
 }
 
