@@ -23,7 +23,9 @@ pub(in crate::tui) const MASTER_ELSEWHERE: &str =
 
 const PAGE_STEP: usize = 10;
 const TEXT_MIN: usize = 12;
-const NARROW_INDENT: usize = 4;
+/// What a narrow box draws before each line of an entry's text and result, which start on their
+/// own lines there. A row starts with its time, so no line of text can pass as a row.
+const TEXT_GUTTER: &str = "  | ";
 
 /// One drawn line of a Messages list: plain text fitted to the width and the color role it
 /// draws in, none for the plain style. Each host turns it into its own line type.
@@ -369,10 +371,14 @@ impl Messages {
             let lines: Vec<String> = std::iter::once(first)
                 .chain(heads.map(|line| format!("  {line}")))
                 .collect();
-            (lines, NARROW_INDENT.min(limit.saturating_sub(1)))
+            (lines, width(TEXT_GUTTER).min(limit.saturating_sub(1)))
         };
         let room = limit.saturating_sub(indent).max(1);
-        let pad = " ".repeat(indent);
+        let pad: String = if beside {
+            " ".repeat(indent)
+        } else {
+            TEXT_GUTTER.chars().take(indent).collect()
+        };
         let mut words = paragraphs(&text, room).into_iter();
         if beside {
             lines[0].push_str(&words.next().unwrap_or_default());
