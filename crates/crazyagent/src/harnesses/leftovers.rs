@@ -171,16 +171,16 @@ impl Lineage {
     }
 
     /// Reads the process table again: keeps each known process still running with the same
-    /// start, then adds this user's processes in the leader's session and those whose parent
-    /// is kept. Input: the lineage. Output: Ok, or uncertain when `ps` cannot be read.
+    /// start, under the program it runs now, then adds this user's processes in the leader's
+    /// session and those whose parent is kept. Input: the lineage. Output: Ok, or uncertain
+    /// when `ps` cannot be read.
     #[cfg(unix)]
     fn refresh(&mut self) -> Result<(), Unstopped> {
         let table = table()?;
-        let mut kept: Vec<Process> = self
-            .known
+        let mut kept: Vec<Process> = table
             .iter()
-            .filter(|known| table.iter().any(|(process, _)| process == *known))
-            .cloned()
+            .filter(|(process, _)| self.known.iter().any(|known| same(known, process)))
+            .map(|(process, _)| process.clone())
             .collect();
         let session = rustix::process::Pid::from_raw(self.leader);
         let members: Vec<bool> = table
@@ -213,6 +213,13 @@ impl Lineage {
     fn refresh(&mut self) -> Result<(), Unstopped> {
         Err(Unstopped::Uncertain)
     }
+}
+
+/// Tells whether two rows name the same process: the same id with the same start, whatever
+/// program it runs now. Inputs: the rows. Output: true only then.
+#[cfg(unix)]
+fn same(known: &Process, now: &Process) -> bool {
+    known.pid == now.pid && known.started == now.started
 }
 
 /// Reads this user's running processes, other than the engine, with `ps`; a zombie has
@@ -344,6 +351,93 @@ mod tests {
         );
         assert!(report.contains("9 sleep and 2 more."), "{report}");
         assert!(!report.contains("10 sleep"), "{report}");
+    }
+
+    /// Reads a process's program with `ps`. Input: the id. Output: its basename, if running.
+    #[cfg(target_os = "macos")]
+    fn program_of(pid: i32) -> Option<String> {
+        let listing = crate::spawn_gate::output(
+            std::process::Command::new("/bin/ps")
+                .args(["-o", "comm=", "-p", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&listing.stdout);
+        text.trim()
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leftover_that_runs_a_new_program_after_the_snapshot_is_still_named() {
+        use std::os::unix::process::CommandExt;
+        let folder = tempfile::tempdir().unwrap();
+        let mut leader = crate::spawn_gate::spawn(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 1; exec \"/bin/sleep\", \"30\"' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
+                )
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Some(child) = std::fs::read_to_string(folder.path().join("child.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break child;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never started");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let kill = || {
+            if let Some(pid) = rustix::process::Pid::from_raw(child) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        };
+        let lineage = Lineage::of(leader.id()).unwrap();
+        assert!(
+            lineage
+                .known
+                .iter()
+                .any(|process| process.pid == child && process.program == "perl"),
+            "{lineage:?}"
+        );
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        while program_of(child).as_deref() != Some("sleep") {
+            if Instant::now() >= deadline {
+                kill();
+                panic!("the leftover never ran its new program");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let settled = lineage.settle();
+        kill();
+        match settled {
+            Err(Unstopped::Left(left)) => assert_eq!(
+                left.0
+                    .known
+                    .iter()
+                    .map(|process| (process.pid, process.program.as_str()))
+                    .collect::<Vec<_>>(),
+                [(child, "sleep")]
+            ),
+            other => panic!(
+                "a leftover that ran a new program after the snapshot was dropped: {other:?}"
+            ),
+        }
     }
 
     #[test]
