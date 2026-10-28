@@ -4,6 +4,7 @@ import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, 
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
+import { useQuestionNotifications } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -273,5 +274,6 @@ export function App() {
   useUpdateWatch(session.showToast);
   const alerts = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
+  useQuestionNotifications(session.engine === "running", session.showToast);
   return <AppView session={session} route={route} alerts={alerts} />;
 }

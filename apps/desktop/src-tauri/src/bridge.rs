@@ -31,6 +31,7 @@ pub mod master;
 pub mod memory;
 mod model_access;
 mod native_auth;
+pub mod notify;
 pub mod open;
 mod owner_setup;
 pub mod picker;
