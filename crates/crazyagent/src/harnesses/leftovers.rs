@@ -40,6 +40,18 @@ const TABLE_POLL: Duration = Duration::from_millis(5);
 /// killed at the deadline.
 #[cfg(unix)]
 const TABLE_GRACE: Duration = Duration::from_millis(100);
+/// The longest a Full access stop spends finding and checking what the agent left: one
+/// listing before the kill and the settling after it, whose last listing may start one
+/// poll after `SETTLE` ends.
+#[cfg(unix)]
+pub(crate) const STOP_TIME: Duration = TABLE_TIME
+    .saturating_add(TABLE_GRACE)
+    .saturating_mul(2)
+    .saturating_add(SETTLE)
+    .saturating_add(SETTLE_POLL);
+/// No Full access stop looks for leftovers where no process table is read.
+#[cfg(not(unix))]
+pub(crate) const STOP_TIME: Duration = Duration::ZERO;
 /// The command that lists every process with what the lineage needs of it.
 #[cfg(unix)]
 const PS_TABLE: &[&str] = &[
