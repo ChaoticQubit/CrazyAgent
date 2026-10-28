@@ -1025,6 +1025,7 @@ export interface GitHubRepo {
   private: boolean;
   default_branch: string;
   size_kb: number;
+  refused: string | null;
 }
 
 export interface GitHubRepoPage {

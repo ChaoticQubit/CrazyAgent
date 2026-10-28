@@ -499,6 +499,22 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.doesNotMatch(found, />Overview</);
 });
 
+test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
+  const repos = [
+    { full_name: "octo-cat/.github", private: false, default_branch: "main", size_kb: 4, refused: "github_repo_name_unsupported" },
+    { full_name: "octo-cat/notes", private: false, default_branch: "main", size_kb: 4, refused: null },
+  ];
+  const base = { status: { signed_in: true, login: "octo-cat", method: "token", waiting: false, problem: null }, query: "", onQuery: noop, more: false, loadingMore: false, onMore: noop, cloning: null, onClone: noop };
+  const rows = html(RepoListView, { ...base, repos: ok(repos) }).split("<li").slice(1);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /octo-cat\/\.github/);
+  assert.match(rows[0], /CrazyAgent can(&#x27;|')t clone a repository whose name starts with a dot/);
+  assert.match(rows[0], /<button[^>]*disabled=""[^>]*>.*Clone<\/button>/);
+  assert.doesNotMatch(rows[0], /github_repo_name_unsupported/);
+  assert.match(rows[1], /Public, 4 KB, branch main/);
+  assert.doesNotMatch(rows[1], /disabled=""/);
+});
+
 test("the setup review shows the steps, the overview, missing items and a confirm that waits", () => {
   const catalog = ok({ tech_stack: [], platforms: [{ kind: "website", label: "Website" }], research: [{ kind: "market_research", label: "Market research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
