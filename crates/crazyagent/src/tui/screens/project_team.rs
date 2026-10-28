@@ -969,13 +969,13 @@ impl TeamView {
     }
 
     fn keep_warm(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.still_saving() {
-            return TeamReply::Handled;
-        }
         let on = !status.keep_warm;
         let done = match (on, status.min_agents) {
             (false, _) => "Agents now stop when they run out of work.".to_owned(),
@@ -1001,13 +1001,13 @@ impl TeamView {
     /// 2 min, 10 min, 1 h. Takes which limit. Returns the
     /// change, or Handled while the team loads or saves.
     fn time_limit(&mut self, which: Limit) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.still_saving() {
-            return TeamReply::Handled;
-        }
         let below = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if a < b);
         let limits = &crate::team::LIMIT_CHOICES_SECS;
         let (turn, kept, idle) = (
@@ -1061,13 +1061,13 @@ impl TeamView {
     /// Flips the On harness switch setting between Carry over and Start fresh.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn harness_switch(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.still_saving() {
-            return TeamReply::Handled;
-        }
         let mode = match status.on_harness_switch {
             SwitchMode::Carry => SwitchMode::Fresh,
             SwitchMode::Fresh => SwitchMode::Carry,
