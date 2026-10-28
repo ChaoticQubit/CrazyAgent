@@ -3157,8 +3157,8 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
         })
         .collect();
 
-    let lines = finished_agents(&fixture.connection, &project, now).unwrap();
-    assert_eq!(lines.len(), FINISHED_LISTED_MAX);
+    let lines = super::super::events::finished_agents(&fixture.connection, &project, now).unwrap();
+    assert_eq!(lines.len(), super::super::events::FINISHED_LISTED_MAX);
     let label = |id: i64| {
         format!(
             "{}, Sub-agent {id}",

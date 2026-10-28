@@ -1827,7 +1827,8 @@ impl TeamRuntime {
         } else {
             None
         };
-        let finished = finished_agents(&self.connection, &stored.project_id, now_ms())?;
+        let finished =
+            super::events::finished_agents(&self.connection, &stored.project_id, now_ms())?;
         let mut framing = live_framing(
             stored,
             self.workers[&id].team_tool,
@@ -4368,8 +4369,6 @@ fn per_turn(
 const PROCESS_CLOSED: &str = "The agent process closed";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
-const FINISHED_LISTED_MAX: usize = 20;
-const FINISHED_TASK_BYTES_MAX: usize = 120;
 
 /// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
 /// before, so waking the agent continues it (DEC-102). A record path that is not plain text
@@ -4426,75 +4425,6 @@ fn last_result(connection: &Connection, agent: i64) -> Result<Option<String>, En
     Ok(result
         .map(|result| super::events::one_line(&result, HANDOFF_BYTES_MAX))
         .filter(|result| !result.is_empty()))
-}
-
-/// Lists a project's finished sub-agents a live master can wake, newest first and at most
-/// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
-/// with its name and Sub-agent number, harness, last task on one line and when it finished.
-/// Takes the database, the project and now. Returns the lines, or none when no such agent
-/// exists.
-fn finished_agents(
-    connection: &Connection,
-    project: &ProjectId,
-    now: i64,
-) -> Result<Vec<String>, EngineError> {
-    let rows: Vec<(i64, String, Option<i64>, Option<String>)> = {
-        let mut statement = connection
-            .prepare(
-                "SELECT a.id,a.harness,a.stopped_ms,
-                        (SELECT t.prompt FROM team_tasks t WHERE t.agent=a.id ORDER BY COALESCE(t.started_ms,t.created_ms) DESC, t.id DESC LIMIT 1)
-                 FROM team_agents a
-                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
-                   AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
-                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
-            )
-            .map_err(error)?;
-        statement
-            .query_map(
-                params![project.as_str(), FINISHED_LISTED_MAX as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(error)?
-            .collect::<Result<_, _>>()
-            .map_err(error)?
-    };
-    assert!(rows.len() <= FINISHED_LISTED_MAX);
-    rows.into_iter()
-        .map(
-            |(id, harness, stopped, task)| -> Result<String, EngineError> {
-                let task = task
-                    .map(|task| super::events::one_line(&task, FINISHED_TASK_BYTES_MAX))
-                    .filter(|task| !task.is_empty())
-                    .unwrap_or_else(|| "no task yet".to_owned());
-                let when =
-                    stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
-                let label = super::events::label(connection, id)?;
-                let number = AgentRole::Sub.agent_label(id);
-                let named = if label == number {
-                    label
-                } else {
-                    format!("{label}, {number}")
-                };
-                Ok(format!(
-                    "- {named} ({}): {task}; {when}",
-                    super::names::harness_name(&harness)
-                ))
-            },
-        )
-        .collect()
-}
-
-/// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
-/// ago", "finished 3 h ago" or "finished 2 days ago". Takes the stop time and now in epoch
-/// milliseconds. Returns the phrase.
-fn finished_ago(at: i64, now: i64) -> String {
-    let minutes = now.saturating_sub(at).max(0) / 60_000;
-    match minutes {
-        0 => "finished just now".to_owned(),
-        1..60 => format!("finished {minutes} min ago"),
-        60..1440 => format!("finished {} h ago", minutes / 60),
-        _ => format!("finished {} days ago", minutes / 1440),
-    }
 }
 
 const LIVE_REPLY_BYTES_MAX: usize = 64 * 1024;

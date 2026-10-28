@@ -697,3 +697,44 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
     let (said, refused) = text(&answers[1]);
     assert!(refused && said.contains("is running"), "{said}");
 }
+
+/// A sub-agent that finishes after the live master's session started is in the master's
+/// status read, named with its Sub-agent number, and wakes by that number (WK-R3), so a
+/// master whose briefing predates it can still find it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let before = status_text(&fixture.connection, &project).unwrap();
+    assert!(!before.contains("Finished sub-agents"), "{before}");
+
+    let agent = named_sub(&fixture, "page-writer", "stopped");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let told = status_text(&fixture.connection, &project).unwrap();
+    assert!(
+        told.contains(&format!(
+            "Finished sub-agents you can wake with {}(agent, text), newest first:\n- {label}, Sub-agent {agent} (",
+            tool::WAKE_TOOL
+        )),
+        "{told}"
+    );
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::WAKE_TOOL,
+            json!({"agent": format!("Sub-agent {agent}"), "text": "Add the footer."}),
+        )],
+    );
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    let (said, refused) = text(&answers[0]);
+    assert!(
+        !refused && said.starts_with(&format!("Waking {label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, agent).len(), 1);
+}
