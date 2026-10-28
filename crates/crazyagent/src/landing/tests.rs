@@ -1239,6 +1239,10 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
     assert!(ran.is_empty(), "configured commands ran: {ran:?}");
 }
 
+/// A dirty submodule in the agent's worktree does not make the worktree look unfinished, and
+/// engine git never enters it to run its configured clean filter. The filter is configured
+/// only after the setup's own git steps, so a racily clean file that the setup's git would
+/// re-hash through it cannot leave the marker before engine git runs.
 #[test]
 fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     let case = Case::new();
@@ -1259,15 +1263,6 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     write(&sub.join("inner.txt"), "inner\n");
     git_in(&case.home, &sub, &["add", "inner.txt"]);
     git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub start"]);
-
-    let marker = case.home.join("submodule-clean-filter-ran");
-    let filter = case.home.join("clean-filter.sh");
-    marker_script(&filter, &marker);
-    git_in(
-        &case.home,
-        &sub,
-        &["config", "filter.guard.clean", filter.to_str().unwrap()],
-    );
     write(&sub.join(".gitattributes"), "inner.txt filter=guard\n");
     git_in(&case.home, &sub, &["add", ".gitattributes"]);
     git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub filter"]);
@@ -1297,6 +1292,14 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     );
     let head = case.agent_head();
 
+    let marker = case.home.join("submodule-clean-filter-ran");
+    let filter = case.home.join("clean-filter.sh");
+    marker_script(&filter, &marker);
+    git_in(
+        &case.home,
+        &sub,
+        &["config", "filter.guard.clean", filter.to_str().unwrap()],
+    );
     write(&sub.join("inner.txt"), "changed\n");
     write(&sub.join("untracked.txt"), "new\n");
 
