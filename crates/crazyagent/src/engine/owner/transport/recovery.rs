@@ -125,9 +125,10 @@ pub struct BannerNotice {
 }
 
 /// One project's interrupted work: its runs and notices, oldest first, and how many open
-/// items did not fit. Runs holds every run whose resume is open or failed and the resumed
-/// runs since the oldest of those; it is empty when every run has resumed. Nothing in
-/// either list means the owner has nothing to resolve and no banner shows.
+/// items did not fit. Runs holds the runs still waiting on their resume or the owner's
+/// retry, however old, and the settled runs, resumed or given up, since the oldest of those;
+/// it is empty when no run waits. Nothing in either list means the owner has nothing to
+/// resolve and no banner shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryBanner {
@@ -322,23 +323,22 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     }
 }
 
-/// Reads one project's banner: its runs whose resume is open or failed, the resumed runs
-/// since the oldest of those, and the ledger notices about its agents or change sets, each
-/// at most its maximum, with the open items left out counted. Inputs: the engine root and
-/// the project. Output: the banner, empty when nothing waits for the owner.
+/// Reads one project's banner: its oldest runs still waiting on their resume or the
+/// owner's retry, the settled runs since the oldest of those, and the ledger notices about
+/// its agents or change sets, each at most its maximum, with the waiting runs and notices
+/// left out counted. Inputs: the engine root and the project. Output: the banner, empty when
+/// nothing waits for the owner.
 fn banner(root: &Path, project: &ProjectId) -> Result<RecoveryBanner, EngineError> {
-    let all = recovery::list(root, project)?;
-    let open: Vec<&Interrupted> = all
-        .iter()
-        .filter(|run| run.state != RunState::Resumed)
-        .collect();
-    let mut more = open.len().saturating_sub(BANNER_RUNS_MAX);
-    let mut chosen: Vec<&Interrupted> = open.into_iter().take(BANNER_RUNS_MAX).collect();
+    let listed = recovery::list(root, project)?;
+    let mut more = listed.more + listed.waiting.len().saturating_sub(BANNER_RUNS_MAX);
+    let mut chosen: Vec<&Interrupted> = listed.waiting.iter().take(BANNER_RUNS_MAX).collect();
     if let Some(oldest) = chosen.first().map(|run| run.id) {
         let room = BANNER_RUNS_MAX - chosen.len();
         chosen.extend(
-            all.iter()
-                .filter(|run| run.state == RunState::Resumed && run.id > oldest)
+            listed
+                .settled
+                .iter()
+                .filter(|run| run.id > oldest)
                 .rev()
                 .take(room),
         );

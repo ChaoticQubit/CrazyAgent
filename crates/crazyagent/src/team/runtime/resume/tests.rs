@@ -563,7 +563,10 @@ done
         }
 
         fn runs(&self) -> Vec<Interrupted> {
-            recovery::list(&self.base, &self.project()).unwrap()
+            let listed = recovery::list(&self.base, &self.project()).unwrap();
+            let mut runs = [listed.waiting, listed.settled].concat();
+            runs.sort_by_key(|run| run.id);
+            runs
         }
 
         fn task(&self, task: i64) -> (String, Option<i64>, i64) {

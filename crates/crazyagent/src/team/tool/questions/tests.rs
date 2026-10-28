@@ -512,6 +512,30 @@ fn a_conversation_master_records_only_from_its_turns_owner_message_and_before_ne
 }
 
 #[test]
+fn a_conversation_masters_turn_message_answers_only_one_of_its_questions() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let session = SessionId::new("session-1").unwrap();
+    let asker = Asker::Session(session.clone());
+    let first = asked(&case, &asker, "Ship on Friday?");
+    let second = asked(&case, &asker, "Rename the app?");
+    for question in [first, second] {
+        called(
+            &drop,
+            RECORD_TOOL,
+            json!({"question": question, "version": 0, "owner_turn": 5}),
+        );
+    }
+    assert_eq!(
+        apply_session_calls(&case.db, &case.project, &session, Some((5, "Yes.")), &drop),
+        [format!(
+            "Your record of question {second} was not taken: message 5 already answered another question."
+        )]
+    );
+    assert_eq!(open_ids(&case), [second]);
+}
+
+#[test]
 fn the_open_line_names_only_the_askers_open_questions_and_the_message_to_record_from() {
     let case = Case::new();
     let master = Asker::Master(41);

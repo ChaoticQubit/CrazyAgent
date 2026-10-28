@@ -455,6 +455,150 @@ fn a_banner_beyond_its_bounds_lists_the_oldest_notices_and_counts_the_rest() {
     assert!(frame.len() <= crate::protocol::FRAME_BYTES_MAX + 4);
 }
 
+/// Settles one interrupted run as its resume does: resuming, then resumed. Inputs: the
+/// engine database and the run.
+fn resume(db: &Connection, run: i64) {
+    assert!(recovery::mark(db, run, RunState::Interrupted, RunState::Resuming, None).unwrap());
+    assert!(recovery::mark(db, run, RunState::Resuming, RunState::Resumed, None).unwrap());
+}
+
+/// Fails one run's resume with the reason the banner shows. Inputs: the engine database and
+/// the run.
+fn fail(db: &Connection, run: i64) {
+    assert!(
+        recovery::mark(
+            db,
+            run,
+            RunState::Interrupted,
+            RunState::Failed,
+            Some("The account is unavailable."),
+        )
+        .unwrap()
+    );
+}
+
+/// A failed run that still holds its task waits for the owner's retry however many newer
+/// runs resumed after it: more resumed runs than a project keeps neither push it out of the
+/// banner nor take its retry away, while an older run whose retried resume failed again and
+/// let its task go waits for nothing and is not listed ahead of it.
+#[test]
+fn an_old_failed_run_that_holds_its_task_stays_in_the_banner_behind_any_number_of_resumed_runs() {
+    let (_directory, root) = root();
+    let db = ledger::open(&root).unwrap();
+    crate::team::initialize(&db).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let gave_up = working(&db, PROJECT, "sub", "Tag the release");
+    let given_up = stop_and_scan(&db, &root)[&gave_up];
+    let failed = working(&db, PROJECT, "sub", "Write the tests");
+    let held = stop_and_scan(&db, &root)[&failed];
+    assert!(given_up < held);
+    fail(&db, given_up);
+    retry(&root, gave_up).unwrap();
+    fail(&db, given_up);
+    let task: i64 = db
+        .query_row(
+            "SELECT task FROM recovery_runs WHERE id=?1",
+            [given_up],
+            |row| row.get(0),
+        )
+        .unwrap();
+    recovery::release(&db, recovery::HeldItem::Task(task)).unwrap();
+    fail(&db, held);
+
+    let resumed: Vec<i64> = (0..=recovery::RUNS_PER_PROJECT_MAX)
+        .map(|index| {
+            let agent = working(&db, PROJECT, "sub", &format!("Fix bug {index}"));
+            resume(&db, stop_and_scan(&db, &root)[&agent]);
+            agent
+        })
+        .collect();
+    assert!(recovery::scan(&root).unwrap().is_empty());
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM recovery_runs WHERE project=?1 AND state='resumed'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept,
+        i64::try_from(recovery::RUNS_PER_PROJECT_MAX).unwrap(),
+        "the project keeps only its newest resumed runs"
+    );
+
+    let listed = recovery::list(&root, &project).unwrap();
+    assert_eq!(
+        listed.waiting.iter().map(|run| run.id).collect::<Vec<_>>(),
+        [held]
+    );
+    assert_eq!(listed.more, 0);
+    assert!(listed.waiting[0].last_turn.task.is_some());
+    let banner = banner_of(&root, PROJECT);
+    let newest = &resumed[resumed.len() - (BANNER_RUNS_MAX - 1)..];
+    assert_eq!(
+        states(&banner),
+        std::iter::once((
+            failed,
+            RunShown::Failed,
+            Some("The account is unavailable.")
+        ))
+        .chain(newest.iter().map(|&agent| (agent, RunShown::Resumed, None)))
+        .collect::<Vec<_>>(),
+        "the old failed run leads and the newest resumed runs fill the rest"
+    );
+    assert_eq!(banner.more, 0);
+
+    retry(&root, failed).unwrap();
+    assert_eq!(
+        states(&banner_of(&root, PROJECT))[0],
+        (failed, RunShown::Interrupted, None),
+        "its retry still reaches it"
+    );
+}
+
+/// More runs wait than one listing reads: the banner shows the oldest and counts every
+/// other waiting run, the ones the listing left out included.
+#[test]
+fn every_waiting_run_past_the_banner_is_counted_even_past_what_one_listing_reads() {
+    let (_directory, root) = root();
+    let db = ledger::open(&root).unwrap();
+    crate::team::initialize(&db).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let extra = 3;
+    let waiting = recovery::RUNS_PER_PROJECT_MAX + extra;
+    for index in 0..waiting {
+        working(&db, PROJECT, "sub", &format!("Task {index}"));
+    }
+    let runs = stop_and_scan(&db, &root);
+    assert_eq!(runs.len(), waiting);
+    let mut by_age: Vec<(i64, i64)> = runs.iter().map(|(&agent, &run)| (run, agent)).collect();
+    by_age.sort_unstable();
+
+    let listed = recovery::list(&root, &project).unwrap();
+    assert_eq!(
+        listed.waiting.iter().map(|run| run.id).collect::<Vec<_>>(),
+        by_age[..recovery::RUNS_PER_PROJECT_MAX]
+            .iter()
+            .map(|&(run, _)| run)
+            .collect::<Vec<_>>(),
+        "a listing reads the oldest waiting runs"
+    );
+    assert_eq!(listed.more, extra);
+    assert!(listed.settled.is_empty());
+    let banner = banner_of(&root, PROJECT);
+    assert_eq!(
+        states(&banner),
+        by_age[..BANNER_RUNS_MAX]
+            .iter()
+            .map(|&(_, agent)| (agent, RunShown::Interrupted, None))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        banner.more,
+        u32::try_from(waiting - BANNER_RUNS_MAX).unwrap()
+    );
+}
+
 #[test]
 fn malformed_or_oversized_recovery_requests_are_refused_before_the_ledger() {
     for body in [

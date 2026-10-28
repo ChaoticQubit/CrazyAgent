@@ -735,6 +735,50 @@ fn record_from_chat_takes_only_a_newer_owner_message_for_the_masters_own_questio
 }
 
 #[test]
+fn one_owner_turn_answers_only_one_of_the_masters_questions() {
+    let case = Case::new();
+    let first = case.ask(&MASTER, "Ship on Friday?");
+    let second = case.ask(&MASTER, "Rename the app?");
+    let turn = case.said(PROJECT, "Yes.");
+
+    assert_eq!(
+        record_from_chat(&case.db, &case.project, 41, first, 0, turn).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        code(record_from_chat(
+            &case.db,
+            &case.project,
+            41,
+            second,
+            0,
+            turn
+        )),
+        "questions_owner_turn_invalid"
+    );
+    let waiting = case.get(second);
+    assert_eq!(
+        (waiting.status, waiting.answer),
+        (QuestionStatus::Pending, None)
+    );
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM team_owner_turns WHERE project='alpha'"),
+        0
+    );
+
+    let next = case.said(PROJECT, "No, keep the name.");
+    assert_eq!(
+        record_from_chat(&case.db, &case.project, 41, second, 0, next).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        case.get(second).answer.as_deref(),
+        Some("No, keep the name.")
+    );
+    assert_eq!(case.get(first).answer.as_deref(), Some("Yes."));
+}
+
+#[test]
 fn a_settle_notice_quoting_a_masters_own_question_is_never_an_owner_turn() {
     let case = Case::new();
     let waiting = case.ask(&MASTER, "Ship on Friday?");

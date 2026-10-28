@@ -472,9 +472,11 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
 /// message and may record only a question it asked itself; the answer is that message's
 /// text, never the master's own words, and the message must be an owner turn the engine
 /// recorded when the owner typed it in the question's project after the question was
-/// asked, never a settle notice or a framed IDE comment. Nothing is delivered back, since
-/// the master read it. Inputs: the engine connection, the master's project, its team agent
-/// id, the question id, the version the master read and the owner message id. Output:
+/// asked, never a settle notice or a framed IDE comment. Each owner turn answers at most one
+/// question: recording it uses the turn up, so one "Yes" never settles a list of questions
+/// the master picked. Nothing is delivered back, since the master read it. Inputs: the
+/// engine connection, the master's project, its team agent id, the question id, the
+/// version the master read and the owner message id. Output:
 /// Settled, Stale, or `questions_not_found` (also for a question it did not ask),
 /// `questions_owner_turn_invalid`, `questions_answer_invalid` or `questions_text_invalid`.
 pub fn record_from_chat(
@@ -508,6 +510,15 @@ pub fn record_from_chat(
     let text = answer_text(&turn)?;
     let how = How::Answer(&text, AnsweredBy::Chat);
     let settled = settle(&tx, question, how, &Writer::Agent(agent), version)?;
+    if settled == Settlement::Settled {
+        let used = tx
+            .execute(
+                "DELETE FROM team_owner_turns WHERE message=?1 AND project=?2",
+                params![owner_turn, project.as_str()],
+            )
+            .map_err(unavailable)?;
+        assert_eq!(used, 1);
+    }
     finish(db, tx, project, settled)
 }
 
@@ -771,6 +782,19 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
             Ok((ProjectId::new(project).map_err(unavailable)?, count))
         })
         .collect()
+}
+
+/// Forgets every question of a removed project inside the removal's transaction, so the
+/// badge, notifications and pages never count it again. Inputs: the transaction and the
+/// project. Output: Ok, or `questions_unavailable`.
+pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    ensure(tx)?;
+    tx.execute(
+        "DELETE FROM owner_questions WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(unavailable)?;
+    Ok(())
 }
 
 /// Logs one checked question inside the caller's transaction and notifies the owner.

@@ -2309,7 +2309,7 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 18] = [
+const REMOVED_WITH_PROJECT: [&str; 19] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2325,6 +2325,7 @@ const REMOVED_WITH_PROJECT: [&str; 18] = [
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
+    "team_owner_turns",
     "team_agent_conversations",
     "agent_instruction_settings",
     "project_setups",
@@ -2436,6 +2437,7 @@ fn remove(
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
+    crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
