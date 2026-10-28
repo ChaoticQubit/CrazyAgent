@@ -44,6 +44,9 @@ pub const LIMIT_CHOICES_SECS: [u32; 5] = [1800, 3600, 7200, 14_400, 28_800];
 /// How long an idle sub-agent may wait for work before it stops, in seconds: 2 min, 10 min
 /// and 1 h. Never stopping is the other choice, stored as zero.
 pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
+/// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
+/// stopped while that work still runs, and no owner setting changes it.
+pub const MASTER_IDLE_STOP_SECS: u32 = 900;
 /// The idle stop a team starts with: 10 minutes.
 pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
 

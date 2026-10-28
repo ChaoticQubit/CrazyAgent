@@ -871,14 +871,18 @@ impl TeamView {
             ),
         };
         self.changing = Some(match which {
-            Limit::Idle => idle.map_or_else(
-                || "Idle sub-agents now keep running until the team stops.".to_owned(),
-                |secs| {
-                    format!(
-                        "An idle sub-agent now stops after {}.",
-                        crate::team::span_words(secs.into())
-                    )
-                },
+            Limit::Idle => format!(
+                "{} An idle master stops {} after its work is done.",
+                idle.map_or_else(
+                    || "Idle sub-agents now keep running until the team stops.".to_owned(),
+                    |secs| {
+                        format!(
+                            "An idle sub-agent now stops after {}.",
+                            crate::team::span_words(secs.into())
+                        )
+                    },
+                ),
+                crate::team::span_words(crate::team::MASTER_IDLE_STOP_SECS.into())
             ),
             Limit::Task | Limit::Session => format!(
                 "Each task may now run {}, each agent session {}.",

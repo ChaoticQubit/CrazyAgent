@@ -1428,7 +1428,9 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
     );
     assert_eq!(
         view.notice,
-        Some(Notice::plain("An idle sub-agent now stops after 1 h."))
+        Some(Notice::plain(
+            "An idle sub-agent now stops after 1 h. An idle master stops 15 min after its work is done."
+        ))
     );
     let mut idle = team();
     idle.idle_stop_secs = Some(3600);

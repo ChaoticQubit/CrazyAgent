@@ -92,7 +92,7 @@ impl Default for TeamLimits {
         Self {
             output_bytes: 8 * 1024 * 1024,
             attempts_max: 2,
-            master_idle_stop: Duration::from_secs(15 * 60),
+            master_idle_stop: Duration::from_secs(super::MASTER_IDLE_STOP_SECS.into()),
             rate_limit_pause: Duration::from_secs(10 * 60),
             stop_grace: Duration::from_secs(2),
         }

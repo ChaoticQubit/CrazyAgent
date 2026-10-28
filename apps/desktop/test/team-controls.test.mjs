@@ -97,3 +97,8 @@ test("a team view the engine shortened to fit says older history is hidden", () 
   const partial = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ partial: true }), reload() {} }));
   assert.match(partial, /<p class="pj-note" role="status">Older team history is hidden so the team fits in one view\. Queued and running work stays listed\.<\/p>/);
 });
+
+test("the idle stop says when an idle master stops, which no setting changes", () => {
+  const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
+});

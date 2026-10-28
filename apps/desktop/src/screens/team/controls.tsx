@@ -10,6 +10,7 @@ import { displayText } from "../conversation";
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
 export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
+export const MASTER_IDLE_STOP_SECS = 900;
 const ANY_HARNESS = "";
 const NO_LIMIT = "off";
 const encoder = new TextEncoder();
@@ -143,7 +144,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
         helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
       <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
         onValue={(value) => void limit("idle", value)}
-        helper="Off keeps an idle sub-agent running until the team stops. The master is never stopped while its work is still going." />
+        helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
     </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
