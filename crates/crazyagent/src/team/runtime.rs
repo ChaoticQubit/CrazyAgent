@@ -2694,7 +2694,13 @@ impl TeamRuntime {
             .join(format!("agent-{id}"));
         let mut made = NewClone(None);
         match (adopt, layout) {
-            (true, _) => {}
+            (true, Layout::Linked) => {}
+            (true, Layout::Clone) => crate::landing::ready_agent_clone(&worktree).map_err(|e| {
+                with_code(
+                    "the agent's own copy of the project could not be readied",
+                    Some(&e.0),
+                )
+            })?,
             (false, Layout::Linked) => {
                 add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
                     with_code("the agent worktree could not be added", Some(run_code(&e)))
