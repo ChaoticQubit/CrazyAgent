@@ -131,12 +131,14 @@ pub struct AgentProject {
 }
 
 /// What every agent of one project receives at a launch: the owner's app and project
-/// instructions with the instruction files the engine read after them, and the engine's
-/// record of each instruction file it found.
+/// instructions with the instruction files the engine read after them, the engine's record
+/// of each instruction file it found, and how many bytes at the end of the text are the
+/// instruction files section.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Given {
     pub text: String,
     pub files: Vec<crate::instruction_files::Record>,
+    pub section_bytes: usize,
 }
 
 /// Checks owner text before it is saved: at most `TEXT_BYTES_MAX` bytes with no NUL.
@@ -215,6 +217,7 @@ pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
     Ok(Given {
         text,
         files: delivery.records,
+        section_bytes: delivery.text.len(),
     })
 }
 

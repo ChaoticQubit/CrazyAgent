@@ -24,6 +24,7 @@ fn given(text: &str) -> Given {
     Given {
         text: text.into(),
         files: Vec::new(),
+        section_bytes: 0,
     }
 }
 

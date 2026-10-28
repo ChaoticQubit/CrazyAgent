@@ -299,6 +299,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
         files: Vec::new(),
+        section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
     prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
