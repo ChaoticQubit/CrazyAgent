@@ -496,31 +496,15 @@ fn copy_tree(
 }
 
 /// Opens an absolute path one part at a time from `/`, never through a link at any part,
-/// so a folder swapped for a link after a check is never passed through. Inputs: the path
-/// and the flags for its last part. Output: the descriptor, or the error.
+/// so a folder swapped for a link after a check is never passed through
+/// ([`crate::platform::open_beneath`]). Inputs: the path and the flags for its last part.
+/// Output: the descriptor, or the error.
 #[cfg(unix)]
 fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
-    if !path.is_absolute() {
-        return Err(rustix::io::Errno::INVAL);
-    }
-    let mut names = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => names.push(name),
-            _ => return Err(rustix::io::Errno::INVAL),
-        }
-    }
-    let mut opened = rustix::fs::open("/", FOLDER, Mode::empty())?;
-    for (index, name) in names.iter().enumerate() {
-        let flags = if index + 1 == names.len() {
-            last
-        } else {
-            FOLDER
-        };
-        opened = rustix::fs::openat(&opened, *name, flags, Mode::empty())?;
-    }
-    Ok(opened)
+    let below = path
+        .strip_prefix("/")
+        .map_err(|_| rustix::io::Errno::INVAL)?;
+    crate::platform::open_beneath(Path::new("/"), below, last)
 }
 
 /// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any letter case,

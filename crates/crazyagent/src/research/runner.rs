@@ -826,7 +826,7 @@ impl ResearchRunner {
         drop(setup);
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
-        write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
+        write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
             let output = match harness {
                 ResearchHarness::Codex => tmp.join("report.md"),
@@ -915,7 +915,7 @@ impl ResearchRunner {
             ),
         ] {
             let Some(stream) = stream else { continue };
-            let log = create_private(&agent.join(name))?;
+            let log = create_private(&agent, &agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
@@ -1118,7 +1118,7 @@ impl ResearchRunner {
         let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true)) {
             assert!(last.len() as u64 <= counted);
-            write_private(output, last.as_bytes())?;
+            write_private(&self.state.join("agents"), output, last.as_bytes())?;
         }
         Ok(ending)
     }
@@ -1159,8 +1159,12 @@ impl ResearchRunner {
         root: &Path,
         output: &Path,
     ) -> Result<PathBuf, &'static str> {
-        let body = read_bounded(output, self.limits.report_bytes_max)
-            .map_err(|_| "Agent returned no report")?;
+        let body = read_bounded(
+            &self.state.join("agents"),
+            output,
+            self.limits.report_bytes_max,
+        )
+        .map_err(|_| "Agent returned no report")?;
         let body = body.trim();
         if body.is_empty() {
             return Err("Agent returned no report");
@@ -1288,7 +1292,7 @@ impl ResearchRunner {
         }
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
-        write_private(&agent.join("prompt.md"), run.prompt.as_bytes())?;
+        write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
         let mut command = sandbox.command(&profile, executable);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
@@ -1329,7 +1333,7 @@ impl ResearchRunner {
         ];
         for (stream, name) in streams {
             let Some(stream) = stream else { continue };
-            let log = create_private(&agent.join(name))?;
+            let log = create_private(&agent, &agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
@@ -1381,7 +1385,7 @@ impl ResearchRunner {
         if let Some(ending) = ending {
             return Ok(ending);
         }
-        let answer = read_bounded(&output, self.limits.report_bytes_max)
+        let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         Ok(if answer.is_empty() {
@@ -1680,22 +1684,34 @@ fn unavailable() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "research_runner_unavailable")
 }
 
-/// Creates a fresh 0600 file without following a link at `path`.
-/// Takes the path. Returns the new file, or the I/O error, also when it exists.
+/// Creates a fresh 0600 file below a folder the engine holds, following no link in any
+/// part below that folder, so an agent that swapped its temp folder for a link is refused
+/// rather than written through. Takes the folder and the path in it. Returns the new file,
+/// or the I/O error, also when it exists.
 #[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+fn create_private(base: &Path, path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    let below = path.strip_prefix(base).map_err(|_| invalid())?;
+    let name = below.file_name().ok_or_else(invalid)?;
+    let folder = crate::platform::open_beneath(
+        base,
+        below.parent().unwrap_or(Path::new("")),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+    )?;
+    let created = rustix::fs::openat(
+        &folder,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    Ok(File::from(created))
 }
 
 /// Refuses an owner-only research file where none can be made.
-/// Takes the path, unused. Returns `research_runner_unavailable`.
+/// Takes the folder and path, unused. Returns `research_runner_unavailable`.
 #[cfg(not(unix))]
-fn create_private(_path: &Path) -> io::Result<File> {
+fn create_private(_base: &Path, _path: &Path) -> io::Result<File> {
     Err(unavailable())
 }
 
@@ -1722,8 +1738,10 @@ fn open_append(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = create_private(path)?;
+/// Writes a fresh 0600 file below a folder the engine holds ([`create_private`]). Takes
+/// the folder, the path in it and the bytes. Returns Ok once synced, or the I/O error.
+fn write_private(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_private(base, path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -2352,7 +2370,7 @@ fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max:
         ResearchHarness::Codex => {
             rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
         }
-        ResearchHarness::ClaudeCode => read_bounded(output, max).is_ok_and(|text| {
+        ResearchHarness::ClaudeCode => read_bounded(agent, output, max).is_ok_and(|text| {
             text.lines()
                 .find(|line| !line.trim().is_empty())
                 .is_some_and(rate_limited)
@@ -2395,7 +2413,7 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     if harness != ResearchHarness::Codex {
         return GENERIC.to_owned();
     }
-    let Ok(text) = read_bounded(log, max) else {
+    let Some(Ok(text)) = log.parent().map(|agent| read_bounded(agent, log, max)) else {
         return GENERIC.to_owned();
     };
     let (mut turn, mut error) = (None, None);
@@ -2421,11 +2439,16 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
-/// Reads a report or brief an agent may have replaced, through one open that follows no
-/// link and never waits on a FIFO, keeping it only when the opened file is regular and
-/// within `max` bytes. Inputs: the path and the bound. Output: the text or the I/O error.
-fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    let file = crate::platform::open_plain(path)?;
+/// Reads a report or brief an agent may have replaced, opened from a folder the engine
+/// holds with no link followed in any part below it and no FIFO waited on, so an agent
+/// that swapped its temp folder for a link is refused; the file is kept only when regular
+/// and within `max` bytes. Inputs: the engine-held folder, the path in it and the bound.
+/// Output: the text or the I/O error.
+fn read_bounded(base: &Path, path: &Path, max: u64) -> io::Result<String> {
+    let below = path
+        .strip_prefix(base)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let file = crate::platform::open_plain_beneath(base, below)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > max {
         return Err(io::Error::other("report is not a bounded regular file"));
@@ -2437,7 +2460,7 @@ fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
 
 fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
     let context = crate::projects_home::state_folder(root).join("context");
-    let brief = match read_bounded(&context.join("brief.md"), BRIEF_BYTES_MAX) {
+    let brief = match read_bounded(&context, &context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
@@ -3217,10 +3240,13 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let report = folder.path().join("report.md");
         fs::write(&report, "Findings\n").unwrap();
-        assert_eq!(read_bounded(&report, 64).unwrap(), "Findings\n");
+        assert_eq!(
+            read_bounded(folder.path(), &report, 64).unwrap(),
+            "Findings\n"
+        );
         let link = folder.path().join("link.md");
         std::os::unix::fs::symlink(&report, &link).unwrap();
-        assert!(read_bounded(&link, 64).is_err());
+        assert!(read_bounded(folder.path(), &link, 64).is_err());
         let fifo = folder.path().join("fifo.md");
         let made = crate::spawn_gate::status(
             std::process::Command::new("/usr/bin/mkfifo")
@@ -3230,9 +3256,9 @@ mod tests {
         .unwrap();
         assert!(made.success());
         let (sent, read) = std::sync::mpsc::channel();
-        let reader = fifo.clone();
+        let (base, reader) = (folder.path().to_path_buf(), fifo.clone());
         std::thread::spawn(move || {
-            let _ = sent.send(read_bounded(&reader, 64).map_err(|error| error.to_string()));
+            let _ = sent.send(read_bounded(&base, &reader, 64).map_err(|error| error.to_string()));
         });
         let answer = read.recv_timeout(Duration::from_secs(5));
         if answer.is_err() {
@@ -3244,6 +3270,44 @@ mod tests {
         assert!(
             matches!(answer, Ok(Err(_))),
             "a FIFO at the report path made the research worker wait: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_temp_folder_swapped_for_a_link_is_neither_read_nor_written_through() {
+        let folder = tempfile::tempdir().unwrap();
+        let agents = folder.path().join("agents");
+        let agent = agents.join("job-1");
+        let tmp = agent.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let report = tmp.join("report.md");
+        fs::write(&report, "Own findings\n").unwrap();
+        assert_eq!(
+            read_bounded(&agents, &report, 64).unwrap(),
+            "Own findings\n"
+        );
+        let outside = folder.path().join("other-project");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("report.md"), "Another project's findings\n").unwrap();
+        fs::rename(&tmp, agent.join("home-tmp")).unwrap();
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        let read = read_bounded(&agents, &report, 64);
+        assert!(
+            read.is_err(),
+            "the report was read through the swapped folder: {read:?}"
+        );
+        fs::remove_file(outside.join("report.md")).unwrap();
+        let written = write_private(&agents, &report, b"Reply\n");
+        assert!(
+            written.is_err(),
+            "the reply was written through the swapped folder"
+        );
+        assert!(!outside.join("report.md").exists());
+        assert!(read_bounded(&agent, &outside.join("report.md"), 64).is_err());
+        write_private(&agents, &agent.join("prompt.md"), b"Plan\n").unwrap();
+        assert_eq!(
+            read_bounded(&agent, &agent.join("prompt.md"), 64).unwrap(),
+            "Plan\n"
         );
     }
 
