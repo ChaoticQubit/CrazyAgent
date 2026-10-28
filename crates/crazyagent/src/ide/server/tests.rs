@@ -668,7 +668,7 @@ async fn an_open_waits_for_an_extension_preparation_still_running_on_its_folder(
     });
     held.recv().unwrap();
     let build = cached_build();
-    let open = servers.open(&project, checkout.path(), &build);
+    let open = servers.open(&project, checkout.path(), &build, false);
     tokio::pin!(open);
     let deadline = Instant::now() + PREPARATION_HELD;
     while Instant::now() < deadline {
