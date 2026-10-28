@@ -1386,7 +1386,10 @@ mod tests {
             "the agent card shows what the master got"
         );
         assert!(card.text.contains("Shorten them on the Process page."));
-        assert_eq!(card.files, given.files);
+        assert_eq!(
+            crate::agent_home::given_files(&project.data, &home).unwrap(),
+            given.files
+        );
 
         let small = crate::agent_home::Given {
             text: "# Instructions from CrazyAgent\n\nShort.\n".into(),

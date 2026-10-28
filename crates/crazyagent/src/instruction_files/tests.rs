@@ -463,11 +463,7 @@ mod launch {
             after(&claude_arguments, "--append-system-prompt-file").expect("a prompt file"),
         )
         .unwrap();
-        let claude_record =
-            crate::agent_home::received(&claude, crate::agent_home::Harness::Claude)
-                .unwrap()
-                .unwrap()
-                .files;
+        let claude_record = crate::agent_home::given_files(&case.data, &claude).unwrap();
         drop(installed);
         let codex = agent_home(case, &format!("codex-{round}"));
         let (_, installed) =
@@ -477,10 +473,7 @@ mod launch {
             .unwrap()
             .parse()
             .unwrap();
-        let codex_record = crate::agent_home::received(&codex, crate::agent_home::Harness::Codex)
-            .unwrap()
-            .unwrap()
-            .files;
+        let codex_record = crate::agent_home::given_files(&case.data, &codex).unwrap();
         drop(installed);
         Launched {
             claude_arguments,
