@@ -25,6 +25,10 @@ enum Source {
 
 const CODEX_OVERRIDE: &str = "AGENTS.override.md";
 const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
+const HFS_IGNORED: [char; 16] = [
+    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
 
 const SOURCES: [(&str, Source); 6] = [
     ("CLAUDE.md", Source::Committed("CLAUDE.md")),
@@ -158,27 +162,53 @@ pub fn known_name(name: &str) -> bool {
     SOURCES.iter().any(|(known, _)| *known == name)
 }
 
-/// Tells whether a changed project path is an instruction file agents are given or read: a
-/// file named like a project source above or Codex's `AGENTS.override.md` in any folder, or
-/// any path through a `.claude` or `.codex` folder, names compared without ASCII case since
-/// macOS and Windows open `claude.md` as `CLAUDE.md`. Input: the path relative to the
-/// project. Output: true for one.
-pub fn instruction_file(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or_default();
-    let named = SOURCES
+/// Folds a file name the way case-insensitive volumes compare names, so a name such a
+/// volume opens as an instruction file matches it: ASCII letters to lower case, U+017F LONG S
+/// to `s` and U+212A KELVIN SIGN to `k` as APFS folds them (probed), U+0131 DOTLESS I to `i` as
+/// the NTFS upcase table maps it to `I`, and the code points HFS+ ignores in names (git's
+/// `core.protectHFS` list) left out. Input: the name or path. Output: the folded text.
+fn folded(name: &str) -> String {
+    name.chars()
+        .filter(|c| !HFS_IGNORED.contains(c))
+        .map(|c| match c {
+            '\u{17F}' => 's',
+            '\u{212A}' => 'k',
+            '\u{131}' => 'i',
+            other => other.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+/// Tells whether a file name is one an instruction file is read under in any folder: a
+/// project source name above or Codex's `AGENTS.override.md`, compared as `folded` compares
+/// names. Input: the name. Output: true for one.
+fn instruction_name(name: &str) -> bool {
+    let name = folded(name);
+    SOURCES
         .iter()
         .filter_map(|(_, source)| match source {
             Source::Committed(file) | Source::Checkout(file) => file.rsplit('/').next(),
             Source::Home(_) => None,
         })
         .chain([CODEX_OVERRIDE])
-        .any(|known| known.eq_ignore_ascii_case(name));
-    named
-        || path.split('/').any(|part| {
-            HARNESS_FOLDERS
-                .iter()
-                .any(|folder| folder.eq_ignore_ascii_case(part))
-        })
+        .any(|known| folded(known) == name)
+}
+
+/// Tells whether a folder name is a harness folder, `.claude` or `.codex`, compared as
+/// `folded` compares names. Input: the name. Output: true for one.
+fn harness_folder(name: &str) -> bool {
+    let name = folded(name);
+    HARNESS_FOLDERS.iter().any(|folder| *folder == name)
+}
+
+/// Tells whether a changed project path is an instruction file agents are given or read: a
+/// file named like a project source above or Codex's `AGENTS.override.md` in any folder, or
+/// any path through a `.claude` or `.codex` folder, names compared as case-insensitive
+/// volumes compare them, since macOS and Windows open `claude.md` or a long-s `AGENTS.md`
+/// as the instruction file. Input: the path relative to the project. Output: true for one.
+pub fn instruction_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    instruction_name(name) || path.split('/').any(harness_folder)
 }
 
 /// Creates the settings table. Input: a connection to `engine.db`. Output: unit.
