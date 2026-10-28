@@ -276,7 +276,7 @@ impl OwnerClient {
                     project,
                     offset,
                 },
-                None,
+                Vec::new(),
                 self.timeout,
             )
             .await?
@@ -348,7 +348,7 @@ impl OwnerClient {
         match self
             .plugins_exchange(
                 Action::ImportSkill { folder, replace },
-                None,
+                Vec::new(),
                 self.timeout.max(IMPORT_TIMEOUT),
             )
             .await?
