@@ -418,8 +418,7 @@ pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineErr
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
 /// not one store-relative folder name.
 pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
-    if project.is_empty() || project.len() > 128 || project.contains('/') || project.contains("..")
-    {
+    if !crate::protocol::single_component(project) {
         return Err(error("plugin_skill_folder_invalid"));
     }
     match std::fs::remove_dir_all(
