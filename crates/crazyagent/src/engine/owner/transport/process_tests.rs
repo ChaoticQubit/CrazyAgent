@@ -232,6 +232,45 @@ fn a_mismatched_or_oversized_request_is_refused() {
     );
 }
 
+#[test]
+fn saves_at_once_each_read_back_the_settings_they_stored() {
+    use crate::instruction_files::Choice;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+        .into_iter()
+        .flat_map(|files| {
+            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        })
+        .collect();
+    assert_eq!(options.len(), 6);
+    let start = std::sync::Barrier::new(options.len());
+    std::thread::scope(|scope| {
+        let saves: Vec<_> = options
+            .iter()
+            .map(|&settings| {
+                let (root, project, start) = (&root, &project, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        assert_eq!(
+                            instruction_settings(root, project, Some(settings)),
+                            Ok(settings)
+                        );
+                    }
+                })
+            })
+            .collect();
+        for save in saves {
+            save.join()
+                .expect("every save reads back what it stored, whatever saves beside it");
+        }
+    });
+    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+}
+
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();

@@ -674,6 +674,8 @@ fn agent_instructions(
 }
 
 /// Reads one set-up project's agent instruction settings, or stores new ones whole first.
+/// The setup check, the save and the read back run in one transaction, taken for writing
+/// up front on a save, so no other save or project removal lands between them.
 /// Inputs: the engine root, the project and the settings to store, none to only read.
 /// Output: the settings as stored, `process_project_unknown` for a project with no setup,
 /// or a plain code.
@@ -683,7 +685,7 @@ fn instruction_settings(
     save: Option<InstructionSettings>,
 ) -> Result<InstructionSettings, EngineError> {
     let unavailable = |_| failure("instruction_settings_unavailable");
-    let connection = match save {
+    let mut connection = match save {
         None => read_only(root)?,
         Some(_) => {
             let connection = rusqlite::Connection::open_with_flags(
@@ -699,7 +701,14 @@ fn instruction_settings(
             connection
         }
     };
-    let known: bool = connection
+    let behavior = match save {
+        None => rusqlite::TransactionBehavior::Deferred,
+        Some(_) => rusqlite::TransactionBehavior::Immediate,
+    };
+    let tx = connection
+        .transaction_with_behavior(behavior)
+        .map_err(unavailable)?;
+    let known: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM project_setups WHERE project=?1)",
             [project.as_str()],
@@ -710,10 +719,11 @@ fn instruction_settings(
         return Err(failure("process_project_unknown"));
     }
     if let Some(settings) = save {
-        crate::instruction_files::save(&connection, project, settings).map_err(unavailable)?;
+        crate::instruction_files::save(&tx, project, settings).map_err(unavailable)?;
     }
-    let stored = crate::instruction_files::load(&connection, project).map_err(failure)?;
+    let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
     assert!(save.is_none_or(|saved| saved == stored));
+    tx.commit().map_err(unavailable)?;
     Ok(stored)
 }
 
