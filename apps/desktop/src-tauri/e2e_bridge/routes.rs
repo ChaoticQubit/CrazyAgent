@@ -2064,6 +2064,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.cancel_native_auth(&ticket).await }.await;
             routed(result)
         }
+        "desktop_clear_native_auth" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.clear_native_auth().await }.await;
+            routed(result)
+        }
         "desktop_logout_native_auth" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
