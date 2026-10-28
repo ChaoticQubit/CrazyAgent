@@ -3461,3 +3461,66 @@ fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project()
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/crazyagent"), "");
 }
+
+#[test]
+fn files_an_instruction_file_imports_or_links_to_are_marked() {
+    let case = Case::new();
+    let fed = [
+        "docs/conventions.md",
+        "style/guide.md",
+        "rules/extra.md",
+        "docs/agents-target.md",
+        "docs/other.md",
+        "config/codex/config.toml",
+    ];
+    case.edit(
+        "CLAUDE.md",
+        "Read @docs/conventions.md and @./style/Guide.md, then the rest.\nNot these: @~/private.md @/etc/hosts @../outside.md\n",
+    );
+    case.edit(".claude/CLAUDE.md", "Also @../rules/extra.md\n");
+    for path in fed {
+        case.edit(path, "Old.\n");
+    }
+    std::os::unix::fs::symlink(
+        "docs/agents-target.md",
+        case.workspace.worktree.join("AGENTS.md"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("config/codex", case.workspace.worktree.join(".codex")).unwrap();
+    case.agent_commit("Instructions that pull in other files");
+    for path in fed {
+        case.edit(path, "New.\n");
+    }
+    case.edit(
+        "CLAUDE.md",
+        "Read @docs/conventions.md and @./style/Guide.md, then the rest.\nNow also @docs/fresh.md\n",
+    );
+    case.edit("docs/fresh.md", "Fresh.\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marked: Vec<(&str, bool)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.marks.contains(&FileMark::Instructions),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            ("CLAUDE.md", true),
+            ("config/codex/config.toml", true),
+            ("docs/agents-target.md", true),
+            ("docs/conventions.md", true),
+            ("docs/fresh.md", true),
+            ("docs/other.md", false),
+            ("rules/extra.md", true),
+            ("style/guide.md", true),
+        ]
+    );
+}

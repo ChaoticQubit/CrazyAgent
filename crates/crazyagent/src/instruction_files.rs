@@ -8,6 +8,7 @@ pub const FILE_BYTES_MAX: usize = 32 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_MAX: usize = SOURCES.len();
 const NAME_BYTES_MAX: usize = 32;
+const IMPORTS_MAX: usize = 64;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
 pub const SECTION_BYTES_MAX: usize =
@@ -182,7 +183,7 @@ fn folded(name: &str) -> String {
 /// Tells whether a file name is one an instruction file is read under in any folder: a
 /// project source name above or Codex's `AGENTS.override.md`, compared as `folded` compares
 /// names. Input: the name. Output: true for one.
-fn instruction_name(name: &str) -> bool {
+pub(crate) fn instruction_name(name: &str) -> bool {
     let name = folded(name);
     SOURCES
         .iter()
@@ -196,7 +197,7 @@ fn instruction_name(name: &str) -> bool {
 
 /// Tells whether a folder name is a harness folder, `.claude` or `.codex`, compared as
 /// `folded` compares names. Input: the name. Output: true for one.
-fn harness_folder(name: &str) -> bool {
+pub(crate) fn harness_folder(name: &str) -> bool {
     let name = folded(name);
     HARNESS_FOLDERS.iter().any(|folder| *folder == name)
 }
@@ -209,6 +210,66 @@ fn harness_folder(name: &str) -> bool {
 pub fn instruction_file(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or_default();
     instruction_name(name) || path.split('/').any(harness_folder)
+}
+
+/// Resolves a link or import target written in the instruction file at `path` to a path in
+/// the project, from the file's folder. Inputs: the file's path in the project and the
+/// target. Output: the path, or None for an empty, absolute or home target or one that
+/// leaves the project.
+pub(crate) fn resolved(path: &str, target: &str) -> Option<String> {
+    if target.is_empty() || target.starts_with('/') || target.starts_with('~') {
+        return None;
+    }
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// The project paths one instruction file imports into what agents are told, as Claude Code
+/// reads imports: each word that starts with `@`, with and without trailing punctuation,
+/// resolved from the file's folder, at most `IMPORTS_MAX`. Inputs: the file's path in the
+/// project and its text. Output: the paths.
+pub(crate) fn imports(path: &str, text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let Some(target) = word.strip_prefix('@') else {
+            continue;
+        };
+        let trimmed = target.trim_end_matches(|c: char| ".,;:!?)]}'\"`".contains(c));
+        for candidate in [target, trimmed] {
+            if found.len() == IMPORTS_MAX {
+                return found;
+            }
+            if let Some(resolved) = resolved(path, candidate)
+                && !found.contains(&resolved)
+            {
+                found.push(resolved);
+            }
+        }
+    }
+    assert!(found.len() <= IMPORTS_MAX);
+    found
+}
+
+/// Tells whether a changed path is a file, or lies under a folder, whose text an
+/// instruction file feeds to agents, paths compared as case-insensitive volumes compare
+/// names. Inputs: the fed paths, each with whether it is a folder, and the changed path.
+/// Output: true when fed.
+pub(crate) fn fed(feeds: &[(String, bool)], path: &str) -> bool {
+    let path = folded(path);
+    feeds.iter().any(|(feed, folder)| {
+        let feed = folded(feed);
+        path == feed || (*folder && path.starts_with(&format!("{feed}/")))
+    })
 }
 
 /// Creates the settings table. Input: a connection to `engine.db`. Output: unit.
