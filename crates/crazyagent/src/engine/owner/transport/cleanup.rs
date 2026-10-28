@@ -27,6 +27,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "cleanup_unavailable",
     "cleanup_worktree_dirty",
     "cleanup_worktree_invalid",
+    "cleanup_worktree_unreadable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",

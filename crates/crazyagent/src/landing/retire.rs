@@ -15,7 +15,8 @@ fn unavailable(_: impl std::fmt::Display) -> EngineError {
 /// Says why an agent worktree cannot be removed now, as a plain code, checking the store
 /// before git: an open change set, a discarded one still restorable or work in flight, a
 /// worktree the repository does not record as its own, a HEAD that is not the commit the
-/// worktree's next change set would open above, or uncommitted or untracked files.
+/// worktree's next change set would open above, uncommitted or untracked files, or a
+/// worktree git cannot read, such as one a stale lock holds, which keeps only this agent.
 /// Inputs: the store, the three paths and the time now. Output: None when it can go.
 pub(super) fn blocker(
     db: &Connection,
@@ -49,6 +50,9 @@ pub(super) fn blocker(
         Err(refused) if refused.0 == "changes_workspace_invalid" => {
             return Ok(Some("cleanup_worktree_invalid"));
         }
+        Err(refused) if refused.0 == "changes_git_failed" => {
+            return Ok(Some("cleanup_worktree_unreadable"));
+        }
         opened => opened?,
     };
     let head = match agent.head() {
@@ -59,9 +63,12 @@ pub(super) fn blocker(
         Err(_) => None,
     };
     match (head, store::base_of(db, text)?) {
-        (Some(head), Some(base)) if head == base => {
-            Ok((!holds_only(&agent.repo, &head)?).then_some("cleanup_worktree_dirty"))
-        }
+        (Some(head), Some(base)) if head == base => match holds_only(&agent.repo, &head) {
+            Err(refused) if refused.0 == "changes_git_failed" => {
+                Ok(Some("cleanup_worktree_unreadable"))
+            }
+            held => Ok((!held?).then_some("cleanup_worktree_dirty")),
+        },
         _ => Ok(Some("cleanup_commits_unlanded")),
     }
 }
