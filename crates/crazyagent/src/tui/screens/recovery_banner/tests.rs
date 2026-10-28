@@ -51,7 +51,7 @@ fn shown(banner: RecoveryBanner) -> ProjectRecovery {
 
 fn text(recovery: &ProjectRecovery, width: usize) -> Vec<String> {
     recovery
-        .rows(width, &Look::plain())
+        .rows(width, &Look::plain(), false)
         .iter()
         .map(|row| row.text().trim_end().to_owned())
         .collect()
@@ -121,6 +121,37 @@ fn keys(recovery: &ProjectRecovery) -> String {
         .into_iter()
         .find(|line| line.starts_with("Ctrl-"))
         .expect("the banner shows its keys")
+}
+
+#[test]
+fn while_the_composer_holds_the_keys_the_key_line_says_tab_first() {
+    let recovery = shown(RecoveryBanner {
+        runs: vec![run(
+            3,
+            "Sub-agent 3",
+            RunShown::Failed,
+            Some("The account is unavailable."),
+        )],
+        notices: vec![notice(ActionKind::AgentSpawn, 7, NoticeShown::Unknown)],
+        more: 0,
+    });
+    let line = |composer: bool| {
+        recovery
+            .rows(120, &Look::plain(), composer)
+            .iter()
+            .map(|row| row.text().trim_end().to_owned())
+            .find(|line| line.contains("Ctrl-D"))
+            .expect("the banner shows its keys")
+    };
+    assert_eq!(
+        line(true),
+        "Tab first, then Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start   Ctrl-N Next item",
+        "in the composer Ctrl-R and Ctrl-D are the composer's until Tab"
+    );
+    assert_eq!(
+        line(false),
+        "Ctrl-R Retry Sub-agent 3   Ctrl-D Dismiss Ada's start   Ctrl-N Next item"
+    );
 }
 
 /// Answers the request in flight as done, then the read that follows with a banner.

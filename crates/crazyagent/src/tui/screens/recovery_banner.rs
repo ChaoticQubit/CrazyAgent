@@ -199,8 +199,10 @@ impl ProjectRecovery {
 
     /// The banner's rows: a heading, one line or two per group with items, what the owner
     /// can do and the result of the last choice; a problem line when the read failed; none
-    /// when nothing waits for the owner. Inputs: the width and the look. Output: the rows.
-    pub(in crate::tui) fn rows(&self, width: usize, look: &Look) -> Vec<Row> {
+    /// when nothing waits for the owner. While the Conversation composer holds the keys the
+    /// key line says Tab comes first. Inputs: the width, the look and whether the composer
+    /// holds the keys. Output: the rows.
+    pub(in crate::tui) fn rows(&self, width: usize, look: &Look, composer: bool) -> Vec<Row> {
         let Some(banner) = self.banner.as_ref().filter(|banner| open(banner)) else {
             return match &self.problem {
                 Some(problem) => vec![
@@ -296,7 +298,8 @@ impl ProjectRecovery {
             keys.push("Ctrl-N Next item".to_owned());
         }
         if !keys.is_empty() {
-            rows.push(Row::of(keys.join("   "), look.accent));
+            let lead = if composer { "Tab first, then " } else { "" };
+            rows.push(Row::of(format!("{lead}{}", keys.join("   ")), look.accent));
         }
         if let Some(note) = &self.note {
             rows.push(Row::of(note.clone(), look.muted));

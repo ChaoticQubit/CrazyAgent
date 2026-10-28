@@ -1918,3 +1918,59 @@ fn ctrl_d_while_typing_in_the_conversation_never_dismisses_a_recovery_notice() {
         "out of the composer, Ctrl-D dismisses the notice"
     );
 }
+
+#[test]
+fn the_recovery_banner_on_the_conversation_tab_says_tab_first_while_the_composer_has_the_keys() {
+    use crate::engine::owner::{BannerNotice, NoticeShown, RecoveryBanner};
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Recovery(query) = request {
+            read.push(*query);
+        }
+    }
+    assert_eq!(read, [RecoveryQuery::Read { project: notes }]);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: Vec::new(),
+                notices: vec![BannerNotice {
+                    action_kind: crate::ledger::ActionKind::AgentSpawn,
+                    id: 7,
+                    agent: Some(2),
+                    label: Some("Ada".into()),
+                    change_set: None,
+                    shown: NoticeShown::Unknown,
+                    started_ms: 1_800_000_000_000,
+                }],
+                more: 0,
+            })),
+        },
+    )))));
+
+    let typing = render(&mut shell, 80, 24);
+    assert!(
+        typing.contains("Tab first, then Ctrl-D Dismiss Ada's start"),
+        "the composer has Ctrl-D, so the banner says Tab first:\n{typing}"
+    );
+
+    shell.key(Key::Tab);
+    let out = render(&mut shell, 80, 24);
+    assert!(
+        out.contains("Ctrl-D Dismiss Ada's start") && !out.contains("Tab first"),
+        "out of the composer the key works as shown:\n{out}"
+    );
+}
