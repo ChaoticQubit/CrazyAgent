@@ -1595,7 +1595,10 @@ fn validate_registration(
         return Err(error("master_configured_receipt_conflict"));
     }
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
-    if record.database_identity != database_identity(&metadata)? {
+    if !crate::file_identity::same_files(
+        &[record.database_identity],
+        &[database_identity(&metadata)?],
+    ) {
         return Err(error("master_configured_database_changed"));
     }
     let config = crate::config::resolve_config(&record.global_source, &record.project_source)
