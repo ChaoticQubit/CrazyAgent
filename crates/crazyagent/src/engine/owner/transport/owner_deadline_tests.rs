@@ -72,15 +72,13 @@ impl Owner {
     }
 
     /// Queues a real storage sweep of `SWEPT_FILES` files ahead of every later storage
-    /// job. Output: the swept folder and the sweep's answer.
+    /// job, in a removed skill folder of the private plugin store made as the engine makes
+    /// it. Output: the swept folder and the sweep's answer.
     fn occupy_storage(&self) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
-        let swept = self
-            .engine_root
-            .join(crate::storage::plugins::STORE)
-            .join("skills")
-            .join("global")
+        let swept = crate::storage::plugins::store_folder(&self.engine_root, &["skills", "global"])
+            .unwrap()
             .join(".removed-busy-storage");
-        std::fs::create_dir_all(&swept).unwrap();
+        std::fs::create_dir(&swept).unwrap();
         for index in 0..SWEPT_FILES {
             std::fs::write(swept.join(index.to_string()), b"x").unwrap();
         }
