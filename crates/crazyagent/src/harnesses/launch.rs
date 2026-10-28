@@ -330,12 +330,21 @@ fn claude_limit_line(line: &str) -> bool {
         })
 }
 
-/// A plain failure code from a launch adapter. It never carries secrets or raw output.
+/// A plain failure code from a launch adapter. It never carries secrets or raw output; a
+/// `launch_secret_in_command` refusal also names the MCP server and secret, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchError(pub String);
+pub struct LaunchError(pub String, pub Option<Box<SecretInCommand>>);
+
+/// The owner-given names of the MCP server and secret whose value a refused launch command
+/// would have held. Names are validated when saved, so they are plain text to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretInCommand {
+    pub server: String,
+    pub secret: String,
+}
 
 pub(super) fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on
@@ -361,7 +370,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
         .map_err(|_| failure("launch_secret_invalid"))?;
-    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0))?;
+    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0, None))?;
     let home = request.account.home().to_path_buf();
     request.account = AccountBinding::Url {
         home,

@@ -614,18 +614,22 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let (reason, attempts_max) = match error {
-                    RunError::Context(_) => (
-                        "Could not give the agent this project's context",
+                let (reason, attempts_max) = match &error {
+                    RunError::Context(problem) => (
+                        crate::launch_context::secret_in_command_text(problem).unwrap_or_else(
+                            || "Could not give the agent this project's context".to_owned(),
+                        ),
                         self.limits.attempts_max,
                     ),
-                    RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN, 1),
+                    RunError::Uncertain(_) => {
+                        (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1)
+                    }
                     _ => (
-                        "Could not prepare the research sandbox",
+                        "Could not prepare the research sandbox".to_owned(),
                         self.limits.attempts_max,
                     ),
                 };
-                jobs.fail(&job, reason, attempts_max)?;
+                jobs.fail(&job, &reason, attempts_max)?;
                 Err(error)
             }
         }
@@ -856,7 +860,11 @@ impl ResearchRunner {
             let mut session =
                 TerminalSession::start_installed(host.clone(), pane, request, installed, &context)
                     .map_err(|problem| {
-                        RunError::Invalid(format!("agent terminal: {}", problem.0))
+                        if problem.1.is_some() {
+                            RunError::Context(problem)
+                        } else {
+                            RunError::Invalid(format!("agent terminal: {}", problem.0))
+                        }
                     })?;
             let group = session.process_group();
             #[cfg(unix)]

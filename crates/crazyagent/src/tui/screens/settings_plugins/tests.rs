@@ -1265,3 +1265,10 @@ fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
     let shown = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
     assert!(shown.iter().all(|line| !line.contains("Agents don't get")));
 }
+
+#[test]
+fn a_secret_too_short_to_keep_out_of_launch_commands_says_why_it_was_refused() {
+    let reason = plugin_plain("server_secret_too_short");
+    assert!(reason.contains("at least 8 characters"), "{reason}");
+    assert!(reason.contains("launch command"), "{reason}");
+}

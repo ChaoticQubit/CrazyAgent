@@ -223,6 +223,10 @@ pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, Engin
 
 #[cfg(unix)]
 const SECRET_BYTES_MAX: usize = 8192;
+/// The shortest MCP secret value kept. A shorter value such as `1` or `true` is part of
+/// nearly every launch path or flag, so no launch could prove its command keeps it hidden.
+#[cfg(unix)]
+const SECRET_BYTES_MIN: usize = 8;
 
 fn valid_reference(reference: &str) -> bool {
     reference.strip_prefix("secret-").is_some_and(|hex| {
@@ -282,7 +286,8 @@ pub(crate) fn store_secret(
 
 /// Saves one MCP server secret as a private 0600 file named by its reference.
 /// Inputs: the engine root, a fresh reference and the secret bytes, which are zeroed after
-/// writing. Output: Ok, or a code with no file left behind.
+/// writing. Output: Ok, or a code with no file left behind; `server_secret_too_short` for a
+/// value under `SECRET_BYTES_MIN` bytes.
 #[cfg(unix)]
 pub(crate) fn store_secret(
     root: &Path,
@@ -292,6 +297,9 @@ pub(crate) fn store_secret(
     let stored = (|| {
         if !valid_reference(reference) || secret.is_empty() || secret.len() > SECRET_BYTES_MAX {
             return Err(error("server_secret_invalid"));
+        }
+        if secret.len() < SECRET_BYTES_MIN {
+            return Err(error("server_secret_too_short"));
         }
         let directory = secrets_directory(root)?;
         let mut file = std::fs::File::from(

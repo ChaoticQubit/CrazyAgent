@@ -209,7 +209,10 @@ fn line_above_the_limit_is_refused() {
     }
     assert_eq!(
         outcome,
-        Err(LaunchError("launch_transcript_line_too_long".to_owned()))
+        Err(LaunchError(
+            "launch_transcript_line_too_long".to_owned(),
+            None
+        ))
     );
 }
 
@@ -434,7 +437,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     ] {
         assert_eq!(
             TranscriptReader::resumed(source.clone(), &case.work(), &refused, None).err(),
-            Some(LaunchError("launch_resume_unavailable".to_owned())),
+            Some(LaunchError("launch_resume_unavailable".to_owned(), None)),
             "{}",
             refused.display()
         );
@@ -462,7 +465,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
             None
         )
         .err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     let middle = resumed.start();
     assert!(middle > 0);
@@ -473,7 +476,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     let past = std::fs::metadata(&file).unwrap().len() + 1;
     assert_eq!(
         TranscriptReader::resumed(claude, &case.work(), &file, Some(past)).err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
 }
 
@@ -569,7 +572,7 @@ fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
     assert_eq!(named, None);
     assert_eq!(
         resumed,
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     assert!(messages.is_empty());
 }

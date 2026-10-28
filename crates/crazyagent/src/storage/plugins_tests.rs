@@ -254,7 +254,7 @@ fn the_largest_server_the_checks_accept_fits_one_reply_frame() {
             "S{index:0>2}{}",
             "_".repeat(crate::plugins::SECRET_NAME_BYTES_MAX - 3)
         );
-        attach(&mut connection, root, &id, &name, b"value");
+        attach(&mut connection, root, &id, &name, b"dummy-limit-value");
     }
     let fits = |connection: &mut Connection| {
         let ResultValue::Server(view) =
@@ -303,4 +303,40 @@ fn the_largest_server_the_checks_accept_fits_one_reply_frame() {
     let view = fits(&mut connection);
     assert_eq!(view.tools, tools, "the check kept every tool it accepted");
     assert_eq!(view.secrets.len(), SECRETS_PER_SERVER_MAX);
+}
+
+#[test]
+fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
+    let (dir, _connection) = database();
+    let root = dir.path();
+    for value in [&b"1"[..], b"a", b"true", b"1234567"] {
+        let reference = new_secret_reference().unwrap();
+        assert_eq!(
+            store_secret(root, &reference, value.to_vec())
+                .err()
+                .map(|problem| problem.0)
+                .as_deref(),
+            Some("server_secret_too_short"),
+            "a {}-byte secret is a substring of launch paths and flags",
+            value.len()
+        );
+        assert_eq!(
+            read_secret(root, &reference)
+                .err()
+                .map(|problem| problem.0)
+                .as_deref(),
+            Some("server_secret_not_found"),
+            "a refused secret leaves no file"
+        );
+    }
+    assert_eq!(
+        crate::plugins::known_code("server_secret_too_short"),
+        Some("server_secret_too_short"),
+        "the desktop shows only codes it knows"
+    );
+    let reason = crate::plugins::plain_problem("server_secret_too_short").unwrap();
+    assert!(reason.contains("8 characters"), "{reason}");
+    let reference = new_secret_reference().unwrap();
+    store_secret(root, &reference, b"12345678".to_vec()).unwrap();
+    assert_eq!(read_secret(root, &reference).unwrap(), b"12345678");
 }
