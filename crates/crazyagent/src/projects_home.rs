@@ -380,7 +380,7 @@ pub fn state_folder(project: &Path) -> PathBuf {
 /// Checks a folder the owner asked to delete from the projects home.
 /// Input: the canonical home, the owner's path text and the folders of
 /// set-up projects. Output: the real folder, or a refusal unless it is a
-/// plain top-level folder of the home that no set-up project uses.
+/// plain top-level folder of the home that holds no set-up project's folder.
 pub fn plan_trash(
     home: &Path,
     path: &str,
@@ -400,7 +400,10 @@ pub fn plan_trash(
         .and_then(|name| name.to_str())
         .ok_or_else(|| refused("home_trash_outside"))?;
     folder_name(name).map_err(|_| refused("home_trash_outside"))?;
-    if registered.iter().any(|project| project.folder == real) {
+    if registered
+        .iter()
+        .any(|project| overlaps(&real, &project.folder))
+    {
         return Err(refused("home_trash_still_set_up"));
     }
     assert!(real.starts_with(home) && real != home);
