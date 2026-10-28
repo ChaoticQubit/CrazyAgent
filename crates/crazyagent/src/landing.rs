@@ -500,7 +500,8 @@ pub fn retire_blocker(
 /// Removes a finished agent's worktree with the host git, never forcing, after checking
 /// `retire_blocker` again while no landing step can run on its repository. Inputs: the
 /// store, the owner's checkout root, the worktree, its git folder and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// Output: Ok once removed, `cleanup_worktree_leftover` when git deleted its record of the
+/// worktree but left files in it, or the plain code that kept it.
 pub fn retire_worktree(
     db: &Connection,
     repository: &Path,

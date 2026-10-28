@@ -76,7 +76,8 @@ pub(super) fn blocker(
 /// Removes an agent worktree with git, never forcing it, while holding the repository so
 /// no landing step runs on it meanwhile, after checking `blocker` again under that hold,
 /// then forgets its base. Inputs: the store, the three paths and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// Output: Ok once removed, `cleanup_worktree_leftover` with the base forgotten when git
+/// deleted its record of the worktree but left files in it, or the plain code that kept it.
 pub(super) fn remove(
     db: &Connection,
     repository: &Path,
@@ -98,7 +99,16 @@ pub(super) fn remove(
         REMOVE_OUTPUT_BYTES_MAX,
     )?;
     if removed.code != 0 {
-        return Ok(Err("cleanup_worktree_dirty"));
+        let unregistered = matches!(
+            std::fs::symlink_metadata(git_dir),
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound
+        );
+        if !unregistered {
+            return Ok(Err("cleanup_worktree_dirty"));
+        }
+        db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
+            .map_err(unavailable)?;
+        return Ok(Err("cleanup_worktree_leftover"));
     }
     if std::fs::symlink_metadata(worktree).is_ok() || std::fs::symlink_metadata(git_dir).is_ok() {
         return Err(failure("changes_git_failed"));

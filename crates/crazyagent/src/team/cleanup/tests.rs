@@ -506,3 +506,41 @@ fn an_agent_git_cannot_read_keeps_its_own_code_and_leaves_the_others_removable()
     assert_eq!(case.remove(&[2, 3]), removed(&[2, 3]));
     assert!(case.listed().is_empty());
 }
+
+#[test]
+fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+    }
+    let outside = case.home.join("outside");
+    write(&outside.join("keep.txt"), b"the owner's\n");
+    let cache = case.worktree(1).join("target/cache/module");
+    write(&cache.join("lib.go"), b"package lib\n");
+    std::os::unix::fs::symlink(&outside, case.worktree(1).join("target/cache/link")).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert_eq!(case.listed(), [2, 1]);
+    assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+    let listing = git_in(&case.home, &case.repo, &["worktree", "list", "--porcelain"]);
+    for id in [1, 2] {
+        assert!(!case.worktree(id).exists() && !case.git_dir(id).exists());
+        assert!(!listing.contains(&format!("agent-{id}")));
+        assert!(!case.folder(id).exists() && !case.known(id));
+    }
+    let bases: i64 = case
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_bases WHERE worktree=?1",
+            [case.worktree(1).to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bases, 0);
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"the owner's\n"
+    );
+    assert!(case.retiring().is_empty());
+    assert!(case.listed().is_empty());
+}

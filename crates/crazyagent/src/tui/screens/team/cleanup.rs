@@ -68,6 +68,9 @@ pub(super) fn words(code: &str) -> &'static str {
         "cleanup_worktree_invalid" => {
             "An agent's working copy is not where the engine recorded it."
         }
+        "cleanup_worktree_leftover" => {
+            "Git removed an agent's worktree but left files the engine could not delete."
+        }
         "cleanup_worktree_unreadable" => {
             "Git could not read an agent's working copy, for example because of a leftover lock file."
         }

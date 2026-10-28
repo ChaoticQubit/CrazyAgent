@@ -383,10 +383,11 @@ pub fn remove(
 }
 
 /// Checks every claimed worktree again, then per agent checks its row once more, removes
-/// its worktree, its agent folder and sandbox profile and last its waiting record, in
-/// claim order. Inputs: the store, the team state folder, the project, the claims, the
-/// time now and the list each removed agent joins. Output: None once all are removed, or
-/// the plain code of the first one kept.
+/// its worktree, deleting what git left when it removed its record only part way, then its
+/// agent folder and sandbox profile and last its waiting record, in claim order. Inputs:
+/// the store, the team state folder, the project, the claims, the time now and the list
+/// each removed agent joins. Output: None once all are removed, or the plain code of the
+/// first one kept.
 fn retire_claimed(
     db: &Connection,
     team: &Path,
@@ -413,14 +414,16 @@ fn retire_claimed(
             if let Some(code) = agent_blocker(db, project, target.id)? {
                 return Ok(Some(code));
             }
-            if let Err(code) = crate::landing::retire_worktree(
+            match crate::landing::retire_worktree(
                 db,
                 &place.repository,
                 &place.worktree,
                 &place.git_dir,
                 now,
             )? {
-                return Ok(Some(code));
+                Ok(()) => {}
+                Err("cleanup_worktree_leftover") if remove_tree(&place.worktree).is_ok() => {}
+                Err(code) => return Ok(Some(code)),
             }
         }
         if remove_agent_files(team, target.id).is_err() {
@@ -517,18 +520,28 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
 /// read-only folders writable first, such as a module cache a toolchain left. Inputs: the
 /// team state folder and the agent. Output: Ok once both are gone.
 fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
-    let gone = |result: std::io::Result<()>| match result {
+    remove_tree(&agent_folder(team, id))?;
+    gone(std::fs::remove_file(profile(team, id)))
+}
+
+fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
+    match result {
         Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
             Err(EngineError("cleanup_folder_failed".into()))
         }
         _ => Ok(()),
-    };
-    let folder = agent_folder(team, id);
-    if std::fs::remove_dir_all(&folder).is_err() {
-        writable(&folder);
-        gone(std::fs::remove_dir_all(&folder))?;
     }
-    gone(std::fs::remove_file(profile(team, id)))
+}
+
+/// Deletes a folder and everything in it without following a link, making its read-only
+/// folders writable first when a plain delete stops on one. Input: the folder. Output: Ok
+/// once nothing has its name.
+fn remove_tree(folder: &Path) -> Result<(), EngineError> {
+    if std::fs::remove_dir_all(folder).is_err() {
+        writable(folder);
+        gone(std::fs::remove_dir_all(folder))?;
+    }
+    Ok(())
 }
 
 /// Lets the owner delete inside every real folder under `folder`, visiting at most
