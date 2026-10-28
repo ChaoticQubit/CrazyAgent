@@ -1025,3 +1025,63 @@ fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_parti
         "the record written last is counted, and the reading is partial only while the home is cut"
     );
 }
+
+/// MSL2B-R3-1: a home of more records than one scan reads, all well inside the walk's
+/// bounds, says its reading is partial whenever the scan leaves out a record that changed
+/// since the previous scan, and only then. An agent rewriting its other records in a loop
+/// keeps its live session record out of every scan, so the owner must see the reading as
+/// partial rather than complete; records left out unchanged since the previous scan hold no
+/// usage of the period, and a record once read again is counted whole.
+#[test]
+fn a_home_whose_scan_leaves_out_a_changed_record_reads_as_partial() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let live = folder.join("live.jsonl");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    pause();
+    let others: Vec<PathBuf> = (0..FILES_PER_SCAN_MAX)
+        .map(|index| folder.join(format!("o{index:03}.jsonl")))
+        .collect();
+    for other in &others {
+        append(other, "");
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((0, 0), Some(1)),
+        "the first scan leaves out the live record, which no scan read before"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(0)),
+        "a record left out unchanged since the previous scan holds nothing of this period"
+    );
+    append(&live, &claude_assistant("m2", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan(NOW + 2),
+        ((12, 5), Some(0)),
+        "the live record changed last is read whole, and the records left out did not change"
+    );
+    append(&live, &claude_assistant("m3", 1, 1, 0, 0, "end_turn"));
+    pause();
+    for other in &others {
+        append(other, "\n");
+    }
+    assert_eq!(
+        scan(NOW + 3),
+        ((0, 0), Some(1)),
+        "an agent rewriting its other records keeps the changed live record out, and the reading says so"
+    );
+}
