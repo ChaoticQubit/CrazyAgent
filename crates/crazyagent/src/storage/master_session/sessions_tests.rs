@@ -742,7 +742,7 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     assert!(
         root_backups(&case)
             .iter()
-            .any(|name| name.starts_with("3-to-4-")),
+            .any(|name| name.starts_with("3-to-6-")),
         "the upgrade kept a backup"
     );
     drop(db);
