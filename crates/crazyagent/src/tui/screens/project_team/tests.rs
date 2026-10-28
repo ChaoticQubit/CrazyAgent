@@ -72,6 +72,8 @@ fn agent(
         stopped_ms: None,
         persona: None,
         handle: None,
+        register: None,
+        finished: false,
     }
 }
 
@@ -126,6 +128,7 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        show_finished: false,
         paused: false,
         live_master: None,
         live_problem: None,

@@ -132,6 +132,20 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets where the project's finished agents show: in the agents list and team graph, or
+    /// only in their Finished fold-out. Takes the project id, true for Show and the client
+    /// generation. Returns the actual commit receipt.
+    pub async fn team_finished_agents(
+        &mut self,
+        id: &str,
+        show: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::FinishedAgents { project_id, show }, generation)
+            .await
+    }
+
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
     /// app running in a terminal the owner types into. Takes the project id, the switch and
     /// the client generation. Returns the actual commit receipt.

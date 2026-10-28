@@ -24,6 +24,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 mod cleanup;
+mod finished;
 #[cfg(test)]
 mod tests;
 
@@ -120,6 +121,7 @@ pub struct Team {
     attached: Option<Attached>,
     task: Option<i64>,
     cleanup: cleanup::Cleanup,
+    finished: finished::Finished,
     instructions: Option<Instructions>,
 }
 
@@ -142,6 +144,7 @@ impl Team {
             attached: None,
             task: None,
             cleanup: cleanup::Cleanup::new(),
+            finished: finished::Finished::new(),
             instructions: None,
         }
     }
@@ -719,6 +722,10 @@ impl Team {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
         }
+        if let Some((title, lines)) = self.finished.lines(limit, usize::from(inner.height), ctx) {
+            boxed(frame, area, &title, false, lines, ctx);
+            return None;
+        }
         if let Some(open) = self.instructions.as_mut() {
             let lines = instruction_lines(&open.read, limit, ctx);
             open.top = open
@@ -846,6 +853,9 @@ impl Screen for Team {
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
+        if self.finished.open() {
+            return self.finished.hints();
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let mut hints = vec![
             hint(&vertical, "Move"),
@@ -866,6 +876,7 @@ impl Screen for Team {
                 hints.push(hint("Esc", "Close"));
             }
             None => {
+                hints.push(hint("f", "Finished"));
                 hints.push(hint("c", "Clean up"));
                 hints.push(hint("Esc", "Back"));
             }
@@ -883,6 +894,11 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if !self.cleanup.open()
+            && let Some(flow) = self.finished.key(key, &self.project, ctx)
+        {
+            return flow;
         }
         if let Some(flow) = self.cleanup.key(key, &self.project, ctx) {
             return flow;
@@ -939,6 +955,7 @@ impl Screen for Team {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.cleanup.arrive(arrival, &self.project, ctx);
+        self.finished.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);

@@ -795,6 +795,198 @@ fn an_ended_terminal_is_not_opened_again_when_the_engine_comes_back() {
     assert!(matches!(&sent[0], Request::TeamGraph { .. }));
 }
 
+fn finished_team() -> crate::team::TeamStatus {
+    use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamStatus, TeamTask};
+    let agent = |id: i64, status: AgentStatus, finished: bool| TeamAgent {
+        id,
+        role: AgentRole::Sub,
+        label: AgentRole::Sub.agent_label(id),
+        harness: "codex".into(),
+        tools: true,
+        account: None,
+        worktree: None,
+        status,
+        status_label: status.label().into(),
+        task: None,
+        turns: 1,
+        problem: None,
+        process_group: None,
+        created_ms: 1,
+        heartbeat_ms: 1,
+        stopped_ms: None,
+        persona: None,
+        handle: None,
+        register: None,
+        finished,
+    };
+    TeamStatus {
+        project_id: project(),
+        keep_warm: false,
+        show_finished: false,
+        paused: false,
+        live_master: None,
+        live_problem: None,
+        min_agents: 1,
+        max_agents: 5,
+        harnesses: Vec::new(),
+        agents: vec![
+            agent(2, AgentStatus::Working, false),
+            TeamAgent {
+                register: Some("r".repeat(32)),
+                ..agent(3, AgentStatus::Stopped, true)
+            },
+            TeamAgent {
+                problem: Some("The agent process closed.".into()),
+                ..agent(4, AgentStatus::Failed, true)
+            },
+        ],
+        tasks: vec![TeamTask {
+            id: 9,
+            source: TaskSource::Master,
+            harness: "codex".into(),
+            tools: true,
+            prompt: "Write the docs\nwith care".into(),
+            status: TaskStatus::Done,
+            status_label: TaskStatus::Done.label().into(),
+            agent: Some(3),
+            attempts: 1,
+            result: Some("Done.".into()),
+            problem: None,
+            delivered: true,
+            output_bytes: 0,
+            created_ms: 1,
+            started_ms: Some(1),
+            finished_ms: Some(2),
+        }],
+        messages: Vec::new(),
+        plan: Vec::new(),
+        events: Default::default(),
+    }
+}
+
+fn setup_reply(
+    query: crate::project_setup::SetupQuery,
+    result: Result<crate::project_setup::SetupView, &str>,
+) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query,
+            result: result.map_err(str::to_owned),
+        },
+    ))))
+}
+
+#[test]
+fn f_lists_finished_agents_w_wakes_one_through_the_register_and_h_switches_the_setting() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    assert!(render(&mut shell).join("\n").contains("f Finished"));
+    shell.key(Key::Char('f'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::Setup(SetupQuery::Team { project: asked })] if *asked == project()),
+        "{sent:?}"
+    );
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Reading finished agents...")
+    );
+    let read = SetupQuery::Team { project: project() };
+    shell.arrive(setup_reply(
+        read.clone(),
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished (2)"), "{text}");
+    assert!(text.contains("Finished agents: Hide."), "{text}");
+    let failed = text
+        .find("> Sub-agent 4")
+        .expect("the newest finished agent is picked");
+    let stopped = text.find("  Sub-agent 3").expect("the older one follows");
+    assert!(failed < stopped, "{text}");
+    assert!(text.contains("The agent process closed."), "{text}");
+    assert!(text.contains("Last task: Write the docs"), "{text}");
+    assert!(
+        !text.contains("Sub-agent 2  "),
+        "a working agent is not finished: {text}"
+    );
+
+    shell.key(Key::Char('w'));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "no register entry, nothing to wake"
+    );
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Sub-agent 4 cannot be woken.")
+    );
+    shell.key(Key::Down);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::Setup(SetupQuery::WakeAgent { register })] if *register == "r".repeat(32)),
+        "{sent:?}"
+    );
+    shell.key(Key::Char('w'));
+    assert!(requests(&mut shell).is_empty(), "one wake at a time");
+    shell.arrive(setup_reply(
+        SetupQuery::WakeAgent {
+            register: "r".repeat(32),
+        },
+        Err("agent_restart_conflict"),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
+    assert!(text.contains("It is already running again."), "{text}");
+
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { project_id, show },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    assert_eq!((project_id, *show), (&project(), true));
+    shell.key(Key::Char('h'));
+    assert!(requests(&mut shell).is_empty(), "one change at a time");
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Applied,
+        )),
+    ));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::TeamGraph { project: asked }] if *asked == project()),
+        "{sent:?}"
+    );
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Finished agents: Show.")
+    );
+    shell.key(Key::Char('f'));
+    assert!(!render(&mut shell).join("\n").contains("Finished (2)"));
+}
+
 #[test]
 fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
     use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
@@ -811,6 +1003,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
     let status = TeamStatus {
         project_id: project(),
         keep_warm: false,
+        show_finished: false,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -837,6 +1030,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 stopped_ms: Some(2),
                 persona: None,
                 handle: None,
+                register: None,
+                finished: false,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -1162,6 +1357,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
     let status = crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
+        show_finished: false,
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
