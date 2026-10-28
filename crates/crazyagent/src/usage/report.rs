@@ -63,8 +63,8 @@ pub struct AgentLinesRow {
 }
 
 /// The usage page's numbers for one range: app totals, the largest projects, pools,
-/// accounts and agents, tokens per local day, lines changed per project, and every
-/// account's limits.
+/// accounts and agents, tokens per local day, lines changed per project, every account's
+/// limits, and how many agent homes a scan in the range left records of uncounted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageReport {
@@ -79,6 +79,7 @@ pub struct UsageReport {
     pub lines: Vec<LinesRow>,
     pub agent_lines: Vec<AgentLinesRow>,
     pub limits: Vec<AccountLimits>,
+    pub partial_homes: u64,
 }
 
 fn count(value: i64) -> u64 {
@@ -303,6 +304,14 @@ pub fn report(
             .map_err(storage)?
     };
     days.reverse();
+    let partial_homes = db
+        .query_row(
+            "SELECT COUNT(*) FROM usage_cut WHERE cut_ms>=?1 AND (?2 IS NULL OR project=?2)",
+            params![since, project],
+            |row| row.get(0),
+        )
+        .map(count)
+        .map_err(storage)?;
     let mut limits = all_limits(db)?;
     limits.truncate(LIMITS_MAX);
     let report = fit(UsageReport {
@@ -317,6 +326,7 @@ pub fn report(
         lines: lines(db, project, since)?,
         agent_lines: agent_lines(db, project, since)?,
         limits,
+        partial_homes,
     })?;
     assert!(report.projects.len() <= ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agent_lines.len() <= ROWS_MAX);

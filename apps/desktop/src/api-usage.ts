@@ -72,6 +72,7 @@ export interface UsageReport {
   lines: LinesRow[];
   agent_lines: AgentLinesRow[];
   limits: AccountLimits[];
+  partial_homes: number;
 }
 
 const REFUSALS: Record<string, string> = {

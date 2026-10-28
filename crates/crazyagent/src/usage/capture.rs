@@ -55,6 +55,11 @@ CREATE INDEX IF NOT EXISTS usage_runs_started ON usage_runs(started_ms);
 CREATE TABLE IF NOT EXISTS usage_refresh (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     requested_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_cut (
+    home TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    cut_ms INTEGER NOT NULL
 );";
 
 /// Token counts a run used: fresh input, output, input read from the provider's cache and
@@ -291,13 +296,14 @@ fn codex_line(
 }
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
-/// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
-/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
-/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all, entering the most
-/// recently changed folder first, and keeps only the newest records it saw, so a home an
-/// agent filled costs a bounded scan that leaves out its least recently changed folders.
-/// Inputs: the home and the format. Output: the paths.
-pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
+/// first by [`changed_at`]: Claude Code's `projects/<folder>/<session>.jsonl` with its
+/// sub-agent records further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`.
+/// The walk examines at most `ENTRIES_PER_SCAN_MAX` entries and `FILES_PER_SCAN_MAX * 4`
+/// folders of the home, entering the most recently changed folder first, and keeps only the
+/// newest records it saw, so a home an agent filled costs a bounded scan that leaves out its
+/// least recently changed folders. Inputs: the home and the format. Output: the paths, and
+/// whether the walk stopped at a bound before it saw every entry.
+pub(crate) fn records(home: &Path, format: Format) -> (Vec<PathBuf>, bool) {
     let root = match format {
         Format::Claude => home.join("projects"),
         Format::Codex => home.join("sessions"),
@@ -306,15 +312,18 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let mut folders = vec![(root, 0)];
     let mut visited = 0;
     let mut examined = 0;
+    let mut cut = false;
     let changed = |entry: &std::fs::DirEntry| {
         entry
             .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(std::time::SystemTime::UNIX_EPOCH, |metadata| {
+                changed_at(&metadata)
+            })
     };
     'walk: while let Some((folder, level)) = folders.pop() {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
+            cut = true;
             break;
         }
         let Ok(entries) = std::fs::read_dir(&folder) else {
@@ -323,6 +332,7 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         let mut below = Vec::new();
         for entry in entries.flatten() {
             if examined == ENTRIES_PER_SCAN_MAX {
+                cut = true;
                 break 'walk;
             }
             examined += 1;
@@ -347,11 +357,82 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         folders.extend(below.into_iter().map(|(_, path)| (path, level + 1)));
     }
     assert!(examined <= ENTRIES_PER_SCAN_MAX && newest.len() <= FILES_PER_SCAN_MAX);
-    newest
+    assert!(cut || folders.is_empty());
+    let paths = newest
         .into_sorted_vec()
         .into_iter()
         .map(|(_, path)| path)
-        .collect()
+        .collect();
+    (paths, cut)
+}
+
+/// When a walked entry last changed, by a clock no agent can set: the inode change time,
+/// which every write and every change of a file's dates moves to now, so an agent can never
+/// make a record it wrote, or its folder, look older. Input: the entry's metadata. Output:
+/// the time, the epoch for a time before it.
+#[cfg(unix)]
+fn changed_at(metadata: &std::fs::Metadata) -> std::time::SystemTime {
+    use std::os::unix::fs::MetadataExt;
+    let seconds = u64::try_from(metadata.ctime()).unwrap_or(0);
+    let nanos = u32::try_from(metadata.ctime_nsec()).unwrap_or(0) % 1_000_000_000;
+    std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(seconds, nanos))
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// When a walked entry last changed: its modification time, as this platform has no inode
+/// change time. Input: the entry's metadata. Output: the time, the epoch when unreadable.
+#[cfg(not(unix))]
+fn changed_at(metadata: &std::fs::Metadata) -> std::time::SystemTime {
+    metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+/// Keeps whether the last scan of a home stopped at the walk's bound, so the usage page can
+/// say its reading is partial: a cut scan stores the home with the time and keeps only the
+/// `FILES_PER_SCAN_MAX` most recently cut homes, and a whole scan removes the home.
+/// Inputs: the store, the home, its attribution, whether the scan was cut and the time.
+/// Output: done, or `usage_unavailable`.
+fn mark_cut(
+    db: &Connection,
+    home: &Path,
+    attribution: &Attribution,
+    cut: bool,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let key = home.to_string_lossy();
+    if !cut {
+        let stored: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_cut WHERE home=?1)",
+                [key.as_ref()],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if stored {
+            db.execute("DELETE FROM usage_cut WHERE home=?1", [key.as_ref()])
+                .map_err(storage)?;
+        }
+        return Ok(());
+    }
+    db.execute(
+        "INSERT INTO usage_cut (home,project,cut_ms) VALUES (?1,?2,?3)
+         ON CONFLICT(home) DO UPDATE SET project=excluded.project,cut_ms=excluded.cut_ms",
+        params![
+            key,
+            text(attribution.project.as_ref().map(ProjectId::as_str)),
+            now_ms
+        ],
+    )
+    .map_err(storage)?;
+    db.execute(
+        "DELETE FROM usage_cut WHERE home NOT IN
+         (SELECT home FROM usage_cut ORDER BY cut_ms DESC LIMIT ?1)",
+        [FILES_PER_SCAN_MAX as i64],
+    )
+    .map_err(storage)?;
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -503,8 +584,10 @@ pub fn scan_home(
 ) -> Result<Tokens, EngineError> {
     checked_attribution(attribution)?;
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
+    let (paths, cut) = records(home, format);
+    mark_cut(db, home, attribution, cut, now_ms)?;
     let mut changed = Vec::new();
-    for path in records(home, format) {
+    for path in paths {
         let key = path.to_string_lossy().into_owned();
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
@@ -767,6 +850,8 @@ fn forget_finished_runs(db: &Connection, now_ms: i64) -> Result<(), EngineError>
             params![format!("{home}/")],
         )
         .map_err(storage)?;
+        db.execute("DELETE FROM usage_cut WHERE home=?1", [&home])
+            .map_err(storage)?;
         db.execute(
             "DELETE FROM usage_runs WHERE home=?1 AND started_ms<?2",
             params![home, ended],

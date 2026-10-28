@@ -77,7 +77,7 @@ pub fn observed(home: &Path, harness: Harness) -> Observed {
         Harness::Codex => Format::Codex,
     };
     let mut seen = Observed::default();
-    for path in records(home, format).into_iter().take(RECORDS_READ_MAX) {
+    for path in records(home, format).0.into_iter().take(RECORDS_READ_MAX) {
         let Some((file, _, _)) = open_record(&path) else {
             continue;
         };
