@@ -248,9 +248,11 @@ fn sqlite(root: &Path, sql: &str) -> Result<String, Box<dyn Error>> {
 }
 
 /// Presses Wake the way the Finished fold-out does (DEC-102, AVF-5): the bridge sends the team
-/// wake by agent id to the real engine, which records it for the running team runtime to
-/// serve; a running agent, one whose worktree is gone and an unknown one are refused with
-/// their plain codes. Team agents are stored as the runtime leaves them.
+/// wake by agent id to the real engine, which records it for the team runtime and then shows
+/// the agent as waking; a running agent, one whose worktree is gone and an unknown one are
+/// refused with their plain codes. Team agents are stored as the runtime leaves them. This
+/// engine runs no team runtime (only the `crazyagent` binary starts one), so the recorded
+/// Wake stays pending and the waking checks do not depend on any tick.
 async fn wake(bridge: &mut NativeBridge, root: &Path, id: &str) -> Result<(), Box<dyn Error>> {
     for (agent, status, turns, worktree) in [
         (501, "stopped", 2, true),
@@ -303,18 +305,15 @@ async fn wake(bridge: &mut NativeBridge, root: &Path, id: &str) -> Result<(), Bo
             matches!(pressed.outcome, ActionOutcome::Applied),
             "{pressed:?}"
         );
-        let served_by = tokio::time::Instant::now() + Duration::from_secs(5);
-        while sqlite(root, "SELECT COUNT(*) FROM team_wake_requests;")? != "0" {
-            assert!(
-                tokio::time::Instant::now() < served_by,
-                "the team runtime serves the recorded Wake"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        assert_ne!(
-            shown(&bridge.team_status(id).await?, 501).2.as_deref(),
-            Some("Waking."),
-            "a served Wake no longer shows the agent as waking"
+        assert_eq!(
+            shown(&bridge.team_status(id).await?, 501),
+            (true, false, Some("Waking.".into()))
+        );
+        let again = bridge.team_wake_agent(id, 501, 16).await?;
+        assert!(matches!(again.outcome, ActionOutcome::Applied), "{again:?}");
+        assert_eq!(
+            sqlite(root, "SELECT COUNT(*) FROM team_wake_requests;")?,
+            "1"
         );
     } else {
         assert_eq!(
