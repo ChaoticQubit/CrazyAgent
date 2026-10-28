@@ -75,8 +75,8 @@ fn a_full_access_stop_whose_process_listing_cannot_start_ends_within_its_bound()
     holder.join().unwrap();
 
     assert!(
-        took < Duration::from_secs(4),
-        "a process listing whose start was held up for 6 s held the stop for {took:?}"
+        took < Duration::from_millis(1800),
+        "a process listing whose start was held up for 6 s held the stop for {took:?}; a stop waits out one held-up listing at most"
     );
     match stopped {
         Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED, "{}", left.plain()),

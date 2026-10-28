@@ -80,14 +80,19 @@ struct Process {
 /// process in the leader's session, and every process whose parent is one of them. A
 /// process that left both before it was seen, such as a daemon whose parent already
 /// exited, is not found. `table` is the command that lists the processes; `unchecked`
-/// tells that a listing failed, so the lineage may miss processes.
+/// tells that a listing failed, so the lineage may miss processes; `pending` is a listing
+/// still held up past its bound, which a later read waits out instead of starting another.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     leader: i32,
     known: Vec<Process>,
     table: &'static [&'static str],
     unchecked: bool,
+    pending: Option<Listing>,
 }
+
+/// Where a listing thread reports its output, or none when it failed or ran out of bounds.
+type Listing = std::sync::mpsc::Receiver<Option<Vec<u8>>>;
 
 /// The processes a Full access agent left running after its stop, which no Seatbelt
 /// warden can end, or a stop whose processes could not be listed; never both empty and
@@ -201,6 +206,7 @@ impl Lineage {
             known: Vec::new(),
             table,
             unchecked: false,
+            pending: None,
         };
         lineage.unchecked = lineage.refresh().is_err();
         Ok(lineage)
@@ -243,7 +249,7 @@ impl Lineage {
     /// when `ps` cannot be read.
     #[cfg(unix)]
     fn refresh(&mut self) -> Result<(), Unstopped> {
-        let table = table(self.table)?;
+        let table = table(self.table, &mut self.pending)?;
         let mut kept: Vec<Process> = table
             .iter()
             .filter(|(process, _)| self.known.iter().any(|known| same(known, process)))
@@ -290,12 +296,15 @@ fn same(known: &Process, now: &Process) -> bool {
 }
 
 /// Reads this user's running processes, other than the engine, with the listing command;
-/// a zombie has ended and is left out. Input: the command, [`PS_TABLE`] outside tests.
-/// Output: each process with its parent's id, or uncertain when the listing fails or is out
-/// of bounds.
+/// a zombie has ended and is left out. Inputs: the command, [`PS_TABLE`] outside tests,
+/// and the lineage's listing still held up, if any. Output: each process with its parent's
+/// id, or uncertain when the listing fails, is out of bounds or is still held up.
 #[cfg(unix)]
-fn table(argv: &'static [&'static str]) -> Result<Vec<(Process, i32)>, Unstopped> {
-    let output = read_bounded(argv)?;
+fn table(
+    argv: &'static [&'static str],
+    pending: &mut Option<Listing>,
+) -> Result<Vec<(Process, i32)>, Unstopped> {
+    let output = read_bounded(argv, pending)?;
     let listing = String::from_utf8_lossy(&output);
     let user = rustix::process::getuid().as_raw();
     let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
@@ -305,10 +314,22 @@ fn table(argv: &'static [&'static str]) -> Result<Vec<(Process, i32)>, Unstopped
 /// Runs a listing command with a cleared environment in a thread of its own and takes its
 /// output, at most `TABLE_BYTES_MAX` bytes within `TABLE_TIME` counted from before the
 /// spawn, so neither a spawn held up by a stalled exec nor a stalled or flooding listing
-/// holds up a stop. Input: the program and its arguments. Output: the output of a run that
-/// exited 0 within both bounds, or uncertain.
+/// holds up a stop. A listing held up past its bound stays `pending`, and no other starts
+/// until it has ended, so a lasting stall holds up one listing thread, not one per read.
+/// Inputs: the program with its arguments and the pending listing. Output: the output of a
+/// run that exited 0 within both bounds, or uncertain.
 #[cfg(unix)]
-fn read_bounded(argv: &'static [&'static str]) -> Result<Vec<u8>, Unstopped> {
+fn read_bounded(
+    argv: &'static [&'static str],
+    pending: &mut Option<Listing>,
+) -> Result<Vec<u8>, Unstopped> {
+    use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
+    if let Some(listing) = pending {
+        if matches!(listing.try_recv(), Err(TryRecvError::Empty)) {
+            return Err(Unstopped::Uncertain);
+        }
+        *pending = None;
+    }
     let deadline = Instant::now() + TABLE_TIME;
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::Builder::new()
@@ -317,11 +338,14 @@ fn read_bounded(argv: &'static [&'static str]) -> Result<Vec<u8>, Unstopped> {
             let _ = sender.send(run_listing(argv, deadline));
         })
         .map_err(|_| Unstopped::Uncertain)?;
-    receiver
-        .recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE)
-        .ok()
-        .flatten()
-        .ok_or(Unstopped::Uncertain)
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE) {
+        Ok(listing) => listing.ok_or(Unstopped::Uncertain),
+        Err(RecvTimeoutError::Timeout) => {
+            *pending = Some(receiver);
+            Err(Unstopped::Uncertain)
+        }
+        Err(RecvTimeoutError::Disconnected) => Err(Unstopped::Uncertain),
+    }
 }
 
 /// Starts a listing command and reads its output until `deadline`, killing it past the
@@ -482,6 +506,7 @@ mod tests {
             known,
             table: PS_TABLE,
             unchecked: false,
+            pending: None,
         })
         .plain();
         assert!(
@@ -608,6 +633,7 @@ mod tests {
             known: Vec::new(),
             table: PS_TABLE,
             unchecked: false,
+            pending: None,
         })
         .plain();
     }
