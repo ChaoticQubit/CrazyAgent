@@ -185,6 +185,54 @@ pub(super) fn other_refs(worktree: &Path) -> Result<Vec<String>, EngineError> {
     Ok(found)
 }
 
+/// Says whether an agent's own clone still holds its branch, read as data from its git
+/// folder with no git run and no link followed: a loose ref file, a `packed-refs` line, or
+/// a `reftable` store, which the engine does not read and so counts as holding it. Input:
+/// the worktree. Output: the answer, else `changes_workspace_invalid` for ref data that is
+/// not a plain file or folder or `changes_too_large` past the bounds.
+pub(super) fn has_branch(worktree: &Path) -> Result<bool, EngineError> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat, statat};
+    let branch = agent_git::branch(worktree).ok_or_else(invalid)?;
+    let own = format!("refs/heads/{branch}");
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let git = openat(&root, ".git", flags, Mode::empty()).map_err(|_| invalid())?;
+    match statat(&git, "reftable", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => return Ok(true),
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(_) => return Err(invalid()),
+    }
+    let parts: Vec<&str> = own.split('/').collect();
+    let (name, folders) = parts.split_last().ok_or_else(invalid)?;
+    let mut folder: Option<rustix::fd::OwnedFd> = None;
+    let mut loose = true;
+    for part in folders {
+        match openat(folder.as_ref().unwrap_or(&git), *part, flags, Mode::empty()) {
+            Ok(opened) => folder = Some(opened),
+            Err(rustix::io::Errno::NOENT) => {
+                loose = false;
+                break;
+            }
+            Err(_) => return Err(invalid()),
+        }
+    }
+    if loose
+        && let Some(folder) = &folder
+        && read_at(folder, name, HEAD_BYTES_MAX)?.is_some()
+    {
+        return Ok(true);
+    }
+    let packed = read_at(&git, "packed-refs", PACKED_REFS_BYTES_MAX)?.unwrap_or_default();
+    Ok(packed.split(|byte| *byte == b'\n').any(|line| {
+        !line.starts_with(b"#")
+            && !line.starts_with(b"^")
+            && line
+                .iter()
+                .position(|byte| *byte == b' ')
+                .is_some_and(|space| &line[space + 1..] == own.as_bytes())
+    }))
+}
+
 /// Walks one folder of a clone's loose refs for `other_refs`, opening each inner folder
 /// without following a link, at most `REF_DEPTH_MAX` deep and `REF_ENTRIES_MAX` entries in
 /// all. Inputs: the open folder, its ref path, its depth, the entries left, the branch's

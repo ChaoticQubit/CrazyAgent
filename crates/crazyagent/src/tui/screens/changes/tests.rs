@@ -34,6 +34,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         conflicts: Vec::new(),
         message: "Add a file".into(),
         waiting: false,
+        outside: false,
     }
 }
 

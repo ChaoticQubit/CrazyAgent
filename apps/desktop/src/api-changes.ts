@@ -22,6 +22,7 @@ export interface ChangeSet {
   conflicts: string[];
   message: string;
   waiting: boolean;
+  outside: boolean;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
