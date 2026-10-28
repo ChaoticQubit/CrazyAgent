@@ -14,6 +14,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
     use crazyagent::protocol::ProjectSpec;
+    use crazyagent::sandbox_settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
     match command {
         "desktop_connect" => {
@@ -1213,6 +1214,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .save_owner_profile(profile, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_sandbox_settings" => {
+            let result: Result<_, BridgeError> = async { lock(state).await?.sandbox_settings().await }.await;
+            routed(result)
+        }
+        "desktop_set_sandbox_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: SandboxSettings,
+                generation: u64,
+            }
+            let Args { settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_sandbox_settings(settings, generation) .await }.await;
             routed(result)
         }
         "desktop_pool_summaries" => {
