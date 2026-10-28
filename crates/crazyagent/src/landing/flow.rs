@@ -975,14 +975,17 @@ fn repository_layout(
     Ok(false)
 }
 
-/// Refuses a tree whose links an owner could follow out of the project or into the
-/// agents' worktrees folder (SR1-2), such as to a bare-repository layout in an ignored
-/// folder of an agent's worktree, which no landing check reads. Each link the change added
-/// or changed needs a relative, UTF-8 target of at most `PATH_BYTES_MAX` bytes with ASCII
-/// names and `..` only before its first name; resolved from the link's folder it stays in
-/// the tree, does not start with the agents' folder, and neither its folders nor any step
-/// of it is a link of the tree in any ASCII case. No other link of the tree may pass
-/// through or end at one of the change's links. Inputs: the repository, the owner's
+/// Refuses a tree whose links an owner could follow out of the project or into a folder an
+/// agent writes (SR1-2): the agents' worktrees folder, such as to a bare-repository layout
+/// in an ignored folder of an agent's worktree, which no landing check reads, and the
+/// owner's `.git`, where a Linked agent writes `.git/worktrees/<id>` and `.git/objects`.
+/// Each link the change added or changed needs an ASCII path and a relative, UTF-8 target
+/// of at most `PATH_BYTES_MAX` bytes with ASCII names and `..` only before its first name;
+/// resolved from the link's folder it stays in the tree, does not start with the agents'
+/// folder, steps into no `.git` in any ASCII case, and neither its folders nor any step of
+/// it is a link of the tree in any ASCII case. No other link of the tree may pass through
+/// or end at one of the change's links. A tree link path or step that is not ASCII
+/// matches any name the volume could fold it onto. Inputs: the repository, the owner's
 /// checkout, the tree that lands and the paths of the change's links. Output: Ok, else
 /// `changes_link_outside`, `changes_too_large` or `changes_git_failed`.
 fn check_links(
@@ -993,6 +996,9 @@ fn check_links(
 ) -> Result<(), EngineError> {
     if changed.is_empty() {
         return Ok(());
+    }
+    if !changed.iter().all(|path| path.is_ascii()) {
+        return Err(failure("changes_link_outside"));
     }
     let links = tree_links(repo, tree)?;
     let every: BTreeSet<String> = links
@@ -1006,13 +1012,18 @@ fn check_links(
     if !fresh.is_subset(&every) {
         return Err(failure("changes_git_failed"));
     }
+    let folded: Vec<&str> = every
+        .iter()
+        .filter(|path| !path.is_ascii())
+        .map(String::as_str)
+        .collect();
     let agents = agents_root(checkout);
     let ids: Vec<&str> = links.iter().map(|(_, id)| id.as_str()).collect();
     let targets = link_targets(repo, &ids)?;
     assert_eq!(targets.len(), links.len());
     for ((path, _), target) in links.iter().zip(&targets) {
         let outside = if fresh.contains(&path.to_ascii_lowercase()) {
-            !fresh_link_inside(path, target.as_deref(), &agents, &every)
+            !fresh_link_inside(path, target.as_deref(), &agents, &every, &folded)
         } else {
             target
                 .as_deref()
@@ -1137,13 +1148,15 @@ fn agents_root(checkout: &Path) -> Vec<String> {
 }
 
 /// Tells whether one of the change's links stays inside under [`check_links`]'s rule.
-/// Inputs: the link's path, its target (none when too long), the agents' folder parts and
-/// every link path of the tree in ASCII lower case. Output: true when it stays inside.
+/// Inputs: the link's path, its target (none when too long), the agents' folder parts,
+/// every link path of the tree in ASCII lower case and those of them that are not ASCII.
+/// Output: true when it stays inside.
 fn fresh_link_inside(
     path: &str,
     target: Option<&[u8]>,
     agents: &[String],
     links: &BTreeSet<String>,
+    folded: &[&str],
 ) -> bool {
     let Some(Ok(target)) = target.map(std::str::from_utf8) else {
         return false;
@@ -1153,7 +1166,10 @@ fn fresh_link_inside(
     }
     let mut walk: Vec<&str> = path.split('/').collect();
     walk.pop();
-    let link = |walk: &[&str]| links.contains(&walk.join("/").to_ascii_lowercase());
+    let link = |walk: &[&str]| {
+        links.contains(&walk.join("/").to_ascii_lowercase())
+            || folded.iter().any(|name| folds_onto(name, walk))
+    };
     if (1..=walk.len()).any(|end| link(&walk[..end])) {
         return false;
     }
@@ -1177,7 +1193,59 @@ fn fresh_link_inside(
             }
         }
     }
-    !entered(&walk, agents)
+    !entered(&walk, agents) && !walk.iter().any(|part| part.eq_ignore_ascii_case(".git"))
+}
+
+/// The code points outside ASCII that a case-insensitive APFS volume folds onto ASCII,
+/// with the ASCII they fold onto: the full case fold of their canonical decomposition,
+/// each checked on the volume (probe 2026-10-28). Every other code point stays outside ASCII.
+const ASCII_FOLDS: [(char, &str); 13] = [
+    ('\u{DF}', "ss"),
+    ('\u{17F}', "s"),
+    ('\u{37E}', ";"),
+    ('\u{1E9E}', "ss"),
+    ('\u{1FEF}', "`"),
+    ('\u{212A}', "k"),
+    ('\u{FB00}', "ff"),
+    ('\u{FB01}', "fi"),
+    ('\u{FB02}', "fl"),
+    ('\u{FB03}', "ffi"),
+    ('\u{FB04}', "ffl"),
+    ('\u{FB05}', "st"),
+    ('\u{FB06}', "st"),
+];
+
+/// Folds one path part the way the volume compares names, when the result is ASCII.
+/// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied, or
+/// None when a code point stays outside ASCII.
+fn ascii_fold(part: &str) -> Option<String> {
+    let mut folded = String::with_capacity(part.len());
+    for point in part.chars() {
+        if point.is_ascii() {
+            folded.push(point.to_ascii_lowercase());
+        } else {
+            let (_, ascii) = ASCII_FOLDS.iter().find(|(from, _)| *from == point)?;
+            folded.push_str(ascii);
+        }
+    }
+    assert!(folded.is_ascii());
+    Some(folded)
+}
+
+/// Tells whether a walk may name a link path on a volume that folds names: every part
+/// folds onto the same ASCII name under [`ascii_fold`], or both stay outside ASCII, since
+/// the volume may still fold one onto the other. A part that stays outside ASCII never
+/// matches one that folds onto ASCII. Inputs: the link path and the walk's parts.
+/// Output: true when it may.
+fn folds_onto(link: &str, walk: &[&str]) -> bool {
+    link.split('/').count() == walk.len()
+        && link.split('/').zip(walk).all(|(part, step)| {
+            match (ascii_fold(part), ascii_fold(step)) {
+                (Some(part), Some(step)) => part == step,
+                (None, None) => true,
+                _ => false,
+            }
+        })
 }
 
 /// Tells whether a walk starts with the agents' folder. A compared part that is not ASCII
@@ -1197,8 +1265,9 @@ fn entered(walk: &[&str], agents: &[String]) -> bool {
 
 /// Tells whether another link of the tree, resolved by name from its folder, passes
 /// through or ends at one of the change's links, so the change would carry it to where
-/// the change's link points. Inputs: its path, its target and the change's link paths in
-/// ASCII lower case. Output: true when it does.
+/// the change's link points. A step that is not ASCII matches any of the change's links
+/// the volume could fold it onto. Inputs: its path, its target and the change's link
+/// paths in ASCII lower case. Output: true when it does.
 fn passes_through(path: &str, target: &[u8], fresh: &BTreeSet<String>) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
         return false;
@@ -1218,7 +1287,10 @@ fn passes_through(path: &str, target: &[u8], fresh: &BTreeSet<String>) -> bool {
             }
             name => {
                 walk.push(name);
-                if fresh.contains(&walk.join("/").to_ascii_lowercase()) {
+                if fresh.contains(&walk.join("/").to_ascii_lowercase())
+                    || (!walk.iter().all(|step| step.is_ascii())
+                        && fresh.iter().any(|link| folds_onto(link, &walk)))
+                {
                     return true;
                 }
             }
