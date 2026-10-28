@@ -57,34 +57,29 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
 const PROJECT_HOOKS_COUNT: &str = "13";
 
-/// The variable that ends git's search for a repository at the agents roots (INT1-1): git in
-/// an agent folder, whose `.git` the IDE sandbox cannot read, then finds no repository
-/// instead of walking up to the project's and acting on it. The server's environment adds it.
+/// The variable that ends git's search for a repository at the project's agents root
+/// (INT1-1): git in an agent folder, whose `.git` the IDE sandbox cannot read, then finds no
+/// repository instead of walking up to the project's and acting on it. The server's
+/// environment adds it.
 pub const CEILING_VARIABLE: &str = "GIT_CEILING_DIRECTORIES";
 
-/// The [`CEILING_VARIABLE`] value for one project: both agents roots a project uses,
-/// `<root>/.crazyagent/worktrees` and `<root>/worktrees`; git never searches from either
-/// upwards, and the project folder lies above both, so its own git is unchanged. Input: the
-/// canonical project folder. Output: the value, or `ide_project_folder_invalid` for a folder
-/// that is not absolute or holds a `:`, which separates the list.
+/// The [`CEILING_VARIABLE`] value for one project: the agents root its layout uses
+/// (INT1-R2-1), `<root>/.crazyagent/worktrees` when the project keeps its state in
+/// `.crazyagent` and `<root>/worktrees` otherwise, as [`crate::projects_home::state_folder`]
+/// decides for the agents' exclude line. Git never searches from it upwards; the project
+/// folder and the owner's own folders, a `.crazyagent` project's top-level `worktrees` among
+/// them, keep their repository. Input: the canonical project folder. Output: the value, or
+/// `ide_project_folder_invalid` for a folder that is not absolute or holds a `:`, which git
+/// reads as a list separator.
 pub fn ceiling(root: &Path) -> Result<OsString, EngineError> {
     if !root.is_absolute() || root.as_os_str().as_encoded_bytes().contains(&b':') {
         return Err(failure("ide_project_folder_invalid"));
     }
-    let mut value = root
-        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+    let value = crate::projects_home::state_folder(root)
         .join("worktrees")
         .into_os_string();
-    value.push(":");
-    value.push(root.join("worktrees"));
-    assert_eq!(
-        value
-            .as_encoded_bytes()
-            .iter()
-            .filter(|byte| **byte == b':')
-            .count(),
-        1
-    );
+    assert!(Path::new(&value).starts_with(root));
+    assert!(!value.as_encoded_bytes().contains(&b':'));
     Ok(value)
 }
 

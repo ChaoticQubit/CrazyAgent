@@ -573,13 +573,14 @@ fn planted(script: &Path, marker: &Path) {
     fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-/// INT-1, IN1-1 and IN1-F1 under the installed IDE profile, through the engine's own git
-/// shim and git configuration. Agent folders under either agents root, as an agent's own
-/// clone, a linked worktree whose admin folder it can write, a `gitdir:` file and a
-/// bare-looking folder, each with a planted clean filter that runs when git works there,
-/// are refused with the hooks switch Off and On, and the IDE cannot read a clone's config.
-/// In the Project section the IDE stages and commits, runs the project's hooks only when
-/// the switch is On, never signs, and still cannot write the project's git config or hooks.
+/// INT-1, IN1-1, IN1-F1 and INT1-R2-1 under the installed IDE profile, through the engine's
+/// own git shim and git configuration. Agent folders under a `.crazyagent` project's agents
+/// root, as an agent's own clone, a linked worktree whose admin folder it can write, a
+/// `gitdir:` file and a bare-looking folder, each with a planted clean filter that runs when
+/// git works there, are refused with the hooks switch Off and On, and the IDE cannot read a
+/// clone's config. The owner's own tracked `worktrees` folder keeps the project's git. In
+/// the Project section the IDE stages and commits, runs the project's hooks only when the
+/// switch is On, never signs, and still cannot write the project's git config or hooks.
 #[test]
 fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     let scratch = tempfile::Builder::new()
@@ -600,7 +601,10 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
 
     setup(&root, &["init", "-q"]);
     fs::write(root.join("a.txt"), "base\n").unwrap();
-    setup(&root, &["add", "a.txt"]);
+    let sub = root.join("worktrees").join("sub");
+    folder(&sub);
+    fs::write(sub.join("own.txt"), "owner\n").unwrap();
+    setup(&root, &["add", "a.txt", "worktrees/sub/own.txt"]);
     setup(&root, &["commit", "-q", "-m", "base"]);
     fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
     planted(
@@ -625,9 +629,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     }
 
     let inner = root.join(".crazyagent").join("worktrees");
-    let outer = root.join("worktrees");
     folder(&inner);
-    folder(&outer);
     let clone = inner.join("agent-clone");
     setup(
         &base,
@@ -650,7 +652,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             linked.to_str().unwrap(),
         ],
     );
-    let gitdir = outer.join("agent-gitdir");
+    let gitdir = inner.join("agent-gitdir");
     folder(&gitdir);
     setup(
         &gitdir,
@@ -661,7 +663,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             gitdir.join("meta").to_str().unwrap(),
         ],
     );
-    let bare = outer.join("agent-bare");
+    let bare = inner.join("agent-bare");
     folder(&bare);
     setup(&bare, &["init", "-q", "--bare"]);
     setup(&bare, &["config", "core.bare", "false"]);
@@ -753,6 +755,24 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     assert!(
         status,
         "the Project section's git works under the profile: {said}"
+    );
+    let own = ide_git_output(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &sub,
+        &["rev-parse", "--show-toplevel"],
+    );
+    assert!(
+        own.status.success(),
+        "{}",
+        String::from_utf8_lossy(&own.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&own.stdout).trim(),
+        root.to_str().unwrap(),
+        "the owner's own worktrees folder keeps the project's git"
     );
     fs::write(root.join("a.txt"), "off\n").unwrap();
     let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
@@ -874,7 +894,8 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
 /// `<project>/worktrees`, an agent folder's unreadable `.git` makes git in the Project
 /// section see the agent's files as untracked, so Stage All would commit them past Accept.
 /// Once the IDE start hides the agents root ([`crate::projects_home::exclude_agents`]),
-/// Stage All through the IDE's git stages the owner's files only.
+/// Stage All through the IDE's git stages the owner's files only, and git in the agent's
+/// folder stops at that root (INT1-R2-1).
 #[test]
 fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     let scratch = tempfile::Builder::new()
@@ -965,6 +986,18 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         "notes.txt\n"
     );
     assert_eq!(setup(&agent, &["status", "--porcelain"]), "?? work.txt\n");
+    let (inside, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &agent,
+        &["status", "--porcelain"],
+    );
+    assert!(
+        !inside && said.contains("not a git repository"),
+        "the older layout's agents root stops the IDE's git: {said}"
+    );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
 
