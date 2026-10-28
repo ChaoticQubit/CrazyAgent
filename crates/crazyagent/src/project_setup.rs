@@ -2252,7 +2252,9 @@ fn set_agent_policy(
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops. Returns `invalid_project` for an unknown project.
+/// running one stops. Its project-scoped MCP servers, skills, secrets and per-project
+/// switches are cleared too, so a new project reusing the id never inherits them. Returns
+/// `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2298,6 +2300,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
 
