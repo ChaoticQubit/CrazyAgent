@@ -289,6 +289,7 @@ fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever
         ctx.try_request(Request::EditPool {
             change: crate::tui::seam::PoolChange::Remove {
                 id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
             },
         })
     } {
