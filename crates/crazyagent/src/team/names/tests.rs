@@ -185,6 +185,55 @@ fn handles_become_short_kebab_case_or_nothing() {
     assert_eq!(long, "word-word-word-word-word-word-wo");
 }
 
+/// A handle never reads as an agent number a master names agents by (RV-DS-62): bare digits,
+/// `team-<n>`, `sub-agent-<n>` and `<harness>-<n>` are refused as roles and renames, and a
+/// taken role is never suffixed into one.
+#[test]
+fn a_handle_never_reads_as_an_agent_number() {
+    for numbered in [
+        "7",
+        "@7",
+        "team-7",
+        "Team 7",
+        "sub-agent-7",
+        "Sub-agent 7",
+        "codex-7",
+        "@Codex-7",
+        "claude-code-12",
+    ] {
+        assert_eq!(handle(numbered), None, "{numbered}");
+    }
+    for kept in [
+        "onboarding-fix-2",
+        "task-1",
+        "v2",
+        "2fa",
+        "codex",
+        "team",
+        "7up",
+    ] {
+        assert!(handle(kept).is_some(), "{kept}");
+    }
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let first = agent(&connection, "alpha", "sub", "working");
+    let second = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, first, "codex").unwrap(),
+        Ok("codex".into())
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "codex").unwrap(),
+        Err("team_handle_taken"),
+        "codex-2 would read as agent 2"
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "7").unwrap(),
+        Err("team_handle_invalid")
+    );
+    assert_eq!(stored_name(&connection, second).unwrap().handle, None);
+}
+
 #[test]
 fn a_role_handle_is_unique_among_the_project_s_live_agents() {
     let (_directory, connection) = engine();

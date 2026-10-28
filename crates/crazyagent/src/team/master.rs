@@ -1068,8 +1068,9 @@ fn answer_agent(
 }
 
 /// Types a master's text into the running sub-agent it names: a persona or `@handle` first,
-/// then the `<harness>-<id>` names events use. Takes the database, terminal host, project,
-/// the name and the text. Returns the agent's label, or the plain reason it was not sent.
+/// then the `<harness>-<id>` names events use, and types into the agent found by its id, so
+/// the name is read once (RV-DS-62). Takes the database, terminal host, project, the name
+/// and the text. Returns the agent's label, or the plain reason it was not sent.
 fn type_to_agent(
     connection: &Connection,
     host: &dyn Host,
@@ -1078,13 +1079,8 @@ fn type_to_agent(
     text: &str,
 ) -> Result<String, String> {
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
-    let target = match super::names::resolve(connection, project, agent).map_err(unreadable)? {
-        Some(id) => format!("team-{id}"),
-        None => agent.to_owned(),
-    };
-    match super::events::send_to_agent(connection, host, project, &target, text)
-        .map_err(unreadable)?
-    {
+    let found = super::events::resolve(connection, project, agent).map_err(unreadable)?;
+    match super::events::send_to(connection, host, found, text).map_err(unreadable)? {
         Ok(id) => super::events::label(connection, id).map_err(unreadable),
         Err("team_message_invalid") => Err(format!(
             "Not sent: give plain text up to {} bytes.",

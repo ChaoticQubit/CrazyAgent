@@ -533,6 +533,70 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
     assert_eq!(send(live.to_string(), "hi"), Ok(live));
 }
 
+/// A numbered name reaches that agent, never another agent whose handle was stored in that
+/// form before handles refused it (RV-DS-62), and the text is typed into the numbered one.
+#[test]
+fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let holder = fixture.agent(PROJECT, "sub", "codex", "working");
+    let named = fixture.agent(PROJECT, "sub", "codex", "working");
+    let finished = fixture.agent(PROJECT, "sub", "codex", "stopped");
+    fixture.pane(&host, named, &["/bin/sh", "-c", "exec cat"]);
+    for (agent, persona, handle) in [
+        (holder, "Ada", named.to_string()),
+        (finished, "Grace", format!("codex-{named}")),
+    ] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![agent, PROJECT, persona, handle],
+            )
+            .unwrap();
+    }
+    for name in [
+        named.to_string(),
+        format!("@{named}"),
+        format!("codex-{named}"),
+        format!("@codex-{named}"),
+        format!("team-{named}"),
+    ] {
+        assert_eq!(
+            resolve(&fixture.connection, &project(), &name).unwrap(),
+            Some(named),
+            "{name}"
+        );
+        assert_eq!(
+            super::super::names::resolve(&fixture.connection, &project(), &name).unwrap(),
+            None,
+            "{name}"
+        );
+        assert_eq!(
+            super::super::names::resolve_finished(&fixture.connection, &project(), &name).unwrap(),
+            None,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        resolve(&fixture.connection, &project(), "Ada").unwrap(),
+        Some(holder),
+        "the holder is still reached by its persona"
+    );
+    assert_eq!(
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &named.to_string(),
+            "hi"
+        )
+        .unwrap(),
+        Ok(named),
+        "typed into the numbered agent, not the paneless holder"
+    );
+}
+
 #[test]
 fn a_task_end_records_finished_or_failed_whatever_its_last_line_asks_and_master_delegations_are_carried()
  {

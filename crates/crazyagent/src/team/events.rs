@@ -891,8 +891,9 @@ pub fn questions(
 const SUB_AGENT_PREFIX: &str = "Sub-agent ";
 
 /// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
-/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`.
-/// Takes the connection, the project and the name.
+/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`. A name
+/// in a numbered form is read only as that number, so a handle stored in that form never
+/// takes it (RV-DS-62). Takes the connection, the project and the name.
 /// Returns the team agent id, or none for an unknown name, another project's agent or a master.
 pub fn resolve(
     connection: &Connection,
@@ -956,10 +957,25 @@ pub fn send_to_agent(
     agent: &str,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    let found = resolve(connection, project, agent)?;
+    send_to(connection, host, found, text)
+}
+
+/// Types a master's message or answer into the sub-agent [`resolve`] found, as
+/// [`send_to_agent`] does, so a caller that already resolved the name passes its id rather
+/// than a name to read again. Takes the connection, the terminal host, the agent or None
+/// when no agent was found, and the text. Returns the agent id, or the same plain refusal
+/// codes.
+pub fn send_to(
+    connection: &Connection,
+    host: &dyn Host,
+    found: Option<i64>,
+    text: &str,
+) -> Result<Result<i64, &'static str>, EngineError> {
     if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
         return Ok(Err("team_message_invalid"));
     }
-    let Some(id) = resolve(connection, project, agent)? else {
+    let Some(id) = found else {
         return Ok(Err("team_agent_not_found"));
     };
     let status: String = connection
