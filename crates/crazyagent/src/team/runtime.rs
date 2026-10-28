@@ -821,42 +821,38 @@ impl TeamRuntime {
 
     /// Applies the owner's stop and restart from the agent register to live agents and
     /// shows the register which agents are working. A stop cancels the agent's work; a
-    /// restart returns it to its queue for the fresh process.
+    /// restart returns it to its queue for the fresh process. What the stop stores, the live
+    /// switch turned off and the owner's stop of a sub-agent (AW-1), is written before the
+    /// agent is touched, so a failed write leaves the stop to the next tick.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
-        let mut stopped_live = Vec::new();
-        let mut stopped_subs = Vec::new();
         for (id, worker) in &mut self.workers {
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
             hosted.set_busy(worker.busy.is_some());
             let asked = hosted.requested();
-            if asked == Some(HostedRequest::Restart) && !worker.held {
+            let restart = asked == Some(HostedRequest::Restart) && !worker.held;
+            if !restart && (asked != Some(HostedRequest::Stop) || worker.stopping) {
+                continue;
+            }
+            if worker.live {
+                super::master::set_live(&self.connection, &worker.project, false)?;
+            }
+            if worker.role == AgentRole::Sub {
+                self.connection
+                    .execute(
+                        "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                        params![*id, worker.project.as_str(), now_ms()],
+                    )
+                    .map_err(error)?;
+            }
+            if restart {
                 worker.held = true;
                 worker.restarting = true;
-            } else if asked != Some(HostedRequest::Stop) || worker.stopping {
-                continue;
             }
             worker.stopping = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
-            if worker.live {
-                stopped_live.push(worker.project.clone());
-            }
-            if worker.role == AgentRole::Sub {
-                stopped_subs.push((*id, worker.project.clone()));
-            }
-        }
-        for project in stopped_live {
-            super::master::set_live(&self.connection, &project, false)?;
-        }
-        for (id, project) in stopped_subs {
-            self.connection
-                .execute(
-                    "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
-                    params![id, project.as_str(), now_ms()],
-                )
-                .map_err(error)?;
         }
         Ok(())
     }

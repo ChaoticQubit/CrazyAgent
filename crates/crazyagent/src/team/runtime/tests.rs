@@ -3586,9 +3586,10 @@ fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task
 }
 
 /// The owner's stop holds against the master (AW-1): a sub-agent the owner stopped is
-/// recorded as stopped by the owner, the master's wake of it is refused, a task pinned to
-/// it fails instead of waking it, and only the owner's Wake starts it again, which clears
-/// the record.
+/// recorded as stopped by the owner, and a stop whose record cannot be written is not
+/// applied until it is (AW-C1). The master's wake of it is refused and a task the master
+/// pinned to it fails instead of waking it, while the owner's change-set Update, Wake and
+/// restart each start it again and clear the record.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
@@ -3608,7 +3609,30 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
     let listed = agents
         .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
         .unwrap();
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_owner_stop BEFORE INSERT ON team_owner_stops
+             BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
+        )
+        .unwrap();
     agents.stop(&listed[0].id).unwrap();
+    for _ in 0..3 {
+        assert!(
+            team.tick().is_err(),
+            "the stop is tried again each tick until its record is written"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        fixture.agent_status(member).0,
+        AgentStatus::Idle,
+        "a stop whose record could not be written is not applied"
+    );
+    fixture
+        .connection
+        .execute_batch("DROP TRIGGER refuse_owner_stop;")
+        .unwrap();
     fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
         f.agent_status(member).0 == AgentStatus::Stopped
     });
@@ -3663,6 +3687,29 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
 
     let tx = connection.transaction().unwrap();
     assert_eq!(
+        crate::team::admit_resolve(
+            &tx,
+            &fixture.setup.project_id,
+            member,
+            "Update the page to the new trunk.",
+            now_ms()
+        )
+        .unwrap(),
+        Ok(())
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the owner's change-set Update starts it", |f| {
+        launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle
+    });
+    assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped it again", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    assert!(crate::team::owner_stopped(&fixture.connection, member).unwrap());
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
         crate::team::execute(
             &tx,
             &fixture.access,
@@ -3676,9 +3723,35 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
     );
     tx.commit().unwrap();
     fixture.until(&mut team, "the owner's Wake starts it", |f| {
-        launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle
+        launches(f, member).len() == 3 && f.agent_status(member).0 == AgentStatus::Idle
     });
     assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+
+    fixture
+        .connection
+        .execute_batch(
+            "CREATE TABLE owner_stops_seen(agent INTEGER NOT NULL);
+             CREATE TRIGGER see_owner_stop AFTER INSERT ON team_owner_stops
+             BEGIN INSERT INTO owner_stops_seen(agent) VALUES (NEW.agent); END;",
+        )
+        .unwrap();
+    agents.restart(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner's restart starts it again", |f| {
+        launches(f, member).len() == 4 && f.agent_status(member).0 == AgentStatus::Idle
+    });
+    let seen: Vec<i64> = fixture
+        .connection
+        .prepare("SELECT agent FROM owner_stops_seen")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(seen, [member], "the owner's restart records its stop");
+    assert!(
+        !crate::team::owner_stopped(&fixture.connection, member).unwrap(),
+        "and clears it once the agent is back"
+    );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
