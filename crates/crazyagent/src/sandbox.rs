@@ -1516,27 +1516,27 @@ fn seatbelt_pattern(path: &Path) -> String {
 /// it may never replace, rename or relink, no move or removal of its `objects` or
 /// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
 /// git folder, the fallback repository git's upload-pack serves when the git folder fails
-/// git's repository test (RL-1), and no `objects/pack/multi-pack-index` file, folder or
-/// companion, which can name a pack outside the store (RL-2), each name in any letter case,
-/// while its own loose objects and packs stay writable. The engine's fetch checks the same
+/// git's repository test (RL-1), no `objects/pack/multi-pack-index` file, folder or
+/// companion, which can name a pack outside the store (RL-2), and no write to the
+/// `objects/pack` or `objects/<xx>` folder entries, so no folder built elsewhere is moved
+/// in over one with its contents (RL-3), each name in any letter case, while its own loose
+/// objects and packs inside those folders stay writable. The engine makes those folders
+/// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
 /// store before it runs (w-landing). Input: the clone. Output: the rule text.
 fn clone_store_denies(clone: &Path) -> String {
     let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
     let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
     let objects = format!("{git}/{}", any_case("objects"));
     let info = format!("{objects}/{}", any_case("info"));
-    let index = format!(
-        "{objects}/{}/{}",
-        any_case("pack"),
-        any_case("multi-pack-index")
-    );
+    let pack = format!("{objects}/{}", any_case("pack"));
+    let index = format!("{pack}/{}", any_case("multi-pack-index"));
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
         any_case("alternates"),
         any_case("http-alternates"),
         any_case("commondir")
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 8);
+    assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
     text
 }
