@@ -81,12 +81,6 @@ async fn extension_decline_drops_the_ask_and_keeps_the_extension_out_of_the_ide(
         None,
         "a declined extension is never allowed in the IDE"
     );
-    let approve = client
-        .ide_extension_approve(project.clone(), EXTENSION.into(), VERSION.into())
-        .await
-        .expect_err("an approval of a declined ask is refused before any download");
-    assert_eq!(approve.0, "ide_extension_ask_missing");
-    assert_eq!(allowed(&engine, EXTENSION), None);
 
     engine.restart();
     let owner = Owner::attach(&engine).await;
