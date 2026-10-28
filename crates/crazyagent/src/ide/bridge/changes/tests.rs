@@ -46,6 +46,55 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
+/// The master's worktree as the engine leases it: the repository admitted for the project,
+/// a master bootstrap lease reserved and checked out on its own `crazyagent/` branch, the
+/// only HEAD a master change set may be recorded from. Inputs: the store, the engine root,
+/// the project and the repository. Output: the worktree and its git folder.
+fn master_lease(
+    db: &Connection,
+    engine: &Path,
+    project: &ProjectId,
+    repo: &Path,
+) -> (PathBuf, PathBuf) {
+    use crate::protocol::{Outcome, ProjectSpec, SessionId, StoredProject, TaskId};
+    crate::storage::initialize_authority_schemas(db).unwrap();
+    let repository = repo.to_str().unwrap();
+    let stored = StoredProject {
+        project_id: project.clone(),
+        spec: ProjectSpec {
+            name: "Project one".into(),
+            repositories: vec![repository.into()],
+        },
+    };
+    db.execute(
+        "INSERT INTO projects VALUES (?1,?2)",
+        rusqlite::params![project.as_str(), serde_json::to_string(&stored).unwrap()],
+    )
+    .unwrap();
+    let task = TaskId::new("master-bootstrap-1").unwrap();
+    let session = SessionId::new("session-1").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    assert_eq!(
+        crate::worktrees::admit(&tx, project, repository).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        crate::worktrees::reserve_master_bootstrap(
+            &tx, engine, project, &task, &session, repository
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    crate::worktrees::provision(db, &task, repository).unwrap();
+    let Outcome::Worktrees { leases } = crate::worktrees::leases(db, &task).unwrap() else {
+        panic!("the bootstrap task holds its lease");
+    };
+    assert_eq!(leases.len(), 1);
+    let git_dir = crate::worktrees::lease_git_dir(db, &leases[0]).unwrap();
+    (PathBuf::from(&leases[0].path), git_dir)
+}
+
 impl Case {
     pub(in crate::ide::bridge) fn new() -> Self {
         Self::in_store(None)
@@ -147,23 +196,29 @@ impl Case {
         }
         owner(&["add", "-A"]);
         owner(&["commit", "-q", "-m", "Start"]);
-        let worktree = root.join("agent-7");
-        owner(&[
-            "worktree",
-            "add",
-            "-q",
-            "--detach",
-            worktree.to_str().unwrap(),
-            "HEAD",
-        ]);
         let project = ProjectId::new("project-1").unwrap();
         let db = landing::open(&engine).unwrap();
+        let (worktree, git_dir) = match agent.kind {
+            AgentKind::Sub => {
+                let worktree = root.join("agent-7");
+                owner(&[
+                    "worktree",
+                    "add",
+                    "-q",
+                    "--detach",
+                    worktree.to_str().unwrap(),
+                    "HEAD",
+                ]);
+                (worktree, repo.join(".git/worktrees/agent-7"))
+            }
+            AgentKind::Master => master_lease(&db, &engine, &project, &repo),
+        };
         let workspace = Workspace {
             project: project.clone(),
             agent,
             repository: repo.clone(),
             worktree: worktree.clone(),
-            git_dir: repo.join(".git/worktrees/agent-7"),
+            git_dir,
         };
         std::fs::write(worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
         std::fs::write(worktree.join("NOTES"), "added by the agent\n").unwrap();
