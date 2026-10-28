@@ -1,15 +1,16 @@
 import { Channel } from "@tauri-apps/api/core";
 import type { IDisposable, ITerminalOptions, Terminal } from "@xterm/xterm";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { attachTerminal, detachTerminal, promptTerminal, resizeTerminal, typeIntoTerminal } from "../../api";
 import type { GraphNode, TerminalMessage } from "../../engine-client";
 import type { InputChoice } from "./terminal-io";
 import { Button, Icon, NotReady, isMac, sendsMessage } from "../../ui";
 import { displayText } from "../conversation";
 import { nodeLine } from "./graph";
-import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
+import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, jobQueue, keyOverride, menuSpot, muteQueries, outputText, pasteText, promptText, settleAfterWrites, terminalEvent, terminalSize } from "./terminal-io";
 
 const COPIED_MS = 2000;
+const COPY_REFUSED = "The clipboard refused the copy.";
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
@@ -133,7 +134,8 @@ export function terminalOutput(terminal: Terminal): string {
 
 /** Routes an opened terminal's keys to the agent: what xterm types, Shift+Enter as one new
  * line that xterm never also reads as Enter, the copy key copying a selection instead of
- * typing, and clipboard pastes with their control characters dropped before xterm brackets
+ * typing (off a Mac Ctrl+C then drops the selection, so the next Ctrl+C interrupts the
+ * agent), and clipboard pastes with their control characters dropped before xterm brackets
  * them. Inputs: the terminal, the typing action and whether this is a Mac. Output: the
  * subscription for typed text and pastes. */
 export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: boolean = isMac()): IDisposable {
@@ -142,7 +144,10 @@ export function typeKeys(terminal: Terminal, type: (data: string) => void, mac: 
   const typed = terminal.onData(type);
   terminal.attachCustomKeyEventHandler((event) => {
     if (copyKey(event, terminal.hasSelection(), mac)) {
-      if (event.type === "keydown") void copyText(terminal.getSelection());
+      if (event.type === "keydown") {
+        void copyText(terminal.getSelection());
+        if (!mac) terminal.clearSelection();
+      }
       return false;
     }
     const override = keyOverride(event);
@@ -188,6 +193,67 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
   };
 }
 
+/** Tells whether the owner reads above the live screen, so Jump to latest shows only then:
+ * once at the start, so a reopened view never keeps the last view's flag, and on every scroll,
+ * which xterm also reports when an app switches to or from its full screen.
+ * Inputs: the terminal and the setter for that flag. Output: the subscription. */
+export function followScroll(terminal: Terminal, set: (behind: boolean) => void): IDisposable {
+  const report = () => {
+    const buffer = terminal.buffer.active;
+    set(buffer.viewportY < buffer.baseY);
+  };
+  report();
+  return terminal.onScroll(report);
+}
+
+/** Where the owner right-clicked a terminal, in page coordinates, and what was selected then. */
+export type MenuAt = { x: number; y: number; selection: string };
+
+/** The terminal's right-click menu: Copy for the selection taken when it opened and Copy
+ * output for the whole buffer, placed inside its panel near the click, the arrow keys moving
+ * between items, Escape and a copy handing focus back to the terminal, and a press outside
+ * closing it. Inputs: the terminal, where it opened and the close action, given the note to
+ * show after a copy or null. Output: the menu. */
+export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at: MenuAt; onDone: (note: string | null) => void }) {
+  const list = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const menu = list.current;
+    const panel = menu?.offsetParent;
+    if (!menu || !panel) return;
+    const box = panel.getBoundingClientRect();
+    const spot = menuSpot({ x: at.x - box.left - panel.clientLeft, y: at.y - box.top - panel.clientTop },
+      { width: menu.offsetWidth, height: menu.offsetHeight }, { width: panel.clientWidth, height: panel.clientHeight });
+    menu.style.left = `${spot.x}px`;
+    menu.style.top = `${spot.y}px`;
+    menu.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)")?.focus();
+  }, [at]);
+  useEffect(() => {
+    const outside = (event: PointerEvent) => { if (!(event.target instanceof Node && list.current?.contains(event.target))) onDone(null); };
+    document.addEventListener("pointerdown", outside, true);
+    return () => document.removeEventListener("pointerdown", outside, true);
+  }, [onDone]);
+  const back = (note: string | null) => {
+    terminal.focus();
+    onDone(note);
+  };
+  const copy = async (text: string, done: string) => back(await copyText(text) ? done : COPY_REFUSED);
+  const move = (step: number) => {
+    const items = [...(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]:not(:disabled)") ?? [])];
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    items[(index + step + items.length) % items.length]?.focus();
+  };
+  return <div ref={list} className="menu-list tg-terminal-menu" role="menu" aria-label="Terminal" onKeyDown={(event) => {
+    if (event.key === "Escape") back(null);
+    else if (event.key === "ArrowDown") move(1);
+    else if (event.key === "ArrowUp") move(-1);
+    else return;
+    event.preventDefault();
+  }}>
+    <button type="button" role="menuitem" className="menu-item" disabled={!at.selection} onClick={() => void copy(at.selection, "Copied the selection.")}><Icon name="copy" size={14} />Copy</button>
+    <button type="button" role="menuitem" className="menu-item" onClick={() => void copy(terminalOutput(terminal), "Copied the output.")}><Icon name="file-text" size={14} />Copy output</button>
+  </div>;
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
@@ -208,20 +274,11 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
   const screen = useRef<HTMLDivElement>(null);
   const prompt = useRef<((text: string) => boolean) | null>(null);
   const latest = useRef<(() => void) | null>(null);
-  const texts = useRef<{ selection: () => string; output: () => string } | null>(null);
-  const menuList = useRef<HTMLDivElement>(null);
+  const term = useRef<Terminal | null>(null);
   const [view, setView] = useState<View>({ kind: "connecting" });
   const [behind, setBehind] = useState(false);
-  const [menu, setMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
+  const [menu, setMenu] = useState<MenuAt | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!menu) return;
-    menuList.current?.querySelector<HTMLElement>("[role=menuitem]:not(:disabled)")?.focus();
-    const outside = (event: PointerEvent) => { if (!(event.target instanceof Node && menuList.current?.contains(event.target))) setMenu(null); };
-    document.addEventListener("pointerdown", outside, true);
-    return () => document.removeEventListener("pointerdown", outside, true);
-  }, [menu]);
 
   useEffect(() => {
     if (!copied) return;
@@ -229,10 +286,11 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     return () => window.clearTimeout(timer);
   }, [copied]);
 
-  const copy = async (text: string, done: string) => {
+  const copy = async (text: string, done: string) => setCopied(await copyText(text) ? done : COPY_REFUSED);
+  const closeMenu = useRef((note: string | null) => {
     setMenu(null);
-    setCopied(await copyText(text) ? done : "The clipboard refused the copy.");
-  };
+    if (note) setCopied(note);
+  }).current;
   const [round, setRound] = useState(0);
   const name = node.terminal;
 
@@ -289,15 +347,12 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         terminal.focus();
         return true;
       };
-      const scrolled = terminal.onScroll(() => {
-        const buffer = terminal.buffer.active;
-        setBehind(buffer.viewportY < buffer.baseY);
-      });
+      const scrolled = followScroll(terminal, setBehind);
       latest.current = () => {
         terminal.scrollToBottom();
         terminal.focus();
       };
-      texts.current = { selection: () => terminal.getSelection(), output: () => terminalOutput(terminal) };
+      term.current = terminal;
       const resized = terminal.onResize(() => {
         window.clearTimeout(timer);
         timer = window.setTimeout(sendSize, RESIZE_PAUSE_MS);
@@ -322,7 +377,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       release = () => {
         prompt.current = null;
         latest.current = null;
-        texts.current = null;
+        term.current = null;
         channel.onmessage = () => {};
         observer.disconnect();
         typing.dispose();
@@ -363,20 +418,15 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       <Button size="small" icon="refresh-cw" onClick={() => setRound((value) => value + 1)}>Open again</Button>
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} onContextMenu={(event) => {
-      if (!texts.current) return;
+      if (!term.current) return;
       event.preventDefault();
-      const box = (event.currentTarget.parentElement ?? event.currentTarget).getBoundingClientRect();
-      setMenu({ x: event.clientX - box.left, y: event.clientY - box.top, selection: texts.current.selection() });
+      setMenu({ x: event.clientX, y: event.clientY, selection: term.current.getSelection() });
     }} />
-    {menu && <div ref={menuList} className="menu-list tg-terminal-menu" role="menu" aria-label="Terminal" style={{ left: menu.x, top: menu.y }}
-      onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setMenu(null); } }}>
-      <button type="button" role="menuitem" className="menu-item" disabled={!menu.selection} onClick={() => void copy(menu.selection, "Copied the selection.")}><Icon name="copy" size={14} />Copy</button>
-      <button type="button" role="menuitem" className="menu-item" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}><Icon name="file-text" size={14} />Copy output</button>
-    </div>}
+    {menu && term.current && <TerminalMenu terminal={term.current} at={menu} onDone={closeMenu} />}
     {view.kind === "live" && <div className="tg-terminal-note">
       <span role="status">{copied ?? inputNote(node, input)}</span>
       {behind && <Button variant="quiet" size="small" icon="chevron-down" onClick={() => latest.current?.()}>Jump to latest</Button>}
-      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(texts.current?.output() ?? "", "Copied the output.")}>Copy output</Button>
+      <Button variant="quiet" size="small" icon="copy" onClick={() => void copy(term.current ? terminalOutput(term.current) : "", "Copied the output.")}>Copy output</Button>
     </div>}
     {mode.box && name && view.kind !== "not_ready" && <Composer node={node} live={view.kind === "live"} onSend={(text) => prompt.current?.(text) ?? false} />}
   </section>;
