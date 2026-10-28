@@ -1443,11 +1443,18 @@ async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_worki
         .execute_batch(&format!(
             "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES ('{PROJECT}','owner','Old question','answered',1);
              INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('{PROJECT}','owner','codex',0,'Old step','done',1,1);
-             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);"
+             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);
+             INSERT INTO team_finished_view(project,show) VALUES ('{PROJECT}',1);"
         ))
         .unwrap();
     drop(database);
-    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+    for table in [
+        "onboarding",
+        "team_messages",
+        "team_tasks",
+        "research_jobs",
+        "team_finished_view",
+    ] {
         assert_eq!(project_rows(&bench.root, table), 1, "{table}");
     }
 
@@ -1458,7 +1465,13 @@ async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_worki
         .await
         .unwrap();
     assert_eq!(rejection(&response), None, "{response:?}");
-    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+    for table in [
+        "onboarding",
+        "team_messages",
+        "team_tasks",
+        "research_jobs",
+        "team_finished_view",
+    ] {
         assert_eq!(project_rows(&bench.root, table), 0, "{table} after removal");
     }
     assert!(
