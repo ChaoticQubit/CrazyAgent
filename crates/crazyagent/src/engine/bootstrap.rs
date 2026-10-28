@@ -1407,4 +1407,109 @@ mod tests {
         );
         assert!(path.exists());
     }
+
+    /// The anchor entries whose names start with `prefix`, sorted.
+    /// Input: the anchor folder and the prefix. Output: the matching paths.
+    fn set_aside(root: &Path, prefix: &str) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(prefix)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// A reboot can give the engine's volume another device number while every inode stays,
+    /// so the locator a crashed engine left names engine.db by an identity that no longer
+    /// matches. The next engine holds the engine lock, so it sets that locator aside and
+    /// starts.
+    #[tokio::test]
+    async fn an_engine_starts_again_after_a_reboot_gave_its_database_another_device() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let mut first = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let path = root.path().join(LOCATOR);
+        let mut left: Locator = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        first.shutdown().await.unwrap();
+        let database = std::fs::metadata(root.path().join("engine.db")).unwrap();
+        assert_eq!(left.database, Identity::of(&database));
+        left.database.device = database.dev() ^ 1;
+        let stale = serde_json::to_vec(&left).unwrap();
+        std::fs::write(&path, &stale).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let started = EngineService::start(root.path(), "e.sock", &config, &stopped).await;
+        assert_eq!(
+            started.as_ref().err().map(|error| error.0.as_str()),
+            None,
+            "an engine starts after a reboot changed its database's device"
+        );
+        let mut second = started.unwrap();
+        second.ensure_ready(&stopped).unwrap();
+        let aside = set_aside(root.path(), "owner-current.stale-");
+        assert_eq!(
+            aside.len(),
+            1,
+            "the stale locator is kept aside, not deleted"
+        );
+        assert_eq!(std::fs::read(&aside[0]).unwrap(), stale);
+        second.shutdown().await.unwrap();
+        assert_eq!(set_aside(root.path(), "owner-current.stale-"), aside);
+    }
+
+    /// An engine stopped without its cleanup leaves its ordinary socket file behind with no
+    /// listener; with no locator naming it, the next engine holds the engine lock, finds no
+    /// listener there and sets the socket file aside instead of refusing to start.
+    #[tokio::test]
+    async fn an_engine_starts_beside_the_socket_a_dropped_listener_left() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let socket = root.path().join("e.sock");
+        let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop(listener);
+        assert!(
+            std::fs::symlink_metadata(&socket)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        assert!(!root.path().join(LOCATOR).exists());
+
+        let started = EngineService::start(root.path(), "e.sock", &config, &stopped).await;
+        assert_eq!(
+            started.as_ref().err().map(|error| error.0.as_str()),
+            None,
+            "an engine starts beside the socket file a dropped listener left"
+        );
+        let mut service = started.unwrap();
+        service.ensure_ready(&stopped).unwrap();
+        let aside = set_aside(root.path(), "e.sock.stale-");
+        assert_eq!(
+            aside.len(),
+            1,
+            "the stale socket is kept aside, not deleted"
+        );
+        assert!(
+            std::fs::symlink_metadata(&aside[0])
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        service.shutdown().await.unwrap();
+    }
 }
