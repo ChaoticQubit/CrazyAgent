@@ -503,6 +503,68 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
     assert!(upgraded.shutdown().unwrap().is_empty());
 }
 
+/// An agent holding a toolchain is stopped under a reason that says what happened: a
+/// policy the engine cannot read is named as unreadable, and a toolchain the saved policy
+/// no longer allows without an owner choice turning it off is never called turned off.
+#[test]
+fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why() {
+    use crate::sandbox::toolchains::Toolchain;
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let sandboxed = crate::sandbox::policy::AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        toolchains: Vec::new(),
+    };
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    let unreadable = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        toolchains: Some(vec![Toolchain::Rust]),
+        ..fixture.pane(&host, unreadable)
+    };
+    fixture.keep(unreadable, &record);
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the agent stopped as unreadable", |f| {
+        f.agent_status(unreadable).0 == AgentStatus::Stopped && host.alive().unwrap().is_empty()
+    });
+    let problem = fixture.agent_status(unreadable).1.unwrap_or_default();
+    assert!(
+        problem.contains("the project's agent access could not be read")
+            && !problem.contains("turned off")
+            && !problem.contains("lowered"),
+        "{problem}"
+    );
+    assert!(team.shutdown().unwrap().is_empty());
+
+    crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
+    assert!(
+        !Toolchain::Rust.used_by(&fixture.base.join("project")),
+        "the project has no Cargo.toml"
+    );
+    let detected = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        toolchains: Some(vec![Toolchain::Rust]),
+        ..fixture.pane(&host, detected)
+    };
+    fixture.keep(detected, &record);
+    let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut again, "the agent stopped as no longer allowed", |f| {
+        f.agent_status(detected).0 == AgentStatus::Stopped && host.alive().unwrap().is_empty()
+    });
+    let problem = fixture.agent_status(detected).1.unwrap_or_default();
+    assert!(
+        problem.contains("no longer allowed") && !problem.contains("was turned off"),
+        "{problem}"
+    );
+    assert!(again.shutdown().unwrap().is_empty());
+}
+
 #[test]
 fn a_project_never_runs_more_than_fifteen_agent_terminals() {
     let fixture = Fixture::new(14);

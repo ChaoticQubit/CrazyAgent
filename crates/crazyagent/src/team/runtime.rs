@@ -25,7 +25,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
-use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, Narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -302,12 +302,11 @@ enum Busy {
 }
 
 /// Why the engine stopped an agent whose running process holds more than the owner saved:
-/// a lower access level, a toolchain turned off, or toolchains a pane from before the engine
-/// kept them may hold.
+/// what the saved policy no longer allows, or toolchains a pane from before the engine kept
+/// them may hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrowed {
-    Access,
-    Toolchains,
+    Saved(Narrowing),
     Unrecorded,
 }
 
@@ -315,20 +314,33 @@ impl Narrowed {
     /// The plain reason the stopped agent shows, with its code. Input: the cause.
     /// Output: the sentence.
     fn problem(self) -> String {
-        match self {
-            Self::Access => with_code(
+        let (text, code) = match self {
+            Self::Saved(Narrowing::Access) => (
                 "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                Some("agent_access_lowered"),
+                Narrowing::Access.code(),
             ),
-            Self::Toolchains => with_code(
+            Self::Saved(Narrowing::TurnedOff) => (
                 "the project's toolchain access was turned off, so the agent was stopped; its next start goes without it",
-                Some("agent_toolchain_lowered"),
+                Narrowing::TurnedOff.code(),
             ),
-            Self::Unrecorded => with_code(
+            Self::Saved(Narrowing::NotAllowed) => (
+                "a toolchain the agent started with is no longer allowed for the project (turned off, or no longer used by the project), so the agent was stopped; its next start goes without it",
+                Narrowing::NotAllowed.code(),
+            ),
+            Self::Saved(Narrowing::PolicyUnreadable) => (
+                "the project's agent access could not be read, so the agent was stopped; it starts again once it can be read",
+                Narrowing::PolicyUnreadable.code(),
+            ),
+            Self::Saved(Narrowing::FolderUnreadable) => (
+                "the project folder could not be read to check the agent's toolchains, so the agent was stopped",
+                Narrowing::FolderUnreadable.code(),
+            ),
+            Self::Unrecorded => (
                 "the agent started before the engine kept the toolchains it was given, so it was stopped; its next start uses the project's toolchain settings",
-                Some("agent_toolchains_unrecorded"),
+                "agent_toolchains_unrecorded",
             ),
-        }
+        };
+        with_code(text, Some(code))
     }
 }
 
@@ -1390,7 +1402,9 @@ impl TeamRuntime {
     /// every family. A stopped agent is held, so its task or message waits again without a
     /// spent attempt, and every next start reads the policy again, so it starts
     /// with the new level and without that toolchain. Each agent is checked once per saved
-    /// policy; an unreadable policy or project folder counts as Sandboxed with no toolchain.
+    /// policy. An unreadable policy stops every agent holding more than Sandboxed with no
+    /// toolchain, and a project folder that toolchain detection cannot read stops every agent
+    /// holding a toolchain the owner made no choice for, each under its own reason.
     /// Takes the project's stored setup.
     fn retire_narrowed(&mut self, stored: &StoredSetup) {
         let project = &stored.project_id;
@@ -1405,36 +1419,22 @@ impl TeamRuntime {
         if stale.is_empty() {
             return;
         }
-        let access = saved
-            .as_ref()
-            .map_or(AgentAccess::Sandboxed, |policy| policy.access);
-        let allowed = saved.as_ref().map_or_else(Vec::new, |policy| {
-            stored
-                .project_folder()
-                .canonicalize()
-                .map_or_else(|_| Vec::new(), |root| policy.allowed(&root))
-        });
-        assert!(allowed.len() <= Toolchain::ALL.len());
+        let root = stored.project_folder().canonicalize().ok();
         for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running = !worker.managed || worker.live || worker.busy.is_some();
-            let narrowed = if running && worker.access.wider_than(access) {
-                Some(Narrowed::Access)
-            } else if worker
-                .toolchains
-                .as_deref()
-                .unwrap_or(&Toolchain::ALL)
-                .iter()
-                .any(|toolchain| !allowed.contains(toolchain))
-            {
-                Some(if worker.toolchains.is_some() {
-                    Narrowed::Toolchains
-                } else {
+            let narrowed = crate::sandbox::policy::narrowing(
+                saved.as_ref(),
+                root.as_deref(),
+                running.then_some(worker.access),
+                worker.toolchains.as_deref().unwrap_or(&Toolchain::ALL),
+            )
+            .map(|cause| match cause {
+                Narrowing::TurnedOff | Narrowing::NotAllowed if worker.toolchains.is_none() => {
                     Narrowed::Unrecorded
-                })
-            } else {
-                None
-            };
+                }
+                cause => Narrowed::Saved(cause),
+            });
             let Some(narrowed) = narrowed else {
                 worker.checked = saved.clone();
                 continue;
