@@ -13,10 +13,12 @@ struct Busy {
     service: EngineService,
     _shutdown: tokio::sync::watch::Sender<bool>,
     client: OwnerClient,
+    _disk: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Busy {
     async fn start() -> Self {
+        let disk = super::usage_tests::busy_storage().await;
         let root = tempfile::Builder::new()
             .prefix("ca-busy-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -45,6 +47,7 @@ impl Busy {
             service,
             _shutdown: shutdown,
             client,
+            _disk: disk,
         }
     }
 
