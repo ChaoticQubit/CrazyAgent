@@ -479,6 +479,84 @@ async fn idle_server_stops_after_the_idle_limit() {
     assert!(!servers.touch(&ProjectId::new("never-opened").unwrap()));
 }
 
+/// Starts opening a project's IDE and drops the open once its launch is stored but before
+/// it listens, as the IDE tab's request timeout cuts a slow start. While the open is still
+/// pending its launch cannot have passed `ready`. Inputs: the register, the project, the
+/// checkout and the build. Output: the cut launch's process group.
+async fn cut_open(servers: &Servers, project: &ProjectId, checkout: &Path, build: &Path) -> i32 {
+    let open = servers.open(project, checkout, build);
+    tokio::pin!(open);
+    let deadline = Instant::now() + START_LIMIT;
+    loop {
+        tokio::select! {
+            opened = &mut open => panic!("the open finished before it could be cut: {opened:?}"),
+            () = tokio::time::sleep(Duration::from_millis(2)) => {}
+        }
+        if let Some(group) = servers.group(project) {
+            return group;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the open never stored its launch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_open_cut_while_its_server_starts_still_stops_when_idle() {
+    let checkout = scratch();
+    let data = scratch();
+    let idle = Duration::from_secs(3);
+    let servers = Servers::new(data.path(), idle);
+    let project = project("cut-idle");
+    let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
+    let issued = servers.project_folder(&project).unwrap().join(token::FILE);
+    assert!(issued.exists());
+    assert!(
+        present(group),
+        "the cut launch runs on with nobody waiting for it"
+    );
+    gone(group).await;
+    assert_eq!(servers.group(&project), None);
+    assert!(!servers.touch(&project));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while issued.exists() {
+        assert!(Instant::now() < deadline, "a cut launch's token stayed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let project = project("cut-reuse");
+    let build = cached_build();
+    let cut = cut_open(&servers, &project, checkout.path(), &build).await;
+    assert!(present(cut));
+
+    let info = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    let group = servers.group(&project).unwrap();
+    assert_ne!(group, cut, "the next open started its own launch");
+    gone(cut).await;
+    assert!(
+        group_listeners(group).contains(&format!("127.0.0.1:{}", info.server_port)),
+        "the new launch, which passed its port check, holds the server port"
+    );
+    let again = servers
+        .open(&project, checkout.path(), &build)
+        .await
+        .unwrap();
+    assert_eq!(again, info, "a ready launch is handed back");
+    assert_eq!(servers.group(&project), Some(group));
+    servers.stop_all().await;
+    gone(group).await;
+}
+
 #[tokio::test]
 async fn no_ide_server_process_survives_engine_stop() {
     let checkout = scratch();

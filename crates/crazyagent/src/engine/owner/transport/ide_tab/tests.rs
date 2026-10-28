@@ -68,3 +68,50 @@ async fn ide_tab_reads_the_build_and_never_opens_a_server_before_it_is_ready() {
     );
     service.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tab_request_that_cannot_take_the_owner_barrier_in_time_is_refused_busy() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-idetab-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let busy = Duration::from_millis(1000);
+    let config =
+        crate::config::resolve_config_bytes(&format!("timeout_ms = {}\n", busy.as_millis()), "")
+            .unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let controller = OwnerController::attach(root.path(), OwnerClientKind::Desktop, WAIT)
+        .await
+        .unwrap();
+    let client = controller.shared_client().unwrap();
+
+    let held = service
+        .owner_runtime()
+        .unwrap()
+        .engine
+        .owner_egress
+        .write()
+        .await;
+    let asked = std::time::Instant::now();
+    assert_eq!(
+        client.ide_tab_state(false).await,
+        Err(EngineError("owner_busy".into())),
+        "a request that cannot take the barrier is refused, not left to eat the open budget"
+    );
+    assert!(asked.elapsed() >= busy);
+    assert!(
+        asked.elapsed() < WAIT,
+        "the barrier wait is bounded by the engine timeout"
+    );
+    drop(held);
+    assert_eq!(
+        client.ide_tab_state(false).await.unwrap().build,
+        BuildState::Missing,
+        "once the barrier is free the same request is served"
+    );
+    service.shutdown().await.unwrap();
+}
