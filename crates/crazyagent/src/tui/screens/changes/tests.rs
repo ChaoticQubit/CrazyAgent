@@ -143,7 +143,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
     );
 
     assert!(view.key(key(KeyCode::Char('a')), NOW));
-    assert!(text(&view).contains("Accept these changes?"));
+    assert!(text(&view).contains("Accept the changes of Sub-agent Agent 1?"));
     assert!(view.key(key(KeyCode::Enter), NOW));
     let landed = AcceptOutcome::Landed {
         commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
@@ -669,6 +669,88 @@ fn a_marked_file_past_the_preview_limit_is_named_with_its_marks_before_plain_fil
     for want in [
         "2 more files need checking before you accept.",
         "and 1 more files",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}
+
+#[test]
+fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its_neighbour() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Conflict),
+        named('2', ChangeState::Conflict),
+        named('3', ChangeState::Conflict),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    reordered(
+        &mut view,
+        vec![
+            named('1', ChangeState::Conflict),
+            named('3', ChangeState::Conflict),
+        ],
+    );
+    let shown = text(&view);
+    assert!(
+        !shown.contains("> Sub-agent"),
+        "no set takes over the highlight\n{shown}"
+    );
+    assert!(
+        shown.contains("The change set you picked left the list. Pick one with"),
+        "{shown}"
+    );
+    for code in [
+        KeyCode::Char('a'),
+        KeyCode::Char('d'),
+        KeyCode::Char('u'),
+        KeyCode::Enter,
+    ] {
+        view.key(key(code), NOW);
+        assert_eq!(view.asking, None, "{code:?} asks nothing");
+        assert!(view.diff.is_none(), "{code:?} opens nothing");
+        assert_eq!(view.next_query(NOW), None, "{code:?} sends nothing");
+    }
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(
+        !help
+            .iter()
+            .any(|(key, _)| ["a", "d", "u", "r"].contains(key)),
+        "{help:?}"
+    );
+
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(
+        text(&view).contains("> Sub-agent Agent 3"),
+        "the first move picks the set now in that place"
+    );
+    assert!(view.key(key(KeyCode::Char('u')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Update { id: id('3') })
+    );
+}
+
+#[test]
+fn accept_and_discard_name_the_set_they_ask_about() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Pending),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    let shown = text(&view);
+    for want in [
+        "Discard the changes of Sub-agent Agent 2?",
+        "1 file, 1 line added, 0 removed, at 2222222.",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(view.key(key(KeyCode::Char('n')), NOW));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let shown = text(&view);
+    for want in [
+        "Accept the changes of Sub-agent Agent 2?",
+        "1 file, 1 line added, 0 removed, at 2222222.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
