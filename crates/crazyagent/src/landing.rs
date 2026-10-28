@@ -181,7 +181,8 @@ pub enum FileKind {
 
 /// A property of a changed path the owner should look at before accepting: an
 /// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
-/// an edit the owner made in the agent's worktree while the agent ran.
+/// a file the IDE reads as its settings, under `.vscode` or a `*.code-workspace` file,
+/// or an edit the owner made in the agent's worktree while the agent ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -191,6 +192,7 @@ pub enum FileMark {
     Modules,
     Mode,
     OwnerEdited,
+    IdeConfig,
 }
 
 /// One changed path. `old_path` is set for a rename.

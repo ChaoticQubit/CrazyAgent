@@ -37,7 +37,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 
 /// The built-in extension's files by path inside its folder: its manifest and the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src`.
-pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 24] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -126,6 +126,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 22] = [
         "out/terminal.js",
         include_bytes!("../../../../apps/ide-extension/out/terminal.js"),
     ),
+    (
+        "out/trust.js",
+        include_bytes!("../../../../apps/ide-extension/out/trust.js"),
+    ),
+    (
+        "out/trust-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/trust-model.js"),
+    ),
 ];
 
 const GRANTS_MAX: usize = 64;
@@ -171,6 +179,12 @@ pub enum IdeCall {
     ChangeDiff { id: ChangeSetId, page: u16 },
     #[serde(rename = "ide.base_blob")]
     BaseBlob {
+        id: ChangeSetId,
+        path: String,
+        page: u16,
+    },
+    #[serde(rename = "ide.config_blob")]
+    ConfigBlob {
         id: ChangeSetId,
         path: String,
         page: u16,
@@ -280,7 +294,9 @@ impl IdeRequest {
     /// Input: the request. Output: Ok, or `ide_request_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let valid = match &self.call {
-            IdeCall::BaseBlob { path, .. } | IdeCall::OwnerEdit { path, .. } => relative(path),
+            IdeCall::BaseBlob { path, .. }
+            | IdeCall::ConfigBlob { path, .. }
+            | IdeCall::OwnerEdit { path, .. } => relative(path),
             IdeCall::Comment {
                 path, line, text, ..
             } => {
@@ -850,6 +866,7 @@ async fn answer(
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }
+        | IdeCall::ConfigBlob { .. }
         | IdeCall::Accept { .. }
         | IdeCall::Discard { .. }
         | IdeCall::Restore { .. }

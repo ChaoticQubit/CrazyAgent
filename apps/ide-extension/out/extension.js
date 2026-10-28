@@ -15,6 +15,7 @@ const context_js_1 = require("./sidebar/context.js");
 const memories_js_1 = require("./sidebar/memories.js");
 const scm_js_1 = require("./scm.js");
 const terminal_js_1 = require("./terminal.js");
+const trust_js_1 = require("./trust.js");
 const features = [
     base_content_js_1.registerBaseContent,
     scm_js_1.registerChanges,
@@ -27,6 +28,7 @@ const features = [
     extensions_js_1.extensions,
     reveal_js_1.reveal,
     terminal_js_1.sandboxedTerminal,
+    trust_js_1.registerTrust,
 ];
 function activate(context) {
     (0, lock_js_1.startLock)(context, process.env);

@@ -33,6 +33,7 @@ const MARKS: Record<string, string> = {
   attributes: ".gitattributes: changes how Git treats files",
   modules: ".gitmodules: changes the project's submodules",
   owner_edited: "Edited by you",
+  ide_config: "IDE settings: changes how the IDE behaves in this project",
 };
 
 const MESSAGE_BYTES_MAX = 4096;

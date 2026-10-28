@@ -892,6 +892,7 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
             FileMark::Modules => ".gitmodules: changes the project's submodules",
             FileMark::Mode => "File mode changed",
             FileMark::OwnerEdited => "Edited by you",
+            FileMark::IdeConfig => "IDE settings: changes how the IDE behaves in this project",
         };
         if !marks.contains(&word) {
             marks.push(word);

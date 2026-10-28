@@ -12,6 +12,7 @@ import { sidebarContext } from "./sidebar/context.js";
 import { sidebarMemories } from "./sidebar/memories.js";
 import { registerChanges } from "./scm.js";
 import { sandboxedTerminal } from "./terminal.js";
+import { registerTrust } from "./trust.js";
 
 /**
  * One CrazyAgent IDE feature. It registers its views, commands and event handlers with
@@ -31,6 +32,7 @@ const features: Feature[] = [
   extensions,
   reveal,
   sandboxedTerminal,
+  registerTrust,
 ];
 
 /**

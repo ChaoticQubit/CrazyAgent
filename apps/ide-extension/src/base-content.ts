@@ -1,15 +1,29 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { BASE_SCHEME, type BasePage, parseBasePath, refusal } from "./scm-model.js";
+import { BASE_SCHEME, type BasePage, CONFIG_SCHEME, parseBasePath, refusal } from "./scm-model.js";
 
 const PAGES_MAX = 512;
+const SIDES = [
+  [BASE_SCHEME, "ide.base_blob"],
+  [CONFIG_SCHEME, "ide.config_blob"],
+] as const;
 
-/** Serves the left side of a change set's diff: a file's text before the agent touched it,
- * read from the engine page by page, which answers only for this IDE's project and only
- * for text files of that change set. Inputs: the extension context and the engine
- * client. Output: none; the provider is disposed with the extension. */
+/** Serves both engine-read sides of a change set's diff, read page by page from the engine,
+ * which answers only for this IDE's project and only for text files of that change set:
+ * the base side, a file's text before the agent touched it, and an agent IDE settings
+ * file as the set's head has it, which the IDE server itself cannot read. The documents are
+ * read-only. Inputs: the extension context and the engine client. Output: none; the
+ * providers are disposed with the extension. */
 export function registerBaseContent(context: vscode.ExtensionContext, engine: Engine): void {
-  const provider: vscode.TextDocumentContentProvider = {
+  for (const [scheme, call] of SIDES) {
+    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(scheme, provider(engine, call)));
+  }
+}
+
+/** One side's provider: it reads every page of the file through one engine call. Inputs:
+ * the engine client and the call name. Output: the provider. */
+function provider(engine: Engine, call: (typeof SIDES)[number][1]): vscode.TextDocumentContentProvider {
+  return {
     async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
       const target = parseBasePath(uri.path);
       if (target === null) throw new Error(refusal("changes_not_found"));
@@ -17,7 +31,7 @@ export function registerBaseContent(context: vscode.ExtensionContext, engine: En
       let page = 0;
       for (;;) {
         if (parts.length >= PAGES_MAX) throw new Error(refusal("changes_too_large"));
-        const reply = await engine.request<BasePage>("ide.base_blob", { id: target.id, path: target.path, page });
+        const reply = await engine.request<BasePage>(call, { id: target.id, path: target.path, page });
         if (reply.kind !== "ok") throw new Error(refusal(reply.code));
         const data: Partial<BasePage> = reply.data ?? {};
         if (typeof data.text !== "string") throw new Error(refusal("changes_outcome_unknown"));
@@ -30,5 +44,4 @@ export function registerBaseContent(context: vscode.ExtensionContext, engine: En
       }
     },
   };
-  context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(BASE_SCHEME, provider));
 }

@@ -1,6 +1,7 @@
 use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
+use crate::ide::agent_config;
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -151,8 +152,11 @@ fn kind_of(mode: &str, binary: bool) -> FileKind {
     }
 }
 
+/// Whether a path's file name opens the same file as `name` on a case-insensitive APFS
+/// volume, as git and the IDE open it there. Inputs: the path and a lower-case ASCII name.
+/// Output: true for that file.
 fn named(path: &str, name: &str) -> bool {
-    path.rsplit('/').next() == Some(name)
+    agent_config::same_name(path.rsplit('/').next().unwrap_or(path), name)
 }
 
 /// Lists the files a change touches with their status, kind and the marks the owner
@@ -216,6 +220,9 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         }
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);
+        }
+        if agent_config::is_ide_config(path) || old_path.is_some_and(agent_config::is_ide_config) {
+            marks.push(FileMark::IdeConfig);
         }
         files.push(ChangedFile {
             path: plain(path),

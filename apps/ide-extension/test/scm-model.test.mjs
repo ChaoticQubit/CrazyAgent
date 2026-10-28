@@ -21,7 +21,7 @@ test("a pending change set is one Source Control group named for its agent and t
   assert.equal(group.id, `crazyagent.${ID}.open`);
   assert.deepEqual([group.accept, group.discard, group.restore], [true, true, false]);
   assert.deepEqual(group.resources, [{
-    path: "README.md", file: "/work/agents/builder/README.md", base: `/${ID}/README.md`, open: "diff", letter: "M", tooltip: "Modified", strikeThrough: false,
+    path: "README.md", file: "/work/agents/builder/README.md", base: `/${ID}/README.md`, config: null, open: "diff", letter: "M", tooltip: "Modified", strikeThrough: false,
   }]);
 });
 
@@ -110,4 +110,27 @@ test("an Accept, Discard or Restore answer reads as the desktop's own sentence",
   for (const code of ["changes_stale", "changes_owner_dirty", "changes_restore_expired", "changes_owner_identity_missing", "changes_not_found"]) {
     assert.ok(model.REFUSAL_CODES.includes(code), code);
   }
+});
+
+test("an agent IDE settings file opens as the engine's read-only copy, never the worktree file", () => {
+  const files = [
+    file({ path: ".vscode/settings.json", status: "added", marks: ["ide_config"] }),
+    file({ path: ".vscode/tasks.json", marks: ["ide_config"] }),
+    file({ path: ".vscode/old.json", status: "deleted", marks: ["ide_config"] }),
+    file({ path: "app/.vscode", status: "added", kind: "symlink", marks: ["symlink", "ide_config"] }),
+    file({ path: "shop.code-workspace", status: "added", kind: "binary", marks: ["ide_config"] }),
+  ];
+  const [group] = model.scmGroups([set({ files })], NOW);
+  const shown = Object.fromEntries(group.resources.map((resource) => [resource.path, resource]));
+  for (const path of [".vscode/settings.json", ".vscode/tasks.json"]) {
+    assert.deepEqual([shown[path].open, shown[path].base, shown[path].config], ["diff", `/${ID}/${path}`, `/${ID}/${path}`], path);
+    assert.equal(shown[path].tooltip.endsWith("IDE settings: changes how the IDE behaves in this project"), true, path);
+  }
+  assert.deepEqual([shown[".vscode/old.json"].open, shown[".vscode/old.json"].config], ["base", null]);
+  assert.deepEqual([shown["app/.vscode"].open, shown["app/.vscode"].config], ["none", null]);
+  assert.deepEqual([shown["shop.code-workspace"].open, shown["shop.code-workspace"].config], ["none", null]);
+  assert.equal(model.CONFIG_SCHEME, "crazyagent-config");
+  assert.deepEqual(model.parseBasePath(shown[".vscode/settings.json"].config), { id: ID, path: ".vscode/settings.json" });
+  const desktop = readFileSync(new URL("../../desktop/src/screens/changes/model.ts", import.meta.url), "utf8");
+  assert.ok(desktop.includes(`  ${model.IDE_CONFIG}: "IDE settings: changes how the IDE behaves in this project",`));
 });

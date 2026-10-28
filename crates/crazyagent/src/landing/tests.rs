@@ -1355,6 +1355,78 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 }
 
 #[test]
+fn agent_change_to_vscode_folder_or_workspace_file_is_flagged() {
+    let case = Case::new();
+    case.edit(".vscode/extensions.json", "{\"recommendations\": []}\n");
+    case.agent_commit("Recommend nothing");
+    case.start();
+    case.agent(&["mv", ".vscode/extensions.json", "extensions.json"]);
+    case.edit(
+        ".vscode/settings.json",
+        "{\"chat.disableAIFeatures\": false}\n",
+    );
+    case.edit("web/.VSCODE/launch.json", "{}\n");
+    case.edit("shop.code-workspace", "{\"folders\": []}\n");
+    case.edit("docs/Team.CODE-WORKSPACE", "{\"folders\": []}\n");
+    std::fs::create_dir(case.workspace.worktree.join("app")).unwrap();
+    std::os::unix::fs::symlink("../README", case.workspace.worktree.join("app/.vscode")).unwrap();
+    case.edit("vscode/notes.md", "plain\n");
+    case.edit("src/.vscode-old/a.txt", "plain\n");
+    case.edit("notes.code-workspace.md", "plain\n");
+    case.edit(".code-workspaces/a.txt", "plain\n");
+    case.edit("api/.v\u{17f}code/settings.json", "{}\n");
+    case.edit("ui/.VSCode/tasks.json", "{}\n");
+    case.edit("ops/team.code-wor\u{212a}space", "{\"folders\": []}\n");
+    case.edit("lib/.gitattribute\u{17f}", "* text\n");
+    case.edit("a/.vscod\u{e9}/x.json", "{}\n");
+    case.edit("b/.vscode\u{301}/y.json", "{}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert!(page.next.is_none());
+    let mut flagged: Vec<(&str, Option<&str>)> = page
+        .files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::IdeConfig))
+        .map(|file| (file.path.as_str(), file.old_path.as_deref()))
+        .collect();
+    flagged.sort_unstable();
+    assert_eq!(
+        flagged,
+        [
+            (".vscode/settings.json", None),
+            ("api/.v\u{17f}code/settings.json", None),
+            ("app/.vscode", None),
+            ("docs/Team.CODE-WORKSPACE", None),
+            ("extensions.json", Some(".vscode/extensions.json")),
+            ("ops/team.code-wor\u{212a}space", None),
+            ("shop.code-workspace", None),
+            ("ui/.VSCode/tasks.json", None),
+            ("web/.VSCODE/launch.json", None),
+        ]
+    );
+    let attributes = page
+        .files
+        .iter()
+        .find(|file| file.path == "lib/.gitattribute\u{17f}")
+        .unwrap();
+    assert_eq!(attributes.marks, [FileMark::Attributes]);
+    let accented: Vec<&str> = page
+        .files
+        .iter()
+        .filter(|file| file.path.starts_with("a/") || file.path.starts_with("b/"))
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(accented.len(), 2, "{accented:?}");
+    let link = page
+        .files
+        .iter()
+        .find(|file| file.path == "app/.vscode")
+        .unwrap();
+    assert_eq!(link.marks, [FileMark::Symlink, FileMark::IdeConfig]);
+    assert_eq!(page.files.len(), 16, "{:?}", page.files);
+}
+
+#[test]
 fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
     let case = Case::new();
     let start = case.tip();

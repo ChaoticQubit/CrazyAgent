@@ -3,6 +3,7 @@ import type { Engine, Reply } from "./engine.js";
 import {
   type AcceptOutcome,
   BASE_SCHEME,
+  CONFIG_SCHEME,
   type IdeChangeSet,
   type ScmGroup,
   type ScmResource,
@@ -180,15 +181,17 @@ export function registerChanges(context: vscode.ExtensionContext, engine: Engine
 
 /** One file of a change set as a Source Control row: its status icon and tooltip, struck
  * through when deleted, opening the diff, the base text or the file. The base address
- * carries the head, so a set that moved on opens fresh base text. Inputs: the set and the
- * file's row. Output: the row. */
+ * carries the head, so a set that moved on opens fresh base text. An IDE settings file's
+ * agent side is the engine's read-only copy at the head, never the worktree file. Inputs:
+ * the set and the file's row. Output: the row. */
 function resourceState(set: IdeChangeSet, resource: ScmResource): vscode.SourceControlResourceState {
   const file = vscode.Uri.file(resource.file);
   const base = resource.base === null ? null : vscode.Uri.from({ scheme: BASE_SCHEME, path: resource.base, query: set.head });
+  const right = resource.config === null ? file : vscode.Uri.from({ scheme: CONFIG_SCHEME, path: resource.config, query: set.head });
   const name = plainLine(resource.path);
   let command: vscode.Command | undefined;
   if (resource.open === "diff" && base !== null) {
-    command = { command: "vscode.diff", title: "Open changes", arguments: [base, file, `${name} (${plainLine(set.agent)})`] };
+    command = { command: "vscode.diff", title: "Open changes", arguments: [base, right, `${name} (${plainLine(set.agent)})`] };
   } else if (resource.open === "base" && base !== null) {
     command = { command: "vscode.open", title: "Open the file before the agent's changes", arguments: [base] };
   } else if (resource.open === "file") {

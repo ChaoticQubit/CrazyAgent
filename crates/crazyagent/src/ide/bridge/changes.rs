@@ -61,6 +61,9 @@ pub(crate) async fn answer(
             IdeCall::BaseBlob { id, path, page } => {
                 json(base_blob(&db, &project, &id, &path, page)?)
             }
+            IdeCall::ConfigBlob { id, path, page } => {
+                json(config_blob(&db, &project, &id, &path, page)?)
+            }
             IdeCall::Accept { id, head, message } => {
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)
@@ -224,6 +227,21 @@ pub(crate) fn base_blob(
     page: u16,
 ) -> Result<BasePage, EngineError> {
     let text = landing::ide::base_text(db, project, id, path)?;
+    page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
+}
+
+/// One page of an IDE settings file as the agent's change set has it, the right side of
+/// its diff, served by the engine because the IDE server cannot read agent `.vscode` or
+/// `*.code-workspace` files. Inputs: the store, the project, the set, the path and the page.
+/// Output: the page, or `changes_not_found` for any other path or a page past the end.
+pub(crate) fn config_blob(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ChangeSetId,
+    path: &str,
+    page: u16,
+) -> Result<BasePage, EngineError> {
+    let text = landing::ide::config_text(db, project, id, path)?;
     page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
 }
 
