@@ -756,7 +756,7 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
         open.profile()
     );
     let served = std::thread::spawn(move || {
-        let (mut stream, _) = server.accept().unwrap();
+        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp_std(&server).unwrap();
         let mut got = String::new();
         std::io::Read::read_to_string(&mut stream, &mut got).unwrap();
         got

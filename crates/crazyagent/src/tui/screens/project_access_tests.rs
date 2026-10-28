@@ -5,6 +5,7 @@ use crate::sandbox::policy::{AgentAccess, LevelView, PolicyView, ToolchainView};
 use crate::sandbox::toolchains::Toolchain;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+#[cfg(target_os = "macos")]
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

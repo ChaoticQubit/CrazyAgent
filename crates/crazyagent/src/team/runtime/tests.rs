@@ -2958,6 +2958,7 @@ fn limited_runtime(
 }
 
 /// Applies owner team actions in one transaction, as the owner socket does.
+#[cfg(target_os = "macos")]
 fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
@@ -2971,6 +2972,7 @@ fn owner(fixture: &Fixture, actions: &[crate::team::TeamAction]) {
     tx.commit().unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     crate::team::TeamAction::Delegate {
         project_id: fixture.setup.project_id.clone(),
@@ -2979,6 +2981,7 @@ fn hand_off(fixture: &Fixture, prompt: &str) -> crate::team::TeamAction {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
     fixture
         .connection
@@ -3007,6 +3010,7 @@ fn idle_stop(fixture: &Fixture, idle: Duration) {
         .unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn subs(fixture: &Fixture) -> Vec<i64> {
     fixture
         .connection
@@ -3733,6 +3737,7 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
     assert!(!live_framing(&fixture.setup, false, &[], &lines).contains("Finished sub-agents"));
 }
 
+#[cfg(target_os = "macos")]
 const RESUMING_CLAUDE: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
 id=""
@@ -3826,6 +3831,7 @@ fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
 }
 
 /// What the engine typed into one agent's pasted inputs, from its stand-in's log.
+#[cfg(target_os = "macos")]
 fn typed(fixture: &Fixture, agent: i64) -> String {
     std::fs::read_to_string(
         fixture
