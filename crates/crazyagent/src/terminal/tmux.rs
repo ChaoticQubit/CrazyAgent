@@ -979,8 +979,8 @@ impl Host for Tmux {
         self.capture(agent, HISTORY_ROWS_MAX, true)
     }
 
-    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
-        self.capture(agent, 0, false).map(|stream| stream.screen)
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.capture(agent, 0, false)
     }
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
