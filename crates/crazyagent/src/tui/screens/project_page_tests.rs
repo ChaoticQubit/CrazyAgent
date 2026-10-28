@@ -2119,7 +2119,6 @@ async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
     assert!(!line.contains("in Changes"), "{line}");
 }
 
-<<<<<<< HEAD
 async fn waiting_header(engine: &Engine, place: Place) -> String {
     let mut connection = engine.connect();
     let mut ctx = ctx(160, 30);
@@ -2218,7 +2217,8 @@ async fn a_project_page_counts_its_own_change_sets_and_the_rest_as_other_project
         "{line}"
     );
     assert!(!line.contains("in Changes"), "{line}");
-=======
+}
+
 async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs: u32) {
     let client = Client::new(
         engine.root.path().join("e.sock"),
@@ -2296,7 +2296,6 @@ async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desk
         (Some(1800), Some(7200)),
         "a change from the fresh read applies and keeps the desktop session limit"
     );
->>>>>>> fix/tui-team-route
 }
 
 async fn team_settings_after(keys: &[char]) -> (crate::team::TeamStatus, String) {
