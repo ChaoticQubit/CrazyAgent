@@ -52,10 +52,13 @@ pub(super) struct Stats {
 }
 
 /// Replaces every control character but newline and tab, and every bidirectional
-/// override or isolate, with U+FFFD, so text shown to the owner cannot move a terminal
-/// cursor or reorder what it shows. Input: the text. Output: the plain text.
+/// override or isolate, with U+FFFD, then shows every other character a reviewer cannot
+/// see, such as zero-width, tag and line separator characters, as its `memory::visible_text`
+/// escape, so text shown to the owner cannot move a terminal cursor, reorder what it shows
+/// or hide text from it. Input: the text. Output: the plain text.
 pub(super) fn plain(text: &str) -> String {
-    text.chars()
+    let replaced: String = text
+        .chars()
         .map(|c| {
             let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
             if (c.is_control() && c != '\n' && c != '\t') || bidi {
@@ -64,7 +67,8 @@ pub(super) fn plain(text: &str) -> String {
                 c
             }
         })
-        .collect()
+        .collect();
+    crate::memory::visible_text(&replaced)
 }
 
 fn text(bytes: &[u8]) -> Result<&str, EngineError> {
@@ -213,6 +217,11 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         }
         if named(path, ".gitmodules") || old_path.is_some_and(|old| named(old, ".gitmodules")) {
             marks.push(FileMark::Modules);
+        }
+        if crate::instruction_files::instruction_file(path)
+            || old_path.is_some_and(crate::instruction_files::instruction_file)
+        {
+            marks.push(FileMark::Instructions);
         }
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);

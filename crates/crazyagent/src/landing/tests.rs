@@ -1817,6 +1817,93 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
 }
 
 #[test]
+fn an_instruction_file_change_is_marked_and_its_hidden_characters_show_as_escapes() {
+    let case = Case::new();
+    case.edit("AGENTS.md", "Follow the plan.\u{200b}\u{e0041}\u{e0042}\n");
+    case.edit(".claude/CLAUDE.md", "Keep tests real.\n");
+    case.edit("web/CLAUDE.local.md", "Local notes.\n");
+    case.edit("notes.md", "Plain\u{2028}notes.\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marks: Vec<(String, String)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                serde_json::to_string(&file.marks).unwrap(),
+            )
+        })
+        .collect();
+    let instructions = r#"["instructions"]"#.to_owned();
+    assert_eq!(
+        marks,
+        [
+            (".claude/CLAUDE.md".to_owned(), instructions.clone()),
+            ("AGENTS.md".to_owned(), instructions.clone()),
+            ("notes.md".to_owned(), "[]".to_owned()),
+            ("web/CLAUDE.local.md".to_owned(), instructions),
+        ]
+    );
+    assert!(
+        page.text
+            .contains("+Follow the plan.\\u200b\\u{e0041}\\u{e0042}\n"),
+        "{:?}",
+        page.text
+    );
+    assert!(
+        page.text.contains("+Plain\\u2028notes.\n"),
+        "{:?}",
+        page.text
+    );
+    assert!(!crate::memory::hidden_text(&page.text), "{:?}", page.text);
+}
+
+#[test]
+fn instruction_marks_ignore_case_and_cover_codex_overrides_and_harness_folders() {
+    let case = Case::new();
+    for path in [
+        "claude.md",
+        "web/Agents.md",
+        "AGENTS.override.md",
+        ".claude/commands/x.md",
+        ".codex/config.toml",
+        "docs/.Claude/notes.md",
+        "notes.md",
+    ] {
+        case.edit(path, "Text.\n");
+    }
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marked: Vec<(&str, bool)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.marks.contains(&FileMark::Instructions),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            (".claude/commands/x.md", true),
+            (".codex/config.toml", true),
+            ("AGENTS.override.md", true),
+            ("claude.md", true),
+            ("docs/.Claude/notes.md", true),
+            ("notes.md", false),
+            ("web/Agents.md", true),
+        ]
+    );
+}
+
+#[test]
 fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
     let case = Case::new();
     let start = case.tip();

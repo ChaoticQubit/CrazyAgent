@@ -1,6 +1,6 @@
 use super::intake::NOT_READY;
 use super::new_project_input::TextInput;
-use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
+use super::new_project_view::{Look, Row, columns, list_row, printable, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
@@ -14,6 +14,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
 const LIST_POLL_MS: i64 = 5_000;
+const DIFF_HEADER: &str = "diff --git ";
+const QUOTED_HEADER: &str = "diff --git \"";
 const DIFF_LINES_MAX: usize = 20_000;
 const DIFF_AHEAD: usize = 40;
 const DIFF_PAGE_ROWS: usize = 20;
@@ -699,8 +701,41 @@ impl ProjectChanges {
             return lines;
         }
         let text_rows = room.saturating_sub(lines.len()).max(1);
-        for line in diff.lines.iter().skip(diff.top).take(text_rows) {
-            lines.push(Row::of(line.clone(), diff_style(line, look)).pad(content));
+        let instructions = instruction_headers(&diff.files);
+        let marked = |header: &String| {
+            instructions.contains(header)
+                || (header.starts_with(QUOTED_HEADER) && !instructions.is_empty())
+        };
+        let mut inside = diff
+            .lines
+            .iter()
+            .take(diff.top)
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(&marked);
+        let mut shown = 0;
+        for line in diff.lines.iter().skip(diff.top) {
+            if shown >= text_rows {
+                break;
+            }
+            if line.starts_with(DIFF_HEADER) {
+                inside = marked(line);
+            }
+            let style = diff_style(line, look);
+            if inside {
+                let pieces = crate::tui::text::wrap(&printable(line.clone()), content.max(1));
+                for piece in pieces.into_iter().take(text_rows - shown) {
+                    lines.push(Row::of(piece, style).pad(content));
+                    shown += 1;
+                }
+                if line.is_empty() {
+                    lines.push(Row::of(String::new(), style).pad(content));
+                    shown += 1;
+                }
+            } else {
+                lines.push(Row::of(line.clone(), style).pad(content));
+                shown += 1;
+            }
         }
         lines.truncate(room.max(1));
         lines
@@ -1003,6 +1038,9 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
             FileMark::Attributes => ".gitattributes: changes how Git treats files",
             FileMark::Modules => ".gitmodules: changes the project's submodules",
             FileMark::Mode => "File mode changed",
+            FileMark::Instructions => {
+                "Instruction file: changes what every agent of this project is told"
+            }
         };
         if !marks.contains(&word) {
             marks.push(word);
@@ -1027,6 +1065,21 @@ fn conflict_line(files: &[String]) -> String {
     format!(
         "These files also changed on your branch: {shown}{more}. Ask the agent to update, or discard."
     )
+}
+
+/// The diff header lines of the changed files that carry the instruction file mark, as the
+/// engine's patch writes them, so the diff view shows those files' lines in full rather than
+/// cut. A quoted header, which git writes for unusual names, counts when any file is marked.
+/// Input: the files. Output: the headers.
+fn instruction_headers(files: &[ChangedFile]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::Instructions))
+        .map(|file| {
+            let old = file.old_path.as_deref().unwrap_or(&file.path);
+            format!("{DIFF_HEADER}a/{old} b/{}", file.path)
+        })
+        .collect()
 }
 
 fn diff_line(line: &str) -> String {

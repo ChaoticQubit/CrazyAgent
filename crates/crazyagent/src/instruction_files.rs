@@ -23,6 +23,9 @@ enum Source {
     Home(&'static str),
 }
 
+const CODEX_OVERRIDE: &str = "AGENTS.override.md";
+const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
+
 const SOURCES: [(&str, Source); 6] = [
     ("CLAUDE.md", Source::Committed("CLAUDE.md")),
     (".claude/CLAUDE.md", Source::Committed(".claude/CLAUDE.md")),
@@ -153,6 +156,29 @@ pub struct Delivery {
 /// home names only these files. Input: the name. Output: true for a known name.
 pub fn known_name(name: &str) -> bool {
     SOURCES.iter().any(|(known, _)| *known == name)
+}
+
+/// Tells whether a changed project path is an instruction file agents are given or read: a
+/// file named like a project source above or Codex's `AGENTS.override.md` in any folder, or
+/// any path through a `.claude` or `.codex` folder, names compared without ASCII case since
+/// macOS and Windows open `claude.md` as `CLAUDE.md`. Input: the path relative to the
+/// project. Output: true for one.
+pub fn instruction_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let named = SOURCES
+        .iter()
+        .filter_map(|(_, source)| match source {
+            Source::Committed(file) | Source::Checkout(file) => file.rsplit('/').next(),
+            Source::Home(_) => None,
+        })
+        .chain([CODEX_OVERRIDE])
+        .any(|known| known.eq_ignore_ascii_case(name));
+    named
+        || path.split('/').any(|part| {
+            HARNESS_FOLDERS
+                .iter()
+                .any(|folder| folder.eq_ignore_ascii_case(part))
+        })
 }
 
 /// Creates the settings table. Input: a connection to `engine.db`. Output: unit.

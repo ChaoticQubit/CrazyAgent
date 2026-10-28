@@ -67,6 +67,10 @@ test("every file says how it changed and marks what can change more than its tex
   assert.deepEqual(model.fileMarks(file({ marks: ["executable", "mode"] })), ["Can run as a program", "File mode changed"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitattributes", marks: ["attributes"] })), [".gitattributes: changes how Git treats files"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitmodules", marks: ["modules"] })), [".gitmodules: changes the project's submodules"]);
+  assert.deepEqual(model.fileMarks(file({ path: "AGENTS.md", marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"]);
+  for (const path of ["claude.md", "web/Agents.md", "AGENTS.override.md", ".claude/commands/x.md"]) {
+    assert.deepEqual(model.fileMarks(file({ path, marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"], path);
+  }
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] })).length, 1, "a mark this build does not know is still shown");
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] }))[0], "Marked new mark");
   assert.equal(model.fileLine(file({ path: "evil\u001b[31m.ts" })), "Modified evil\\u001b[31m.ts");
