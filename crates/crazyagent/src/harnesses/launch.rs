@@ -1181,9 +1181,9 @@ impl Session {
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
@@ -1198,16 +1198,19 @@ impl Session {
         state: &Path,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
                 (command, Some(installed))
             }
-            None => (command(&request)?, None),
+            None => {
+                let installed = crate::launch_context::lock_only(request.account.home())?;
+                (command(&request)?, Some(installed))
+            }
         };
         drop(context);
         let io = DurableIo::create(state)?;
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, installed, Some(io), (relay, key))
     }
 
