@@ -823,6 +823,10 @@ fn finished_team() -> crate::team::TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
         paused: false,
         live_master: None,
