@@ -298,6 +298,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     const element = screen.current;
     if (!name || !element) return;
     setView({ kind: "connecting" });
+    setMenu(null);
     let disposed = false;
     let serial: number | null = null;
     let release = () => {};
