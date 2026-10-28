@@ -167,6 +167,43 @@ fn delegation_lines_are_read_from_a_master_reply() {
     assert!(parse_delegations(&long).is_empty());
 }
 
+/// A master that is not live wakes a finished sub-agent with a reply line (WK-R5): `WAKE`,
+/// the agent's name or number, a colon and the text, in any case and list form.
+#[test]
+fn wake_lines_are_read_from_a_master_reply() {
+    let reply = "Two of them know this.
+WAKE @onboarding-fix: Fix the copy again
+- wake Sub-agent 4: Add the footer
+`WAKE Ada: Check the title`
+WAKEUP Ada: nope
+WAKE : no name
+WAKE Ada:   
+WAKE Ada no colon
+Not a WAKE Ada: line";
+    let line = |agent: &str, text: &str| WakeLine {
+        agent: agent.into(),
+        text: text.into(),
+    };
+    assert_eq!(
+        parse_wakes(reply),
+        [
+            line("@onboarding-fix", "Fix the copy again"),
+            line("Sub-agent 4", "Add the footer"),
+            line("Ada", "Check the title"),
+        ]
+    );
+    let many = (0..20)
+        .map(|i| format!("WAKE Sub-agent {i}: task {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(parse_wakes(&many).len(), DELEGATIONS_PER_REPLY_MAX);
+    let long = format!("WAKE Ada: {}", "x".repeat(TASK_PROMPT_BYTES_MAX + 1));
+    assert!(parse_wakes(&long).is_empty());
+    let named = format!("WAKE {}: text", "a".repeat(WAKE_NAME_BYTES_MAX + 1));
+    assert!(parse_wakes(&named).is_empty());
+    assert!(parse_delegations(reply).is_empty());
+}
+
 /// Finished agents (DEC-102) are the stopped and failed sub-agents and the idle ones that ran
 /// a turn since they last started; each says whether the owner's Wake can wake it and, when
 /// not, why. A Wake of a finished agent with a kept worktree is recorded once for the team

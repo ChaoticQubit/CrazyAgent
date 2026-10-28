@@ -36,6 +36,8 @@ pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
 const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
 pub const DELEGATE_MARKER: &str = "DELEGATE";
+pub const WAKE_MARKER: &str = "WAKE";
+pub const WAKE_NAME_BYTES_MAX: usize = 64;
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
 
@@ -661,14 +663,7 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if found.len() == DELEGATIONS_PER_REPLY_MAX {
             break;
         }
-        let line = line
-            .trim()
-            .trim_start_matches(|c: char| {
-                c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
-            })
-            .trim()
-            .trim_end_matches('`')
-            .trim();
+        let line = reply_line(line);
         let Some(head) = line.get(..DELEGATE_MARKER.len()) else {
             continue;
         };
@@ -681,6 +676,63 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
             found.push(delegation);
         }
+    }
+    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
+    found
+}
+
+/// Strips the list bullets, quotes and backticks a model puts around a reply line.
+/// Takes the line. Returns its text.
+fn reply_line(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches(|c: char| {
+            c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
+        })
+        .trim()
+        .trim_end_matches('`')
+        .trim()
+}
+
+/// One finished sub-agent a master that is not live asked in its reply to wake (WK-R5): the
+/// name or number it gave and the text for the agent's next task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeLine {
+    pub agent: String,
+    pub text: String,
+}
+
+/// Reads wake lines from a master reply: `WAKE <name or Sub-agent number>: <text>`.
+/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
+/// Returns at most eight wakes, each with a name of up to `WAKE_NAME_BYTES_MAX` bytes and a
+/// task text within bounds.
+pub fn parse_wakes(reply: &str) -> Vec<WakeLine> {
+    let mut found = Vec::new();
+    for line in reply.lines() {
+        if found.len() == DELEGATIONS_PER_REPLY_MAX {
+            break;
+        }
+        let line = reply_line(line);
+        let Some(head) = line.get(..WAKE_MARKER.len()) else {
+            continue;
+        };
+        let rest = &line[WAKE_MARKER.len()..];
+        if !head.eq_ignore_ascii_case(WAKE_MARKER) || !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((agent, text)) = rest.split_once(':') else {
+            continue;
+        };
+        let (agent, text) = (agent.trim(), text.trim().trim_matches('`').trim());
+        if agent.is_empty()
+            || agent.len() > WAKE_NAME_BYTES_MAX
+            || !text_valid(text, TASK_PROMPT_BYTES_MAX)
+        {
+            continue;
+        }
+        found.push(WakeLine {
+            agent: agent.to_owned(),
+            text: text.to_owned(),
+        });
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
     found

@@ -2,7 +2,7 @@ use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
     admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
-    parse_delegations, pick_account, tool,
+    parse_delegations, parse_wakes, pick_account, tool,
 };
 use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
@@ -1603,10 +1603,12 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
+            let finished = super::events::finished_agents(&self.connection, project, now_ms())?;
             prompt.push_str(&framing(
                 stored,
                 team_tool,
                 &super::available_harnesses(access, project),
+                &finished,
             ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
@@ -3728,6 +3730,7 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)?;
+        let wakes = parse_wakes(text);
         if text.trim().is_empty() && proposed.is_empty() {
             let _ = append_message(
                 &tx,
@@ -3750,7 +3753,7 @@ impl TeamRuntime {
         }
         delegations.truncate(DELEGATIONS_PER_REPLY_MAX);
         let mut refused = Vec::new();
-        if !delegations.is_empty() && rounds >= DELEGATION_ROUNDS_MAX {
+        if (!delegations.is_empty() || !wakes.is_empty()) && rounds >= DELEGATION_ROUNDS_MAX {
             let _ = append_message(
                 &tx,
                 project,
@@ -3794,17 +3797,48 @@ impl TeamRuntime {
                 now,
             )?;
         }
+        let mut woken = Vec::with_capacity(wakes.len());
+        for wake in &wakes {
+            let (said, _) =
+                super::master::wake_in(&tx, &access, &stored, &wake.agent, &wake.text, false)?;
+            woken.push(format!("- {said}"));
+        }
+        if !woken.is_empty() {
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &format!("The master's wakes:\n{}", woken.join("\n")),
+                MessageState::Note,
+                now,
+            )?;
+        }
         tx.commit().map_err(error)
     }
 }
 
-/// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup, whether the team tool is on and, for an
-/// empty plan, the harnesses with an eligible account now.
+/// Builds the master's opening frame: its sub-agents, how to hand out work, when any
+/// sub-agent finished how to wake one with a `WAKE` line and which ones it can wake (WK-R5),
+/// and the project brief. Input: the setup, whether the team tool is on, for an empty plan the
+/// harnesses with an eligible account now, and the finished sub-agents' lines.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
+fn framing(
+    stored: &StoredSetup,
+    team_tool: bool,
+    available: &[&str],
+    finished: &[String],
+) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
+    let wake = if finished.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "To wake a finished sub-agent in its own worktree with your text as its next task, write on its own line exactly like this:\n{} <its name or Sub-agent number>: <the text>\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
+            super::WAKE_MARKER,
+            finished.join("\n")
+        )
+    };
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -3815,7 +3849,7 @@ fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String 
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
         stored.name, team, brief
     )
 }

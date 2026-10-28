@@ -414,6 +414,85 @@ fn count(connection: &Connection, sql: &str) -> i64 {
         .unwrap()
 }
 
+/// A master that is not live wakes a finished sub-agent with a `WAKE` line in its reply
+/// (WK-R5): its framing lists the finished sub-agents and says how once there is one, the
+/// line pins the text to that agent, and the master hears, under the name the engine
+/// settled, what was woken and what was not.
+#[test]
+fn a_master_that_is_not_live_wakes_a_finished_sub_agent_with_a_reply_line() {
+    let mut fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    assert!(
+        !framing(&fixture.setup, false, &[], &[]).contains("WAKE"),
+        "no wake words while no sub-agent finished"
+    );
+    let finished = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    assert!(
+        names::assign_role(&fixture.connection, &project, finished, "page-writer")
+            .unwrap()
+            .is_ok()
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![finished, PROJECT, format!("worktrees/agent-{finished}")],
+        )
+        .unwrap();
+    let listed =
+        super::super::events::finished_agents(&fixture.connection, &project, now_ms()).unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    for team_tool in [false, true] {
+        let framed = framing(&fixture.setup, team_tool, &[], &listed);
+        assert!(
+            framed.contains("WAKE <its name or Sub-agent number>: <the text>"),
+            "{framed}"
+        );
+        assert!(framed.contains(&listed[0]), "{framed}");
+    }
+    let label = super::super::events::label(&fixture.connection, finished).unwrap();
+    assert!(label.ends_with("(@page-writer)"), "{label}");
+
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Finish the page",
+        MessageState::Pending,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let mut team = fixture.runtime();
+    team.finish_message(
+        &project,
+        message,
+        "The page writer knows this.\nWAKE @page-writer: Add the footer\nWAKE Nobody: Check the title",
+        TurnEnd::Success,
+        None,
+        vec![],
+    )
+    .unwrap();
+    let pinned: Vec<String> = fixture
+        .connection
+        .prepare(
+            "SELECT t.prompt FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+             WHERE p.agent=?1 AND t.source='master' AND t.status='queued'",
+        )
+        .unwrap()
+        .query_map([finished], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(pinned, ["Add the footer"]);
+    let heard = format!(
+        "The master's wakes:\n- Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.\n- Not woken: no finished sub-agent of this project is called Nobody. Wake one from the finished list by its name or Sub-agent number."
+    );
+    assert!(fixture.note(&heard), "{:#?}", fixture.status().messages);
+}
+
 #[test]
 fn a_full_project_still_stores_the_master_reply_and_delivers_sub_agent_results() {
     use crate::protocol::Outcome;
@@ -1097,7 +1176,7 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
     };
     let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
     for text in [
-        framing(&setup, true, &["codex", "claude-code"]),
+        framing(&setup, true, &["codex", "claude-code"], &[]),
         live_framing(&setup, true, &["codex", "claude-code"], &[]),
     ] {
         assert!(text.contains(listed), "{text}");
@@ -1140,7 +1219,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let frame = || {
         let (sent, got) = channel();
         let setup = setup.clone();
-        std::thread::spawn(move || sent.send(framing(&setup, false, &[])));
+        std::thread::spawn(move || sent.send(framing(&setup, false, &[], &[])));
         got.recv_timeout(Duration::from_secs(5)).ok()
     };
     let mut wrong = Vec::new();
