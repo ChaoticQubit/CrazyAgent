@@ -1722,27 +1722,6 @@ fn open_append(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Opens a file to read without following a link at `path`.
-/// Takes the path. Returns the open file or the I/O error.
-#[cfg(unix)]
-fn open_read(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-}
-
-/// Opens a file to read as the reparse point itself, never a link's target.
-/// Takes the path. Returns the open file or the I/O error.
-#[cfg(windows)]
-fn open_read(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = create_private(path)?;
     file.write_all(bytes)?;
@@ -2442,8 +2421,11 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
+/// Reads a report or brief an agent may have replaced, through one open that follows no
+/// link and never waits on a FIFO, keeping it only when the opened file is regular and
+/// within `max` bytes. Inputs: the path and the bound. Output: the text or the I/O error.
 fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    let file = open_read(path)?;
+    let file = crate::platform::open_plain(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > max {
         return Err(io::Error::other("report is not a bounded regular file"));
@@ -3228,6 +3210,41 @@ mod tests {
         assert!(capital.contains("- [A](https://a.example/z)"));
         let empty = render_report("Market research", "Codex", "Body only");
         assert!(empty.contains("No links were returned by the agent."));
+    }
+
+    #[test]
+    fn a_fifo_left_at_the_report_path_is_refused_without_waiting_for_a_writer() {
+        let folder = tempfile::tempdir().unwrap();
+        let report = folder.path().join("report.md");
+        fs::write(&report, "Findings\n").unwrap();
+        assert_eq!(read_bounded(&report, 64).unwrap(), "Findings\n");
+        let link = folder.path().join("link.md");
+        std::os::unix::fs::symlink(&report, &link).unwrap();
+        assert!(read_bounded(&link, 64).is_err());
+        let fifo = folder.path().join("fifo.md");
+        let made = crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&fifo)
+                .stdin(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(made.success());
+        let (sent, read) = std::sync::mpsc::channel();
+        let reader = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = sent.send(read_bounded(&reader, 64).map_err(|error| error.to_string()));
+        });
+        let answer = read.recv_timeout(Duration::from_secs(5));
+        if answer.is_err() {
+            let _ = OpenOptions::new()
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&fifo);
+        }
+        assert!(
+            matches!(answer, Ok(Err(_))),
+            "a FIFO at the report path made the research worker wait: {answer:?}"
+        );
     }
 
     #[test]
