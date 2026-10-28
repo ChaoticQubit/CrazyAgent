@@ -1035,6 +1035,46 @@ fn a_terminal_box_leaving_without_an_owner_key_is_closed_unanswered() {
     assert!(case.messages().is_empty());
 }
 
+/// A terminal question the owner dismissed in the Questions view reads as dismissed by the
+/// owner, not as closed unanswered, while a box that left with no owner key still reads as
+/// closed without an answer on the same page.
+#[test]
+fn a_terminal_question_the_owner_dismissed_reads_as_dismissed_by_the_owner() {
+    let case = Case::new();
+    let dismissed = case.ask(&Asker::Terminal(7), "Allow this command?");
+    assert_eq!(
+        dismiss(&case.db, dismissed, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        versioned::current(&case.db, &item(&case.project, dismissed).unwrap())
+            .unwrap()
+            .writer,
+        versioned::LastWriter::Owner
+    );
+    let page = case.page();
+    assert!(page.contains("Dismissed by the owner.\n"), "{page}");
+    assert!(!page.contains("Closed without an answer."), "{page}");
+
+    let closed = case.ask(&Asker::Terminal(7), "Allow this other command?");
+    assert_eq!(
+        terminal_settled(&case.db, closed, None).unwrap(),
+        Settlement::Settled
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("Dismissed by the owner.\n").count(),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        page.matches("Closed without an answer.\n").count(),
+        1,
+        "{page}"
+    );
+    assert!(case.messages().is_empty());
+}
+
 #[test]
 fn pages_list_pending_first_then_settled_newest_first() {
     let case = Case::new();
@@ -1144,7 +1184,7 @@ fn hidden_characters_never_reach_the_page_unescaped() {
     question.context = Some("~~~\n# Planted heading\n~~~~".into());
     question.answer = Some("Yes\u{2066}".into());
     question.answered_by = Some(AnsweredBy::Owner);
-    let rendered = page::render(&[], &[question]);
+    let rendered = page::render(&[], &[question], &std::collections::HashSet::new());
     assert!(!hidden_text(&rendered), "{rendered}");
     for escaped in ["\\u202e", "\\u200b", "\\u2066"] {
         assert!(rendered.contains(escaped), "{escaped} in {rendered}");
@@ -1180,7 +1220,7 @@ fn the_page_keeps_every_pending_question_and_cuts_settled_ones_at_its_bound() {
             question
         })
         .collect();
-    let rendered = page::render(&pending, &settled);
+    let rendered = page::render(&pending, &settled, &std::collections::HashSet::new());
     assert!(rendered.len() <= page::PAGE_BYTES_MAX);
     let shown = headings(&rendered)
         .iter()
