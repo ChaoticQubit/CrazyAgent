@@ -29,6 +29,7 @@ const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
 const MESSAGE_ROWS: usize = 6;
 const UPDATED_NOTICE: &str =
     "Your branch is merged into the agent's copy. The list shows when the agent picks it up.";
+const MOVED_NOTE: &str = "These changes moved on since you opened them. They are read again from the top: Accept and Discard come back at the last page.";
 const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,12 +48,15 @@ struct Diff {
     next: Option<u16>,
     truncated: bool,
     top: usize,
+    moved: bool,
+    seen_all: bool,
 }
 
 impl Diff {
-    /// Opens a change set's diff with nothing read yet. Inputs: the set's id and the head
-    /// shown. Output: the diff, waiting for its first page.
-    fn of(id: ChangeSetId, head: String) -> Self {
+    /// Starts reading a change set's diff from its first page at one head, with nothing
+    /// read yet. Inputs: the change set, the head and whether the set moved on since the
+    /// owner opened it. Output: the diff, waiting for its first page.
+    fn at(id: ChangeSetId, head: String, moved: bool) -> Self {
         Self {
             id,
             head,
@@ -63,7 +67,16 @@ impl Diff {
             next: Some(0),
             truncated: false,
             top: 0,
+            moved,
+            seen_all: false,
         }
+    }
+
+    /// Tells whether Accept and Discard may name this diff's head: always for the head
+    /// the owner opened, and after a move only once the new head's last page was read
+    /// (RV-DS-79). Output: the answer.
+    fn reviewed(&self) -> bool {
+        !self.moved || self.seen_all
     }
 
     /// Whether the next page is wanted now: while the file list is not complete, so every
@@ -169,6 +182,7 @@ impl ProjectChanges {
         } else if let Some(diff) = self.diff.as_ref().filter(|diff| diff.wants_more()) {
             ChangesQuery::Diff {
                 id: diff.id.clone(),
+                head: diff.head.clone(),
                 page: diff.next?,
             }
         } else if self.stale || (!self.not_ready && now_ms - self.read_ms >= LIST_POLL_MS) {
@@ -229,10 +243,18 @@ impl ProjectChanges {
                 self.sets = sets.clone();
                 self.loaded = true;
                 self.not_ready = false;
-                if let Some(diff) = &self.diff
-                    && !self.sets.iter().any(|set| set.id == diff.id)
-                {
-                    self.diff = None;
+                if let Some(diff) = self.diff.as_mut() {
+                    match self.sets.iter().find(|set| set.id == diff.id) {
+                        None => self.diff = None,
+                        Some(set)
+                            if set.head != diff.head
+                                || (diff.moved && !diff.seen_all && diff.next.is_none()) =>
+                        {
+                            *diff = Diff::at(set.id.clone(), set.head.clone(), true);
+                            self.notice = Some(Notice::problem(MOVED_NOTE));
+                        }
+                        Some(_) => {}
+                    }
                 }
             }
             (ChangesQuery::List { .. }, Err(code)) => {
@@ -241,11 +263,25 @@ impl ProjectChanges {
                     refusal(code)
                 )));
             }
-            (ChangesQuery::Diff { id, page }, Ok(ChangesView::Diff(page_diff))) => {
-                if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
+            (ChangesQuery::Diff { id, head, page }, Ok(ChangesView::Diff(page_diff))) => {
+                if let Some(diff) = self
+                    .diff
+                    .as_mut()
+                    .filter(|diff| &diff.id == id && &diff.head == head)
                     && diff.next == Some(*page)
                 {
                     diff.add(page_diff);
+                    diff.seen_all = diff.next.is_none();
+                }
+            }
+            (ChangesQuery::Diff { id, .. }, Err(code)) if code == "changes_stale" => {
+                if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id) {
+                    *diff = Diff {
+                        next: None,
+                        ..Diff::at(diff.id.clone(), diff.head.clone(), true)
+                    };
+                    self.stale = true;
+                    self.notice = Some(Notice::problem(MOVED_NOTE));
                 }
             }
             (ChangesQuery::Diff { .. }, Err(code)) => {
@@ -326,6 +362,19 @@ impl ProjectChanges {
         self.sets.iter().find(|set| &set.id == id)
     }
 
+    /// The actions the chosen change set allows now, with Accept and Discard held back
+    /// while an open diff that moved on is not read to its last page (RV-DS-79).
+    /// Input: the time now. Output: the actions, or none when no set is chosen.
+    fn actions(&self, now_ms: i64) -> Option<Actions> {
+        let reviewed = self.diff.as_ref().is_none_or(Diff::reviewed);
+        self.chosen().map(|set| {
+            let mut actions = Actions::of(set, now_ms);
+            actions.accept &= reviewed;
+            actions.discard &= reviewed;
+            actions
+        })
+    }
+
     fn reviewed_head(&self) -> Option<String> {
         let set = self.chosen()?;
         Some(match &self.diff {
@@ -374,7 +423,7 @@ impl ProjectChanges {
         if self.not_ready || !self.loaded {
             return false;
         }
-        let actions = self.chosen().map(|set| Actions::of(set, now_ms));
+        let actions = self.actions(now_ms);
         let used = match (key.code, actions) {
             (KeyCode::Char('a'), Some(actions)) if actions.accept => {
                 let proposed = self.chosen().map(|set| set.message.clone());
@@ -425,8 +474,7 @@ impl ProjectChanges {
                 let Some(set) = self.chosen() else {
                     return true;
                 };
-                let diff = Diff::of(set.id.clone(), set.head.clone());
-                self.diff = Some(diff);
+                self.diff = Some(Diff::at(set.id.clone(), set.head.clone(), false));
             }
             _ => return false,
         }
@@ -642,7 +690,7 @@ impl ProjectChanges {
         }
         lines.push(Row::default());
         if diff.lines.is_empty() {
-            let waiting = if diff.next.is_some() {
+            let waiting = if diff.next.is_some() || !diff.reviewed() {
                 "Loading changes..."
             } else {
                 "No text changes to show."
@@ -745,7 +793,7 @@ impl ProjectChanges {
         } else {
             vec![("\u{2191}\u{2193}", "Move"), ("Enter", "Show changes")]
         };
-        if let Some(actions) = self.chosen().map(|set| Actions::of(set, now_ms)) {
+        if let Some(actions) = self.actions(now_ms) {
             if actions.accept {
                 help.push(("a", "Accept"));
             }

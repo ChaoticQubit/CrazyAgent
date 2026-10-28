@@ -567,7 +567,7 @@ fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_comm
         later.head,
         "a turn without changes made a commit"
     );
-    let diff = diff(&case.db, &id, 0).unwrap();
+    let diff = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     let files: Vec<_> = diff
         .files
         .iter()
@@ -1210,7 +1210,7 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
     case.edit(".gitattributes", "*.txt diff=evil\n");
     case.edit("a.txt", "plain text\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     assert!(page.files.iter().any(|file| file.path == ".gitattributes"
         && file.marks.contains(&FileMark::Attributes)));
     assert!(matches!(
@@ -1228,7 +1228,7 @@ fn repository_hooks_filters_merge_drivers_textconv_and_fsmonitor_never_run() {
         "filtered\n",
         "the clean filter changed the committed content"
     );
-    diff(&case.db, &id, 0).unwrap();
+    diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     let before = case.checkout();
     assert_eq!(refused(case.accept(&id)), "changes_git_unsupported");
     assert_eq!(case.checkout(), before);
@@ -1626,7 +1626,7 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let (mut files, mut text, mut page) = (Vec::new(), String::new(), 0);
     loop {
-        let diff = diff(&case.db, &id, page).unwrap();
+        let diff = diff(&case.db, &id, &case.view(&id).head, page).unwrap();
         assert!(!diff.truncated);
         assert!(serde_json::to_vec(&diff).unwrap().len() < crate::protocol::FRAME_BYTES_MAX);
         files.extend(diff.files);
@@ -1690,7 +1690,7 @@ fn diff_pages_are_plain_text_and_mark_what_the_owner_should_check() {
             .chars()
             .any(|c| c == '\u{1b}' || c == '\u{202E}' || c == '\r')
     );
-    let past = diff(&case.db, &id, page + 5).unwrap();
+    let past = diff(&case.db, &id, &case.view(&id).head, page + 5).unwrap();
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());
 }
 
@@ -2295,9 +2295,10 @@ fn a_second_open_change_set_for_one_worktree_is_refused_and_both_rows_stay() {
 }
 
 fn all_pages(case: &Case, id: &ChangeSetId) -> Vec<ChangeDiff> {
-    let mut pages = vec![diff(&case.db, id, 0).unwrap()];
+    let head = case.view(id).head;
+    let mut pages = vec![diff(&case.db, id, &head, 0).unwrap()];
     while let Some(next) = pages.last().and_then(|page| page.next) {
-        pages.push(diff(&case.db, id, next).unwrap());
+        pages.push(diff(&case.db, id, &head, next).unwrap());
     }
     pages
 }
@@ -2320,7 +2321,7 @@ fn later_diff_pages_are_read_from_the_first_computation_without_running_git() {
     std::fs::rename(&git, &moved).unwrap();
     assert!(diff::page(&record.repository, &record.head, &record.base, 0).is_err());
     let again = all_pages(&case, &id);
-    let past = diff(&case.db, &id, 900).unwrap();
+    let past = diff(&case.db, &id, &case.view(&id).head, 900).unwrap();
     std::fs::rename(&moved, &git).unwrap();
     assert_eq!(again, first);
     assert!(past.files.is_empty() && past.text.is_empty() && past.next.is_none());

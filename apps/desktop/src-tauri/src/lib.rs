@@ -2101,10 +2101,11 @@ async fn desktop_change_diff(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    head: String,
     page: u16,
 ) -> Result<ChangeDiff, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.change_diff(id, page)?;
+    let call = lock(&state).await?.change_diff(id, head, page)?;
     call.await
 }
 

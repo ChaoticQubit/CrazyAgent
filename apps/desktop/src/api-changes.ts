@@ -109,10 +109,11 @@ export function loadChanges(projectId: string): Promise<Result<ChangeSet[]>> {
   return call<ChangeSet[]>("desktop_changes", { projectId });
 }
 
-/** Reads one page of a change set's diff. Inputs: the change set id and the page, from 0.
- * Output: that page's files with marks, its plain diff text and the next page, if any. */
-export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeDiff>> {
-  return call<ChangeDiff>("desktop_change_diff", { id, page });
+/** Reads one page of a change set's diff at the head the owner is reading. Inputs: the
+ * change set id, that head and the page, from 0. Output: that page's files with marks, its
+ * plain diff text and the next page, if any, or `changes_stale` once the set moved on. */
+export function loadChangeDiff(id: string, head: string, page: number): Promise<Result<ChangeDiff>> {
+  return call<ChangeDiff>("desktop_change_diff", { id, head, page });
 }
 
 /** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id,

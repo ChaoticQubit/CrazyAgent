@@ -490,18 +490,28 @@ pub fn open_change_set(
 }
 
 /// Reads one page of a change set's diff between its base and head, produced by the
-/// engine with no external diff or text conversion. Inputs: the store, the change set
-/// and the page. Output: the page.
-pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
+/// engine with no external diff or text conversion, only while the set is still at the
+/// head the owner is reading, so every page shown is of the head Accept and Discard name
+/// (RV-DS-13, RV-DS-79). Inputs: the store, the change set, that head and the page.
+/// Output: the page, or `changes_stale` once the set moved to another head.
+pub fn diff(
+    db: &Connection,
+    id: &ChangeSetId,
+    head: &str,
+    page: u16,
+) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
+        if record.head != head {
+            return Err(EngineError("changes_stale".into()));
+        }
         diff::page(&record.repository, &record.base, &record.head, page)
     }
     #[cfg(not(unix))]
     {
-        let _ = (db, id, page);
+        let _ = (db, id, head, page);
         Err(unavailable())
     }
 }
