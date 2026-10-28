@@ -249,7 +249,7 @@ pub struct AgentMessages {
 }
 
 /// Creates the kept messages and the settings tables and the indexes that read one agent's
-/// tasks, events and messages by time. Takes a connection with the team and event tables.
+/// tasks, pinned tasks, events and messages by time. Takes a connection with the team and event tables.
 /// Returns unit.
 pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -266,6 +266,7 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_agent_messages_agent ON team_agent_messages(project, agent, created_ms);
             CREATE INDEX IF NOT EXISTS team_events_agent ON team_events(project, agent, created_ms);
             CREATE INDEX IF NOT EXISTS team_tasks_agent ON team_tasks(project, agent, created_ms);
+            CREATE INDEX IF NOT EXISTS team_task_pins_agent ON team_task_pins(project, agent);
             CREATE TABLE IF NOT EXISTS team_message_settings (
                 project TEXT PRIMARY KEY,
                 keep_master INTEGER NOT NULL,
@@ -488,19 +489,28 @@ impl Page<'_> {
         }
     }
 
+    /// Reads the agent's newest tasks before the cursor in two seeks: the tasks it took, each
+    /// marked when it is also pinned to it, and the other tasks pinned to it to wake it, so
+    /// each half reads one agent's rows by its own index and no task shows twice. Takes the
+    /// page. Returns at most `take` entries, newest first.
     fn tasks(&self) -> Result<Vec<AgentMessage>, EngineError> {
         let (at, id) = self.bound(Source::Task);
         let mut statement = self
             .connection
             .prepare(
-                "SELECT t.id, t.source, t.prompt, t.created_ms,
+                "SELECT t.id AS id, t.source, t.prompt, t.created_ms AS created_ms,
                  EXISTS(SELECT 1 FROM team_task_pins p WHERE p.task=t.id AND p.agent=?2)
                  FROM team_tasks t
-                 WHERE t.project=?1
-                 AND (t.agent=?2 OR t.id IN (SELECT task FROM team_task_pins WHERE project=?1 AND agent=?2))
+                 WHERE t.project=?1 AND t.agent=?2
                  AND (?3 OR t.source<>'owner')
                  AND (t.created_ms<?4 OR (t.created_ms=?4 AND t.id<?5))
-                 ORDER BY t.created_ms DESC, t.id DESC LIMIT ?6",
+                 UNION ALL
+                 SELECT t.id, t.source, t.prompt, t.created_ms, 1
+                 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                 WHERE p.project=?1 AND p.agent=?2 AND t.project=?1 AND t.agent IS NOT ?2
+                 AND (?3 OR t.source<>'owner')
+                 AND (t.created_ms<?4 OR (t.created_ms=?4 AND t.id<?5))
+                 ORDER BY created_ms DESC, id DESC LIMIT ?6",
             )
             .map_err(error)?;
         let rows = statement
