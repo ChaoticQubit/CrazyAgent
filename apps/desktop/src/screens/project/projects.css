@@ -187,3 +187,5 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-master-live > .tg-terminal { flex: 1; min-height: 0; }
 .pj-master-live .tg-terminal-screen { min-height: 160px; }
 .pj-master-live > .pj-convo { flex: 1; height: auto; min-height: 0; }
+
+.pj-waiting { margin-bottom: var(--space-4); }

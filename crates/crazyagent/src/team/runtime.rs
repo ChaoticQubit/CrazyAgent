@@ -2152,13 +2152,10 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            let prompt = format!(
-                "You are a sub-agent of the project \"{}\". Work only inside {}.\nYour task: {}\nWhen you finish, reply with a short summary of what you did.",
-                stored.name,
-                worktree
-                    .map_or(folder.clone(), |worktree| folder.join(worktree))
-                    .display(),
-                prompt
+            let prompt = sub_agent_prompt(
+                &stored.name,
+                &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
+                &prompt,
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
@@ -3627,8 +3624,18 @@ impl TeamRuntime {
     }
 }
 
-/// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// The turn a sub-agent gets for one task: the project, the worktree it works in, the task,
+/// and that its edits stay there for CrazyAgent to land. Inputs: the project name, the
+/// worktree and the task. Output: the prompt.
+fn sub_agent_prompt(name: &str, worktree: &Path, task: &str) -> String {
+    format!(
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\nYour task: {task}\nLeave your edits as files in that worktree: never create a branch, commit, push or write inside .git, and never retry a refused command outside the sandbox. CrazyAgent turns your edits into a change set the owner accepts in Changes.\nWhen you finish, reply with a short summary of what you did.",
+        worktree.display()
+    )
+}
+
+/// Builds the master's opening frame: its sub-agents, how to hand out work, how the
+/// team's work lands and the project brief. Input: the setup, whether the team tool is on and, for an
 /// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
 fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
@@ -3644,8 +3651,11 @@ fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String 
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
-        stored.name, team, brief
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n{}\nProject brief:\n{}\n\n",
+        stored.name,
+        team,
+        crate::launch_context::MASTER_LANDING_RULES,
+        brief
     )
 }
 
@@ -3675,9 +3685,9 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 }
 
 /// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive and when to ask the owner. Takes the setup, whether it has the
-/// engine's team tools and, for an empty plan, the harnesses with an eligible account now.
-/// Returns the text.
+/// how team events arrive, when to ask the owner and how the team's work lands. Takes the
+/// setup, whether it has the engine's team tools and, for an empty plan, the harnesses with
+/// an eligible account now. Returns the text.
 fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
     let team = sub_agent_lines(stored, available);
     let how = if team_tool {
@@ -3695,9 +3705,10 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
+        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}\nProject brief:\n{}\n",
         stored.name,
         team,
+        crate::launch_context::MASTER_LANDING_RULES,
         master_brief(stored)
     )
 }

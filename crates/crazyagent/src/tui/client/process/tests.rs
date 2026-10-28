@@ -157,6 +157,35 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         view.skills.is_empty(),
         "a launch that installed no skill records none"
     );
+    assert_eq!(view.sessions, 0, "its harness wrote no session record yet");
+    let rollout = home.join("sessions/2026/10/27/rollout-2026-10-27T18-00-00-0199.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let said = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            said("# AGENTS.md instructions for /w/agent\n\n<INSTRUCTIONS>\nx\n</INSTRUCTIONS>"),
+            said("<skill>\n<name>systematic-debugging</name>\n<path>/s/SKILL.md</path>\n</skill>")
+        ),
+    )
+    .unwrap();
+    let Ok(ProcessReply::Agent(view)) = native.process(asked.clone()).await.result else {
+        panic!("the harness report is read through the engine");
+    };
+    assert_eq!(view.sessions, 1);
+    assert_eq!(
+        view.loaded,
+        vec![crate::agent_home::LoadedFile {
+            name: "AGENTS.md".into(),
+            path: "/w/agent".into(),
+        }]
+    );
+    assert_eq!(view.skills_used, vec!["systematic-debugging".to_owned()]);
     std::fs::remove_file(home.join("AGENTS.md")).unwrap();
     std::os::unix::fs::symlink(
         folder.join(".crazyagent/instructions.md"),

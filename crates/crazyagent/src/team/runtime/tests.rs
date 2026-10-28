@@ -3014,3 +3014,65 @@ fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
     run.stop();
     assert!(run.team.shutdown().unwrap().is_empty());
 }
+
+#[test]
+fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Landing\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Landing".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![HarnessSlot {
+                harness: "codex".into(),
+                agents: 1,
+                tools: true,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    for team_tool in [true, false] {
+        for text in [
+            framing(&setup, team_tool, &[]),
+            live_framing(&setup, team_tool, &[]),
+        ] {
+            assert!(
+                text.contains(crate::launch_context::MASTER_LANDING_RULES),
+                "{text}"
+            );
+            assert!(text.contains("Never ask a sub-agent to create a branch, commit or push"));
+            assert!(text.contains(
+                "tell the owner to review and accept them in the project's Changes view"
+            ));
+        }
+    }
+
+    let prompt = sub_agent_prompt("Landing", &folder.join("wt-7"), "Fix the login form.");
+    assert!(prompt.contains(&format!(
+        "Work only inside {}.",
+        folder.join("wt-7").display()
+    )));
+    assert!(prompt.contains("Your task: Fix the login form.\n"));
+    for rule in [
+        "Leave your edits as files in that worktree",
+        "never create a branch, commit, push or write inside .git",
+        "never retry a refused command outside the sandbox",
+        "CrazyAgent turns your edits into a change set the owner accepts in Changes.",
+    ] {
+        assert!(prompt.contains(rule), "{rule}");
+    }
+}

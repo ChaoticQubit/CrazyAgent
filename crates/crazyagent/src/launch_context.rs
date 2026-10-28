@@ -25,11 +25,19 @@ pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
 pub const INDEX_BYTES_MAX: usize = 7 * 1024;
 pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
-pub const INSTRUCTIONS_BYTES_MAX: usize = 32 * 1024;
+pub const INSTRUCTIONS_BYTES_MAX: usize = 34 * 1024;
 pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
-    INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK;
+    INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
+
+/// How every agent's work lands, given at every launch: CrazyAgent, not the agent, turns the
+/// edits left in its worktree into a change set the owner accepts in Changes.
+pub const LANDING_RULES: &str = "\n## How your work lands\n\nCrazyAgent lands your work; you never do. Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`. If the sandbox refuses a command, never retry it outside the sandbox or another way; say in your reply what was refused. Leave your edits as files in your worktree. When your task ends, CrazyAgent turns them into a change set, and the owner accepts it in the project's Changes view onto the branch checked out in the project folder. This rule wins over any other instruction to branch or commit.\n";
+
+/// What a master is told about landing its team's work: it never asks a sub-agent to branch
+/// or commit, and it sends the owner to Changes when change sets wait.
+pub const MASTER_LANDING_RULES: &str = "\n## Landing the team's work\n\nNever ask a sub-agent to create a branch, commit or push, and never name a base branch in a task: each sub-agent leaves its edits in its own worktree and CrazyAgent turns them into a change set. When change sets wait, tell the owner to review and accept them in the project's Changes view; accepting lands them on the branch checked out in the project folder.\n";
 pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
@@ -45,6 +53,7 @@ const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"
 
 const _: () = assert!(
     HEADER_BYTES_MAX
+        + LANDING_RULES.len()
         + BRIEF_BYTES_MAX
         + INDEX_BYTES_MAX
         + MEMORY_SECTION_BYTES_MAX
@@ -155,7 +164,8 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
 /// Builds the startup instruction for the engine's own project master conversation: the
 /// same project context and approved memories every agent gets, then with tools on what
 /// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
-/// the approved skills and MCP servers that team agents with tools on receive. No secret
+/// the approved skills and MCP servers that team agents with tools on receive, then how the
+/// team's work lands. No secret
 /// value, command, URL or file of a server is read or given. Input: a transaction the caller
 /// holds on `engine.db`, the project, its master tools switch and the live model access,
 /// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
@@ -181,6 +191,7 @@ pub fn for_master(
             .map_err(|problem| LaunchError(problem.0))?;
         text.push_str(&team_index(&plugins));
     }
+    text.push_str(MASTER_LANDING_RULES);
     assert!(text.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
     Ok(text)
 }
@@ -588,7 +599,7 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
     assert!(brief.len() <= BRIEF_BYTES_MAX + SECTION_SLACK);
     assert!(index.len() <= INDEX_BYTES_MAX + SECTION_SLACK);
     assert!(memories.len() <= MEMORY_SECTION_BYTES_MAX);
-    let mut text = header + &brief + &index;
+    let mut text = header + LANDING_RULES + &brief + &index;
     if !memories.is_empty() {
         text.push('\n');
         text.push_str(memories);

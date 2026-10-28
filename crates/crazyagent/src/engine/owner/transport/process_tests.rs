@@ -165,7 +165,8 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
         "review your own diff",
         "No comments in code, except a short docstring",
         "Never use an em dash",
-        "Never add a Co-Authored-By trailer",
+        "never commit, and never write inside `.git`",
+        "CrazyAgent turns them into a change set",
         "Never put a secret",
         "asks the master",
         "escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions",
@@ -285,6 +286,9 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
         }
     );
 
@@ -304,8 +308,42 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: true,
             text: "# Sub rules\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
         }
     );
+
+    let rollout = sub_home.join("sessions/2026/10/27/rollout-2026-10-27T18-00-00-0199.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let said = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            said(&format!(
+                "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\nOWNER-SECRET-78\n</INSTRUCTIONS>",
+                folder.display()
+            )),
+            said("<skill>\n<name>tdd</name>\n<path>/skills/tdd/SKILL.md</path>\n</skill>")
+        ),
+    )
+    .unwrap();
+    let reported = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(reported.sessions, 1);
+    assert_eq!(
+        reported.loaded,
+        vec![crate::agent_home::LoadedFile {
+            name: "AGENTS.md".into(),
+            path: folder.display().to_string(),
+        }]
+    );
+    assert_eq!(reported.skills_used, vec!["tdd".to_owned()]);
+    assert!(!format!("{reported:?}").contains("OWNER-SECRET-78"));
 
     let master_home = launched_home(&root, master);
     prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();

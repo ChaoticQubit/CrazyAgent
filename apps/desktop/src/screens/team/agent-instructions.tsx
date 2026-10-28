@@ -1,5 +1,5 @@
 import { listSkills, type Result } from "../../api";
-import { agentOf, loadAgentInstructions, processMessage, textBytes, type AgentInstructions as Received, type SkillEntry } from "../../api-process";
+import { agentOf, loadAgentInstructions, processMessage, reportedLine, textBytes, type AgentInstructions as Received, type SkillEntry } from "../../api-process";
 import type { GraphNode } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { TaggedText, byteSize, catalogOf } from "../process";
@@ -10,6 +10,9 @@ const FILES: Record<string, string> = { codex: "AGENTS.md", "claude-code": "CLAU
 function Given({ value, skills }: { value: Received; skills: readonly SkillEntry[] }) {
   if (!value.launched) return <p className="tg-instructions-note">This agent hasn't launched yet. What it receives shows here after its first launch.</p>;
   return <>
+    <p className="tg-instructions-reported">{reportedLine(value)}</p>
+    {value.loaded.length > 0 && <ul className="tg-instructions-loaded" aria-label="Instruction files its harness loaded">{value.loaded.map((file) =>
+      <li key={`${file.name} ${file.path}`}><span className="tg-instructions-file">{file.name}</span> <span className="tg-instructions-path">{file.path}</span></li>)}</ul>}
     <p className="tg-instructions-note"><span className="tg-instructions-file">{FILES[value.harness] ?? "Instructions file"}</span>
       {value.text ? ` ${byteSize(textBytes(value.text))}` : ""}</p>
     {value.text ? <TaggedText text={value.text} skills={skills} />
@@ -20,8 +23,9 @@ function Given({ value, skills }: { value: Received; skills: readonly SkillEntry
   </>;
 }
 
-/** The read-only Instructions view of one agent: the instruction file its last launch wrote,
- * with its size and catalog skill names as tags, then the skills installed for it.
+/** The read-only Instructions view of one agent: what its harness reported loading and
+ * invoking, the instruction file its last launch wrote, with its size and catalog skill names
+ * as tags, then the skills installed for it.
  * Inputs: the engine read and the skill catalog. Output: the section. */
 export function AgentInstructionsView({ read, skills }: { read: Loaded<Received>; skills: readonly SkillEntry[] }) {
   return <section className="tg-instructions" aria-label="What this agent received">
