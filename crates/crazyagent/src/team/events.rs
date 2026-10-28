@@ -291,7 +291,7 @@ impl EventsStatus {
                 text.push_str(&format!(", task {task}: {prompt}"));
             }
             if let Some(question) = &agent.waiting {
-                text.push_str(&format!(", waiting on: {}", agent_text(question)));
+                text.push_str(&format!(", waiting on: {}", agent_line(question)));
             }
             text.push('\n');
         }
@@ -1273,7 +1273,7 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     })
 }
 
-/// Writes one event as the master reads it: the agent's text goes through `agent_text`, so
+/// Writes one event as the master reads it: the agent's text goes through `agent_line`, so
 /// a tag such as `[owner]` inside it can never pass for a speaker. Takes the event.
 /// Returns the line.
 fn line(event: &TeamEvent) -> String {
@@ -1284,7 +1284,7 @@ fn line(event: &TeamEvent) -> String {
         "[team] {} {}: {}{task}",
         event.label,
         event.kind.verb(),
-        agent_text(&event.text)
+        agent_line(&event.text)
     )
 }
 
@@ -1297,44 +1297,40 @@ const CLOSE_BRACKETS: [char; 16] = [
     '\u{2046}', '\u{2773}', '\u{298C}', '\u{298E}', '\u{2990}', '\u{27ED}', '\u{FE5E}', '\u{FE48}',
 ];
 
-const QUOTED: &str = "(quoted) ";
-const SPEAKERS: [&str; 9] = [
-    "message from the owner",
-    "message from the engine",
-    "owner",
-    "engine",
-    "master",
-    "human",
-    "user",
-    "assistant",
-    "system",
-];
-const SPEAKER_LEADS: [char; 12] = [
-    '*', '_', '#', '>', '`', '-', '~', '|', '+', '"', '\'', '\u{2022}',
-];
-const SPEAKER_ENDS: [char; 4] = [':', '\u{FF1A}', '\u{FE55}', ')'];
-const SPEAKER_HEAD_CHARS: usize = 64;
+const QUOTE: &str = "> ";
 
-/// Writes text a sub-agent wrote the way the master may read it: brackets made plain, and
-/// each line that opens with a speaker label the master trusts, such as `(owner)`,
-/// `Owner:` or `Message from the owner:`, marked `(quoted) `. Every task result, problem,
-/// event, waiting question and history line that carries agent text reaches the master
-/// through it, so no line can pass for the owner or the engine. Takes the text. Returns it.
+/// Writes text a sub-agent wrote as the master reads it on lines of its own: brackets made
+/// plain, and every line opened with `> `, so no line of it can start as the owner, the
+/// engine or any other speaker however it is written. A line that already opens with `> `
+/// is kept, so quoting twice changes nothing. Task results and problems and the master's
+/// history reach the master through it. Takes the text. Returns it.
 pub(super) fn agent_text(text: &str) -> String {
     let plain = plain_brackets(text);
-    let mut quoted = String::with_capacity(plain.len() + QUOTED.len());
+    let mut quoted = String::with_capacity(plain.len() + QUOTE.len());
     for line in plain.split_inclusive(line_break) {
-        if speaker_label(line) {
-            quoted.push_str(QUOTED);
+        if !line.starts_with(QUOTE) {
+            quoted.push_str(QUOTE);
         }
         quoted.push_str(line);
     }
     assert!(
         quoted
             .split_inclusive(line_break)
-            .all(|line| line.starts_with(QUOTED) || !speaker_label(line))
+            .all(|line| line.starts_with(QUOTE))
     );
     quoted
+}
+
+/// Writes text a sub-agent wrote as part of one engine line, such as an event or the
+/// question an agent waits on: brackets made plain and every line break made a space, so it
+/// never starts a line of its own. Takes the text. Returns one line.
+fn agent_line(text: &str) -> String {
+    let line: String = plain_brackets(text)
+        .chars()
+        .map(|c| if line_break(c) { ' ' } else { c })
+        .collect();
+    assert!(!line.contains(line_break));
+    line
 }
 
 fn line_break(c: char) -> bool {
@@ -1342,26 +1338,6 @@ fn line_break(c: char) -> bool {
         c,
         '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
     )
-}
-
-/// Tells whether a line opens with a speaker label: past leading spaces, list and quote
-/// marks and invisible characters, an optional `(`, a label of `SPEAKERS` in any letter
-/// case, then `:` or `)`. Takes the line. Returns true for a label.
-fn speaker_label(line: &str) -> bool {
-    let head = line
-        .chars()
-        .filter(|c| !crate::memory::hidden_char(*c))
-        .take(SPEAKER_HEAD_CHARS)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let head = head.trim_start_matches(|c: char| c.is_whitespace() || SPEAKER_LEADS.contains(&c));
-    let head = head
-        .strip_prefix('(')
-        .map_or(head, |rest| rest.trim_start_matches(' '));
-    SPEAKERS.iter().any(|speaker| {
-        head.strip_prefix(speaker)
-            .is_some_and(|rest| rest.trim_start_matches(' ').starts_with(SPEAKER_ENDS))
-    })
 }
 
 /// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
