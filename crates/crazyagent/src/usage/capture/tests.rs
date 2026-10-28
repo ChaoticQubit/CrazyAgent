@@ -363,6 +363,56 @@ fn a_replaced_or_shortened_record_starts_over_and_an_overlong_line_is_skipped() 
     assert_eq!(Format::of("aider"), None);
 }
 
+#[test]
+fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan() {
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s9.jsonl");
+    append(&record, &claude_assistant("g1", 6, 2, 0, 0, "end_turn"));
+    let mut progress = Progress::default();
+    let opened = open_record(&record).unwrap();
+    let length = opened.2;
+    append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
+    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW);
+    assert_eq!(
+        growth,
+        Tokens {
+            input: 6,
+            output: 2,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+    assert_eq!(progress.offset, length);
+    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 1);
+    assert_eq!(
+        growth,
+        Tokens {
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+    let grown = std::fs::metadata(&record).unwrap().len();
+    assert_eq!(progress.offset, grown);
+
+    let line = claude_assistant("g3", 5, 5, 0, 0, "end_turn");
+    let (head, tail) = line.split_at(25);
+    append(&record, head);
+    let opened = open_record(&record).unwrap();
+    append(&record, tail);
+    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW + 2);
+    assert_eq!(growth, Tokens::default());
+    assert_eq!(progress.offset, grown);
+    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 3);
+    assert_eq!((growth.input, growth.output), (5, 5));
+    assert_eq!(progress.offset, std::fs::metadata(&record).unwrap().len());
+    assert_eq!(
+        read_record(&record, Format::Claude, &mut progress, NOW + 4).0,
+        Tokens::default()
+    );
+}
+
 fn unattributed(harness: &str) -> Attribution {
     Attribution {
         kind: RunKind::Research,

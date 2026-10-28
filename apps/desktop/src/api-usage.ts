@@ -48,6 +48,14 @@ export interface LimitWindow {
 
 export type WindowKind = "five_hour" | "weekly";
 
+export type UsageStep = "poll" | "team" | "runs";
+
+export interface StepHealth {
+  step: UsageStep;
+  panics: number;
+  last_ms: number;
+}
+
 export interface AccountLimits {
   account: string;
   plan: string | null;
@@ -74,6 +82,7 @@ export interface UsageReport {
   agent_lines: AgentLinesRow[];
   limits: AccountLimits[];
   not_reported_by?: string[];
+  health?: StepHealth[];
 }
 
 const REFUSALS: Record<string, string> = {

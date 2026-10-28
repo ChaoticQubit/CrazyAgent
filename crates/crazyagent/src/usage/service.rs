@@ -1,4 +1,5 @@
 use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
+use super::health::{UsageStep, clear, record_panic};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
 use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
@@ -20,6 +21,11 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(5);
 pub const POLL_EVERY_MS: i64 = 10 * 60 * 1000;
 const STOPPED_SCAN_MS: i64 = 10 * 60 * 1000;
 const AGENTS_PER_SCAN_MAX: i64 = 256;
+const STEP_PANICKED: &str = "usage_step_panicked";
+const PANIC_PAUSE_MAX: Duration = Duration::from_secs(10 * 60);
+const PANIC_DOUBLINGS_MAX: u32 = 8;
+
+const _: () = assert!(SCAN_EVERY.as_millis() <= PANIC_PAUSE_MAX.as_millis());
 
 /// Reads the live model access; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
@@ -117,7 +123,8 @@ pub fn pool_of(
 }
 
 /// One engine's usage upkeep: it counts what every team agent and research run's records
-/// gained and polls every signed-in subscription account's limits.
+/// gained and polls every signed-in subscription account's limits. `doing` names the part
+/// of the step running now, so a panic is counted against it.
 pub struct Usage {
     db: Connection,
     team: PathBuf,
@@ -127,11 +134,13 @@ pub struct Usage {
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
     polls: u64,
+    doing: UsageStep,
 }
 
 impl Usage {
-    /// Opens the upkeep for an engine database. Inputs: the database, the team state folder,
-    /// the live access and the harness executables by harness id. Output: the upkeep.
+    /// Opens the upkeep for an engine database and forgets the step panics a previous engine
+    /// run counted. Inputs: the database, the team state folder, the live access and the
+    /// harness executables by harness id. Output: the upkeep.
     pub fn open(
         database: &Path,
         team: &Path,
@@ -143,6 +152,7 @@ impl Usage {
             .filter(|root| root.is_absolute())
             .ok_or_else(|| failure("usage_unavailable"))?;
         let db = super::open(root)?;
+        clear(&db)?;
         let custody = std::fs::symlink_metadata(database)
             .map_err(storage)
             .and_then(|metadata| NativeProfileCustody::capture(database, &metadata));
@@ -160,6 +170,7 @@ impl Usage {
             ),
             polled_ms: None,
             polls: 0,
+            doing: UsageStep::Poll,
         })
     }
 
@@ -176,6 +187,7 @@ impl Usage {
     /// readings meet a poll as fresh as the step allows. Output: done, or the store's
     /// failure.
     pub fn step(&mut self, now_ms: i64) -> Result<(), EngineError> {
+        self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
         let due = match self.polled_ms {
@@ -188,7 +200,9 @@ impl Usage {
             self.polled_ms = Some(now_ms);
             self.poll_all(&access, now_ms)?;
         }
+        self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
+        self.doing = UsageStep::Runs;
         scan_runs(
             &self.db,
             |project, account| pool_of(&access, project, account),
@@ -381,9 +395,78 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, reading the
-/// pools live from the engine's settings files. Inputs: the runtime folder, both settings
-/// files and the harness executables by harness id. Output: the service, or a reason.
+/// Runs one upkeep step so that a panic inside it ends only that step: its transaction
+/// rolls back as it unwinds and the thread steps again at the next scan. Input: the step.
+/// Output: its problem code, `usage_step_panicked` for a panic, none when it succeeded.
+fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(step)) {
+        Ok(Ok(())) => None,
+        Ok(Err(problem)) => Some(problem.0),
+        Err(_) => Some(STEP_PANICKED.to_owned()),
+    }
+}
+
+/// Runs one upkeep step under `guarded` and counts a panic against the step kind that was
+/// running, so the usage pages can say counting is degraded. Inputs: the upkeep, the step
+/// and the time. Output: the step's problem code, none when it succeeded.
+fn counted_step(
+    usage: &mut Usage,
+    step: impl FnOnce(&mut Usage) -> Result<(), EngineError>,
+    now_ms: i64,
+) -> Option<String> {
+    let problem = guarded(|| step(usage));
+    if problem.as_deref() == Some(STEP_PANICKED)
+        && let Err(fault) = record_panic(&usage.db, usage.doing, now_ms)
+    {
+        eprintln!("usage: {}", fault.0);
+    }
+    problem
+}
+
+/// The upkeep thread's log and pace. A problem code is logged when it first appears. A
+/// step that panics again right after a panic is counted, not logged, and the wait before
+/// the next step doubles up to `PANIC_PAUSE_MAX`. The default panic hook still reports
+/// every panic on its own, so the longer wait is what bounds that report.
+#[derive(Debug, Default)]
+struct Pace {
+    last: Option<String>,
+    panics: u32,
+}
+
+impl Pace {
+    /// Takes one step's outcome. Input: its problem code, none when it succeeded.
+    /// Output: the lines to log, at most two, and the wait before the next step.
+    fn after(&mut self, problem: Option<String>) -> (Vec<String>, Duration) {
+        let panicked = problem.as_deref() == Some(STEP_PANICKED);
+        let mut lines = Vec::new();
+        if !panicked && self.panics > 1 {
+            lines.push(format!(
+                "usage: {} steps in a row panicked before this one",
+                self.panics
+            ));
+        }
+        self.panics = if panicked {
+            self.panics.saturating_add(1)
+        } else {
+            0
+        };
+        if problem.is_some() && problem != self.last {
+            lines.push(format!("usage: {}", problem.as_deref().unwrap_or_default()));
+        }
+        self.last = problem;
+        let pause = SCAN_EVERY
+            .saturating_mul(1 << self.panics.min(PANIC_DOUBLINGS_MAX))
+            .min(PANIC_PAUSE_MAX);
+        assert!(lines.len() <= 2);
+        assert!((SCAN_EVERY..=PANIC_PAUSE_MAX).contains(&pause));
+        (lines, pause)
+    }
+}
+
+/// Starts the usage upkeep for a running engine: it steps every `SCAN_EVERY`, and less
+/// often while its steps keep panicking, reading the pools live from the engine's settings
+/// files. Inputs: the runtime folder, both settings files and the harness executables by
+/// harness id. Output: the service, or a reason.
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -412,15 +495,16 @@ pub fn start_for_engine(
     let thread = std::thread::Builder::new()
         .name("usage".into())
         .spawn(move || {
-            let mut last = None;
+            let mut pace = Pace::default();
             while !flag.load(Ordering::SeqCst) {
-                let problem = usage.step(now_ms()).err().map(|e| e.0);
-                if problem.is_some() && problem != last {
-                    eprintln!("usage: {}", problem.as_deref().unwrap_or_default());
+                let now = now_ms();
+                let (lines, pause) =
+                    pace.after(counted_step(&mut usage, |usage| usage.step(now), now));
+                for line in lines {
+                    eprintln!("{line}");
                 }
-                last = problem;
                 let mut waited = Duration::ZERO;
-                while waited < SCAN_EVERY && !flag.load(Ordering::SeqCst) {
+                while waited < pause && !flag.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
                     waited += Duration::from_millis(100);
                 }
