@@ -4,7 +4,7 @@ use crate::projects_home::{
     ProjectsHome, Registered,
 };
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 const FOUND_REPLY_BYTES: usize = 48 * 1024;
 
@@ -387,10 +387,10 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
     }
 }
 
-/// Points every set-up project whose folder sat in the old home, under a name
-/// `arrived` accepts, at the same folder name in the new home, keeping an
-/// onboarded project's recorded `.crazyagent/` folder, its onboarding folder and
-/// each repository it lists inside that folder, where its master works.
+/// Points every set-up project whose folder sat anywhere inside a folder of the
+/// old home that `arrived` accepts at the same place in the new home, keeping an
+/// onboarded project's recorded `.crazyagent/` folder and its onboarding folder,
+/// then every project's repository inside such a folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -410,13 +410,9 @@ fn rewrite_folders(
         let mut stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
         let folder = stored.project_folder();
-        let Some(name) = folder.file_name() else {
+        let Some(moved) = moved_path(&folder, from, to, &arrived) else {
             continue;
         };
-        if folder.parent() != Some(from) || !arrived(name) {
-            continue;
-        }
-        let moved = to.join(name);
         let recorded = if Path::new(&stored.folder) == folder {
             moved.clone()
         } else {
@@ -438,58 +434,70 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
-        move_repositories(tx, &project, &folder, &moved)?;
     }
-    Ok(())
+    move_repositories(tx, from, to, &arrived)
 }
 
-/// Rewrites the repositories a project lists inside its moved folder to the same
-/// place in the new folder, leaving those outside it. Inputs: the transaction,
-/// the project, its old folder and its new one. Output: the project row agrees
-/// with the move, or the bound the moved path breaks.
-fn move_repositories(
-    tx: &Transaction<'_>,
-    project: &str,
+/// Says where a path inside the old home is after a move: the same place in the
+/// new home when the home folder holding it arrived, compared component by
+/// component. Inputs: the path, both homes and the arrived test. Output: the
+/// moved path, or None for a path that stays where it is.
+fn moved_path(
+    path: &Path,
     from: &Path,
     to: &Path,
+    arrived: &impl Fn(&OsStr) -> bool,
+) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    match rest.components().next()? {
+        Component::Normal(name) if arrived(name) => Some(to.join(rest)),
+        _ => None,
+    }
+}
+
+/// Rewrites every project's repositories inside a moved folder of the old home to
+/// the same place in the new home, leaving the others. Inputs: the transaction,
+/// both homes and the arrived test. Output: the project rows agree with the move,
+/// or the bound a moved path breaks.
+fn move_repositories(
+    tx: &Transaction<'_>,
+    from: &Path,
+    to: &Path,
+    arrived: &impl Fn(&OsStr) -> bool,
 ) -> Result<(), EngineError> {
-    let Some(body) = tx
-        .query_row("SELECT body FROM projects WHERE id=?1", [project], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(error)?
-    else {
-        return Ok(());
+    let rows: Vec<(String, String)> = {
+        let mut statement = tx.prepare("SELECT id, body FROM projects").map_err(error)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)?
     };
-    let mut stored: crate::protocol::StoredProject = serde_json::from_str(&body).map_err(error)?;
-    let mut moved = 0;
-    for repository in &mut stored.spec.repositories {
-        let Ok(rest) = Path::new(repository.as_str()).strip_prefix(from) else {
+    for (project, body) in rows {
+        let mut stored: crate::protocol::StoredProject =
+            serde_json::from_str(&body).map_err(error)?;
+        let mut moved = 0;
+        for repository in &mut stored.spec.repositories {
+            let Some(place) = moved_path(Path::new(repository.as_str()), from, to, arrived) else {
+                continue;
+            };
+            *repository = place
+                .to_str()
+                .ok_or_else(|| error("projects_home_path_invalid"))?
+                .to_owned();
+            moved += 1;
+        }
+        if moved == 0 {
             continue;
-        };
-        let place = if rest.as_os_str().is_empty() {
-            to.to_path_buf()
-        } else {
-            to.join(rest)
-        };
-        *repository = place
-            .to_str()
-            .ok_or_else(|| error("projects_home_path_invalid"))?
-            .to_owned();
-        moved += 1;
+        }
+        stored.spec.validate().map_err(error)?;
+        let changed = tx
+            .execute(
+                "UPDATE projects SET body=?1 WHERE id=?2",
+                params![serde_json::to_string(&stored).map_err(error)?, project],
+            )
+            .map_err(error)?;
+        assert_eq!(changed, 1);
     }
-    if moved == 0 {
-        return Ok(());
-    }
-    stored.spec.validate().map_err(error)?;
-    let changed = tx
-        .execute(
-            "UPDATE projects SET body=?1 WHERE id=?2",
-            params![serde_json::to_string(&stored).map_err(error)?, project],
-        )
-        .map_err(error)?;
-    assert_eq!(changed, 1);
     Ok(())
 }
 

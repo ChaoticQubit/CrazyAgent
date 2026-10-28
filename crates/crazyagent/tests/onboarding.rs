@@ -1916,3 +1916,67 @@ async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
     );
     bench.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_home_move_points_a_nested_project_and_its_repository_at_the_moved_folder() {
+    let mut bench = Bench::start(|_| {}).await;
+    let home = bench.repo.parent().unwrap().to_path_buf();
+    fs::create_dir(home.join("org")).unwrap();
+    let nested = home.join("org").join("service-a");
+    rust_repo(&nested);
+    bench.use_repos_as_home().await;
+    let response = bench.start_onboarding_at(&nested).await;
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let project = project_id_for(&nested).unwrap();
+    assert_eq!(
+        bench.repositories(&project),
+        [nested.to_str().unwrap().to_owned()]
+    );
+    let next_place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = next_place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let moved = next.join("org").join("service-a");
+    assert!(moved.join(".crazyagent").is_dir() && !nested.exists());
+    assert_eq!(
+        bench.repositories(&project),
+        [moved.to_str().unwrap().to_owned()],
+        "the master's workspace follows the nested project"
+    );
+    let db = rusqlite::Connection::open_with_flags(
+        bench.root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let repo: String = db
+        .query_row(
+            "SELECT repo FROM onboarding WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Path::new(&repo), moved);
+    let body: String = db
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        Path::new(stored["folder"].as_str().unwrap()).starts_with(&moved),
+        "{stored}"
+    );
+    drop(db);
+    bench.stop().await;
+}
