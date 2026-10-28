@@ -451,6 +451,7 @@ fn an_attach_to_a_full_screen_app_reports_the_wheel_to_it_on_its_alternate_scree
     assert!(screen.contents().starts_with("full screen"));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
     use std::os::unix::fs::PermissionsExt;
