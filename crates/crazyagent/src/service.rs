@@ -519,6 +519,17 @@ WantedBy=default.target\n",
         })
     }
 
+    /// Whether the installed definition file holds exactly what [`Service::install`] would
+    /// write now, so a caller can replace one that runs another executable, such as an
+    /// AppImage mount folder that is gone. Output: false when it is missing, unreadable,
+    /// different or this service cannot be defined.
+    pub fn current(&self) -> bool {
+        self.definition_text().is_ok_and(|text| {
+            std::fs::read(&self.definition)
+                .is_ok_and(|bytes| bytes == definition_bytes(&text, self.platform))
+        })
+    }
+
     fn loaded(&self) -> Result<bool, ServiceError> {
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }
@@ -552,6 +563,15 @@ WantedBy=default.target\n",
             return Err(failure(format!(
                 "{}: the engine executable is missing",
                 self.executable.display()
+            )));
+        }
+        self.checked()?;
+        if let Some(entry) = changeable_by_others(&self.executable) {
+            return Err(failure(format!(
+                "{}: other users can change {}, so a login service must not run the engine \
+                 from there; install CrazyAgent in a folder only you and the system can change",
+                self.executable.display(),
+                entry.display()
             )));
         }
         self.layout()?.prepare()?;
@@ -627,6 +647,170 @@ WantedBy=default.target\n",
     }
 }
 
+/// The first entry on an executable's path that someone other than this user or root can
+/// change: an entry another user owns, or a world-writable folder such as `/tmp`, where a
+/// name that goes away can be taken by anyone. It reads the path as written and once its
+/// links are resolved; a link's own mode bits and group-writable folders are not counted,
+/// and an entry that cannot be read counts as changeable. Input: the absolute executable.
+/// Output: the entry, or none when only this user and the system can change it.
+#[cfg(unix)]
+pub fn changeable_by_others(executable: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let me = current_uid();
+    let resolved = std::fs::canonicalize(executable).ok();
+    [Some(executable), resolved.as_deref()]
+        .into_iter()
+        .flatten()
+        .flat_map(Path::ancestors)
+        .find(|entry| match std::fs::symlink_metadata(entry) {
+            Ok(metadata) => {
+                (metadata.uid() != me && metadata.uid() != 0)
+                    || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
+            }
+            Err(_) => true,
+        })
+        .map(Path::to_path_buf)
+}
+
+/// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
+/// runs from the folder the installer chose. Input unused. Output: none.
+#[cfg(not(unix))]
+pub fn changeable_by_others(_executable: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// The engine executable a login service may run for this app: the bundled `executable`
+/// itself when only this user and the system can change it and it is not inside the running
+/// AppImage's mount folder `appdir`, else a copy in `<data root>/bin/<version>`, private to
+/// this user, of the release executables beside it ([`crate::update::BINARIES`]), refreshed
+/// whenever a copied file differs. So a service never names a path that goes away with the
+/// app or that another user can take over. Inputs: the bundled engine, the layout, the app
+/// version and the AppImage mount folder when there is one. Output: the executable to run.
+pub fn installable(
+    executable: &Path,
+    layout: &Layout,
+    version: &str,
+    appdir: Option<&Path>,
+) -> Result<PathBuf, ServiceError> {
+    let mounted = appdir
+        .filter(|folder| folder.is_absolute())
+        .is_some_and(|folder| canonical(executable).starts_with(canonical(folder)));
+    if !executable.is_file() || (!mounted && changeable_by_others(executable).is_none()) {
+        return Ok(executable.to_path_buf());
+    }
+    let named = !version.is_empty()
+        && !version.starts_with('.')
+        && version
+            .chars()
+            .all(|part| part.is_ascii_alphanumeric() || matches!(part, '.' | '-' | '+'));
+    if !named {
+        return Err(failure(format!(
+            "{version}: the app version cannot name a folder"
+        )));
+    }
+    let (source, main) = match (executable.parent(), executable.file_name()) {
+        (Some(source), Some(main)) => (source, main.to_os_string()),
+        _ => return Err(failure("the engine executable has no folder")),
+    };
+    let names: Vec<OsString> = crate::update::BINARIES
+        .iter()
+        .map(|name| OsString::from(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|name| source.join(name).is_file())
+        .collect();
+    if !names.contains(&main) {
+        return Err(failure(format!(
+            "{}: not a CrazyAgent engine executable",
+            executable.display()
+        )));
+    }
+    layout.prepare()?;
+    let copies = layout.root().join("bin");
+    crate::paths::private_folder(&copies)?;
+    let target = copies.join(version);
+    if !names
+        .iter()
+        .all(|name| kept(&source.join(name), &target.join(name)))
+    {
+        let fail = |error: std::io::Error| failure(format!("{}: {error}", target.display()));
+        let staging = copies.join(format!(".staging-{}", std::process::id()));
+        if std::fs::symlink_metadata(&staging).is_ok() {
+            std::fs::remove_dir_all(&staging).map_err(fail)?;
+        }
+        crate::paths::private_folder(&staging)?;
+        for name in &names {
+            copy_private(&source.join(name), &staging.join(name)).map_err(fail)?;
+        }
+        if std::fs::symlink_metadata(&target).is_ok() {
+            std::fs::remove_dir_all(&target).map_err(fail)?;
+        }
+        std::fs::rename(&staging, &target).map_err(fail)?;
+    }
+    let installed = target.join(main);
+    assert!(installed.starts_with(&copies) && installed.is_file());
+    Ok(installed)
+}
+
+/// Removes every engine copy in `<data root>/bin` but the folder holding `installed`, once a
+/// service that runs `installed` is in place, so copies of earlier versions do not pile up.
+/// An `installed` engine outside that folder removes nothing, and a failure leaves that
+/// entry for the next install. Inputs: the layout and the installed executable.
+pub fn prune_copies(layout: &Layout, installed: &Path) {
+    let copies = layout.root().join("bin");
+    let Some(keep) = installed
+        .parent()
+        .filter(|folder| folder.parent() == Some(copies.as_path()))
+        .and_then(Path::file_name)
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&copies) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() == keep {
+            continue;
+        }
+        let path = entry.path();
+        let _ = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path),
+            Ok(_) => std::fs::remove_file(&path),
+            Err(error) => Err(error),
+        };
+    }
+}
+
+/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
+/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
+fn kept(source: &Path, copy: &Path) -> bool {
+    let private = std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
+        #[cfg(unix)]
+        let private = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.uid() == current_uid() && metadata.mode() & 0o777 == 0o700
+        };
+        #[cfg(not(unix))]
+        let private = true;
+        metadata.is_file() && private
+    });
+    private
+        && match (std::fs::read(source), std::fs::read(copy)) {
+            (Ok(bundled), Ok(copied)) => bundled == copied,
+            _ => false,
+        }
+}
+
+/// Copies one file into a new file only this user can read, write or run (0700 on Unix).
+/// Inputs: the source and the new path, which must not exist. Output: Ok once synced.
+fn copy_private(source: &Path, copy: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o700);
+    let mut file = options.open(copy)?;
+    std::io::copy(&mut std::fs::File::open(source)?, &mut file)?;
+    file.sync_all()
+}
+
 fn xml(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -676,20 +860,26 @@ fn current_uid() -> u32 {
     0
 }
 
-fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
-    let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
-    let parent = path
-        .parent()
-        .ok_or_else(|| failure("the service definition has no folder"))?;
-    std::fs::create_dir_all(parent).map_err(fail)?;
-    let bytes = if platform == Platform::Windows {
+/// The bytes of a definition file: UTF-16LE with a byte order mark for the Windows task
+/// XML, UTF-8 elsewhere. Inputs: the definition text and platform. Output: the bytes.
+fn definition_bytes(text: &str, platform: Platform) -> Vec<u8> {
+    if platform == Platform::Windows {
         [0xff, 0xfe]
             .into_iter()
             .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
             .collect()
     } else {
         text.as_bytes().to_vec()
-    };
+    }
+}
+
+fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
+    let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("the service definition has no folder"))?;
+    std::fs::create_dir_all(parent).map_err(fail)?;
+    let bytes = definition_bytes(text, platform);
     let staged = parent.join(format!(
         ".{}.staged",
         path.file_name()
