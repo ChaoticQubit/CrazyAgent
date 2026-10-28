@@ -1,7 +1,7 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CHANGES_CODES, OwnerClient};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -58,23 +58,34 @@ impl NativeBridge {
         }))
     }
 
-    /// Lands a change set on the owner's checked-out branch, run without the bridge lock.
-    /// Inputs: the change set id, the head the owner reviewed and the owner's edited
-    /// message, None for the proposed one. Output: the landed commit and branch, or the
-    /// conflicting files.
+    /// Lands a change set on a local branch, the checked-out one when none is named, run
+    /// without the bridge lock. Inputs: the change set id, the head the owner reviewed,
+    /// the owner's edited message, None for the proposed one, and the target branch.
+    /// Output: the landed commit and branch, or the conflicting files.
     pub fn accept_change(
         &self,
         id: String,
         expected_head: String,
         message: Option<String>,
+        target: Option<String>,
     ) -> Result<Unlocked<AcceptOutcome>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
             client
-                .accept_changes(id, expected_head, message)
+                .accept_changes_into(id, expected_head, message, target)
                 .await
                 .map_err(changes_error)
+        }))
+    }
+
+    /// Lists the local branches a change set can be accepted onto, run without the bridge
+    /// lock. Input: the change set id. Output: the branches and the checked-out one.
+    pub fn change_branches(&self, id: String) -> Result<Unlocked<TargetBranches>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client.change_branches(id).await.map_err(changes_error)
         }))
     }
 

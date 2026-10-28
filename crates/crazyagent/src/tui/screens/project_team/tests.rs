@@ -134,6 +134,7 @@ fn team() -> TeamStatus {
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
+        agent_branches: crate::team::BranchMode::Named,
         live_switch: None,
         paused: false,
         live_master: None,

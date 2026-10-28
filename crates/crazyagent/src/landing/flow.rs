@@ -431,7 +431,8 @@ pub(super) fn shared(record_repository: &Path) -> Result<Repo, EngineError> {
 }
 
 /// The HEAD an agent worktree must hold for the engine to read or move it: a detached
-/// commit for a sub-agent, exactly its lease branch for the master.
+/// commit or its own `agent_git::linked_branch` for a sub-agent, exactly its lease
+/// branch for the master.
 pub(super) enum Pointer {
     Detached,
     Branch(String),
@@ -447,6 +448,15 @@ pub(super) struct Agent {
 }
 
 impl Agent {
+    /// Names the branch this agent worktree has checked out, the one its commits move.
+    /// Takes nothing. Returns the branch, or None for a detached HEAD.
+    pub(super) fn branch(&self) -> Option<&str> {
+        match &self.pointer {
+            Pointer::Detached => None,
+            Pointer::Branch(branch) => Some(branch),
+        }
+    }
+
     /// Reads the commit HEAD names from the git folder without following a link,
     /// refusing `changes_workspace_invalid` unless HEAD has the pointer's shape.
     /// Takes nothing. Returns the commit.
@@ -514,12 +524,19 @@ fn detached(text: &str) -> Result<&str, EngineError> {
         .ok_or_else(invalid)
 }
 
+/// Rewrites a detached HEAD to another commit. Inputs: the git folder and both commits.
+/// Output: Ok once moved, or `changes_git_failed` with the lock removed.
+fn move_detached(git_dir: &Path, old: Option<&str>, new: &str) -> Result<(), EngineError> {
+    replace_head(git_dir, old, &format!("{new}\n"))
+}
+
 /// Rewrites a detached HEAD the way git's own lock does, without git: `HEAD.lock` is
 /// created only when absent and never through a link, HEAD is checked under it to still
 /// be detached and hold `old`, then the lock is renamed over HEAD, which replaces a link
-/// rather than following it. No reflog is written. Inputs: the git folder and both
-/// commits. Output: Ok once moved, or `changes_git_failed` with the lock removed.
-fn move_detached(git_dir: &Path, old: Option<&str>, new: &str) -> Result<(), EngineError> {
+/// rather than following it. No reflog is written. Inputs: the git folder, the commit HEAD
+/// must hold, None for any, and the new HEAD text. Output: Ok once written, or
+/// `changes_git_failed` with the lock removed.
+fn replace_head(git_dir: &Path, old: Option<&str>, text: &str) -> Result<(), EngineError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let lock = git_dir.join("HEAD.lock");
@@ -542,7 +559,7 @@ fn move_detached(git_dir: &Path, old: Option<&str>, new: &str) -> Result<(), Eng
             }
         })
         .and_then(|()| {
-            file.write_all(format!("{new}\n").as_bytes())
+            file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
                 .map_err(git_failed)
         })
@@ -600,7 +617,15 @@ pub(super) fn open_agent(
         return Err(invalid());
     }
     let pointer = match kind {
-        AgentKind::Sub => Pointer::Detached,
+        AgentKind::Sub => match agent_git::linked_branch(worktree) {
+            Some(branch)
+                if bounded_read(&git_dir.join("HEAD"), HEAD_BYTES_MAX)?
+                    == format!("ref: refs/heads/{branch}\n").as_bytes() =>
+            {
+                Pointer::Branch(branch)
+            }
+            _ => Pointer::Detached,
+        },
         AgentKind::Master => crate::worktrees::lease_branch(db, worktree)
             .ok()
             .filter(|branch| branch.strip_prefix("crazyagent/").is_some_and(is_object_id))
@@ -613,6 +638,89 @@ pub(super) fn open_agent(
         git_dir: git_dir.to_path_buf(),
         pointer,
     })
+}
+
+/// Puts a newly added linked agent worktree on its own branch, `agent_git::linked_branch`:
+/// creates the branch at the worktree's detached HEAD in the shared repository, only when
+/// no branch of that name exists, then points HEAD at it under git's own `HEAD.lock`.
+/// The engine runs this git; the agent writes no git metadata. A worktree already on the
+/// branch is left as it is. Inputs: the store and the three paths. Output: the branch, or
+/// `changes_agent_branch_exists`, `changes_agent_branch_invalid` or `changes_git_failed`.
+pub(super) fn name_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    let _held = hold(repository);
+    let branch = agent_git::linked_branch(worktree)
+        .ok_or_else(|| failure("changes_agent_branch_invalid"))?;
+    let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
+    let head = agent.head()?;
+    if agent.branch() == Some(branch.as_str()) {
+        return Ok(branch);
+    }
+    let reference = format!("refs/heads/{branch}");
+    plain_log(&repository.join(".git"), &reference)?;
+    let env = [
+        ("GIT_COMMITTER_NAME", ENGINE.0),
+        ("GIT_COMMITTER_EMAIL", ENGINE.1),
+    ];
+    let created = shared(repository)?.exec(
+        &[
+            "update-ref",
+            "--no-deref",
+            "-m",
+            "CrazyAgent: agent branch",
+            &reference,
+            &head,
+            "",
+        ],
+        None,
+        &env,
+        256,
+    )?;
+    if created.code != 0 {
+        return Err(failure("changes_agent_branch_exists"));
+    }
+    replace_head(git_dir, Some(&head), &format!("ref: {reference}\n"))?;
+    let named = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
+    assert_eq!(named.branch(), Some(branch.as_str()));
+    assert_eq!(named.head()?, head);
+    Ok(branch)
+}
+
+/// Deletes an agent's own branch once its worktree is gone, only while the branch still
+/// names the commit the worktree was retired at, so a branch moved since keeps its work.
+/// Inputs: the owner's checkout root, the branch and that commit. Output: true when
+/// deleted, false when the branch had moved or was already gone.
+pub(super) fn drop_branch(
+    repository: &Path,
+    branch: &str,
+    commit: &str,
+) -> Result<bool, EngineError> {
+    assert!(is_object_id(commit));
+    let reference = format!("refs/heads/{branch}");
+    plain_log(&repository.join(".git"), &reference)?;
+    let deleted = shared(repository)?.exec(
+        &["update-ref", "--no-deref", "-d", &reference, commit],
+        None,
+        &[],
+        256,
+    )?;
+    Ok(deleted.code == 0)
+}
+
+/// Reads the git folder a linked worktree's `.git` file names, as a plain file the engine's
+/// own `git worktree add` wrote. Input: the worktree. Output: the folder, unchecked; the
+/// caller checks it with [`check_places`], or `changes_workspace_invalid`.
+pub(super) fn linked_git_dir(worktree: &Path) -> Result<PathBuf, EngineError> {
+    let link = bounded_read(&worktree.join(".git"), LINK_BYTES_MAX)?;
+    let text = std::str::from_utf8(&link).map_err(|_| invalid())?;
+    text.strip_prefix("gitdir: ")
+        .and_then(|path| path.strip_suffix('\n'))
+        .map(PathBuf::from)
+        .ok_or_else(invalid)
 }
 
 /// Opens the agent worktree of a change set through the git folder the engine recorded

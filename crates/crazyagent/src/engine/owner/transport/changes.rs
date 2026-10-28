@@ -1,6 +1,7 @@
 use super::*;
 use crate::landing::{
-    self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX, MESSAGE_BYTES_MAX,
+    self, AcceptOutcome, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeDiff, ChangeSetId, ChangeSetView,
+    LIST_MAX, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// refusals, this protocol's own, the owner connection's it travels on, and the team's
 /// refusals of the resolve work an Update hands a team agent.
 pub const CHANGES_CODES: &[&str] = &[
+    "changes_agent_branch_exists",
     "changes_agent_branch_invalid",
     "changes_agent_busy",
     "changes_agent_has_pending",
@@ -41,6 +43,8 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_request_invalid",
     "changes_restore_expired",
     "changes_stale",
+    "changes_target_checked_out",
+    "changes_target_invalid",
     "changes_too_large",
     "changes_unavailable",
     "changes_workspace_invalid",
@@ -77,6 +81,11 @@ enum Action {
         expected_head: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    Branches {
+        id: ChangeSetId,
     },
     Discard {
         id: ChangeSetId,
@@ -102,6 +111,7 @@ enum Reply {
     List { change_sets: Vec<ChangeSetView> },
     Diff { diff: ChangeDiff },
     Accepted { outcome: AcceptOutcome },
+    Branches { branches: TargetBranches },
     Discarded { restorable_until_ms: u64 },
     Done,
     Rejected { code: String },
@@ -130,6 +140,12 @@ impl Action {
                 message: Some(message),
                 ..
             } if message.len() > 2 * MESSAGE_BYTES_MAX => Err(failure("changes_message_invalid")),
+            Self::Accept {
+                target: Some(target),
+                ..
+            } if target.is_empty() || target.len() > BRANCH_BYTES_MAX => {
+                Err(failure("changes_target_invalid"))
+            }
             _ => Ok(()),
         }
     }
@@ -164,13 +180,39 @@ impl OwnerClient {
         expected_head: String,
         message: Option<String>,
     ) -> Result<AcceptOutcome, EngineError> {
+        self.accept_changes_into(id, expected_head, message, None)
+            .await
+    }
+
+    /// Lands a change set as one squash commit on a chosen local branch, the checked-out
+    /// one when none is named; a branch not checked out moves as a ref and the owner's
+    /// files stay as they are. Inputs: the change set, the reviewed head, the edited
+    /// message and the target branch. Output: the landed commit and branch, or the files
+    /// it conflicts on.
+    pub async fn accept_changes_into(
+        &self,
+        id: ChangeSetId,
+        expected_head: String,
+        message: Option<String>,
+        target: Option<String>,
+    ) -> Result<AcceptOutcome, EngineError> {
         let action = Action::Accept {
             id,
             expected_head,
             message,
+            target,
         };
         match self.changes_exchange(action).await? {
             Reply::Accepted { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the local branches a change set can be accepted onto and the checked-out
+    /// one, the default target. Input: the change set. Output: the branches.
+    pub async fn change_branches(&self, id: ChangeSetId) -> Result<TargetBranches, EngineError> {
+        match self.changes_exchange(Action::Branches { id }).await? {
+            Reply::Branches { branches } if branches.branches.len() <= BRANCHES_MAX => Ok(branches),
             _ => Err(unknown()),
         }
     }
@@ -336,7 +378,10 @@ async fn prepare(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    if !matches!(action, Action::List { .. } | Action::Diff { .. }) {
+    if !matches!(
+        action,
+        Action::List { .. } | Action::Diff { .. } | Action::Branches { .. }
+    ) {
         return Ok(Prepared::Change(root, action));
     }
     tokio::task::spawn_blocking(move || {
@@ -425,13 +470,30 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             id,
             expected_head,
             message,
+            target,
         } => {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .ok_or_else(|| failure("changes_owner_identity_missing"))?;
-            let outcome = landing::accept(&db, &home, &id, &expected_head, message.as_deref())?;
+            let outcome = match target.as_deref() {
+                None => landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
+                Some(target) => landing::accept_into(
+                    &db,
+                    &home,
+                    &id,
+                    &expected_head,
+                    message.as_deref(),
+                    target,
+                )?,
+            };
             (Reply::Accepted { outcome }, false)
         }
+        Action::Branches { id } => (
+            Reply::Branches {
+                branches: landing::target_branches(&db, &id)?,
+            },
+            false,
+        ),
         Action::Discard { id, expected_head } => (
             Reply::Discarded {
                 restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,

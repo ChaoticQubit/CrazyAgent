@@ -3000,8 +3000,14 @@ impl TeamRuntime {
             .map_err(error)?;
         made.keep();
         if kept.is_none() {
+            let named = layout == Layout::Linked
+                && super::agent_branches(&self.connection, &stored.project_id)?
+                    == super::BranchMode::Named;
             let paths = landing.each_ref().map(Path::new);
             let started = crate::landing::open(&self.root).and_then(|db| {
+                if named {
+                    crate::landing::name_agent_branch(&db, paths[0], paths[1], paths[2])?;
+                }
                 crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2])
             });
             if let Err(problem) = started {

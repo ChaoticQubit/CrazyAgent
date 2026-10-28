@@ -6,7 +6,7 @@ use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
-    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches, TurnOutcome,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -118,6 +118,9 @@ pub(in crate::tui) struct ProjectChanges {
     diff: Option<Diff>,
     asking: Option<Ask>,
     target: Option<(ChangeSetId, String)>,
+    branches: Option<(ChangeSetId, TargetBranches)>,
+    branch: usize,
+    wanted_branches: Option<ChangeSetId>,
     message: TextInput,
     notice: Option<Notice>,
     queued: Option<ChangesQuery>,
@@ -142,6 +145,9 @@ impl ProjectChanges {
             diff: None,
             asking: None,
             target: None,
+            branches: None,
+            branch: 0,
+            wanted_branches: None,
             message: TextInput::multi(MESSAGE_BYTES_MAX),
             notice: None,
             queued: None,
@@ -166,6 +172,8 @@ impl ProjectChanges {
         }
         let query = if let Some(action) = self.queued.take() {
             action
+        } else if let Some(id) = self.wanted_branches.take() {
+            ChangesQuery::Branches { id }
         } else if let Some(diff) = self.diff.as_ref().filter(|diff| diff.wants_more()) {
             ChangesQuery::Diff {
                 id: diff.id.clone(),
@@ -193,7 +201,10 @@ impl ProjectChanges {
             return;
         };
         self.stale = true;
-        if !matches!(lost, ChangesQuery::List { .. } | ChangesQuery::Diff { .. }) {
+        if !matches!(
+            lost,
+            ChangesQuery::List { .. } | ChangesQuery::Diff { .. } | ChangesQuery::Branches { .. }
+        ) {
             self.notice = Some(Notice::problem(
                 "The engine connection dropped before it answered. Check the list before trying again.",
             ));
@@ -254,6 +265,22 @@ impl ProjectChanges {
                 }
                 self.notice = Some(Notice::problem(format!(
                     "Couldn't load the changes. {}",
+                    refusal(code)
+                )));
+            }
+            (ChangesQuery::Branches { id }, Ok(ChangesView::Branches(listed))) => {
+                if self.target.as_ref().is_some_and(|(asked, _)| asked == id) {
+                    self.branch = listed
+                        .current
+                        .as_ref()
+                        .and_then(|current| listed.branches.iter().position(|name| name == current))
+                        .unwrap_or(0);
+                    self.branches = Some((id.clone(), listed.clone()));
+                }
+            }
+            (ChangesQuery::Branches { .. }, Err(code)) => {
+                self.notice = Some(Notice::problem(format!(
+                    "Couldn't list your branches, so these changes land on the checked-out branch. {}",
                     refusal(code)
                 )));
             }
@@ -347,7 +374,13 @@ impl ProjectChanges {
                         self.act(Ask::Accept);
                     }
                 }
-                KeyCode::Esc => self.asking = None,
+                KeyCode::Esc => {
+                    self.asking = None;
+                    self.branches = None;
+                    self.wanted_branches = None;
+                }
+                KeyCode::Tab => self.turn_branch(true),
+                KeyCode::BackTab => self.turn_branch(false),
                 _ => {
                     self.message.handle(key);
                 }
@@ -380,6 +413,9 @@ impl ProjectChanges {
                 let proposed = self.chosen().map(|set| set.message.clone());
                 self.message.set(&proposed.unwrap_or_default());
                 self.ask(Ask::Accept);
+                self.branches = None;
+                self.branch = 0;
+                self.wanted_branches = self.target.as_ref().map(|(id, _)| id.clone());
                 true
             }
             (KeyCode::Char('d'), Some(actions)) if actions.discard => {
@@ -454,7 +490,12 @@ impl ProjectChanges {
     fn queue(&mut self, query: ChangesQuery) {
         if self.queued.is_some()
             || self.sent.as_ref().is_some_and(|sent| {
-                !matches!(sent, ChangesQuery::List { .. } | ChangesQuery::Diff { .. })
+                !matches!(
+                    sent,
+                    ChangesQuery::List { .. }
+                        | ChangesQuery::Diff { .. }
+                        | ChangesQuery::Branches { .. }
+                )
             })
         {
             self.notice = Some(Notice::problem(
@@ -476,14 +517,58 @@ impl ProjectChanges {
         let Some((id, expected_head)) = self.target.take() else {
             return;
         };
-        self.queue(match ask {
-            Ask::Accept => ChangesQuery::Accept {
+        let message = self.message.value().trim().to_owned();
+        let target = self.chosen_branch();
+        self.branches = None;
+        self.wanted_branches = None;
+        self.queue(match (ask, target) {
+            (Ask::Accept, Some(target)) => ChangesQuery::AcceptInto {
                 id,
                 expected_head,
-                message: self.message.value().trim().to_owned(),
+                message,
+                target,
             },
-            Ask::Discard => ChangesQuery::Discard { id, expected_head },
+            (Ask::Accept, None) => ChangesQuery::Accept {
+                id,
+                expected_head,
+                message,
+            },
+            (Ask::Discard, _) => ChangesQuery::Discard { id, expected_head },
         });
+    }
+
+    /// Moves the Accept target to the next or previous listed branch, wrapping around.
+    /// Input: true for the next one. Output: none; nothing moves before the list arrives.
+    fn turn_branch(&mut self, forward: bool) {
+        let Some((_, listed)) = &self.branches else {
+            return;
+        };
+        let count = listed.branches.len();
+        if count == 0 {
+            return;
+        }
+        self.branch = if forward {
+            (self.branch + 1) % count
+        } else {
+            (self.branch + count - 1) % count
+        };
+        assert!(self.branch < count);
+    }
+
+    /// The branch the owner picked for Accept, when it is not the checked-out one, which
+    /// is the engine's default. Output: the branch, or None for the default.
+    fn chosen_branch(&self) -> Option<String> {
+        let (_, listed) = self.branches.as_ref()?;
+        let name = listed.branches.get(self.branch)?;
+        (listed.current.as_ref() != Some(name)).then(|| name.clone())
+    }
+
+    /// The branch Accept lands on, once the list arrived, and whether it is checked out.
+    /// Output: the branch and that answer, or None before the list arrives.
+    fn landing_branch(&self) -> Option<(&str, bool)> {
+        let (_, listed) = self.branches.as_ref()?;
+        let name = listed.branches.get(self.branch)?;
+        Some((name.as_str(), listed.current.as_ref() == Some(name)))
     }
 
     fn update(&mut self) {
@@ -707,14 +792,28 @@ impl ProjectChanges {
         let (question, size) = self.question(Ask::Accept);
         let mut rows = vec![Row::of(question, look.warning)];
         rows.extend(size.map(|size| Row::of(size, look.fg)));
+        let landing = match self.landing_branch() {
+            None => "They land as one commit on the branch checked out in your project folder, under your own Git name.".to_owned(),
+            Some((name, true)) => format!(
+                "They land as one commit on {name}, the branch checked out in your project folder, under your own Git name."
+            ),
+            Some((name, false)) => format!(
+                "They land as one commit on {name}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are."
+            ),
+        };
         rows.extend(
             wrap_words(
-                "They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them. Edit the commit message if you like.",
+                &format!(
+                    "{landing} CrazyAgent did not check them. Edit the commit message if you like."
+                ),
                 content,
             )
             .into_iter()
             .map(|line| Row::of(line, look.muted)),
         );
+        if let Some((name, _)) = self.landing_branch() {
+            rows.push(Row::of("Branch", look.heading).push(format!("  {name}"), look.fg));
+        }
         rows.push(Row::of("Commit message", look.heading));
         let (lines, (line, column)) = self.message.wrap(content.saturating_sub(2).max(1));
         let first = window(line, lines.len(), MESSAGE_ROWS);
@@ -731,11 +830,19 @@ impl ProjectChanges {
     fn help(&self, now_ms: i64) -> Help {
         match self.asking {
             Some(Ask::Accept) => {
-                return vec![
+                let mut help = vec![
                     ("Enter", "Accept"),
                     ("Ctrl-J", "New line"),
                     ("Esc", "Keep reviewing"),
                 ];
+                if self
+                    .branches
+                    .as_ref()
+                    .is_some_and(|(_, listed)| listed.branches.len() > 1)
+                {
+                    help.insert(1, ("Tab", "Branch"));
+                }
+                return help;
             }
             Some(Ask::Discard) => return vec![("y", "Discard"), ("n", "Keep reviewing")],
             None => {}
@@ -1024,7 +1131,7 @@ fn done(view: &ChangesView) -> Notice {
         }
         ChangesView::Restored => Notice::plain("Restored. The changes are ready to review again."),
         ChangesView::Updating => Notice::plain(UPDATED_NOTICE),
-        ChangesView::List(_) | ChangesView::Diff(_) => Notice::plain(""),
+        ChangesView::List(_) | ChangesView::Diff(_) | ChangesView::Branches(_) => Notice::plain(""),
     }
 }
 
@@ -1076,6 +1183,15 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_agent_branch_invalid" => {
             "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard."
+        }
+        "changes_agent_branch_exists" => {
+            "A branch with this agent's name is already in your project. Rename or delete it, then start the agent again."
+        }
+        "changes_target_invalid" => {
+            "That branch isn't a local branch of your project any more. Pick another branch, then accept again."
+        }
+        "changes_target_checked_out" => {
+            "That branch is checked out in another working copy CrazyAgent doesn't manage. Pick another branch, or check it out in your project folder."
         }
         "changes_master_tools_off" => {
             "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard."
