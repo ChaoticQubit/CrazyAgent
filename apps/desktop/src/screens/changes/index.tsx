@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, notReady, restoreChange, updateChange } from "../../api-changes";
+import { acceptChange, changesRefusal, discardChange, loadChangeDiff, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
 import { displayText } from "../conversation";
@@ -8,9 +8,8 @@ import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
 import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
+import { useChangeList } from "./poll";
 import "./changes.css";
-
-const LIST_POLL_MS = 5000;
 
 type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
 
@@ -120,20 +119,13 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
 
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
  * the owner's Accept, Discard, Restore and Ask agent to update. Input: the project data.
- * Output: the tab; the list rereads every few seconds while it is open. */
+ * Output: the tab; the list rereads a few seconds after each reply while it is open. */
 export function ChangesTab({ data }: { data: ProjectData }) {
-  const [list, setList] = useState<Result<ChangeSet[]>>();
-  const [round, setRound] = useState(0);
+  const [list, reread] = useChangeList(data.id);
   const [selected, setSelected] = useState<string | null>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  useEffect(() => {
-    let current = true;
-    void loadChanges(data.id).then((result) => { if (current) setList(result); });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
@@ -145,7 +137,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       const message = done(result.value);
       if (message !== null) data.notify(message);
     } else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
-    setRound((value) => value + 1);
+    reread();
   }
 
   async function accept(set: ChangeSet, message: string) {

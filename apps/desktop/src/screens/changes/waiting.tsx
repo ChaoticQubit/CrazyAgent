@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
-import { loadChanges } from "../../api-changes";
 import { Notice, formatRoute } from "../../ui";
 import { waitingCount, waitingLine } from "./model";
+import { useChangeList } from "./poll";
 
 const WAITING_POLL_MS = 10_000;
 
@@ -15,19 +14,11 @@ export function WaitingChangesView({ projectId, count }: { projectId: string; co
   </div>;
 }
 
-/** Reads the project's change sets every few seconds and shows how many wait for the owner.
- * Input: the project id. Output: the notice, or nothing while none wait or the list can't
- * be read. */
+/** Reads the project's change sets a few seconds after each reply, one read at a time, and
+ * shows how many wait for the owner. Input: the project id. Output: the notice, or nothing
+ * while none wait or the list can't be read. */
 export function WaitingChanges({ projectId }: { projectId: string }) {
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    let current = true;
-    const read = () => void loadChanges(projectId).then((result) => {
-      if (current) setCount(result.kind === "ok" ? waitingCount(result.value) : 0);
-    });
-    read();
-    const timer = window.setInterval(read, WAITING_POLL_MS);
-    return () => { current = false; window.clearInterval(timer); };
-  }, [projectId]);
+  const [list] = useChangeList(projectId, WAITING_POLL_MS);
+  const count = list?.kind === "ok" ? waitingCount(list.value) : 0;
   return <WaitingChangesView projectId={projectId} count={count} />;
 }
