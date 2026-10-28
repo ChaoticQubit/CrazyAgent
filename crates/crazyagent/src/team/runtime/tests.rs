@@ -3589,7 +3589,8 @@ fn a_woken_sub_agent_continues_only_a_conversation_its_harness_and_account_can_r
 }
 
 /// A live master with team tools is told the newest twenty finished sub-agents it can
-/// wake, each with its name, harness, last task on one line and when it finished; running
+/// wake, each with its name and Sub-agent number, harness, last task on one line and when
+/// it finished; running
 /// agents, agents whose worktree is gone and masters are left out.
 #[test]
 fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
@@ -3656,9 +3657,14 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
         })
         .collect();
 
-    let lines = finished_agents(&fixture.connection, &project, now).unwrap();
-    assert_eq!(lines.len(), FINISHED_LISTED_MAX);
-    let label = |id: i64| super::super::events::label(&fixture.connection, id).unwrap();
+    let lines = super::super::events::finished_agents(&fixture.connection, &project, now).unwrap();
+    assert_eq!(lines.len(), super::super::events::FINISHED_LISTED_MAX);
+    let label = |id: i64| {
+        format!(
+            "{}, Sub-agent {id}",
+            super::super::events::label(&fixture.connection, id).unwrap()
+        )
+    };
     let codex = names::harness_name("codex");
     assert_eq!(
         lines[0],
@@ -4637,4 +4643,350 @@ fn a_turn_takes_the_task_limit_or_what_is_left_of_the_session() {
         turn_bound(limits(Some(1800), None), min(250)),
         Some((min(30), TurnBound::Task(min(30))))
     );
+}
+
+/// A Codex sign-in record of a managed profile whose access token stays valid for a day,
+/// so a per-turn handoff copies it without a renewal. Output: the record's bytes.
+#[cfg(target_os = "macos")]
+fn signed_in_codex_record() -> Vec<u8> {
+    use base64::Engine;
+    let expires = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86_400;
+    let part = |value: serde_json::Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+    };
+    let token = format!(
+        "{}.{}.c2ln",
+        part(serde_json::json!({"alg": "RS256", "typ": "JWT"})),
+        part(serde_json::json!({
+            "exp": expires,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-unit"}
+        }))
+    );
+    serde_json::json!({
+        "tokens": {
+            "id_token": token,
+            "access_token": token,
+            "refresh_token": "unit-refresh",
+            "account_id": "acct-unit"
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The conversations a worker reported, in order. Takes its reports. Returns their ids.
+#[cfg(target_os = "macos")]
+fn reported_conversations(reports: &[Report]) -> Vec<String> {
+    reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Conversation(resume) => Some(resume.id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent on a signed-in account (per turn, the owner's account kind) keeps its harness
+/// conversation (WK-R1): its second turn's harness resumes the conversation the first
+/// recorded, the conversation is reported once so a wake can continue it, a woken agent's
+/// first turn resumes it, and a kept conversation whose record is gone is reported refused
+/// and ends the agent so the next wake starts fresh.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut agent = super::managed_agent::ManagedAgent::in_pane("codex", &codex, fixture.host());
+    let record = agent.profile_home.join("auth.json");
+    std::fs::write(&record, signed_in_codex_record()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let home = agent.home.clone();
+    let launched = || -> Vec<String> {
+        std::fs::read_to_string(home.join("launches"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let turns = vec![
+        ("Write the page", agent.acquire("wk-r1-turn-1")),
+        ("Now fix the title", agent.acquire("wk-r1-turn-2")),
+    ];
+    let (reports, problem) = agent.run_turns(None, turns, WAIT);
+    assert_eq!(problem, None);
+    let ends: Vec<TurnEnd> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Finished { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [TurnEnd::Success, TurnEnd::Success]);
+    let conversations = reported_conversations(&reports);
+    let conversation = conversations
+        .first()
+        .cloned()
+        .expect("the first turn's conversation is reported");
+    assert!(
+        conversations
+            .iter()
+            .all(|reported| *reported == conversation),
+        "the second turn continues the same conversation: {conversations:?}"
+    );
+    let lines = launched();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(!lines[0].contains(" resume "), "{lines:?}");
+    assert!(
+        lines[1].ends_with(&format!(" resume {conversation}")),
+        "the second turn's harness continues the first turn's conversation: {lines:?}"
+    );
+    let kept = reports
+        .iter()
+        .find_map(|report| match report {
+            Report::Conversation(resume) => Some(resume.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(kept.record.is_file(), "{}", kept.record.display());
+
+    let turns = vec![("Pick up the review", agent.acquire("wk-r1-wake"))];
+    let (reports, problem) = agent.run_turns(Some(kept.clone()), turns, WAIT);
+    assert_eq!(problem, None);
+    let lines = launched();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[2].ends_with(&format!(" resume {conversation}")),
+        "a woken signed-in agent continues its kept conversation: {lines:?}"
+    );
+    assert!(
+        reported_conversations(&reports)
+            .iter()
+            .all(|reported| *reported == conversation),
+        "the continued conversation is the kept one"
+    );
+    assert!(
+        !reports
+            .iter()
+            .any(|report| matches!(report, Report::ResumeRefused))
+    );
+
+    let gone = Resume {
+        id: "00000000-0000-4000-8000-00000000dead".into(),
+        record: kept.record.with_file_name(
+            "rollout-2026-10-27T00-00-00-00000000-0000-4000-8000-00000000dead.jsonl",
+        ),
+    };
+    let turns = vec![("Try again", agent.acquire("wk-r1-gone"))];
+    let (reports, problem) = agent.run_turns(Some(gone), turns, WAIT);
+    assert!(problem.is_some(), "a refused resume ends the agent");
+    assert!(
+        reports
+            .iter()
+            .any(|report| matches!(report, Report::ResumeRefused)),
+        "the refusal is reported so the kept row is dropped"
+    );
+    assert_eq!(launched().len(), 3, "nothing started for a gone record");
+}
+
+/// The owner's Wake of a finished sub-agent whose conversation cannot continue (WK-R4): it
+/// starts fresh with no task, the master is told the owner woke it, and the next task it
+/// takes carries its last result, as a master's wake gives it at once.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes its task and keeps its conversation",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Idle && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (_, record) = agent_conversation(&fixture, member).unwrap();
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    std::fs::remove_file(&record).unwrap();
+
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: member,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(
+        &mut team,
+        "the same agent starts a fresh conversation",
+        |f| launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle,
+    );
+    assert!(
+        !launches(&fixture, member)[1].contains("resume"),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_events WHERE agent=?1 AND kind='progress' AND text=?2",
+            params![member, OWNER_WOKE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 1, "the master is told the owner woke it");
+    assert!(!typed(&fixture, member).contains("Your last result then"));
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Check page.md.".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the woken agent takes the next task", |f| {
+        typed(f, member).contains("Check page.md.")
+    });
+    assert!(
+        typed(&fixture, member).contains("Your last result then: Done."),
+        "{}",
+        typed(&fixture, member)
+    );
+    assert_eq!(subs(&fixture), vec![member]);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The owner's stop holds against the master (AW-1): a sub-agent the owner stopped is
+/// recorded as stopped by the owner, the master's wake of it is refused, a task pinned to
+/// it fails instead of waking it, and only the owner's Wake starts it again, which clears
+/// the record.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(&mut team, "the sub-agent finishes its task", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|id| f.agent_status(*id).0 == AgentStatus::Idle)
+    });
+    let member = subs(&fixture)[0];
+    assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    assert!(crate::team::owner_stopped(&fixture.connection, member).unwrap());
+
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::admit_wake(
+            &tx,
+            &fixture.access,
+            &fixture.setup,
+            member,
+            "Finish the page.",
+            now_ms()
+        )
+        .unwrap(),
+        Err(crate::team::OWNER_STOPPED)
+    );
+    tx.commit().unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Finish the page.','queued',?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, member],
+        )
+        .unwrap();
+    let ended = |f: &Fixture| -> (String, Option<String>) {
+        f.connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    fixture.until(&mut team, "a task pinned to the stopped agent fails", |f| {
+        ended(f).0 == "failed"
+    });
+    assert_eq!(ended(&fixture).1.as_deref(), Some(OWNER_STOPPED_TASK));
+    idle_ticks(&mut team);
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing woke it");
+    assert_eq!(fixture.agent_status(member).0, AgentStatus::Stopped);
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: member,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the owner's Wake starts it", |f| {
+        launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle
+    });
+    assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
 }

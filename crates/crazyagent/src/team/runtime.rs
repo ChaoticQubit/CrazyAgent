@@ -301,6 +301,7 @@ struct Worker {
     seed: Option<String>,
     bound: Option<TurnBound>,
     spawned: Instant,
+    handoff: Option<String>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -868,7 +869,8 @@ impl TeamRuntime {
     /// restart returns it to its queue for the fresh process.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
         let mut stopped_live = Vec::new();
-        for worker in self.workers.values_mut() {
+        let mut stopped_subs = Vec::new();
+        for (id, worker) in &mut self.workers {
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
@@ -886,9 +888,20 @@ impl TeamRuntime {
             if worker.live {
                 stopped_live.push(worker.project.clone());
             }
+            if worker.role == AgentRole::Sub {
+                stopped_subs.push((*id, worker.project.clone()));
+            }
         }
         for project in stopped_live {
             super::master::set_live(&self.connection, &project, false)?;
+        }
+        for (id, project) in stopped_subs {
+            self.connection
+                .execute(
+                    "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                    params![id, project.as_str(), now_ms()],
+                )
+                .map_err(error)?;
         }
         Ok(())
     }
@@ -1012,9 +1025,15 @@ impl TeamRuntime {
         };
         let paused = self.paused()?;
         let started = match self.account_for(access, &project, &harness, &paused) {
-            Ok(account) if role == AgentRole::Sub => self
-                .wake(&stored, reference, &harness, tools, &account, again)?
-                .map(|(id, _)| id),
+            Ok(account) if role == AgentRole::Sub => {
+                match self.wake(&stored, reference, &harness, tools, &account, again)? {
+                    Ok((id, resumed)) => {
+                        self.owner_woke(&project, id, resumed)?;
+                        Ok(id)
+                    }
+                    Err(reason) => Err(reason),
+                }
+            }
             Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
             Err(reason) => Err(reason),
         };
@@ -1025,6 +1044,37 @@ impl TeamRuntime {
                 &format!("The agent could not restart: {}.", bound_text(&reason, 300)),
             ),
         }
+    }
+
+    /// After the owner's Wake or restart starts a sub-agent again with no task (WK-R4): when
+    /// its harness conversation could not continue, keeps its last result for its next task's
+    /// prompt, as a master's wake gives it at once, and tells the master the owner woke it.
+    /// Takes the project, the agent and whether its conversation continues. Returns any
+    /// SQLite failure.
+    fn owner_woke(
+        &mut self,
+        project: &ProjectId,
+        id: i64,
+        resumed: bool,
+    ) -> Result<(), EngineError> {
+        let handoff = if resumed {
+            None
+        } else {
+            last_result(&self.connection, id)?
+        };
+        if let Some(worker) = self.workers.get_mut(&id) {
+            worker.handoff = handoff;
+        }
+        super::events::record(
+            &self.connection,
+            project,
+            id,
+            None,
+            super::events::EventKind::Progress,
+            OWNER_WOKE,
+            now_ms(),
+        )?;
+        Ok(())
     }
 
     /// Tells whether any agent process is still running.
@@ -1932,7 +1982,8 @@ impl TeamRuntime {
         } else {
             None
         };
-        let finished = finished_agents(&self.connection, &stored.project_id, now_ms())?;
+        let finished =
+            super::events::finished_agents(&self.connection, &stored.project_id, now_ms())?;
         let mut framing = live_framing(
             stored,
             self.workers[&id].team_tool,
@@ -2232,6 +2283,10 @@ impl TeamRuntime {
                 (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
+                    self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    continue;
+                }
                 (None, Some(pinned)) => {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
@@ -2318,17 +2373,20 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
-            let earlier = if woken_fresh {
+            let handoff = if woken_fresh {
                 last_result(&self.connection, agent)?
-                    .map(|last| {
-                        format!(
-                            "You worked in this worktree before and stopped. Your last result then: {last}\n"
-                        )
-                    })
-                    .unwrap_or_default()
             } else {
-                String::new()
+                self.workers
+                    .get_mut(&agent)
+                    .and_then(|worker| worker.handoff.take())
             };
+            let earlier = handoff
+                .map(|last| {
+                    format!(
+                        "You worked in this worktree before and stopped. Your last result then: {last}\n"
+                    )
+                })
+                .unwrap_or_default();
             let prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
@@ -2588,8 +2646,7 @@ impl TeamRuntime {
         self.resuming = None;
         Ok(revived?.map(|agent| {
             assert_eq!(agent, id);
-            let kept = self.workers.get(&id).is_some_and(|worker| !worker.managed);
-            (id, resuming && kept)
+            (id, resuming)
         }))
     }
 
@@ -2673,8 +2730,11 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
+        self.connection
+            .execute("DELETE FROM team_owner_stops WHERE agent=?1", [id])
+            .map_err(error)?;
         if role == AgentRole::Sub {
-            names::assign_persona(&self.connection, &stored.project_id, id)?;
+            names::reclaim(&self.connection, &stored.project_id, id)?;
         }
         let kept = [repository, worktree, git_dir];
         self.launch(stored, id, role, harness, tools, account, again, Some(kept))
@@ -2894,6 +2954,7 @@ impl TeamRuntime {
                 seed: None,
                 bound: None,
                 spawned: Instant::now(),
+                handoff: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -4074,7 +4135,7 @@ fn live_framing(
             )
         };
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one.\n{woken}",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one.\n{woken}",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
@@ -4544,6 +4605,9 @@ fn serve(
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
 /// stop its warden did not confirm keeps both for the engine's life and ends the agent.
+/// Each turn's harness continues the conversation the previous turn recorded, or the one
+/// the plan resumes for a woken agent, and a new conversation is reported so a later wake
+/// continues it; a refused resume is reported and ends the agent as a kept one does.
 fn per_turn(
     plan: &Plan,
     home: &Path,
@@ -4552,6 +4616,7 @@ fn per_turn(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
 ) -> Option<String> {
+    let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, limit) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
@@ -4582,9 +4647,14 @@ fn per_turn(
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
-        let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
+        let started =
+            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.as_ref());
+        let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
+                if resume.is_some() && problem.0 == RESUME_REFUSED {
+                    let _ = reports.send(Report::ResumeRefused);
+                }
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
@@ -4598,6 +4668,13 @@ fn per_turn(
             pane: None,
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, limit);
+        if let Some(recorded) = session
+            .conversation()
+            .filter(|c| resume.as_ref() != Some(c))
+        {
+            let _ = reports.send(Report::Conversation(recorded.clone()));
+            resume = Some(recorded);
+        }
         let stopped = session.stop();
         let reusable = stopped.is_ok()
             && matches!(
@@ -4627,10 +4704,11 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const OWNER_STOPPED_TASK: &str =
+    "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
-const FINISHED_LISTED_MAX: usize = 20;
-const FINISHED_TASK_BYTES_MAX: usize = 120;
 
 /// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
 /// before, so waking the agent continues it (DEC-102). A record path that is not plain text
@@ -4687,68 +4765,6 @@ fn last_result(connection: &Connection, agent: i64) -> Result<Option<String>, En
     Ok(result
         .map(|result| super::events::one_line(&result, HANDOFF_BYTES_MAX))
         .filter(|result| !result.is_empty()))
-}
-
-/// Lists a project's finished sub-agents a live master can wake, newest first and at most
-/// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
-/// with its name, harness, last task on one line and when it finished. Takes the database,
-/// the project and now. Returns the lines, or none when no such agent exists.
-fn finished_agents(
-    connection: &Connection,
-    project: &ProjectId,
-    now: i64,
-) -> Result<Vec<String>, EngineError> {
-    let rows: Vec<(i64, String, Option<i64>, Option<String>)> = {
-        let mut statement = connection
-            .prepare(
-                "SELECT a.id,a.harness,a.stopped_ms,
-                        (SELECT t.prompt FROM team_tasks t WHERE t.agent=a.id ORDER BY COALESCE(t.started_ms,t.created_ms) DESC, t.id DESC LIMIT 1)
-                 FROM team_agents a
-                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
-                   AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
-                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
-            )
-            .map_err(error)?;
-        statement
-            .query_map(
-                params![project.as_str(), FINISHED_LISTED_MAX as i64],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .map_err(error)?
-            .collect::<Result<_, _>>()
-            .map_err(error)?
-    };
-    assert!(rows.len() <= FINISHED_LISTED_MAX);
-    rows.into_iter()
-        .map(
-            |(id, harness, stopped, task)| -> Result<String, EngineError> {
-                let task = task
-                    .map(|task| super::events::one_line(&task, FINISHED_TASK_BYTES_MAX))
-                    .filter(|task| !task.is_empty())
-                    .unwrap_or_else(|| "no task yet".to_owned());
-                let when =
-                    stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
-                Ok(format!(
-                    "- {} ({}): {task}; {when}",
-                    super::events::label(connection, id)?,
-                    super::names::harness_name(&harness)
-                ))
-            },
-        )
-        .collect()
-}
-
-/// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
-/// ago", "finished 3 h ago" or "finished 2 days ago". Takes the stop time and now in epoch
-/// milliseconds. Returns the phrase.
-fn finished_ago(at: i64, now: i64) -> String {
-    let minutes = now.saturating_sub(at).max(0) / 60_000;
-    match minutes {
-        0 => "finished just now".to_owned(),
-        1..60 => format!("finished {minutes} min ago"),
-        60..1440 => format!("finished {} h ago", minutes / 60),
-        _ => format!("finished {} days ago", minutes / 1440),
-    }
 }
 
 const LIVE_REPLY_BYTES_MAX: usize = 64 * 1024;

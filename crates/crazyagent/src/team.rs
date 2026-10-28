@@ -898,6 +898,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT NOT NULL,
                 requested_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_owner_stops (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                stopped_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
@@ -1267,10 +1272,12 @@ pub fn admit_resolve(
 /// Wakes a finished sub-agent for its master (DEC-102): the message becomes a task pinned
 /// to that agent, so the runtime starts the same agent again under its own id and name, in
 /// its own worktree, with the message as its first input, and the master hears how it ends.
-/// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes.
+/// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes,
+/// and never one the owner stopped (AW-1): only the owner's Wake or restart starts that one.
 /// Takes the transaction, live access, the setup, the agent, the message and the time.
 /// Returns the task id, or a plain refusal code: `team_agent_not_found`,
-/// `team_agent_running`, `team_agent_no_worktree`, or one of `admit`'s.
+/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`, or one of
+/// `admit`'s.
 pub fn admit_wake(
     tx: &Transaction<'_>,
     access: &ModelAccess,
@@ -1282,6 +1289,9 @@ pub fn admit_wake(
     let project = &stored.project_id;
     if let Some(code) = wake_refusal(tx, project, agent)? {
         return Ok(Err(code));
+    }
+    if owner_stopped(tx, agent)? {
+        return Ok(Err(OWNER_STOPPED));
     }
     let harness: String = tx
         .query_row(
@@ -1719,6 +1729,22 @@ pub fn wake_refusal(
     } else {
         None
     })
+}
+
+/// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
+pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
+
+/// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
+/// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
+/// whether it was the owner's stop, or a SQLite failure.
+pub fn owner_stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1)",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves

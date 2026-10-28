@@ -264,19 +264,22 @@ pub struct AgentLine {
     pub waiting: Option<String>,
 }
 
-/// What the master's status tool shows: the project's live sub-agents, the newest events
-/// and whether auto-wake is paused at its cap.
+/// What the master's status tool shows: the project's live sub-agents, the finished ones it
+/// can wake, the newest events and whether auto-wake is paused at its cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsStatus {
     pub project_id: ProjectId,
     pub agents: Vec<AgentLine>,
+    #[serde(default)]
+    pub finished: Vec<String>,
     pub events: Vec<TeamEvent>,
     pub paused: bool,
 }
 
 impl EventsStatus {
     /// Writes the status as plain lines for the master's tool reply. Takes the status.
-    /// Returns one line per agent, then the newest events, oldest first.
+    /// Returns one line per running agent, the finished agents it can wake, newest first,
+    /// then the newest events, oldest first.
     pub fn text(&self) -> String {
         let mut text = String::new();
         if self.agents.is_empty() {
@@ -294,6 +297,16 @@ impl EventsStatus {
                 text.push_str(&format!(", waiting on: {}", agent_line(question)));
             }
             text.push('\n');
+        }
+        if !self.finished.is_empty() {
+            text.push_str(&format!(
+                "Finished sub-agents you can wake with {}(agent, text), newest first:\n",
+                super::tool::WAKE_TOOL
+            ));
+            for line in &self.finished {
+                text.push_str(line);
+                text.push('\n');
+            }
         }
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
@@ -1194,6 +1207,79 @@ fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Resu
     })
 }
 
+/// The most finished sub-agents a master is told it can wake.
+pub(crate) const FINISHED_LISTED_MAX: usize = 20;
+const FINISHED_TASK_BYTES_MAX: usize = 120;
+
+/// Lists a project's finished sub-agents a live master can wake, newest first and at most
+/// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
+/// with its name and Sub-agent number, harness, last task on one line and when it finished.
+/// Takes the database, the project and now. Returns the lines, or none when no such agent
+/// exists.
+pub(crate) fn finished_agents(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<Vec<String>, EngineError> {
+    let rows: Vec<(i64, String, Option<i64>, Option<String>)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id,a.harness,a.stopped_ms,
+                        (SELECT t.prompt FROM team_tasks t WHERE t.agent=a.id ORDER BY COALESCE(t.started_ms,t.created_ms) DESC, t.id DESC LIMIT 1)
+                 FROM team_agents a
+                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
+                   AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
+            )
+            .map_err(error)?;
+        statement
+            .query_map(
+                params![project.as_str(), FINISHED_LISTED_MAX as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    assert!(rows.len() <= FINISHED_LISTED_MAX);
+    rows.into_iter()
+        .map(
+            |(id, harness, stopped, task)| -> Result<String, EngineError> {
+                let task = task
+                    .map(|task| one_line(&task, FINISHED_TASK_BYTES_MAX))
+                    .filter(|task| !task.is_empty())
+                    .unwrap_or_else(|| "no task yet".to_owned());
+                let when =
+                    stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
+                let label = label(connection, id)?;
+                let number = AgentRole::Sub.agent_label(id);
+                let named = if label == number {
+                    label
+                } else {
+                    format!("{label}, {number}")
+                };
+                Ok(format!(
+                    "- {named} ({}): {task}; {when}",
+                    super::names::harness_name(&harness)
+                ))
+            },
+        )
+        .collect()
+}
+
+/// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
+/// ago", "finished 3 h ago" or "finished 2 days ago". Takes the stop time and now in epoch
+/// milliseconds. Returns the phrase.
+fn finished_ago(at: i64, now: i64) -> String {
+    let minutes = now.saturating_sub(at).max(0) / 60_000;
+    match minutes {
+        0 => "finished just now".to_owned(),
+        1..60 => format!("finished {minutes} min ago"),
+        60..1440 => format!("finished {} h ago", minutes / 60),
+        _ => format!("finished {} days ago", minutes / 1440),
+    }
+}
+
 const EVENT_COLUMNS: &str = "id,agent,task,kind,text,state,created_ms,delivered_ms";
 
 /// Reads a project's newest events, oldest first. Takes the connection, the project and the
@@ -1218,7 +1304,8 @@ pub fn events(
 }
 
 /// Reads what the master's status tool shows for a project: its live sub-agents with their
-/// task and any question they wait on, the newest events and the auto-wake pause.
+/// task and any question they wait on, the finished sub-agents it can wake as they are now,
+/// the newest events and the auto-wake pause.
 /// Takes the connection and the project. Returns the bounded status.
 pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStatus, EngineError> {
     let waiting = waiting(connection, project)?;
@@ -1270,6 +1357,7 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     Ok(EventsStatus {
         project_id: project.clone(),
         agents,
+        finished: finished_agents(connection, project, super::now_ms())?,
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
