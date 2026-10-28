@@ -10,6 +10,7 @@ pub mod cleanup;
 pub mod direct;
 pub mod events;
 pub mod graph;
+pub mod history;
 pub mod master;
 pub mod names;
 pub mod runtime;

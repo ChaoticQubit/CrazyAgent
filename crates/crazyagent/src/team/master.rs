@@ -70,11 +70,13 @@ pub struct TeamEvents {
 
 /// What the engine answers a live master's team calls with: the live model access and
 /// stored setup `admit` checks a task against, the engine runtime folder that holds the
-/// change sets, the team event handlers and the terminal host, when the engine has them.
+/// change sets, the folder of team agents' own folders whose homes keep harness records,
+/// the team event handlers and the terminal host, when the engine has them.
 pub struct Answering<'a> {
     pub access: &'a ModelAccess,
     pub stored: &'a StoredSetup,
     pub landing: &'a Path,
+    pub agents: &'a Path,
     pub events: Option<&'a TeamEvents>,
     pub host: Option<&'a dyn Host>,
 }
@@ -828,6 +830,10 @@ fn answer(
         },
         Call::Changes => changes(answering),
         Call::Escalate { text } => escalate(connection, project, &text)?,
+        call @ (Call::Sessions { .. } | Call::Session { .. }) => {
+            super::history::answer(connection, project, answering.agents, call)
+                .expect("a past-conversation call has an answer")
+        }
     })
 }
 
