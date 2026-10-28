@@ -1156,3 +1156,79 @@ fn a_tools_off_agent_sends_no_datagram_and_resolves_names_over_tcp() {
         "an open network keeps datagrams: {reached:?}"
     );
 }
+
+const ENVIRON: &str = "import sys
+def read(path):
+    try:
+        with open(path, 'rb') as file:
+            return 'marker' if b'CRAZYAGENT_TEST_MARKER=outside' in file.read() else 'read'
+    except PermissionError:
+        return 'refused'
+    except FileNotFoundError:
+        return 'absent'
+print('outside=' + read('/proc/' + sys.argv[1] + '/environ'))
+print('own=' + read('/proc/self/environ'))
+";
+
+fn environ(sandbox: Option<&dyn Sandbox>, case: &Case, target: u32) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", ENVIRON])
+        .arg(target.to_string())
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+#[test]
+fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .env("CRAZYAGENT_TEST_MARKER", "outside")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id();
+    assert_eq!(
+        environ(None, &case, target),
+        "outside=marker\nown=read\n",
+        "the unsandboxed control must read the outside environment"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        environ(Some(&landlock), &case, target),
+        "outside=refused\nown=read\n",
+        "Landlock refuses ptrace-mode reads of a process outside the agent's domain"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Open),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        environ(Some(&bubblewrap), &case, target),
+        "outside=absent\nown=read\n"
+    );
+    outside.kill().unwrap();
+    outside.wait().unwrap();
+}
