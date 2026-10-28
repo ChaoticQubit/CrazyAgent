@@ -604,3 +604,96 @@ fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
     assert_eq!(escalations, ESCALATIONS_PER_HOUR_MAX);
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
+
+/// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
+/// kept worktree, as a delegated agent leaves them. Takes the fixture, the role, the status
+/// and when it stopped. Returns the agent id.
+#[cfg(target_os = "macos")]
+fn named_sub(fixture: &Fixture, role: &str, status: &str) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','codex',0,'working',?2,?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let agent = fixture.connection.last_insert_rowid();
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        super::super::names::assign_role(&fixture.connection, &project, agent, role)
+            .unwrap()
+            .is_ok()
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status=?2, stopped_ms=?3 WHERE id=?1",
+            params![agent, status, NOW + agent],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+        )
+        .unwrap();
+    agent
+}
+
+/// The task ids pinned to an agent, as a wake leaves them. Takes the fixture and agent.
+#[cfg(target_os = "macos")]
+fn pinned(fixture: &Fixture, agent: i64) -> Vec<i64> {
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT task FROM team_task_pins WHERE agent=?1 ORDER BY task")
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A handle a finished sub-agent and a running one share wakes the finished one (WK-R2):
+/// the master's `wake` looks among finished sub-agents first, so a live namesake never
+/// answers "running", and the running agent is still reached by its number.
+#[cfg(target_os = "macos")]
+#[test]
+fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let finished = named_sub(&fixture, "onboarding-fix", "stopped");
+    let live = named_sub(&fixture, "onboarding-fix", "working");
+    let label = super::super::events::label(&fixture.connection, finished).unwrap();
+    assert!(label.ends_with("(@onboarding-fix)"), "{label}");
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(
+                1,
+                tool::WAKE_TOOL,
+                json!({"agent": "@onboarding-fix", "text": "Fix the onboarding copy."}),
+            ),
+            tool_call(
+                2,
+                tool::WAKE_TOOL,
+                json!({"agent": format!("Sub-agent {live}"), "text": "Stop."}),
+            ),
+        ],
+    );
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+    assert_eq!(
+        text(&answers[0]),
+        (
+            format!("Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
+            false
+        )
+    );
+    assert_eq!(pinned(&fixture, finished).len(), 1);
+    assert!(pinned(&fixture, live).is_empty());
+    let (said, refused) = text(&answers[1]);
+    assert!(refused && said.contains("is running"), "{said}");
+}

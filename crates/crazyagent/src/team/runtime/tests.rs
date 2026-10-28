@@ -3089,7 +3089,8 @@ fn a_woken_sub_agent_continues_only_a_conversation_its_harness_and_account_can_r
 }
 
 /// A live master with team tools is told the newest twenty finished sub-agents it can
-/// wake, each with its name, harness, last task on one line and when it finished; running
+/// wake, each with its name and Sub-agent number, harness, last task on one line and when
+/// it finished; running
 /// agents, agents whose worktree is gone and masters are left out.
 #[test]
 fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
@@ -3158,7 +3159,12 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
 
     let lines = finished_agents(&fixture.connection, &project, now).unwrap();
     assert_eq!(lines.len(), FINISHED_LISTED_MAX);
-    let label = |id: i64| super::super::events::label(&fixture.connection, id).unwrap();
+    let label = |id: i64| {
+        format!(
+            "{}, Sub-agent {id}",
+            super::super::events::label(&fixture.connection, id).unwrap()
+        )
+    };
     let codex = names::harness_name("codex");
     assert_eq!(
         lines[0],

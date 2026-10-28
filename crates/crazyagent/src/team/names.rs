@@ -301,6 +301,36 @@ fn store_handle(
     Ok(Ok(chosen))
 }
 
+/// Gives a sub-agent that starts again its names back (DEC-102): its persona while no other
+/// live agent holds it, and its role handle, with the first free `-2`, `-3` suffix when a
+/// live agent took that handle while it was stopped, or no handle when every suffix is
+/// taken, so no two live agents ever share a name and a live agent's name never changes
+/// under its master. Takes the connection, project and team agent id. Returns the name, or
+/// an error when the agent is not a sub-agent of the project.
+pub fn reclaim(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<AgentName, EngineError> {
+    let persona = assign_persona(connection, project, agent)?;
+    let handle = match name(connection, agent)?.and_then(|name| name.handle) {
+        Some(handle) => match store_handle(connection, project, agent, &handle, true)? {
+            Ok(kept) => Some(kept),
+            Err(_) => {
+                connection
+                    .execute("UPDATE team_names SET handle=NULL WHERE agent=?1", [agent])
+                    .map_err(error)?;
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(handle) = &handle {
+        assert!(!held(connection, project, agent, "handle")?.contains(handle));
+    }
+    Ok(AgentName { persona, handle })
+}
+
 /// Sets the role handle of a sub-agent's current job, as the master asked for it; a handle
 /// another live agent of the project holds, or `@master`, gets the first free `-2`, `-3`
 /// suffix. Takes the connection, project, team agent id and the role in free text.

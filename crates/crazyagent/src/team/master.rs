@@ -861,8 +861,9 @@ fn delegate(
 
 /// Wakes the finished sub-agent a live master names (DEC-102) by pinning its text to that
 /// agent as a task, which the runtime hands to the same agent once it starts again under
-/// its name in its own worktree. A name that reaches a running sub-agent, none or one
-/// whose worktree is gone is refused in plain words. Takes the database, what the answers
+/// its name in its own worktree. A name is looked up among finished sub-agents first, so a
+/// running namesake never hides the finished one; a name or number that reaches only a
+/// running sub-agent, none or one whose worktree is gone is refused in plain words. Takes the database, what the answers
 /// need, the name and the text. Returns the sentence the master reads and whether it is a
 /// refusal, or a SQLite failure.
 fn wake(
@@ -880,9 +881,9 @@ fn wake(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
-    let found = match super::events::resolve(&tx, project, agent)? {
+    let found = match super::names::resolve_finished(&tx, project, agent)? {
         Some(id) => Some(id),
-        None => super::names::resolve_finished(&tx, project, agent)?,
+        None => super::events::resolve(&tx, project, agent)?,
     };
     let Some(id) = found else {
         return Ok((unknown, true));

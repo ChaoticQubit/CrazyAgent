@@ -2500,7 +2500,7 @@ impl TeamRuntime {
             return Ok(Err("the agent is not stopped".into()));
         }
         if role == AgentRole::Sub {
-            names::assign_persona(&self.connection, &stored.project_id, id)?;
+            names::reclaim(&self.connection, &stored.project_id, id)?;
         }
         let kept = [repository, worktree, git_dir];
         self.launch(stored, id, role, harness, tools, account, again, Some(kept))
@@ -3794,7 +3794,7 @@ fn live_framing(
             )
         };
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one.\n{woken}",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one.\n{woken}",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
@@ -4430,8 +4430,9 @@ fn last_result(connection: &Connection, agent: i64) -> Result<Option<String>, En
 
 /// Lists a project's finished sub-agents a live master can wake, newest first and at most
 /// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
-/// with its name, harness, last task on one line and when it finished. Takes the database,
-/// the project and now. Returns the lines, or none when no such agent exists.
+/// with its name and Sub-agent number, harness, last task on one line and when it finished.
+/// Takes the database, the project and now. Returns the lines, or none when no such agent
+/// exists.
 fn finished_agents(
     connection: &Connection,
     project: &ProjectId,
@@ -4467,9 +4468,15 @@ fn finished_agents(
                     .unwrap_or_else(|| "no task yet".to_owned());
                 let when =
                     stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
+                let label = super::events::label(connection, id)?;
+                let number = AgentRole::Sub.agent_label(id);
+                let named = if label == number {
+                    label
+                } else {
+                    format!("{label}, {number}")
+                };
                 Ok(format!(
-                    "- {} ({}): {task}; {when}",
-                    super::events::label(connection, id)?,
+                    "- {named} ({}): {task}; {when}",
                     super::names::harness_name(&harness)
                 ))
             },
