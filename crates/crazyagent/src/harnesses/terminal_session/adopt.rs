@@ -120,10 +120,7 @@ impl PaneRecord {
             return None;
         }
         let content = std::fs::read(path).ok()?;
-        Some(KeyFile {
-            path: path.clone(),
-            content,
-        })
+        Some(KeyFile::new(path.clone(), &content))
     }
 }
 

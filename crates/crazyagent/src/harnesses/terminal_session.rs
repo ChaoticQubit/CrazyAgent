@@ -62,6 +62,17 @@ pub(super) struct KeyFile {
     content: Vec<u8>,
 }
 
+impl KeyFile {
+    /// Guards the key file at `path` that holds `content`. Inputs: the path and the bytes.
+    /// Output: the guard, which removes the file on drop only while it still holds them.
+    pub(super) fn new(path: PathBuf, content: &[u8]) -> Self {
+        Self {
+            path,
+            content: content.to_vec(),
+        }
+    }
+}
+
 impl Drop for KeyFile {
     fn drop(&mut self) {
         if std::fs::read(&self.path).is_ok_and(|current| current == self.content) {
@@ -88,9 +99,8 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
         .key()
         .map(|key| {
             assert!(is_placeholder(key.reveal()));
-            let content = key.reveal().as_bytes().to_vec();
             interactive::write_key(request.account.home(), key)
-                .map(|path| KeyFile { path, content })
+                .map(|path| KeyFile::new(path, key.reveal().as_bytes()))
         })
         .transpose()
 }
