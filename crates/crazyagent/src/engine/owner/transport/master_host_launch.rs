@@ -1701,11 +1701,7 @@ mod tests {
         .unwrap();
         let run = |program: &Path, args: &[&str]| {
             let mut command = Command::new(program);
-            command
-                .args(args)
-                .current_dir(&worktree)
-                .env("HOME", &home)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null");
+            command.args(args).current_dir(&worktree).env("HOME", &home);
             let mut child = sandbox.wrap(&command).unwrap();
             child
                 .stdin(Stdio::null())
