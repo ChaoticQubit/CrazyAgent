@@ -861,9 +861,11 @@ fn delegate(
 
 /// Wakes the finished sub-agent a live master names (DEC-102) by pinning its text to that
 /// agent as a task, which the runtime hands to the same agent once it starts again under
-/// its name in its own worktree. A name is looked up among finished sub-agents first, so a
-/// running namesake never hides the finished one; a name or number that reaches only a
-/// running sub-agent, none or one whose worktree is gone is refused in plain words. Takes the database, what the answers
+/// its name in its own worktree. Its names are settled before the reply names it, so a
+/// handle a running agent took meanwhile gives it a suffix the master is told (WKC-2). A
+/// name is looked up among finished sub-agents first, so a running namesake never hides
+/// the finished one; a name or number that reaches only a running sub-agent, none or one
+/// whose worktree is gone is refused in plain words. Takes the database, what the answers
 /// need, the name and the text. Returns the sentence the master reads and whether it is a
 /// refusal, or a SQLite failure.
 fn wake(
@@ -892,6 +894,8 @@ fn wake(
     let admitted = super::admit_wake(&tx, answering.access, answering.stored, id, text, now_ms())?;
     let reason = match admitted {
         Ok(_) => {
+            super::names::reclaim(&tx, project, id)?;
+            let label = super::events::label(&tx, id)?;
             tx.commit().map_err(state)?;
             return Ok((
                 format!(

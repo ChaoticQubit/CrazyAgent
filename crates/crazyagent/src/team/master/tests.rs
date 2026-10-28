@@ -657,7 +657,10 @@ fn pinned(fixture: &Fixture, agent: i64) -> Vec<i64> {
 
 /// A handle a finished sub-agent and a running one share wakes the finished one (WK-R2):
 /// the master's `wake` looks among finished sub-agents first, so a live namesake never
-/// answers "running", and the running agent is still reached by its number.
+/// answers "running", and the running agent is still reached by its number. The woken
+/// agent's handle is settled when the wake is admitted and the reply names it (WKC-2): the
+/// old handle still reaches only the running namesake, the new one reaches nobody else
+/// while it waits and is not given away, and the agent starts under it.
 #[cfg(target_os = "macos")]
 #[test]
 fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
@@ -668,6 +671,7 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
     let live = named_sub(&fixture, "onboarding-fix", "working");
     let label = super::super::events::label(&fixture.connection, finished).unwrap();
     assert!(label.ends_with("(@onboarding-fix)"), "{label}");
+    let project = ProjectId::new(PROJECT).unwrap();
     let answers = serve_while(
         &mut fixture,
         &mailbox,
@@ -685,10 +689,12 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
         ],
     );
     assert_eq!(answers.len(), 2, "{answers:#?}");
+    let settled = super::super::events::label(&fixture.connection, finished).unwrap();
+    assert!(settled.ends_with("(@onboarding-fix-2)"), "{settled}");
     assert_eq!(
         text(&answers[0]),
         (
-            format!("Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
+            format!("Waking {settled}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
             false
         )
     );
@@ -696,6 +702,41 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
     assert!(pinned(&fixture, live).is_empty());
     let (said, refused) = text(&answers[1]);
     assert!(refused && said.contains("is running"), "{said}");
+    let resolve =
+        |name: &str| super::super::names::resolve(&fixture.connection, &project, name).unwrap();
+    assert_eq!(resolve("@onboarding-fix"), Some(live));
+    assert_eq!(
+        resolve("@onboarding-fix-2"),
+        None,
+        "a message by the woken agent's handle reaches no other agent while it waits"
+    );
+    let later = named_sub(&fixture, "onboarding-fix", "working");
+    let handle = |agent: i64| -> String {
+        fixture
+            .connection
+            .query_row(
+                "SELECT handle FROM team_names WHERE agent=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        handle(later),
+        "onboarding-fix-3",
+        "the waiting agent's handle is not given away"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [finished],
+        )
+        .unwrap();
+    super::super::names::reclaim(&fixture.connection, &project, finished).unwrap();
+    assert_eq!(handle(finished), "onboarding-fix-2");
+    assert_eq!(resolve("@onboarding-fix-2"), Some(finished));
+    assert_eq!(resolve("@onboarding-fix"), Some(live));
 }
 
 /// A sub-agent that finishes after the live master's session started is in the master's
