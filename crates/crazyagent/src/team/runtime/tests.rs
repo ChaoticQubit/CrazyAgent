@@ -2906,6 +2906,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     assert!(host.alive().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 const WORKING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -2931,6 +2932,7 @@ done
 /// Opens a runtime whose agents run `script` as their harness in the fixture's terminal,
 /// under `limits`. Inputs: the fixture, its terminal host, the script and the limits.
 /// Output: the runtime.
+#[cfg(target_os = "macos")]
 fn limited_runtime(
     fixture: &Fixture,
     host: &Arc<dyn Host>,
@@ -2988,10 +2990,12 @@ fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
         .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 const WAKE_IDLE: Duration = Duration::from_secs(2);
 
 /// Stores the project's idle stop as `idle`, shorter than any owner choice, so a finished
 /// sub-agent stops within the test. Inputs: the fixture and the idle time.
+#[cfg(target_os = "macos")]
 fn idle_stop(fixture: &Fixture, idle: Duration) {
     fixture
         .connection
@@ -3014,6 +3018,7 @@ fn subs(fixture: &Fixture) -> Vec<i64> {
         .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn agent_conversation(fixture: &Fixture, agent: i64) -> Option<(String, PathBuf)> {
     fixture
         .connection
@@ -3026,6 +3031,7 @@ fn agent_conversation(fixture: &Fixture, agent: i64) -> Option<(String, PathBuf)
         .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn agent_worktree(fixture: &Fixture, agent: i64) -> String {
     fixture
         .connection
@@ -3277,6 +3283,7 @@ fn an_idle_sub_agent_is_stopped_by_the_idle_setting_and_never_while_it_is_off() 
     team.shutdown().unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn delegate_page(fixture: &Fixture) {
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
@@ -3299,6 +3306,7 @@ fn delegate_page(fixture: &Fixture) {
 /// Plants one live master `wake` call in a mailbox and answers it the way the runtime's
 /// tick does. Takes the fixture, the mailbox, a call number and the call's agent and text.
 /// Returns the reply text and whether it is an error.
+#[cfg(target_os = "macos")]
 fn wake_call(
     fixture: &Fixture,
     mailbox: &Path,
@@ -3426,16 +3434,15 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         |f| f.agent_status(member).0 == AgentStatus::Stopped,
     );
     std::fs::remove_file(&record).unwrap();
-    assert_eq!(
-        wake_call(
+    assert!(
+        !wake_call(
             &fixture,
             &mailbox,
             4,
             &format!("Sub-agent {member}"),
             "Check page.md."
         )
-        .1,
-        false
+        .1
     );
     fixture.until(
         &mut team,
@@ -3757,6 +3764,7 @@ done
 /// A live runtime with Codex and Claude Code stand-ins that keep and resume conversations,
 /// and a local endpoint account each harness can use. Takes the fixture and host. Returns
 /// the runtime.
+#[cfg(target_os = "macos")]
 fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -3787,6 +3795,7 @@ fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
 
 /// Names the project's master harness in its stored team plan, as the owner's Settings
 /// save does. Takes the fixture and the harness name.
+#[cfg(target_os = "macos")]
 fn set_master(fixture: &Fixture, harness: &str) {
     let mut setup = fixture.setup.clone();
     setup.team.master = harness.into();
@@ -3800,6 +3809,7 @@ fn set_master(fixture: &Fixture, harness: &str) {
 }
 
 /// Turns the live master off and waits until every master of the project is stopped.
+#[cfg(target_os = "macos")]
 fn stop_live(fixture: &Fixture, team: &mut TeamRuntime) {
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, false).unwrap();
     fixture.until(team, "the live master stops", |f| {
@@ -4553,6 +4563,7 @@ fn the_owners_wake_brings_back_the_same_agent_and_session_and_a_stale_wake_stops
 
 /// Starts one sub-agent with every time limit Off and lets it finish "Write page.md".
 /// Takes the fixture and its runtime. Returns the idle sub-agent's id.
+#[cfg(target_os = "macos")]
 fn idle_sub_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
     owner(
         fixture,

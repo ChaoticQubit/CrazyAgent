@@ -125,7 +125,7 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
     let line = alternate_line(repository).ok_or_else(invalid)?;
     if ![git_dir, objects.as_path(), info.as_path(), pack.as_path()]
         .into_iter()
-        .all(|path| folder(path))
+        .all(folder)
         || std::fs::symlink_metadata(info.join("http-alternates")).is_ok()
         || !single
         || bounded_read(&alternates, ALTERNATES_BYTES_MAX)? != line.as_bytes()

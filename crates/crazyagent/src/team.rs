@@ -2124,9 +2124,9 @@ impl TimeLimits {
 /// Names a time span the way Team settings shows it: whole hours as "1 h", whole minutes as
 /// "30 min", anything else in seconds. Input: the span in seconds. Output: the words.
 pub fn span_words(secs: u64) -> String {
-    if secs >= 3600 && secs % 3600 == 0 {
+    if secs >= 3600 && secs.is_multiple_of(3600) {
         format!("{} h", secs / 3600)
-    } else if secs >= 60 && secs % 60 == 0 {
+    } else if secs >= 60 && secs.is_multiple_of(60) {
         format!("{} min", secs / 60)
     } else {
         format!("{secs} s")

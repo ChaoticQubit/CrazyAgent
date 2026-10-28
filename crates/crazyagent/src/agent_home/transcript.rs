@@ -130,10 +130,11 @@ fn claude_line(text: &str, seen: &mut Observed) {
         }
         Some("assistant") => {
             for item in value["message"]["content"].as_array().into_iter().flatten() {
-                if item["type"] == "tool_use" && item["name"] == "Skill" {
-                    if let Some(skill) = item["input"]["skill"].as_str() {
-                        seen.invoke(skill);
-                    }
+                if item["type"] == "tool_use"
+                    && item["name"] == "Skill"
+                    && let Some(skill) = item["input"]["skill"].as_str()
+                {
+                    seen.invoke(skill);
                 }
             }
         }

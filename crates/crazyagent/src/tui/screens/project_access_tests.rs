@@ -1,4 +1,6 @@
-use super::project_access::{AccessEdit, AccessKey, FULL_ACCESS_WARNING, summary};
+use super::project_access::summary;
+#[cfg(target_os = "macos")]
+use super::project_access::{AccessEdit, AccessKey, FULL_ACCESS_WARNING};
 use crate::sandbox::policy::{AgentAccess, LevelView, PolicyView, ToolchainView};
 use crate::sandbox::toolchains::Toolchain;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

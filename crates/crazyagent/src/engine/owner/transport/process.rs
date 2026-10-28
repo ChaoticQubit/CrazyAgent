@@ -525,10 +525,8 @@ fn run(
 /// lists.
 const SAVED_PROJECTS_MAX: i64 = 200;
 
-const _: () = assert!(
-    PROCESS_BYTES_MAX <= u32::MAX as usize
-        && super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize
-);
+const _: () = assert!(PROCESS_BYTES_MAX <= u32::MAX as usize);
+const _: () = assert!(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize);
 
 /// Measures what the owner's instructions come to after a save that landed, from the text
 /// just saved: the app and project text the project's agents now receive, the largest
