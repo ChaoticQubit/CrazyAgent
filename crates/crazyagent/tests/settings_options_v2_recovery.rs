@@ -179,6 +179,36 @@ fn runtime() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (folder, root, codex)
 }
 
+/// Every log the codex stand-in wrote below the engine root, found by walking at most
+/// `FOLDERS_MAX` folders without following links. Input: the root. Output: the logs.
+fn heard(root: &Path) -> Vec<PathBuf> {
+    const FOLDERS_MAX: usize = 4096;
+    let mut found = Vec::new();
+    let mut folders = vec![root.to_path_buf()];
+    let mut seen = 0;
+    while let Some(folder) = folders.pop() {
+        seen += 1;
+        assert!(
+            seen <= FOLDERS_MAX,
+            "the engine root is larger than expected"
+        );
+        let Ok(entries) = fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                folders.push(entry.path());
+            } else if entry.file_name() == "heard.log" {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
 /// Picks a projects home and sets up the project through the owner protocol, as New
 /// project does. Inputs: the attached owner and the home folder.
 async fn create(owner: &mut OwnerController, home: &Path) {
@@ -341,6 +371,11 @@ async fn recovery_retry_resumes_the_failed_run_again_and_lets_its_task_go_when_i
         "the second failure lets the task go"
     );
     assert_eq!(notes(&root, WAITS), 1);
+    assert_eq!(
+        heard(&root),
+        Vec::<PathBuf>::new(),
+        "neither resume reached the codex stand-in"
+    );
     drop(owner);
     engine.stop();
 }
