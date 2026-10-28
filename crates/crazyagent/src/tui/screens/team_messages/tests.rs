@@ -413,6 +413,7 @@ fn a_failed_read_says_why_and_reads_again_after_the_refresh_period() {
 fn the_lines_fit_the_room_and_keep_the_pick_in_view() {
     let mut list = opened();
     answer(&mut list, 0, page((1..=40).map(numbered).collect(), false));
+    assert_eq!(list.entries.len(), 40, "the page is taken whole");
     for (key, id) in [
         (Key::Up, 39),
         (Key::PageUp, 29),
