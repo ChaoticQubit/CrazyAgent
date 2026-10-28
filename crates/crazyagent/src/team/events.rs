@@ -896,44 +896,55 @@ pub fn questions(
 
 const SUB_AGENT_PREFIX: &str = "Sub-agent ";
 
-/// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
-/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`.
-/// Takes the connection, the project and the name.
-/// Returns the team agent id, or none for an unknown name, another project's agent or a master.
+/// Finds the project's live sub-agent a master names: by id as `Sub-agent 7`,
+/// `<harness>-7`, `team-7` or `7` first, so no handle can stand for another agent's id, else
+/// its persona or `@handle` as the names module resolves them. Takes the connection, the
+/// project and the name. Returns the team agent id, or none for an unknown name, another
+/// project's agent or a master.
 pub fn resolve(
     connection: &Connection,
     project: &ProjectId,
     name: &str,
 ) -> Result<Option<i64>, EngineError> {
     let name = name.trim();
-    if let Some(agent) = super::names::resolve(connection, project, name)? {
-        let sub: bool = connection
-            .query_row(
-                "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
-                params![agent, project.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(error)?;
-        if sub {
-            return Ok(Some(agent));
-        }
+    if let Some(agent) = by_id_form(connection, project, name.trim_start_matches('@'))? {
+        return Ok(Some(agent));
     }
-    let name = name.trim_start_matches('@');
+    let Some(agent) = super::names::resolve(connection, project, name)? else {
+        return Ok(None);
+    };
+    let sub: bool = connection
+        .query_row(
+            "SELECT role='sub' FROM team_agents WHERE id=?1 AND project=?2",
+            params![agent, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(sub.then_some(agent))
+}
+
+/// Finds the project's sub-agent an id form names: `Sub-agent 7`, `team-7` or `7` for any
+/// harness, `<harness>-7` only for an agent running that harness, in any letter case.
+/// Takes the connection, the project and the name with no `@`. Returns the team agent id,
+/// or none for any other name.
+fn by_id_form(
+    connection: &Connection,
+    project: &ProjectId,
+    name: &str,
+) -> Result<Option<i64>, EngineError> {
     let numbered = name
         .get(..SUB_AGENT_PREFIX.len())
         .filter(|head| head.eq_ignore_ascii_case(SUB_AGENT_PREFIX))
         .map(|_| &name[SUB_AGENT_PREFIX.len()..]);
-    let (prefix, digits) =
-        match numbered.map_or_else(|| name.rsplit_once('-'), |digits| Some(("team", digits))) {
-            Some((prefix, digits)) => (Some(prefix), digits),
-            None => (None, name),
-        };
-    let Ok(agent) = digits.parse::<i64>() else {
+    let form = match numbered {
+        Some(digits) => super::names::id_form(digits)
+            .filter(|(prefix, _)| prefix.is_none())
+            .map(|(_, agent)| (Some("team"), agent)),
+        None => super::names::id_form(name),
+    };
+    let Some((prefix, agent)) = form else {
         return Ok(None);
     };
-    if agent <= 0 || agent.to_string() != digits {
-        return Ok(None);
-    }
     let row: Option<(String, String)> = connection
         .query_row(
             "SELECT harness,role FROM team_agents WHERE id=?1 AND project=?2",
@@ -945,7 +956,9 @@ pub fn resolve(
     let Some((harness, role)) = row else {
         return Ok(None);
     };
-    let named = prefix.is_none_or(|prefix| prefix == harness || prefix == "team");
+    let named = prefix.is_none_or(|prefix| {
+        prefix.eq_ignore_ascii_case(&harness) || prefix.eq_ignore_ascii_case("team")
+    });
     Ok((named && AgentRole::parse(&role) == Some(AgentRole::Sub)).then_some(agent))
 }
 
@@ -968,11 +981,34 @@ pub fn send_to_agent(
     let Some(id) = resolve(connection, project, agent)? else {
         return Ok(Err("team_agent_not_found"));
     };
-    let status: String = connection
-        .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
-            row.get(0)
-        })
+    Ok(send_to_id(connection, host, project, id, text)?.map(|()| id))
+}
+
+/// Types text into the terminal of exactly one sub-agent of a project, chosen by its team
+/// agent id, as `send_to_agent` types it. Takes the connection, the terminal host, the
+/// project, the team agent id and the text. Returns a plain refusal code for blank or long
+/// text, an id that is no sub-agent of the project, a stopped agent or an unreachable terminal.
+pub fn send_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
+        return Ok(Err("team_message_invalid"));
+    }
+    let status: Option<String> = connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            params![id, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
         .map_err(error)?;
+    let Some(status) = status else {
+        return Ok(Err("team_agent_not_found"));
+    };
     if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
         return Ok(Err("team_agent_not_running"));
     }
@@ -986,7 +1022,7 @@ pub fn send_to_agent(
         Err(_) => return Ok(Err("team_agent_unreachable")),
     }
     clear_waiting(connection, id)?;
-    Ok(Ok(id))
+    Ok(Ok(()))
 }
 
 /// The handlers the live master's `message`, `answer` and `status` tools call, set on the

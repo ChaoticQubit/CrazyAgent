@@ -168,10 +168,14 @@ impl Fixture {
     }
 
     fn pane(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        self.pane_running(host, id, &["/bin/sh", "-c", "exec cat"])
+    }
+
+    fn pane_running(&self, host: &Arc<dyn Host>, id: i64, argv: &[&str]) -> PaneRecord {
         let file = self.base.join(format!("session-{id}.jsonl"));
         std::fs::write(&file, format!("{TURN_OPEN}\n{TURN_DONE}\n")).unwrap();
         let command = InteractiveCommand {
-            argv: vec!["/bin/sh".into(), "-c".into(), "exec cat".into()],
+            argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
             cwd: self.base.clone(),
             env: Vec::new(),
             transcript: Transcript::ClaudeSession { file },
@@ -1104,6 +1108,14 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
     ] {
         assert!(text.contains(listed), "{text}");
     }
+    let tools = live_framing(&setup, true, &["codex"]);
+    assert!(
+        tools.contains("ask(question, options?, recommended?, context?) asks the owner one question and logs it, record_answer(question, version, owner_turn) records an answer the owner gave you in chat"),
+        "{tools}"
+    );
+    let typed = live_framing(&setup, false, &["codex"]);
+    assert!(!typed.contains("ask(question"));
+    assert!(!typed.contains("record_answer"));
 }
 
 #[test]
@@ -3214,4 +3226,266 @@ fn dispatch_interrupted_after_send_is_not_handed_out_again_and_one_before_send_w
     drop(fixture.runtime());
     assert_eq!(task(tasks[0]).0, "failed");
     assert_eq!(task(tasks[1]).0, "queued");
+}
+
+/// Reads everything typed into an agent's terminal so far, as its pane wrote it to a file.
+fn typed(fixture: &Fixture, id: i64) -> String {
+    std::fs::read_to_string(fixture.base.join(format!("typed-{id}.txt"))).unwrap_or_default()
+}
+
+/// Starts a team runtime that serves the engine's agent tools over idle sub-agents with
+/// tools, one per id, each taken over from a pane that writes what is typed into it to the
+/// file `typed` reads. Takes the fixture, whose plan must have room for the ids, and the
+/// ids. Returns the terminal host and the runtime once every agent is idle.
+fn asking_team(fixture: &mut Fixture, ids: &[i64]) -> (Arc<dyn Host>, TeamRuntime) {
+    fixture.setup.team.sub_harnesses[0].tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let host = fixture.host();
+    for id in ids {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,'sub','codex',1,?3,'idle',1,1)",
+                params![id, PROJECT, ENDPOINT],
+            )
+            .unwrap();
+        let log = fixture.base.join(format!("typed-{id}.txt"));
+        let record = fixture.pane_running(
+            &host,
+            *id,
+            &["/bin/sh", "-c", "exec cat >>\"$0\"", log.to_str().unwrap()],
+        );
+        fixture.keep(*id, &record);
+    }
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let mut team = fixture
+        .runtime()
+        .with_delegation_tool(&engine)
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap();
+    fixture.until(&mut team, "the sub-agents are taken over", |f| {
+        ids.iter()
+            .all(|id| f.agent_status(*id).0 == AgentStatus::Idle)
+    });
+    (host, team)
+}
+
+/// Waits until an answer was typed into an agent's terminal, lets the runtime tick on, and
+/// requires it was typed exactly once. Takes the fixture, the runtime, the agent and the
+/// answer.
+fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) {
+    let deadline = Instant::now() + WAIT;
+    while !typed(fixture, id).contains(answer) {
+        assert!(Instant::now() < deadline, "{}", typed(fixture, id));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    idle_ticks(team);
+    assert_eq!(
+        typed(fixture, id).matches(answer).count(),
+        1,
+        "{}",
+        typed(fixture, id)
+    );
+}
+
+/// The owner's answer to agent 7's question is typed into agent 7's own terminal exactly
+/// once, with no panic, even while agent 8 carries the handle `team-7`, and agent 8 is never
+/// given it. Each pane writes what it is given to a file, so the count does not depend on
+/// how the screen echoes or wraps.
+#[test]
+fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds_its_id_as_a_handle()
+ {
+    let mut fixture = Fixture::new(2);
+    let (asker, holder) = (7, 8);
+    let (_host, mut team) = asking_team(&mut fixture, &[asker, holder]);
+    let project = fixture.setup.project_id.clone();
+    super::super::names::assign_persona(&fixture.connection, &project, holder).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_names SET handle=?2 WHERE agent=?1",
+            params![holder, format!("team-{asker}")],
+        )
+        .unwrap();
+
+    let ask = crate::questions::Ask {
+        question: "Which database should the service use?".into(),
+        options: vec![],
+        recommended: None,
+        context: None,
+    };
+    let question = crate::questions::ask(
+        &fixture.connection,
+        &project,
+        &crate::questions::Asker::Agent(asker),
+        &ask,
+    )
+    .unwrap();
+    let answer = "Use Postgres 16 for the service.";
+    assert_eq!(
+        crate::questions::answer(
+            &fixture.connection,
+            question,
+            0,
+            &crate::questions::Answer::Text(answer.into()),
+        )
+        .unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    fixture.until(&mut team, "the answer is typed once", |f| {
+        crate::questions::agent_notes(&f.connection, &project, asker)
+            .unwrap()
+            .is_empty()
+    });
+    typed_once(&fixture, &mut team, asker, answer);
+    assert!(
+        !typed(&fixture, holder).contains(answer),
+        "the agent holding the handle team-{asker} never gets agent {asker}'s answer"
+    );
+    team.shutdown().unwrap();
+}
+
+/// A sub-agent's question goes from its own ask server through a runtime tick into the
+/// questions log under that agent, the server hands the agent the question's id, and the
+/// owner's answer is typed into that agent's terminal exactly once.
+#[test]
+fn a_sub_agent_s_question_is_logged_on_a_tick_and_the_owner_s_answer_is_typed_back_once() {
+    let mut fixture = Fixture::new(1);
+    let asker = 7;
+    let (_host, mut team) = asking_team(&mut fixture, &[asker]);
+    let project = fixture.setup.project_id.clone();
+    let mailbox = team.mailbox(asker);
+    let tmp = mailbox.parent().unwrap().to_path_buf();
+    for folder in [team.agent_folder(asker), tmp, mailbox.clone()] {
+        private_directory(&folder).unwrap();
+    }
+    let call = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {"name": tool::ASK_TOOL, "arguments": {
+        "question": "Which database should the service use?",
+        "options": ["Postgres", "SQLite"],
+        "recommended": "Postgres"
+    }}});
+    let mut input = serde_json::to_vec(&call).unwrap();
+    input.push(b'\n');
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        tool::questions::serve_agent(std::io::Cursor::new(input), &mut output, &mailbox)
+            .map(|()| output)
+    });
+    fixture.until(&mut team, "the ask server is answered", |_| {
+        server.is_finished()
+    });
+    let output = String::from_utf8(server.join().unwrap().unwrap()).unwrap();
+    let pending = crate::questions::pending(&fixture.connection, &project).unwrap();
+    assert_eq!(pending.len(), 1, "{output}");
+    assert_eq!(
+        pending[0].asker,
+        crate::questions::Asker::Agent(asker).name()
+    );
+    assert!(
+        output.contains(&format!("Question {} is logged", pending[0].id)),
+        "{output}"
+    );
+
+    let answer = "Use Postgres 16 for the service.";
+    assert_eq!(
+        crate::questions::answer(
+            &fixture.connection,
+            pending[0].id,
+            pending[0].version,
+            &crate::questions::Answer::Text(answer.into()),
+        )
+        .unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    fixture.until(&mut team, "the answer is typed", |f| {
+        crate::questions::agent_notes(&f.connection, &project, asker)
+            .unwrap()
+            .is_empty()
+    });
+    typed_once(&fixture, &mut team, asker, answer);
+    team.shutdown().unwrap();
+}
+
+/// A team master's question calls from one reply are logged as its own by the runtime step
+/// its turn end and turn start run, and the one the store refuses comes back to it as a team
+/// note naming why, so the master hears it on its next turn.
+#[test]
+fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() {
+    use crate::questions::{Ask, Asker};
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let mut team = fixture.runtime();
+    let record = team.tool_record(master);
+    for folder in [
+        team.agent_folder(master),
+        record.parent().unwrap().to_path_buf(),
+    ] {
+        private_directory(&folder).unwrap();
+    }
+    for earlier in 1..crate::questions::PENDING_PER_ASKER_MAX {
+        let ask = Ask {
+            question: format!("Earlier question {earlier}?"),
+            options: vec![],
+            recommended: None,
+            context: None,
+        };
+        crate::questions::ask(&fixture.connection, &project, &Asker::Master(master), &ask).unwrap();
+    }
+    let mut input = Vec::new();
+    for (id, question) in [
+        (1, "Should the page ship today?"),
+        (2, "Should the page keep its old banner?"),
+    ] {
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": tool::ASK_TOOL, "arguments": {"question": question}}});
+        input.extend(serde_json::to_vec(&call).unwrap());
+        input.push(b'\n');
+    }
+    let mut output = Vec::new();
+    tool::serve(std::io::Cursor::new(input), &mut output, &record).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert_eq!(output.matches("Recorded.").count(), 2, "{output}");
+
+    team.log_master_asks(&project, master).unwrap();
+    let mine: Vec<String> = crate::questions::pending(&fixture.connection, &project)
+        .unwrap()
+        .into_iter()
+        .filter(|question| question.asker == Asker::Master(master).name())
+        .map(|question| question.question)
+        .collect();
+    assert_eq!(
+        mine.len(),
+        usize::try_from(crate::questions::PENDING_PER_ASKER_MAX).unwrap()
+    );
+    assert!(mine.contains(&"Should the page ship today?".to_owned()));
+    assert!(
+        fixture.note(
+            "Your question \"Should the page keep its old banner?\" was not logged for the owner: 8 of your questions are still open."
+        ),
+        "{:#?}",
+        fixture.status()
+    );
+    assert!(
+        tool::questions::take_asks(&record).is_empty(),
+        "the calls are taken once"
+    );
+    team.log_master_asks(&project, master).unwrap();
+    assert_eq!(
+        crate::questions::pending(&fixture.connection, &project)
+            .unwrap()
+            .len(),
+        usize::try_from(crate::questions::PENDING_PER_ASKER_MAX).unwrap()
+    );
 }

@@ -379,9 +379,9 @@ pub fn ask(
     let tx = immediate(db)?;
     let id = insert(&tx, project, &asker.name(), source, ask, false)?;
     if let Asker::Agent(agent) = asker {
-        let quoted = bound_text(&flat(&ask.question), QUOTED_BYTES_MAX);
         let text = format!(
-            "Agent {agent} asked the owner question {id} (\"{quoted}\"). The owner's answer comes to you; pass it on to agent {agent}."
+            "Agent {agent} asked the owner question {id}, in its own words {}. The owner's answer comes to you too, and CrazyAgent types it into agent {agent}'s terminal.",
+            quoted(&ask.question)
         );
         let relayed = append_message(
             &tx,
@@ -511,6 +511,42 @@ pub fn record_from_chat(
     finish(db, tx, project, settled)
 }
 
+/// Records the owner's message of a conversation master's turn as the answer to a question
+/// that master's session asked; the text is the engine's copy, and no note comes back.
+/// Inputs: the engine connection, the project, the session, the question id, the version
+/// the master read and the owner's message text. Output: as `record_from_chat`, without
+/// `questions_owner_turn_invalid`.
+pub fn record_from_session(
+    db: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    id: u64,
+    version: u64,
+    owner_message: &str,
+) -> Result<Settlement, EngineError> {
+    let tx = immediate(db)?;
+    let question = found(&tx, id)?;
+    if &question.project != project || question.asker != Asker::Session(session.clone()).name() {
+        return Err(failure("questions_not_found"));
+    }
+    if question.status != QuestionStatus::Pending {
+        return Ok(Settlement::Stale);
+    }
+    let text = answer_text(owner_message)?;
+    let how = How::Answer(&text, AnsweredBy::Chat);
+    let settled = settle(&tx, question, how, &owner(), version)?;
+    if settled == Settlement::Settled {
+        let marked = tx
+            .execute(
+                "UPDATE owner_questions SET noted_ms=?2 WHERE id=?1 AND noted_ms IS NULL",
+                params![column(id), now_ms()],
+            )
+            .map_err(unavailable)?;
+        assert_eq!(marked, 1);
+    }
+    finish(db, tx, project, settled)
+}
+
 /// Marks a box asked in an agent's terminal as answered there, once its screen watch saw
 /// it leave after owner input; nothing is delivered, since the harness has the answer.
 /// Inputs: the engine connection and the question id. Output: Settled, Stale when it was
@@ -536,28 +572,7 @@ pub fn session_notes(
     project: &ProjectId,
     session: &SessionId,
 ) -> Result<Vec<Note>, EngineError> {
-    let tx = db.unchecked_transaction().map_err(unavailable)?;
-    ensure(&tx)?;
-    let settled = select(
-        &tx,
-        &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND asker=?2
-             AND status IN ('answered','dismissed') AND noted_ms IS NULL ORDER BY id LIMIT ?3"
-        ),
-        params![
-            project.as_str(),
-            Asker::Session(session.clone()).name(),
-            NOTES_MAX as i64
-        ],
-    )?;
-    assert!(settled.len() <= NOTES_MAX);
-    Ok(settled
-        .iter()
-        .map(|question| Note {
-            question: question.id,
-            text: told(question, question.answer.as_deref(), "your"),
-        })
-        .collect())
+    notes_of(db, project, &Asker::Session(session.clone()).name())
 }
 
 /// Marks a conversation master's notes as given, so no later turn repeats them. Inputs:
@@ -570,12 +585,65 @@ pub fn notes_delivered(
     session: &SessionId,
     ids: &[u64],
 ) -> Result<(), EngineError> {
+    mark_noted(db, project, &Asker::Session(session.clone()).name(), ids)
+}
+
+/// Reads how the owner settled a sub-agent's questions that were not yet typed into its
+/// terminal, oldest first, worded for the sub-agent itself. Pass their ids to
+/// `agent_notes_delivered` once typed. Inputs: the engine connection, the project and the
+/// team agent id. Output: at most `NOTES_MAX` notes.
+pub fn agent_notes(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Vec<Note>, EngineError> {
+    notes_of(db, project, &Asker::Agent(agent).name())
+}
+
+/// Marks a sub-agent's notes as typed, so no later tick types them again. Inputs: the
+/// engine connection, the project, the team agent id and at most `NOTES_MAX` question ids
+/// from `agent_notes`. Output: as `notes_delivered`.
+pub fn agent_notes_delivered(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    ids: &[u64],
+) -> Result<(), EngineError> {
+    mark_noted(db, project, &Asker::Agent(agent).name(), ids)
+}
+
+fn notes_of(db: &Connection, project: &ProjectId, asker: &str) -> Result<Vec<Note>, EngineError> {
+    let tx = db.unchecked_transaction().map_err(unavailable)?;
+    ensure(&tx)?;
+    let settled = select(
+        &tx,
+        &format!(
+            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND asker=?2
+             AND status IN ('answered','dismissed') AND noted_ms IS NULL ORDER BY id LIMIT ?3"
+        ),
+        params![project.as_str(), asker, NOTES_MAX as i64],
+    )?;
+    assert!(settled.len() <= NOTES_MAX);
+    Ok(settled
+        .iter()
+        .map(|question| Note {
+            question: question.id,
+            text: told(question, question.answer.as_deref(), &mine(question), ""),
+        })
+        .collect())
+}
+
+fn mark_noted(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &str,
+    ids: &[u64],
+) -> Result<(), EngineError> {
     if ids.len() > NOTES_MAX {
         return Err(failure("questions_notes_invalid"));
     }
     let tx = immediate(db)?;
     ensure(&tx)?;
-    let asker = Asker::Session(session.clone()).name();
     let now = now_ms();
     for id in ids {
         tx.execute(
@@ -851,19 +919,41 @@ fn deliver(
     answer: Option<&str>,
 ) -> Result<Option<i64>, EngineError> {
     let (kind, rest) = question.asker.split_once(':').unwrap_or_default();
-    let (author, whose, required) = match (kind, rest) {
-        ("master", rest) if !rest.starts_with("session:") => {
-            (MessageAuthor::Owner, "your".to_owned(), true)
-        }
-        ("agent", agent) => (MessageAuthor::Owner, format!("agent {agent}'s"), true),
+    let (author, text, required) = match (kind, rest) {
+        ("master", rest) if !rest.starts_with("session:") => (
+            MessageAuthor::Owner,
+            told(question, answer, &mine(question), ""),
+            true,
+        ),
+        ("agent", agent) => (
+            MessageAuthor::Owner,
+            told(
+                question,
+                answer,
+                &format!("agent {agent}'s question {}", question.id),
+                &format!(
+                    "\nCrazyAgent types this into agent {agent}'s terminal itself, now while it runs or once its work resumes, so do not send it to agent {agent} yourself."
+                ),
+            ),
+            true,
+        ),
         ("engine", _) => (
             MessageAuthor::Engine,
-            format!("the {}", asker_label(&question.asker)),
+            told(
+                question,
+                answer,
+                &format!(
+                    "the {} question {} ({})",
+                    asker_label(&question.asker),
+                    question.id,
+                    quoted(&question.question)
+                ),
+                "",
+            ),
             false,
         ),
         _ => return Ok(None),
     };
-    let text = told(question, answer, &whose);
     let appended = append_message(
         tx,
         &question.project,
@@ -886,25 +976,31 @@ fn deliver(
 }
 
 /// Words how the owner settled a question for the one who waits on it. Inputs: the
-/// question, the answer, none when dismissed, and whose question it was, such as `your`.
-/// Output: the text.
-fn told(question: &Question, answer: Option<&str>, whose: &str) -> String {
-    let quoted = bound_text(&flat(&question.question), QUOTED_BYTES_MAX);
-    let id = question.id;
-    let tail = match question.asker.split_once(':') {
-        Some(("agent", agent)) => format!("\nPass this on to agent {agent}."),
-        _ => String::new(),
-    };
+/// question, the answer, none when dismissed, the words that name the question, such as
+/// `your question 4 ("Ship?")`, and a closing line, if any. Output: the text.
+fn told(question: &Question, answer: Option<&str>, named: &str, tail: &str) -> String {
+    assert!(named.contains(&question.id.to_string()));
     match answer {
-        Some(answer) => {
-            format!("The owner answered {whose} question {id} (\"{quoted}\"):\n{answer}{tail}")
-        }
-        None => {
-            format!(
-                "The owner dismissed {whose} question {id} (\"{quoted}\"). No answer comes.{tail}"
-            )
-        }
+        Some(answer) => format!("The owner answered {named}:\n{answer}{tail}"),
+        None => format!("The owner dismissed {named}. No answer comes.{tail}"),
     }
+}
+
+/// Names a question for the one who asked it, with its words quoted.
+fn mine(question: &Question) -> String {
+    format!(
+        "your question {} ({})",
+        question.id,
+        quoted(&question.question)
+    )
+}
+
+/// Quotes an asker's words on one line, at most `QUOTED_BYTES_MAX` bytes, as a JSON string,
+/// so quote marks inside cannot end the quote and words cannot pass as the engine's or the
+/// owner's. Input: the words. Output: the quoted text.
+fn quoted(text: &str) -> String {
+    serde_json::to_string(&bound_text(&flat(text), QUOTED_BYTES_MAX))
+        .expect("a string always encodes as JSON")
 }
 
 /// Drops the oldest settled questions of a project beyond `KEPT_PER_PROJECT_MAX` kept

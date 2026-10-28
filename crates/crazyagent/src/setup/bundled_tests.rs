@@ -170,7 +170,48 @@ fn every_bundled_manifest_entry_finds_its_skills_in_the_bundle() {
         assert!(!skill_folders(&folder).unwrap().is_empty(), "{}", entry.id);
         checked += 1;
     }
-    assert_eq!(checked, 9);
+    assert_eq!(checked, 10);
+}
+
+#[test]
+fn the_default_pack_bundles_the_grill_skill() {
+    let manifest = default_pack().unwrap();
+    let grill = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == "grill")
+        .expect("the default pack lists the grill skill");
+    assert!(grill.on_by_default);
+    assert_eq!(grill.license, "Apache-2.0");
+    assert_eq!(
+        grill.source,
+        PackSource::Bundled {
+            path: "skills/grill".into()
+        }
+    );
+    let (_, bytes) = FILES
+        .iter()
+        .find(|(path, _)| *path == "skills/grill/SKILL.md")
+        .expect("the grill skill is compiled into the engine");
+    let text = std::str::from_utf8(bytes).unwrap();
+    let (name, description) = crate::plugins::skill_folder::frontmatter(text).unwrap();
+    assert_eq!(name, "grill");
+    assert!(
+        description.contains("one question at a time"),
+        "{description}"
+    );
+    assert!(text.contains(&format!("`{}` tool", crate::team::tool::ASK_TOOL)));
+    assert_eq!(crate::questions::OPTIONS_MAX, 6);
+    assert!(text.contains("at most 6 short one-line ones"));
+    assert!(text.contains(&format!("`{}` tool", crate::team::tool::RECORD_TOOL)));
+    assert!(!text.contains("ask_owner"));
+    assert!(text.contains("`crazyagent-team`"));
+    assert!(text.contains("`recommended`"));
+    assert!(!text.contains('\u{2014}'));
+    let setup = private();
+    let bundled = extract(setup.path()).unwrap();
+    let folder = entry_folder(setup.path(), grill, Some(bundled.as_path())).unwrap();
+    assert_eq!(skill_folders(&folder).unwrap().len(), 1);
 }
 
 #[test]

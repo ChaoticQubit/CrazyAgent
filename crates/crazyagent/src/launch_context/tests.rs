@@ -489,6 +489,121 @@ fn a_conversation_master_with_tools_on_is_told_its_tools_and_how_to_start_a_sub_
 }
 
 #[test]
+fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() {
+    use crate::project_setup::HarnessSlot;
+    let rule =
+        "Ask the owner a question only with the `ask` tool of the `crazyagent-team` MCP server";
+    assert_eq!(crate::team::tool::ASK_TOOL, "ask");
+    let folder = tempfile::tempdir().unwrap();
+    let mut setup = stored(folder.path());
+    let conversation = master_tools_section(&setup, &["codex"]);
+    assert_eq!(conversation.matches(rule).count(), 1, "{conversation}");
+    assert!(conversation.ends_with(&ask_rule(AskReach::ReplyEnd)));
+    assert!(conversation.contains("when your reply ends"));
+    assert!(conversation.contains(&format!(
+        "record it with `{}`",
+        crate::team::tool::RECORD_TOOL
+    )));
+    assert!(conversation.contains("act on it once"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let fresh = |instructions: String| AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions,
+        process: None,
+    };
+    let start = "# Project context from CrazyAgent\n";
+    assert!(!fresh(start.into()).instructions().contains(rule));
+
+    let drop_file = fresh(start.into()).with_team_tool(engine, &record).unwrap();
+    assert_eq!(
+        drop_file.instructions(),
+        format!("{start}{}", ask_rule(AskReach::ReplyEnd))
+    );
+
+    let live = fresh(start.into())
+        .with_live_team_tool(engine, &mailbox)
+        .unwrap();
+    let told = live.instructions();
+    assert_eq!(told, format!("{start}{}", ask_rule(AskReach::Live)));
+    assert_eq!(told.matches(rule).count(), 1, "{told}");
+    assert!(told.contains("never in your reply text"));
+    assert!(told.contains("one question per call"));
+    assert!(told.contains("Put up to 6 choices in `options`"));
+    assert!(told.contains("the one you recommend in `recommended`"));
+    assert!(told.contains(&format!(
+        "record it with `{}`",
+        crate::team::tool::RECORD_TOOL
+    )));
+    assert_eq!(
+        live.with_live_team_tool(engine, &mailbox).unwrap_err().0,
+        "launch_context_team_tool_taken",
+        "a second live server is refused before any text is added"
+    );
+
+    let agent = fresh(start.into())
+        .with_agent_team_tool(engine, &mailbox)
+        .unwrap();
+    let heard = agent.instructions();
+    assert_eq!(heard, format!("{start}{}", ask_rule(AskReach::SubAgent)));
+    assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
+    assert!(!heard.contains(crate::team::tool::RECORD_TOOL));
+    let server = &agent.plugins.servers[0];
+    assert_eq!(server.name, crate::team::tool::SERVER_NAME);
+    assert_eq!(
+        server.spec,
+        ServerSpec::Stdio {
+            command: "/usr/local/bin/crazyagent".into(),
+            args: vec![
+                crate::team::tool::questions::AGENT_SERVER_COMMAND.into(),
+                mailbox.to_str().unwrap().into(),
+            ],
+        }
+    );
+    assert_eq!(agent.read_paths(), [engine.to_path_buf()]);
+    assert_eq!(
+        agent.with_agent_team_tool(engine, &mailbox).unwrap_err().0,
+        "launch_context_team_tool_taken"
+    );
+    assert_eq!(
+        fresh(start.into())
+            .with_agent_team_tool(engine, Path::new("tmp/calls"))
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+
+    for reach in [AskReach::Live, AskReach::ReplyEnd, AskReach::SubAgent] {
+        assert!(ask_rule(reach).len() <= ASK_RULE_BYTES_MAX);
+        assert!(!ask_rule(reach).contains('\u{2014}'));
+    }
+    let full = fresh("x".repeat(INSTRUCTIONS_BYTES_MAX))
+        .with_live_team_tool(engine, &mailbox)
+        .unwrap();
+    assert!(full.instructions().len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(full.instructions().ends_with(&ask_rule(AskReach::Live)));
+
+    setup.team.sub_harnesses = (0..200)
+        .map(|index| HarnessSlot {
+            harness: format!("{index}-{}", "h".repeat(250)),
+            agents: 1,
+            tools: true,
+        })
+        .collect();
+    let crowded = master_tools_section(&setup, &[]);
+    assert!(crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
+    assert!(crowded.contains(" more\n"));
+    assert!(
+        crowded.ends_with(&ask_rule(AskReach::ReplyEnd)),
+        "a crowded plan drops sub-agent lines, never the rule"
+    );
+}
+
+#[test]
 fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();

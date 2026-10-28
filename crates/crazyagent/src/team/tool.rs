@@ -146,9 +146,9 @@ struct Recorded {
     role: Option<String>,
 }
 
-/// Serves the master's `delegate` tool as an MCP server over stdio until its client closes input.
+/// Serves the master's `delegate` and `ask` tools as an MCP server over stdio until its client closes input.
 /// Takes the client's input and output and the absolute drop file in the master's private temporary folder.
-/// Returns an input or output failure; each call only records a proposal, which the engine admits after the turn.
+/// Returns an input or output failure; each call only records a proposal or question, which the engine takes after the turn.
 pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::Result<()> {
     if !drop.is_absolute() {
         return Err(std::io::Error::other(
@@ -257,9 +257,12 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
                 "required": ["task"],
                 "additionalProperties": false,
             },
-        }]}),
-        Some("tools/call") => match call(params, drop) {
-            Some((text, error)) => tool_result(text, error),
+        }, questions::ask_listing(), questions::record_listing()]}),
+        Some("tools/call") => match call(params, drop)
+            .map(|(text, error)| (text.to_owned(), error))
+            .or_else(|| questions::drop_call(params, drop))
+        {
+            Some((text, error)) => tool_result(&text, error),
             None => return Some(failure(id, -32602, "Unknown tool")),
         },
         _ => return Some(failure(id, -32601, "Method not found")),
@@ -331,21 +334,27 @@ fn live_tools() -> Value {
             },
         },
         ask_tool(),
-        {
-            "name": RECORD_TOOL,
-            "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "integer", "description": "The question number the ask tool gave you."},
-                    "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
-                    "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
-                },
-                "required": ["question", "version", "owner_turn"],
-                "additionalProperties": false,
-            },
-        },
+        record_tool(),
     ]})
+}
+
+/// The MCP entry of the `record_answer` tool, the same for every master that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn record_tool() -> Value {
+    json!({
+        "name": RECORD_TOOL,
+        "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+                "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+            },
+            "required": ["question", "version", "owner_turn"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 /// The MCP entry of the `ask` tool, the same for every master and agent that is given it.
@@ -1292,6 +1301,8 @@ pub fn clear(drop: &Path) {
         let _ = std::fs::remove_file(drop);
     }
 }
+
+pub mod questions;
 
 #[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]

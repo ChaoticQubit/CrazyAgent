@@ -283,6 +283,7 @@ struct Worker {
     managed: bool,
     tools: bool,
     team_tool: bool,
+    ask_tool: bool,
     grants: u64,
     thread: Option<JoinHandle<()>>,
     hosted: Option<Hosted>,
@@ -1110,6 +1111,8 @@ impl TeamRuntime {
         self.resume_interrupted(&stored, access, &paused)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
+        self.serve_agent_asks(project);
+        self.tell_agent_answers(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         let master_live = self.master(project).is_some();
@@ -1561,6 +1564,18 @@ impl TeamRuntime {
         }
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         prompt.push_str(&heard);
+        if team_tool {
+            self.log_master_asks(project, id)?;
+            let pending = crate::questions::pending(&self.connection, project).unwrap_or_default();
+            let owner_message = (author == "owner")
+                .then(|| u64::try_from(message).ok())
+                .flatten();
+            prompt.push_str(&tool::questions::open_line(
+                &pending,
+                &crate::questions::Asker::Master(id),
+                owner_message,
+            ));
+        }
         prompt.push_str(&format!("{speaker}:\n{text}"));
         if !delivery::intend(&self.connection, Busy::Message(message), id, &text, newest)? {
             return Ok(());
@@ -1848,6 +1863,87 @@ impl TeamRuntime {
             config: self.config.as_ref(),
         };
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+    }
+
+    /// Logs the questions this project's sub-agents asked through their `ask` tool since
+    /// the last tick, each with its sub-agent as the asker, and answers every call, a
+    /// refused one with its reason. Takes the project.
+    fn serve_agent_asks(&self, project: &ProjectId) {
+        let asking: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.ask_tool && !worker.stopping)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in asking {
+            let asker = crate::questions::Asker::Agent(id);
+            tool::questions::serve_agent_calls(&self.mailbox(id), |ask| {
+                crate::questions::ask(&self.connection, project, &asker, ask)
+            });
+        }
+    }
+
+    /// Types into each running sub-agent of a project how the owner settled its questions,
+    /// the owner's own words from the questions log, once each. A note the terminal does not
+    /// take stays for the next tick; a note longer than one prompt points to the master, which
+    /// has it in full. Takes the project.
+    fn tell_agent_answers(&self, project: &ProjectId) {
+        let Some(host) = self.terminal.as_deref() else {
+            return;
+        };
+        let asking: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.ask_tool && !worker.stopping)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in asking {
+            let Ok(notes) = crate::questions::agent_notes(&self.connection, project, id) else {
+                continue;
+            };
+            let mut typed = Vec::new();
+            for note in notes {
+                let text = if note.text.len() <= super::events::SEND_BYTES_MAX {
+                    note.text
+                } else {
+                    format!(
+                        "The owner answered your question {}. The answer is longer than CrazyAgent types into a terminal, so ask your master for it.",
+                        note.question
+                    )
+                };
+                match super::events::send_to_id(&self.connection, host, project, id, &text) {
+                    Ok(Ok(())) => typed.push(note.question),
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+            if !typed.is_empty()
+                && let Err(problem) =
+                    crate::questions::agent_notes_delivered(&self.connection, project, id, &typed)
+            {
+                eprintln!(
+                    "questions_agent_notes_unmarked agent={id} code={}",
+                    problem.0
+                );
+            }
+        }
+    }
+
+    /// Logs the questions a drop-file master asked with its `ask` tool and records the chat
+    /// answers it named with `record_answer`, each as that master's own, whatever its turn's
+    /// outcome, and notes each call the store refused so the master hears why on its next
+    /// turn. Takes the project and the master's team agent id. Returns any SQLite failure of
+    /// a note.
+    fn log_master_asks(&mut self, project: &ProjectId, id: i64) -> Result<(), EngineError> {
+        let refused = tool::questions::apply_master_calls(
+            &self.connection,
+            project,
+            id,
+            &self.tool_record(id),
+        );
+        for line in refused {
+            self.note(project, &line)?;
+        }
+        Ok(())
     }
 
     /// Types the oldest waiting team message into a project's live master once it is idle
@@ -2603,6 +2699,8 @@ impl TeamRuntime {
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
+        let ask_tool =
+            seat.role != AgentRole::Master && seat.tools && self.delegation_tool.is_some();
         self.workers.insert(
             id,
             Worker {
@@ -2624,6 +2722,7 @@ impl TeamRuntime {
                 managed,
                 tools: seat.tools,
                 team_tool,
+                ask_tool,
                 grants: 0,
                 thread: Some(thread),
                 hosted: seat.hosted,
@@ -2695,10 +2794,9 @@ impl TeamRuntime {
             }
         };
         let live = self.live_master(&stored.project_id, role, launch);
-        if live && tools {
-            private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
-                with_code("the master's tool mailbox could not be made", Some(&e.0))
-            })?;
+        if tools && (live || (role != AgentRole::Master && self.delegation_tool.is_some())) {
+            private_directory(&tmp.join(tool::MAILBOX_FOLDER))
+                .map_err(|e| with_code("the agent's tool mailbox could not be made", Some(&e.0)))?;
         }
         let context = self.context(&stored.project_id, id, role, tools)?;
         let network = if tools {
@@ -2879,6 +2977,14 @@ impl TeamRuntime {
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
                 context
                     .with_team_tool(engine, &self.tool_record(id))
+                    .map_err(unread)
+            }
+            Some(engine) if tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_agent_team_tool(engine, &self.mailbox(id))
                     .map_err(unread)
             }
             _ if master && !tools => context
@@ -3084,6 +3190,9 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if team_tool {
+                    self.log_master_asks(&project, id)?;
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
                     Some(Busy::Task(task)) => {
@@ -3714,13 +3823,15 @@ fn live_framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> St
     let team = sub_agent_lines(stored, available);
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
+            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}() reads the team, {}() lists the change sets waiting for the owner, {}(question, options?, recommended?, context?) asks the owner one question and logs it, {}(question, version, owner_turn) records an answer the owner gave you in chat, and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle.\n",
             tool::SERVER_NAME,
             tool::TOOL_NAME,
             tool::MESSAGE_TOOL,
             tool::ANSWER_TOOL,
             tool::STATUS_TOOL,
             tool::CHANGES_TOOL,
+            tool::ASK_TOOL,
+            tool::RECORD_TOOL,
             tool::ESCALATE_TOOL
         )
     } else {
