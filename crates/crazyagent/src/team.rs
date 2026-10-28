@@ -2520,7 +2520,9 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let live = |role: AgentRole, harness: &str| {
         agents
             .iter()
-            .filter(|a| a.role == role && a.harness == harness && a.status.live())
+            .filter(|a| {
+                a.role == role && crate::harnesses::same(&a.harness, harness) && a.status.live()
+            })
             .count() as i64
     };
     let plan = &stored.team;

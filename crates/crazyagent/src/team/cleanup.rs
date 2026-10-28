@@ -139,10 +139,9 @@ fn place(
 }
 
 /// Says why a team agent's own row keeps it: not this project's, still running, the master
-/// the runtime starts again in this worktree (for its harness, the newest ended master
-/// that still has a worktree record, as `start_master` picks it), or with an unfinished
-/// task pinned to it. Inputs: the store, the project and the agent. Output: None when it
-/// ended and nothing waits for it.
+/// the runtime starts again in this worktree (picked by `runtime::last_master`, so aliases
+/// of its harness count), or with an unfinished task pinned to it. Inputs: the store, the
+/// project and the agent. Output: None when it ended and nothing waits for it.
 fn agent_blocker(
     db: &Connection,
     project: &ProjectId,
@@ -163,16 +162,7 @@ fn agent_blocker(
         return Ok(Some("cleanup_agent_running"));
     }
     if role == "master" {
-        let revived: Option<i64> = db
-            .query_row(
-                "SELECT a.id FROM team_agents a JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
-                 WHERE a.project=?1 AND a.role='master' AND a.harness=?2 AND a.status IN ('stopped','failed')
-                 ORDER BY a.id DESC LIMIT 1",
-                params![project.as_str(), harness],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(unavailable)?;
+        let revived = super::runtime::last_master(db, project, &harness).map_err(unavailable)?;
         if revived == Some(id) {
             return Ok(Some("cleanup_agent_running"));
         }

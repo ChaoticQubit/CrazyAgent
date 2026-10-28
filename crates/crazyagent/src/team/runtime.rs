@@ -370,7 +370,7 @@ const LAST_MASTERS_READ: i64 = 64;
 /// recorded, so it starts again in its own worktree and home. The harness matches by catalog
 /// entry, so a master recorded under an alias ("claude") serves a plan that names the entry
 /// ("claude-code"). Takes the database, project and harness. Returns the agent, or None.
-fn last_master(
+pub(super) fn last_master(
     connection: &Connection,
     project: &ProjectId,
     harness: &str,
