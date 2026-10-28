@@ -214,6 +214,7 @@ struct Adoption {
     limits: LaunchLimits,
     live: bool,
     managed: Option<Managed>,
+    access: AgentAccess,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -536,7 +537,9 @@ impl TeamRuntime {
 
     /// Takes over one live team pane when its agent may still run: the project's setup and
     /// team plan still hold its role and harness, the team is not paused, the project has
-    /// room, and its account is still an endpoint in the project's pool. Takes the host, the
+    /// room, and its account is still an endpoint in the project's pool. The pane keeps the
+    /// access level its record says it started at, Full access for a record without one, so
+    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -642,6 +645,7 @@ impl TeamRuntime {
             limits: self.launch_limits(),
             live,
             managed,
+            access: record.access.unwrap_or(AgentAccess::Full),
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -2619,10 +2623,7 @@ impl TeamRuntime {
         };
         let access = match &launch {
             Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(_) => {
-                crate::sandbox::policy::load(&self.connection, seat.project.as_str())
-                    .map_or(AgentAccess::Sandboxed, |policy| policy.access)
-            }
+            Launch::Adopt(adoption) => adoption.access,
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -3067,6 +3068,8 @@ impl TeamRuntime {
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
+                let access = Some(self.workers[&id].access);
+                let pane = pane.map(|record| PaneRecord { access, ..record });
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(

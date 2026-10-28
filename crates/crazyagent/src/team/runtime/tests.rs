@@ -176,7 +176,10 @@ impl Fixture {
         };
         let since = SystemTime::now();
         let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
-        PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
+        PaneRecord {
+            access: Some(AgentAccess::Sandboxed),
+            ..PaneRecord::new(&command.transcript, &command.cwd, since, pane.pid, None).unwrap()
+        }
     }
 
     fn keep(&self, id: i64, record: &PaneRecord) {
@@ -316,6 +319,101 @@ fn a_restarted_engine_takes_over_live_agent_panes_and_ends_every_other_one() {
     assert_eq!(host.alive().unwrap(), names(&[master]));
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
+}
+
+#[test]
+fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_stopped() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let level = |access| {
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &crate::sandbox::policy::AgentPolicy {
+                access,
+                toolchains: Vec::new(),
+            },
+        )
+        .unwrap();
+    };
+    let started = |id: i64| {
+        let text: String = fixture
+            .connection
+            .query_row(
+                "SELECT record FROM team_panes WHERE agent=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        PaneRecord::decode(&text).unwrap().access
+    };
+    level(AgentAccess::Full);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        access: Some(AgentAccess::Full),
+        ..fixture.pane(&host, master)
+    };
+    fixture.keep(master, &record);
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the Full access master is taken over", |f| {
+        f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master)
+    });
+    assert_eq!(started(master), Some(AgentAccess::Full));
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+
+    level(AgentAccess::Sandboxed);
+    let mut again = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(
+        &mut again,
+        "the master that started at Full access is stopped",
+        |f| {
+            f.agent_status(master)
+                .1
+                .is_some_and(|problem| problem.contains("the project's agent access was lowered"))
+                && host.alive().unwrap().is_empty()
+        },
+    );
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Stopped);
+    assert!(!fixture.recorded(master));
+    assert!(again.shutdown().unwrap().is_empty());
+
+    let legacy = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        access: None,
+        ..fixture.pane(&host, legacy)
+    };
+    fixture.keep(legacy, &record);
+    let mut old = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(
+        &mut old,
+        "a pane recorded with no level counts as Full access",
+        |f| {
+            f.agent_status(legacy)
+                .1
+                .is_some_and(|problem| problem.contains("the project's agent access was lowered"))
+                && host.alive().unwrap().is_empty()
+        },
+    );
+    assert!(old.shutdown().unwrap().is_empty());
+
+    let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = PaneRecord {
+        access: Some(AgentAccess::Sandboxed),
+        ..fixture.pane(&host, kept)
+    };
+    fixture.keep(kept, &record);
+    let mut last = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut last, "the Sandboxed master is taken over", |f| {
+        f.agent_status(kept) == (AgentStatus::Idle, None) && f.recorded(kept)
+    });
+    for _ in 0..20 {
+        last.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(fixture.agent_status(kept), (AgentStatus::Idle, None));
+    assert_eq!(started(kept), Some(AgentAccess::Sandboxed));
+    assert_eq!(last.shutdown().unwrap(), names(&[kept]));
+    host.close(&[]).unwrap();
 }
 
 #[test]
