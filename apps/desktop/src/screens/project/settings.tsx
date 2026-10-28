@@ -382,7 +382,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
-      onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
+      onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
     <ConfirmDialog open={confirming} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
       onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
       {FULL_ACCESS_WARNING}

@@ -1640,8 +1640,8 @@ async fn stale_read_paths_write_is_refused() {
     assert_eq!(result(removed), OwnerResult::Applied);
     assert_eq!(
         engine.rows("SELECT version FROM versioned_items WHERE item='read-paths:setup-pooled'"),
-        2,
-        "a removed project's folders keep their version"
+        3,
+        "a removed project's folders move their version on once more (V2V-1)"
     );
     let again = owner
         .setup_project(
@@ -1657,11 +1657,11 @@ async fn stale_read_paths_write_is_refused() {
         owner.project_read_paths(project.clone()).await.unwrap(),
         ReadPaths {
             paths: vec![],
-            version: 2
+            version: 3
         },
         "the project added again under the same id starts with no folders"
     );
-    for (version, generation) in [(0, 9), (1, 10)] {
+    for (version, generation) in [(0, 9), (1, 10), (2, 11)] {
         let refused = owner
             .set_project_read_paths(project.clone(), version, vec![text(&assets)], generation)
             .await
@@ -1673,7 +1673,7 @@ async fn stale_read_paths_write_is_refused() {
         );
     }
     let fresh = owner
-        .set_project_read_paths(project.clone(), 2, vec![text(&assets)], 11)
+        .set_project_read_paths(project.clone(), 3, vec![text(&assets)], 12)
         .await
         .unwrap();
     assert_eq!(result(fresh), OwnerResult::Applied);
@@ -1830,6 +1830,72 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         0,
         "the project's agent access goes with it"
     );
+    assert_eq!(
+        engine.rows("SELECT version FROM versioned_items WHERE item='agent-policy:setup-pooled'"),
+        3,
+        "removal moves the access version past every screen read before it (V2V-1)"
+    );
+    for item in [
+        "instruction-settings:setup-pooled",
+        "process:project:setup-pooled",
+    ] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT version FROM versioned_items WHERE item='{item}'"
+            )),
+            1,
+            "{item} moves on at removal even when it was never saved"
+        );
+    }
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(readded.access, AgentAccess::Sandboxed);
+    assert_eq!(readded.version, 3);
+    let from_before = owner
+        .set_project_agent_policy(
+            project.clone(),
+            view.version,
+            AgentPolicy {
+                access: AgentAccess::Full,
+                toolchains: Vec::new(),
+            },
+            6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(from_before),
+        rejected("stale_revision"),
+        "a screen that showed Full before the removal never gives the project added again Full"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        readded,
+        "the project added again stays Sandboxed"
+    );
+    let chosen = owner
+        .set_project_agent_policy(
+            project.clone(),
+            readded.version,
+            AgentPolicy {
+                access: AgentAccess::OwnBranch,
+                toolchains: Vec::new(),
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(chosen), OwnerResult::Applied);
     drop(owner);
     engine.stop().await;
 }

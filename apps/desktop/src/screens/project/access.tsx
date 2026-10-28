@@ -41,10 +41,11 @@ export function accessSummary(view: PolicyView): string {
   return `${accessLabel(view.access)} · ${tools.length ? tools.join(", ") : "no toolchains"}`;
 }
 
-/** Whether the owner must confirm the Full access warning before saving.
- * Inputs: the saved level, or null when none is saved yet, and the chosen level. Output: true to ask first. */
-export function confirmFirst(saved: AgentAccess | null, chosen: AgentAccess): boolean {
-  return chosen === "full" && saved !== "full";
+/** Whether the owner must confirm the Full access warning before saving: on every save
+ * with Full chosen, as the TUI asks, since the level the screen showed may no longer be the
+ * saved one. Input: the chosen level. Output: true to ask first. */
+export function confirmFirst(chosen: AgentAccess): boolean {
+  return chosen === "full";
 }
 
 function toolchainNote(row: PolicyView["toolchains"][number]): string {

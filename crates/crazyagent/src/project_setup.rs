@@ -2405,10 +2405,12 @@ fn set_agent_policy(
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; its read folders and its agents' own instructions go too. The versions
-/// of its read folders and instructions stay, so a project added again under the same id
-/// refuses a save from a screen read before the removal. Returns `invalid_project` for an
-/// unknown project.
+/// running one stops; its read folders, agent access, agent settings and its agents' own
+/// instructions go too. The versions of its read folders, agent access, agent settings and
+/// project instructions move on once more, so a project added again under the same id
+/// refuses a save from a screen read before the removal (V2V-1); agent ids are never reused,
+/// so its agents' instruction versions are dropped. Returns `invalid_project` for an unknown
+/// project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2435,6 +2437,14 @@ fn remove(
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    for item in [
+        crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::agent_policy_item(project_id),
+        crate::storage::versioned::instruction_settings_item(project_id),
+        crate::storage::versioned::process_text_item(Some(project_id)),
+    ] {
+        crate::storage::versioned::retire(tx, &item)?;
+    }
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

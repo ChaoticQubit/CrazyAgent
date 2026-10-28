@@ -378,6 +378,19 @@ pub fn forget(tx: &Transaction<'_>, item: &Item) -> Result<bool, EngineError> {
     Ok(removed == 1)
 }
 
+/// Moves one owner item's version past every version a screen could have read, for an item
+/// whose value goes away while its name can come back, such as a removed project's settings
+/// when a project is added again under the same id. A screen read before is then refused as
+/// stale instead of saving onto the new value. Inputs: an immediate transaction on
+/// `engine.db` and the item. Output: the new version, or `versioned_unavailable`.
+pub fn retire(tx: &Transaction<'_>, item: &Item) -> Result<u64, EngineError> {
+    let read = current(tx, item)?.version;
+    let moved = owner_write(tx, item, read)?;
+    assert!(moved.is_ok(), "no other write lands inside one transaction");
+    assert_eq!(current(tx, item)?.version, read + 1);
+    Ok(read + 1)
+}
+
 /// Opens the engine database for versioned writes without ever creating it, waiting up to
 /// five seconds behind another writer. Callers then write in an immediate transaction so a
 /// racing writer is told to re-read. Input: the absolute engine root holding `engine.db`.
