@@ -158,6 +158,7 @@ pub(crate) struct ManagedAgent {
     pub(crate) project: PathBuf,
     pub(crate) working_dir: PathBuf,
     pub(crate) sandbox_profile: PathBuf,
+    role: AgentRole,
     stamp: HostStamp,
     binding: NativeProfileBinding,
     _root: tempfile::TempDir,
@@ -190,17 +191,27 @@ pub(crate) fn claude() -> PathBuf {
 
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, None)
+        Self::open(harness, executable, None, AgentRole::Sub)
     }
 
-    /// The same agent with its harness app in a pane on `host`, as agents run where the
-    /// engine has a terminal. Inputs: the launch harness, its executable and the host.
-    /// Output: the prepared agent.
-    pub(crate) fn in_pane(harness: &'static str, executable: &Path, host: Arc<dyn Host>) -> Self {
-        Self::open(harness, executable, Some(host))
+    /// The same agent, or the project's master when `role` says so, with its harness app in
+    /// a pane on `host`, as agents run where the engine has a terminal. Inputs: the launch
+    /// harness, its executable, the host and the role. Output: the prepared agent.
+    pub(crate) fn in_pane(
+        harness: &'static str,
+        executable: &Path,
+        host: Arc<dyn Host>,
+        role: AgentRole,
+    ) -> Self {
+        Self::open(harness, executable, Some(host), role)
     }
 
-    fn open(harness: &'static str, executable: &Path, pane: Option<Arc<dyn Host>>) -> Self {
+    fn open(
+        harness: &'static str,
+        executable: &Path,
+        pane: Option<Arc<dyn Host>>,
+        role: AgentRole,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-dec-090-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -329,15 +340,7 @@ impl ManagedAgent {
             },
         };
         let (_, plan, mode) = runtime
-            .prepare(
-                &setup,
-                AGENT,
-                AgentRole::Sub,
-                harness,
-                true,
-                &account,
-                false,
-            )
+            .prepare(&setup, AGENT, role, harness, true, &account, false)
             .unwrap();
         let home = match mode {
             Mode::PerTurn { home, .. } => home,
@@ -356,6 +359,7 @@ impl ManagedAgent {
             project: project.canonicalize().unwrap(),
             working_dir,
             sandbox_profile,
+            role,
             stamp: host,
             binding,
             _root: root,
@@ -395,7 +399,7 @@ impl ManagedAgent {
         for (prompt, profile) in turns {
             let context = self
                 .runtime
-                .context(&project, AGENT, AgentRole::Sub, true)
+                .context(&project, AGENT, self.role, true)
                 .unwrap();
             orders
                 .send(Order::Turn(
@@ -429,7 +433,7 @@ impl ManagedAgent {
         let project = ProjectId::new(PROJECT).unwrap();
         let context = self
             .runtime
-            .context(&project, AGENT, AgentRole::Sub, true)
+            .context(&project, AGENT, self.role, true)
             .unwrap();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

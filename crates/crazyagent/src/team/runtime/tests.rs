@@ -3396,7 +3396,12 @@ fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() 
     let codex = bin.join("codex");
     std::fs::write(&codex, RESUMING_CODEX).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut agent = super::managed_agent::ManagedAgent::in_pane("codex", &codex, fixture.host());
+    let mut agent = super::managed_agent::ManagedAgent::in_pane(
+        "codex",
+        &codex,
+        fixture.host(),
+        AgentRole::Sub,
+    );
     let record = agent.profile_home.join("auth.json");
     std::fs::write(&record, signed_in_codex_record()).unwrap();
     std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -3487,6 +3492,71 @@ fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() 
         "the refusal is reported so the kept row is dropped"
     );
     assert_eq!(launched().len(), 3, "nothing started for a gone record");
+}
+
+/// A master on a signed-in account that is not live starts each turn's harness fresh
+/// (WKC-1): its feed briefs it and replays the conversation every turn, so its second
+/// turn resumes nothing, no conversation is kept for it, and each fresh harness is typed
+/// that turn's briefing once.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_signed_in_master_starts_each_turn_fresh_so_its_briefing_is_not_repeated() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut master = super::managed_agent::ManagedAgent::in_pane(
+        "codex",
+        &codex,
+        fixture.host(),
+        AgentRole::Master,
+    );
+    let record = master.profile_home.join("auth.json");
+    std::fs::write(&record, signed_in_codex_record()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let briefing = "You lead the team for the page project.";
+    let first = format!("{briefing} Message from the owner: Plan the page");
+    let second = format!("{briefing} Message from the owner: Now plan the title");
+    let turns = vec![
+        (first.as_str(), master.acquire("wkc-1-turn-1")),
+        (second.as_str(), master.acquire("wkc-1-turn-2")),
+    ];
+    let (reports, problem) = master.run_turns(None, turns, WAIT);
+    assert_eq!(problem, None);
+    let ends: Vec<TurnEnd> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Finished { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [TurnEnd::Success, TurnEnd::Success]);
+    let launched: Vec<String> = std::fs::read_to_string(master.home.join("launches"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(launched.len(), 2, "{launched:?}");
+    assert!(
+        launched.iter().all(|line| !line.contains(" resume ")),
+        "the master's second turn starts a fresh conversation: {launched:?}"
+    );
+    assert_eq!(
+        reported_conversations(&reports),
+        Vec::<String>::new(),
+        "no conversation is kept for a master that is briefed every turn"
+    );
+    let typed = std::fs::read_to_string(master.home.join("typed")).unwrap();
+    assert_eq!(typed.matches(briefing).count(), 2, "{typed}");
+    let conversations = std::fs::read_dir(master.home.join("sessions/2026/10/27"))
+        .unwrap()
+        .count();
+    assert_eq!(
+        conversations, 2,
+        "each turn's briefing goes to its own conversation"
+    );
 }
 
 /// The owner's Wake of a finished sub-agent whose conversation cannot continue (WK-R4): it

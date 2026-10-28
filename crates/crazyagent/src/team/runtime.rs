@@ -137,6 +137,7 @@ struct Plan {
     pane: Option<(Arc<dyn Host>, AgentId)>,
     live: bool,
     resume: Option<Resume>,
+    continues: bool,
 }
 
 impl Plan {
@@ -2925,6 +2926,7 @@ impl TeamRuntime {
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
             live,
             resume: None,
+            continues: role == AgentRole::Sub,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -4340,9 +4342,10 @@ fn serve(
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
 /// stop its warden did not confirm keeps both for the engine's life and ends the agent.
-/// Each turn's harness continues the conversation the previous turn recorded, or the one
-/// the plan resumes for a woken agent, and a new conversation is reported so a later wake
-/// continues it; a refused resume is reported and ends the agent as a kept one does.
+/// A sub-agent's turn continues the conversation its previous turn recorded, or the one the
+/// plan resumes for a woken agent, and a new conversation is reported so a later wake
+/// continues it; a refused resume is reported and ends the agent as a kept one does. A
+/// master's turn starts a fresh conversation, since its feed briefs it again each turn.
 fn per_turn(
     plan: &Plan,
     home: &Path,
@@ -4403,7 +4406,7 @@ fn per_turn(
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
         if let Some(recorded) = session
             .conversation()
-            .filter(|c| resume.as_ref() != Some(c))
+            .filter(|c| plan.continues && resume.as_ref() != Some(c))
         {
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
