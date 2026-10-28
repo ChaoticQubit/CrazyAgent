@@ -563,16 +563,16 @@ impl Draw<'_> {
     }
 }
 
-/// Draws the New project wizard body for the current step.
-/// Takes the wizard, the frame width and height, and the look.
-/// Returns the body rows, cursor, breadcrumb and help keys.
+/// Draws the New project wizard body for the current step, never narrower than the
+/// smallest frame the shell draws. Takes the wizard, the frame width and height, and
+/// the look. Returns the body rows, cursor, breadcrumb and help keys.
 pub(in crate::tui) fn wizard_screen(
     wizard: &Wizard,
     width: u16,
     height: u16,
     look: &Look,
 ) -> Screen {
-    let width = usize::from(width);
+    let width = usize::from(width.max(crate::tui::frame::MIN_WIDTH));
     let wide = width >= 100;
     let content = if wide { width - 30 } else { width - 4 };
     let mut draw = Draw {
