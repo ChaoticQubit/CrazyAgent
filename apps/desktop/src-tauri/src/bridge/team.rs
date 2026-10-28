@@ -132,6 +132,20 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets where the project's finished agents show: in the agents list and team graph, or
+    /// only in their Finished fold-out. Takes the project id, true for Show and the client
+    /// generation. Returns the actual commit receipt.
+    pub async fn team_finished_agents(
+        &mut self,
+        id: &str,
+        show: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::FinishedAgents { project_id, show }, generation)
+            .await
+    }
+
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
     /// app running in a terminal the owner types into. Takes the project id, the switch and
     /// the client generation. Returns the actual commit receipt.
@@ -203,6 +217,22 @@ impl NativeBridge {
             handle,
         };
         self.team_action(action, generation).await
+    }
+
+    /// Wakes a finished sub-agent (DEC-102) as a team action by its id, which the team runtime
+    /// serves wherever team agents run: the same agent comes back under its own name, worktree
+    /// and harness session. Takes the project id, the team agent id and the client generation.
+    /// Returns the actual commit receipt; a running agent, a cleaned-up worktree or a system
+    /// where team agents cannot run is a plain rejection.
+    pub async fn team_wake_agent(
+        &mut self,
+        id: &str,
+        agent: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::WakeAgent { project_id, agent }, generation)
+            .await
     }
 
     async fn team_action(

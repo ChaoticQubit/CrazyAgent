@@ -718,6 +718,9 @@ export interface TeamAgent {
   stopped_ms: number | null;
   persona?: string | null;
   handle?: string | null;
+  finished?: boolean;
+  wakeable?: boolean;
+  wake_note?: string | null;
 }
 
 export interface TeamTask {
@@ -750,6 +753,7 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  show_finished?: boolean;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -858,6 +862,12 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
 }
 
+/** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
+ * agents list and team graph) or false for Hide (the Finished fold-out only) and a generation. */
+export function teamFinishedAgents(id: string, show: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, generation });
+}
+
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a
  * generation. Output: the commit receipt; a master with no terminal app is rejected. */
 export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
@@ -876,6 +886,13 @@ export function teamHandOff(id: string, reply: number, step: number, generation:
  * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
 export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
+}
+
+/** Wakes a finished sub-agent by its team id; the team runtime brings the same agent back in
+ * its own worktree and session. Inputs: project id, team agent id and a generation. Output: the
+ * commit receipt; an agent that cannot wake is rejected with a plain code. */
+export function teamWakeAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.

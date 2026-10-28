@@ -34,6 +34,12 @@ const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
 const CAPTURE_TRIMMED: &str = "-p -e";
 const REPLY_TIME: Duration = Duration::from_secs(10);
+/// Ends every format the engine has tmux expand. tmux stops expanding a format that has run
+/// for 100 ms of wall time, which a server stalled on a loaded machine reaches, and answers
+/// with the text so far as a success; only a line ending with this mark was expanded whole.
+const FORMAT_END: &str = " end";
+const REPLY_CUT: &str = "terminal_reply_cut";
+const PLACED: &str = "#{pane_id} #{pane_pid}";
 const CLOSE_TIME: Duration = Duration::from_secs(2);
 const LINE_BYTES_MAX: usize = 1024 * 1024;
 const REPLY_BYTES_MAX: usize = 32 * 1024 * 1024;
@@ -234,7 +240,7 @@ impl Tmux {
             return Err(failure("terminal_unavailable"));
         }
         let version = control
-            .run("display-message -p '#{version}'")
+            .ask(&format!("display-message -p '#{{version}}{FORMAT_END}'"))
             .map_err(|_| failure("terminal_unavailable"))?;
         let Some(capture) = version
             .first()
@@ -366,6 +372,26 @@ impl Control {
         let (reply, answer) = sync_channel(1);
         self.send(line, Pending::Reply(reply))?;
         self.wait(&answer)
+    }
+
+    /// Runs a command that only reads, whose every reply line is a format ending with
+    /// `FORMAT_END`, and asks again while tmux cut a line short, for at most `REPLY_TIME`.
+    /// Takes the command. Returns the lines without the mark, or `terminal_not_answering`.
+    fn ask(&self, line: &str) -> Answer {
+        let until = Instant::now() + REPLY_TIME;
+        loop {
+            let lines = self.run(line)?;
+            let kept: Option<Lines> = lines
+                .iter()
+                .map(|line| whole(line).map(<[u8]>::to_vec))
+                .collect();
+            if let Some(kept) = kept {
+                return Ok(kept);
+            }
+            if Instant::now() >= until {
+                return Err(failure("terminal_not_answering"));
+            }
+        }
     }
 
     fn stop(&self) {
@@ -531,7 +557,7 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
         return Err(invalid());
     }
     let mut line = format!(
-        "new-window -d -P -F '#{{pane_id}} #{{pane_pid}}' -n {agent} -c {} -t {SESSION}:",
+        "new-window -d -P -F '{PLACED}{FORMAT_END}' -n {agent} -c {} -t {SESSION}:",
         quote(cwd)
     );
     line.push_str(" -- ");
@@ -621,8 +647,14 @@ struct Located {
     history: usize,
 }
 
+/// Takes one reply line of a format ending with `FORMAT_END`. Returns the line without the
+/// mark, or none when tmux cut its expansion short.
+fn whole(line: &[u8]) -> Option<&[u8]> {
+    line.strip_suffix(FORMAT_END.as_bytes())
+}
+
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
-    let text = std::str::from_utf8(lines.first()?).ok()?;
+    let text = std::str::from_utf8(whole(lines.first()?)?).ok()?;
     let fields: Vec<&str> = text.split(' ').collect();
     let [pane, window, x, y, cols, rows, paste, keys, history] = fields.as_slice() else {
         return None;
@@ -666,7 +698,7 @@ fn viewer(
         cursor,
         modes,
         history,
-    } = located(located_lines).ok_or_else(|| failure("terminal_command_failed"))?;
+    } = located(located_lines).ok_or_else(|| failure(REPLY_CUT))?;
     let history = history.min(limit);
     assert!(capture.len() <= history + usize::from(rows));
     let (earlier, screen) = capture.split_at(history.min(capture.len()));
@@ -840,7 +872,9 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
 }
 
 fn windows(control: &Control) -> Result<Vec<AgentId>, HostError> {
-    let lines = control.run(&format!("list-windows -t {SESSION} -F '#{{window_name}}'"))?;
+    let lines = control.ask(&format!(
+        "list-windows -t {SESSION} -F '#{{window_name}}{FORMAT_END}'"
+    ))?;
     let mut agents: Vec<AgentId> = lines
         .iter()
         .filter_map(|line| std::str::from_utf8(line).ok())
@@ -870,21 +904,28 @@ impl Tmux {
             format!("-{history}")
         };
         let line = format!(
-            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}' ; capture-pane {} -S {start} -t {target}",
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
             control.capture
         );
-        let (reply, answer) = sync_channel(1);
-        control.send(
-            &line,
-            Pending::Attach {
-                agent: agent.clone(),
-                located: None,
-                history,
-                view,
-                reply,
-            },
-        )?;
-        control.wait(&answer)
+        let until = Instant::now() + REPLY_TIME;
+        loop {
+            let (reply, answer) = sync_channel(1);
+            control.send(
+                &line,
+                Pending::Attach {
+                    agent: agent.clone(),
+                    located: None,
+                    history,
+                    view,
+                    reply,
+                },
+            )?;
+            match control.wait(&answer) {
+                Err(cut) if cut.0 == REPLY_CUT && Instant::now() < until => {}
+                Err(cut) if cut.0 == REPLY_CUT => return Err(failure("terminal_not_answering")),
+                answered => return answered,
+            }
+        }
     }
 }
 
@@ -900,10 +941,18 @@ impl Host for Tmux {
             return Err(failure("terminal_agent_running"));
         }
         let lines = control.run(&line)?;
-        let text = lines
-            .first()
-            .map(|line| String::from_utf8_lossy(line).into_owned())
-            .unwrap_or_default();
+        let placed = match lines.first().and_then(|line| whole(line)) {
+            Some(placed) => placed.to_vec(),
+            None => control
+                .ask(&format!(
+                    "list-panes -t {} -F '{PLACED}{FORMAT_END}'",
+                    target(agent)
+                ))?
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+        };
+        let text = String::from_utf8_lossy(&placed).into_owned();
         let (pane, pid) = text
             .split_once(' ')
             .ok_or_else(|| failure("terminal_command_failed"))?;
@@ -942,8 +991,8 @@ impl Host for Tmux {
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
-        let lines = self.live_control()?.run(&format!(
-            "display-message -p -t {} '#{{bracket_paste_flag}}'",
+        let lines = self.live_control()?.ask(&format!(
+            "display-message -p -t {} '#{{bracket_paste_flag}}{FORMAT_END}'",
             target(agent)
         ))?;
         Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))

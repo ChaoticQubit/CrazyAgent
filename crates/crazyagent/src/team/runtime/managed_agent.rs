@@ -5,9 +5,11 @@ use crate::config::{
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
+use crate::harnesses::terminal_session::Resume;
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::team::{AgentRole, TeamAccount, TeamReach};
+use crate::terminal::Host;
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -15,6 +17,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -155,6 +158,9 @@ pub(crate) struct ManagedAgent {
     pub(crate) project: PathBuf,
     pub(crate) working_dir: PathBuf,
     pub(crate) sandbox_profile: PathBuf,
+    role: AgentRole,
+    stamp: HostStamp,
+    binding: NativeProfileBinding,
     _root: tempfile::TempDir,
 }
 
@@ -185,6 +191,27 @@ pub(crate) fn claude() -> PathBuf {
 
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
+        Self::open(harness, executable, None, AgentRole::Sub)
+    }
+
+    /// The same agent, or the project's master when `role` says so, with its harness app in
+    /// a pane on `host`, as agents run where the engine has a terminal. Inputs: the launch
+    /// harness, its executable, the host and the role. Output: the prepared agent.
+    pub(crate) fn in_pane(
+        harness: &'static str,
+        executable: &Path,
+        host: Arc<dyn Host>,
+        role: AgentRole,
+    ) -> Self {
+        Self::open(harness, executable, Some(host), role)
+    }
+
+    fn open(
+        harness: &'static str,
+        executable: &Path,
+        pane: Option<Arc<dyn Host>>,
+        role: AgentRole,
+    ) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-dec-090-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -285,12 +312,24 @@ impl ManagedAgent {
             TeamLimits::default(),
         )
         .unwrap();
+        if let Some(pane) = pane {
+            runtime = runtime.with_terminal(pane).unwrap();
+        }
         let host = HostStamp {
             db_instance: "a".repeat(64),
             engine_epoch: "b".repeat(64),
         };
         let custody = runtime.custody.as_mut().unwrap();
-        custody.prepare(&host, &model).unwrap();
+        let (custody_id, _) = custody.prepare(&host, &model).unwrap();
+        let binding = NativeProfileBinding {
+            database_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            config_id: ConfigId::new("c".repeat(64)).unwrap(),
+            source_hash: "d".repeat(64),
+            at_revision: Cursor::new(1),
+            connection: model.clone(),
+            custody_id,
+        };
         let profile_home = custody.profile_home(&profile_ref);
         assert!(profile_home.is_dir(), "{}", profile_home.display());
         let account = TeamAccount {
@@ -301,15 +340,7 @@ impl ManagedAgent {
             },
         };
         let (_, plan, mode) = runtime
-            .prepare(
-                &setup,
-                AGENT,
-                AgentRole::Sub,
-                harness,
-                true,
-                &account,
-                false,
-            )
+            .prepare(&setup, AGENT, role, harness, true, &account, false)
             .unwrap();
         let home = match mode {
             Mode::PerTurn { home, .. } => home,
@@ -328,8 +359,64 @@ impl ManagedAgent {
             project: project.canonicalize().unwrap(),
             working_dir,
             sandbox_profile,
+            role,
+            stamp: host,
+            binding,
             _root: root,
         }
+    }
+
+    /// Takes this engine's own managed profile for one launch, as the runtime's grant does.
+    /// Input: the launch's name. Output: the profile held for execution.
+    pub(crate) fn acquire(&mut self, launch: &str) -> NativeProfileUse {
+        self.runtime
+            .custody
+            .as_mut()
+            .unwrap()
+            .acquire_use(
+                &self.stamp,
+                &self.binding,
+                &RequestId::new(launch).unwrap(),
+                1,
+                NativeProfileUsePurpose::Execution,
+            )
+            .unwrap()
+    }
+
+    /// Runs one per-turn worker over several turns the way the runtime runs a managed
+    /// agent, continuing `resume` when a wake gives one. Inputs: the conversation to
+    /// continue, each turn's prompt with the profile held for it and the turn's time.
+    /// Output: every report the worker sent and the problem that ended it, if any.
+    pub(super) fn run_turns(
+        &mut self,
+        resume: Option<Resume>,
+        turns: Vec<(&str, NativeProfileUse)>,
+        turn_time: Duration,
+    ) -> (Vec<Report>, Option<String>) {
+        let project = ProjectId::new(PROJECT).unwrap();
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        for (prompt, profile) in turns {
+            let context = self
+                .runtime
+                .context(&project, AGENT, self.role, true)
+                .unwrap();
+            orders
+                .send(Order::Turn(
+                    prompt.to_owned(),
+                    Some(Box::new(Grant { profile, context })),
+                ))
+                .unwrap();
+        }
+        drop(orders);
+        self.plan.resume = resume;
+        let cancel = AtomicBool::new(false);
+        let interrupt = AtomicBool::new(false);
+        let problem = per_turn(
+            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt, turn_time,
+        );
+        drop(reports);
+        (reported.iter().collect(), problem)
     }
 
     /// Runs one turn of the agent the way the runtime runs every turn on a managed
@@ -346,7 +433,7 @@ impl ManagedAgent {
         let project = ProjectId::new(PROJECT).unwrap();
         let context = self
             .runtime
-            .context(&project, AGENT, AgentRole::Sub, true)
+            .context(&project, AGENT, self.role, true)
             .unwrap();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

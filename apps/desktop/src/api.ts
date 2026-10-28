@@ -999,6 +999,13 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
 }
 
+/** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
+ * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+}
+
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
  * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
  * or a plain error. */

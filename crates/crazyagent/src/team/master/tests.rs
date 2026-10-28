@@ -604,3 +604,220 @@ fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
     assert_eq!(escalations, ESCALATIONS_PER_HOUR_MAX);
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
+
+/// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
+/// kept worktree, as a delegated agent leaves them. Takes the fixture, the role, the status
+/// and when it stopped. Returns the agent id.
+#[cfg(target_os = "macos")]
+fn named_sub(fixture: &Fixture, role: &str, status: &str) -> i64 {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','codex',0,'working',?2,?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let agent = fixture.connection.last_insert_rowid();
+    let project = ProjectId::new(PROJECT).unwrap();
+    assert!(
+        super::super::names::assign_role(&fixture.connection, &project, agent, role)
+            .unwrap()
+            .is_ok()
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status=?2, stopped_ms=?3 WHERE id=?1",
+            params![agent, status, NOW + agent],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+        )
+        .unwrap();
+    agent
+}
+
+/// The task ids pinned to an agent, as a wake leaves them. Takes the fixture and agent.
+#[cfg(target_os = "macos")]
+fn pinned(fixture: &Fixture, agent: i64) -> Vec<i64> {
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT task FROM team_task_pins WHERE agent=?1 ORDER BY task")
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A handle a finished sub-agent and a running one share wakes the finished one (WK-R2):
+/// the master's `wake` looks among finished sub-agents first, so a live namesake never
+/// answers "running", and the running agent is still reached by its number. The woken
+/// agent's handle is settled when the wake is admitted and the reply names it (WKC-2): the
+/// old handle still reaches only the running namesake, the new one reaches nobody else
+/// while it waits and is not given away, and the agent starts under it.
+#[cfg(target_os = "macos")]
+#[test]
+fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let finished = named_sub(&fixture, "onboarding-fix", "stopped");
+    let live = named_sub(&fixture, "onboarding-fix", "working");
+    let label = super::super::events::label(&fixture.connection, finished).unwrap();
+    assert!(label.ends_with("(@onboarding-fix)"), "{label}");
+    let project = ProjectId::new(PROJECT).unwrap();
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(
+                1,
+                tool::WAKE_TOOL,
+                json!({"agent": "@onboarding-fix", "text": "Fix the onboarding copy."}),
+            ),
+            tool_call(
+                2,
+                tool::WAKE_TOOL,
+                json!({"agent": format!("Sub-agent {live}"), "text": "Stop."}),
+            ),
+        ],
+    );
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+    let settled = super::super::events::label(&fixture.connection, finished).unwrap();
+    assert!(settled.ends_with("(@onboarding-fix-2)"), "{settled}");
+    assert_eq!(
+        text(&answers[0]),
+        (
+            format!("Waking {settled}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
+            false
+        )
+    );
+    assert_eq!(pinned(&fixture, finished).len(), 1);
+    assert!(pinned(&fixture, live).is_empty());
+    let (said, refused) = text(&answers[1]);
+    assert!(refused && said.contains("is running"), "{said}");
+    let resolve =
+        |name: &str| super::super::names::resolve(&fixture.connection, &project, name).unwrap();
+    assert_eq!(resolve("@onboarding-fix"), Some(live));
+    assert_eq!(
+        resolve("@onboarding-fix-2"),
+        None,
+        "a message by the woken agent's handle reaches no other agent while it waits"
+    );
+    let later = named_sub(&fixture, "onboarding-fix", "working");
+    let handle = |agent: i64| -> String {
+        fixture
+            .connection
+            .query_row(
+                "SELECT handle FROM team_names WHERE agent=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        handle(later),
+        "onboarding-fix-3",
+        "the waiting agent's handle is not given away"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [finished],
+        )
+        .unwrap();
+    super::super::names::reclaim(&fixture.connection, &project, finished).unwrap();
+    assert_eq!(handle(finished), "onboarding-fix-2");
+    assert_eq!(resolve("@onboarding-fix-2"), Some(finished));
+    assert_eq!(resolve("@onboarding-fix"), Some(live));
+}
+
+/// A sub-agent that finishes after the live master's session started is in the master's
+/// status read, named with its Sub-agent number, and wakes by that number (WK-R3), so a
+/// master whose briefing predates it can still find it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let before = status_text(&fixture.connection, &project).unwrap();
+    assert!(!before.contains("Finished sub-agents"), "{before}");
+
+    let agent = named_sub(&fixture, "page-writer", "stopped");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let told = status_text(&fixture.connection, &project).unwrap();
+    assert!(
+        told.contains(&format!(
+            "Finished sub-agents you can wake with {}(agent, text), newest first:\n- {label}, Sub-agent {agent} (",
+            tool::WAKE_TOOL
+        )),
+        "{told}"
+    );
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::WAKE_TOOL,
+            json!({"agent": format!("Sub-agent {agent}"), "text": "Add the footer."}),
+        )],
+    );
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    let (said, refused) = text(&answers[0]);
+    assert!(
+        !refused && said.starts_with(&format!("Waking {label}:")),
+        "{said}"
+    );
+    assert_eq!(pinned(&fixture, agent).len(), 1);
+}
+
+/// A master's wake of a sub-agent the owner stopped is refused in plain words and pins
+/// nothing (AW-1); only the owner's Wake or restart starts it again.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_cannot_wake_an_agent_the_owner_stopped() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let agent = named_sub(&fixture, "page-writer", "stopped");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+            params![agent, PROJECT, NOW],
+        )
+        .unwrap();
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::WAKE_TOOL,
+            json!({"agent": "@page-writer", "text": "You were interrupted, finish it."}),
+        )],
+    );
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    assert_eq!(
+        text(&answers[0]),
+        (
+            format!("The owner stopped {label}. Only the owner can wake it.").as_str(),
+            true
+        )
+    );
+    assert!(pinned(&fixture, agent).is_empty());
+    let tasks: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tasks, 0);
+}

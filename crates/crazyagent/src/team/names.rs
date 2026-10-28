@@ -36,6 +36,8 @@ pub const HANDLE_CHARS_MAX: usize = 32;
 pub const MASTER_HANDLE: &str = "master";
 const NAME_CHARS_MAX: usize = 64;
 const LIVE: &str = "a.status IN ('starting','idle','working')";
+const WAKING: &str = "EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+     WHERE p.agent=a.id AND t.status IN ('queued','needs_pool'))";
 const SUFFIXES_MAX: usize = PANES_PER_PROJECT_MAX + 2;
 
 const _: () = assert!(PERSONAS.len() > PANES_PER_PROJECT_MAX);
@@ -185,7 +187,8 @@ fn held(
     let mut statement = connection
         .prepare(&format!(
             "SELECT n.{column} FROM team_names n JOIN team_agents a ON a.id=n.agent
-             WHERE n.project=?1 AND a.project=?1 AND n.agent<>?2 AND n.{column} IS NOT NULL AND {LIVE}"
+             WHERE n.project=?1 AND a.project=?1 AND n.agent<>?2 AND n.{column} IS NOT NULL
+             AND ({LIVE} OR {WAKING})"
         ))
         .map_err(error)?;
     let found = statement
@@ -198,8 +201,8 @@ fn held(
     Ok(found)
 }
 
-/// Gives a sub-agent its persona: the one it already has while no other live agent of the
-/// project holds it, or else a free persona no agent of the project held before, or the
+/// Gives a sub-agent its persona: the one it already has while no other live or waking agent
+/// of the project holds it, or else a free persona no agent of the project held before, or the
 /// least used. Takes the connection, project and team agent id. Returns the persona, or an
 /// error when the agent is not a sub-agent of the project.
 pub fn assign_persona(
@@ -299,6 +302,38 @@ fn store_handle(
         .map_err(error)?;
     assert_eq!(changed, 1);
     Ok(Ok(chosen))
+}
+
+/// Gives a sub-agent that starts again its names back (DEC-102): its persona while no other
+/// live agent holds it, and its role handle, with the first free `-2`, `-3` suffix when a
+/// live agent took that handle while it was stopped, or no handle when every suffix is
+/// taken, so no two live agents ever share a name and a live agent's name never changes
+/// under its master. A woken agent's names are settled when its wake is admitted and stay
+/// held while its pinned task waits (WKC-2), so it starts under the name the master was
+/// told. Takes the connection, project and team agent id. Returns the name, or an error
+/// when the agent is not a sub-agent of the project.
+pub fn reclaim(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<AgentName, EngineError> {
+    let persona = assign_persona(connection, project, agent)?;
+    let handle = match name(connection, agent)?.and_then(|name| name.handle) {
+        Some(handle) => match store_handle(connection, project, agent, &handle, true)? {
+            Ok(kept) => Some(kept),
+            Err(_) => {
+                connection
+                    .execute("UPDATE team_names SET handle=NULL WHERE agent=?1", [agent])
+                    .map_err(error)?;
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(handle) = &handle {
+        assert!(!held(connection, project, agent, "handle")?.contains(handle));
+    }
+    Ok(AgentName { persona, handle })
 }
 
 /// Sets the role handle of a sub-agent's current job, as the master asked for it; a handle
@@ -441,6 +476,44 @@ pub fn resolve(
                     "SELECT a.id FROM team_names n JOIN team_agents a ON a.id=n.agent
                      WHERE n.project=?1 AND a.project=?1 AND a.role='sub' AND {LIVE} AND n.{column}=?2 COLLATE NOCASE
                      ORDER BY a.id DESC LIMIT 1"
+                ),
+                params![project.as_str(), bare],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(error)
+    };
+    if !marked && let Some(found) = by("persona")? {
+        return Ok(Some(found));
+    }
+    by("handle")
+}
+
+/// Finds the finished sub-agent of a project that a name addresses, for a wake (DEC-102):
+/// a persona in any case first, then an `@handle` or bare handle, among the project's
+/// sub-agents that stopped or failed, the most recently stopped one when several carried it.
+/// Takes the connection, project and the name text. Returns the team agent id, or None.
+pub fn resolve_finished(
+    connection: &Connection,
+    project: &ProjectId,
+    text: &str,
+) -> Result<Option<i64>, EngineError> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > NAME_CHARS_MAX {
+        return Ok(None);
+    }
+    let (marked, bare) = match text.strip_prefix('@') {
+        Some(bare) => (true, bare.to_ascii_lowercase()),
+        None => (false, text.to_ascii_lowercase()),
+    };
+    let by = |column: &str| {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT a.id FROM team_names n JOIN team_agents a ON a.id=n.agent
+                     WHERE n.project=?1 AND a.project=?1 AND a.role='sub'
+                       AND a.status IN ('stopped','failed') AND n.{column}=?2 COLLATE NOCASE
+                     ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT 1"
                 ),
                 params![project.as_str(), bare],
                 |row| row.get::<_, i64>(0),
