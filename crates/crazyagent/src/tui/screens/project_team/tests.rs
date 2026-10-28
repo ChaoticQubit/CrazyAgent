@@ -127,6 +127,7 @@ fn team() -> TeamStatus {
         project_id: project(),
         keep_warm: false,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,

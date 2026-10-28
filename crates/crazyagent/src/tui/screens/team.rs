@@ -39,6 +39,7 @@ const PAGE_STEP: usize = 10;
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
 const MASTER_STOPPED: &str =
     "The live master is stopped. Its terminal opens again once you start it.";
@@ -78,6 +79,7 @@ struct TreeRow {
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
+    switched: Option<String>,
 }
 
 struct Attached {
@@ -208,6 +210,7 @@ impl Team {
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
+                    switched: status.live_switch.as_ref().map(switched_words),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -224,9 +227,11 @@ impl Team {
             } if *project_id == self.project => match result {
                 Ok(_) => {
                     self.want = None;
+                    let switched = self.switch.take().and_then(|switch| switch.switched);
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
+                        switched,
                     });
                     self.read_switch(ctx);
                 }
@@ -688,23 +693,30 @@ impl Team {
         }
     }
 
-    /// The master view's header: whether the live master is on, and the key that switches it
-    /// at the right edge. Inputs: the width and context. Output: the line.
+    /// The master view's header: whether the live master is on, where the live session's
+    /// master harness last switched, and the key that switches it at the right edge.
+    /// Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
-        let state = if self.live_on() == Some(false) {
-            MASTER_OFF
-        } else {
-            MASTER_ON
+        let switched = self
+            .switch
+            .as_ref()
+            .and_then(|switch| switch.switched.as_deref());
+        let state = match (self.live_on() == Some(false), switched) {
+            (true, None) => MASTER_OFF.to_owned(),
+            (true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
+            (false, None) => MASTER_ON.to_owned(),
+            (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
         let control = format!("s {}", self.switch_control());
         let room = limit.saturating_sub(width(&control));
-        if room < width(state) + 2 {
+        if room < width(MASTER_OFF) + 2 {
             return styled(
                 cut(&control, limit, ctx.glyphs.ellipsis),
                 Role::Muted,
                 &ctx.theme,
             );
         }
+        let state = cut(&state, room - 2, ctx.glyphs.ellipsis);
         join([
             Line::raw(format!("{state:<room$}")),
             styled(control, Role::Muted, &ctx.theme),
@@ -1370,6 +1382,16 @@ fn inside(area: Rect) -> Rect {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     )
+}
+
+/// The master header's words for the live session's last master harness switch.
+/// Takes the switch. Returns "Switched to <harness>, carried over" or ", started fresh".
+fn switched_words(switch: &crate::team::SessionSwitch) -> String {
+    let what = match switch.mode {
+        crate::team::SwitchMode::Carry => "carried over",
+        crate::team::SwitchMode::Fresh => "started fresh",
+    };
+    format!("Switched to {}, {what}.", plain(&switch.harness))
 }
 
 /// Splits the master view into its header row with the live master switch and the body.

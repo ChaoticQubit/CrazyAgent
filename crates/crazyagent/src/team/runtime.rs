@@ -1681,10 +1681,12 @@ impl TeamRuntime {
             None => None,
         };
         let mut switch_note = None;
+        let mut switch_mode = None;
         let mut plan = match (&session, switched) {
             (Some(session), Some(from)) => {
                 let to = crate::master_sessions::harness_label(launch);
                 let mode = super::on_harness_switch(&self.connection, project)?;
+                switch_mode = Some(mode);
                 match mode {
                     super::SwitchMode::Carry => {
                         let kept = super::master::session_conversation(
@@ -1767,6 +1769,11 @@ impl TeamRuntime {
             Some(id) => Ok(id),
             None => self.spawn(stored, AgentRole::Master, harness, tools, account)?,
         };
+        if started.is_ok()
+            && let (Some(session), Some(mode)) = (&session, switch_mode)
+        {
+            super::record_switch(&self.connection, project, session.as_str(), launch, mode)?;
+        }
         Ok(started.map(|id| {
             let (id, note) = self.seat_session(id, session.as_ref(), seeded);
             (id, note.or(switch_note))
