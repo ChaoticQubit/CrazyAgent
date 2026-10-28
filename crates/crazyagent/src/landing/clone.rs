@@ -39,11 +39,16 @@ fn invalid() -> EngineError {
 /// with no template, hooks or config beyond git's defaults, that reads the project's
 /// objects through `objects/info/alternates` and never writes them, its branch
 /// `agent_git::branch` at the owner's HEAD commit and checked out, with no command the
-/// owner's repository configures run. Inputs: the owner checkout root and the new
-/// worktree folder, absolute, whose parent exists. Output: Ok once the clone holds the
-/// commit, else `changes_workspace_invalid`, `changes_git_unsupported` or
-/// `changes_git_failed`.
-pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+/// owner's repository configures run. A worker cut from its lead starts at the lead's
+/// commit instead, which the owner repository already holds. Inputs: the owner checkout
+/// root, the new worktree folder, absolute, whose parent exists, and that commit, None for
+/// the owner's HEAD. Output: Ok once the clone holds the commit, else
+/// `changes_workspace_invalid`, `changes_git_unsupported` or `changes_git_failed`.
+pub(super) fn add(
+    repository: &Path,
+    worktree: &Path,
+    base: Option<&str>,
+) -> Result<(), EngineError> {
     let branch = agent_git::branch(worktree).ok_or_else(invalid)?;
     let parent = worktree.parent().ok_or_else(invalid)?;
     let objects = repository.join(".git").join("objects");
@@ -58,7 +63,7 @@ pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError>
     }
     let shared = Repo::open(repository, &repository.join(".git"), None)?;
     let head = shared
-        .commit_of("HEAD")?
+        .commit_of(base.unwrap_or("HEAD"))?
         .ok_or_else(|| failure("changes_git_failed"))?;
     let format = shared.run(&["rev-parse", "--show-object-format"])?;
     let format = match format.as_slice() {

@@ -35,10 +35,25 @@ pub const SESSIONS_TOOL: &str = "sessions";
 pub const SESSION_TOOL: &str = "session";
 pub const REMEMBER_TOOL: &str = "remember";
 pub const RECALL_TOOL: &str = "recall";
+pub const ACCEPT_TOOL: &str = "accept";
 /// The engine subcommand that serves a sub-agent's team tools, `AGENT_TOOLS`.
 pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
-/// The team tools a sub-agent gets; a live master gets them with its own.
-pub const AGENT_TOOLS: [&str; 4] = [SESSIONS_TOOL, SESSION_TOOL, REMEMBER_TOOL, RECALL_TOOL];
+/// The team tools a sub-agent gets: past conversations and memory, and the lead tools that
+/// reach only its own workers, whose `delegate` the engine refuses past the owner's Sub-agent
+/// depth setting. A live master gets all but `accept` with its own.
+pub const AGENT_TOOLS: [&str; 11] = [
+    SESSIONS_TOOL,
+    SESSION_TOOL,
+    REMEMBER_TOOL,
+    RECALL_TOOL,
+    TOOL_NAME,
+    STATUS_TOOL,
+    MESSAGE_TOOL,
+    ANSWER_TOOL,
+    WAKE_TOOL,
+    CHANGES_TOOL,
+    ACCEPT_TOOL,
+];
 /// The one instructions line that names the past-conversation tools.
 pub const HISTORY_LINE: &str = "Past conversations: sessions(query) in the crazyagent-team MCP server searches every earlier master and sub-agent conversation of this project, of any age, and session(id, offset) reads one page by page.\n";
 /// The one instructions line that names the saved-memory tools.
@@ -68,6 +83,8 @@ const SESSION_INVALID: &str =
     "Not read: give a conversation id from sessions() and a message number from 0.";
 const REMEMBER_INVALID: &str =
     "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
+const ACCEPT_INVALID: &str =
+    "Not accepted: give the change set id that changes() lists, 32 letters and digits.";
 const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -85,7 +102,8 @@ const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 /// and `changes` read the team and its pending change sets, `escalate` raises an app
 /// notification for a decision only the owner makes, `sessions` and `session` search and
 /// read the project's past conversations, and `remember` and `recall` save and search
-/// memories; those four are the only calls a sub-agent makes.
+/// memories. A sub-agent makes those four, and as a lead the team calls that reach its own
+/// workers and `accept`, which lands a worker's change set on the lead's branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -124,6 +142,9 @@ pub enum Call {
     },
     Recall {
         query: String,
+    },
+    Accept {
+        change_set: String,
     },
 }
 
@@ -195,8 +216,36 @@ pub fn serve_agent(input: impl BufRead, output: impl Write, mailbox: &Path) -> s
     rpc(input, output, |request| answer_agent(request, mailbox))
 }
 
+/// What a sub-agent reads for each lead tool, which reaches only the workers it started.
+const LEAD_DESCRIPTIONS: [(&str, &str); 6] = [
+    (
+        TOOL_NAME,
+        "Start one worker of your own for part of your task. It runs in its own git worktree and branch cut from your current commit, and the engine tells you when it ends. The engine refuses past the owner's Sub-agent depth setting.",
+    ),
+    (
+        STATUS_TOOL,
+        "Read your own workers: each one, its job and state.",
+    ),
+    (
+        MESSAGE_TOOL,
+        "Type a message into one of your own workers' terminals, such as a correction or more detail.",
+    ),
+    (
+        ANSWER_TOOL,
+        "Answer the question one of your own workers is waiting on; the answer is typed into its terminal.",
+    ),
+    (
+        WAKE_TOOL,
+        "Wake one of your own finished workers by its name: it starts again in its own worktree and gets your text as its next task.",
+    ),
+    (
+        CHANGES_TOOL,
+        "List your own workers' change sets that are waiting to land.",
+    ),
+];
+
 fn agent_tools() -> Value {
-    let tools: Vec<Value> = live_tools()["tools"]
+    let mut tools: Vec<Value> = live_tools()["tools"]
         .as_array()
         .map(|tools| {
             tools
@@ -210,6 +259,19 @@ fn agent_tools() -> Value {
                 .collect()
         })
         .unwrap_or_default();
+    for tool in &mut tools {
+        let lead = LEAD_DESCRIPTIONS
+            .iter()
+            .find(|(name, _)| tool["name"].as_str() == Some(*name));
+        if let Some((_, description)) = lead {
+            tool["description"] = json!(description);
+        }
+    }
+    tools.push(json!({
+        "name": ACCEPT_TOOL,
+        "description": "Land one of your own workers' change sets on your own branch, as one squash commit. The owner's setting may keep that for the owner's own Accept; then this says so.",
+        "inputSchema": {"type": "object", "properties": {"change_set": {"type": "string", "description": "The change set id that changes() lists."}}, "required": ["change_set"], "additionalProperties": false},
+    }));
     assert_eq!(tools.len(), AGENT_TOOLS.len());
     json!({ "tools": tools })
 }
@@ -530,6 +592,14 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(RECALL_INVALID),
         },
+        ACCEPT_TOOL => match argument("change_set").map(str::trim) {
+            Some(change_set) if crate::landing::ChangeSetId::new(change_set).is_ok() => {
+                Ok(Call::Accept {
+                    change_set: change_set.to_owned(),
+                })
+            }
+            _ => Err(ACCEPT_INVALID),
+        },
         _ => return None,
     })
 }
@@ -559,6 +629,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             json!({"text": text, "scope": scope.as_str()}),
         ),
         Call::Recall { query } => (RECALL_TOOL, json!({"query": query})),
+        Call::Accept { change_set } => (ACCEPT_TOOL, json!({"change_set": change_set})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {

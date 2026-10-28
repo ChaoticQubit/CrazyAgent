@@ -380,6 +380,41 @@ impl SwitchMode {
     }
 }
 
+/// The owner's Sub-agent depth choices: 1 lets only the master start sub-agents, 2 lets
+/// the master's sub-agents lead workers of their own, 3 lets those workers lead too.
+pub const DEPTH_CHOICES: [u8; 3] = [1, 2, 3];
+/// The Sub-agent depth a project has until the owner picks another.
+pub const DEPTH_DEFAULT: u8 = 2;
+const _: () = assert!(DEPTH_DEFAULT >= DEPTH_CHOICES[0] && DEPTH_DEFAULT <= DEPTH_CHOICES[2]);
+
+/// The owner's setting for where a lead's worker lands its change set: `Lead` lets the lead
+/// accept it onto the lead's own branch, `Owner` keeps every change set for the owner's own
+/// Accept in Changes. Lead is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildLanding {
+    #[default]
+    Lead,
+    Owner,
+}
+
+impl ChildLanding {
+    /// The stored name of the setting. Output: `lead` or `owner`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Lead, Self::Owner]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
 /// The owner's setting for where a new sub-agent commits: `Named` checks out the engine's
 /// branch `crazyagent/agent-<id>` in the agent's worktree, so each agent works on its own
 /// branch; `Detached` keeps the older detached HEAD. Named is the default.
@@ -406,6 +441,14 @@ impl BranchMode {
             .into_iter()
             .find(|mode| mode.name() == name)
     }
+}
+
+/// A project's nested sub-agent settings: how deep leads may start workers and where a
+/// worker's change set lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nesting {
+    pub depth: u8,
+    pub lands: ChildLanding,
 }
 
 /// The latest master harness switch of the project's live session, for the divider its
@@ -447,6 +490,14 @@ pub enum TeamAction {
     OnHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchMode,
+    },
+    SubAgentDepth {
+        project_id: ProjectId,
+        depth: u8,
+    },
+    ChildLanding {
+        project_id: ProjectId,
+        mode: ChildLanding,
     },
     LiveMaster {
         project_id: ProjectId,
@@ -568,7 +619,12 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::SubAgentDepth { depth, .. } => DEPTH_CHOICES
+                .contains(depth)
+                .then_some(())
+                .ok_or_else(|| failure("team_depth_invalid")),
             Self::KeepWarm { .. }
+            | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
@@ -589,6 +645,8 @@ impl TeamAction {
             | Self::KeepWarm { project_id, .. }
             | Self::TimeLimits { project_id, .. }
             | Self::OnHarnessSwitch { project_id, .. }
+            | Self::SubAgentDepth { project_id, .. }
+            | Self::ChildLanding { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
             | Self::AgentBranches { project_id, .. }
             | Self::LiveMaster { project_id, .. }
@@ -890,7 +948,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 heartbeat_ms INTEGER NOT NULL,
                 stopped_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -912,7 +971,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 started_ms INTEGER,
                 finished_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -942,6 +1002,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 turn_secs INTEGER,
                 session_secs INTEGER,
                 idle_secs INTEGER NOT NULL DEFAULT 600
+            );
+            CREATE TABLE IF NOT EXISTS team_nesting (
+                project TEXT PRIMARY KEY,
+                depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+                lands TEXT NOT NULL CHECK(lands IN ('lead','owner'))
             );
             CREATE TABLE IF NOT EXISTS team_master_switch (
                 project TEXT PRIMARY KEY,
@@ -1695,6 +1760,24 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::SubAgentDepth { depth, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET depth=excluded.depth",
+                params![project.as_str(), depth, ChildLanding::default().name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::ChildLanding { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET lands=excluded.lands",
+                params![project.as_str(), DEPTH_DEFAULT, mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::FinishedAgents { show, .. } => {
             tx.execute(
                 "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
@@ -1976,6 +2059,8 @@ pub struct TeamAgent {
     pub wakeable: bool,
     #[serde(default)]
     pub wake_note: Option<String>,
+    #[serde(default)]
+    pub parent: Option<i64>,
 }
 
 impl TeamAgent {
@@ -1995,6 +2080,46 @@ impl TeamAgent {
                 AgentStatus::Starting | AgentStatus::Working => false,
             }
     }
+}
+
+/// Orders agents as their lead tree (N2): each lead followed by its own workers, depth
+/// first, keeping the given order among siblings; an agent whose lead is not listed starts
+/// a tree of its own. Takes the agents in display order. Returns each agent once with its
+/// depth under the listed leads, 0 for a top agent.
+pub fn lead_tree<'a>(agents: &[&'a TeamAgent]) -> Vec<(&'a TeamAgent, usize)> {
+    let listed: BTreeSet<i64> = agents.iter().map(|agent| agent.id).collect();
+    let mut stack: Vec<(&TeamAgent, usize)> = agents
+        .iter()
+        .rev()
+        .filter(|agent| {
+            agent
+                .parent
+                .is_none_or(|lead| lead == agent.id || !listed.contains(&lead))
+        })
+        .map(|agent| (*agent, 0))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(agents.len());
+    while let Some((agent, depth)) = stack.pop() {
+        if !seen.insert(agent.id) {
+            continue;
+        }
+        ordered.push((agent, depth));
+        stack.extend(
+            agents
+                .iter()
+                .rev()
+                .filter(|worker| worker.parent == Some(agent.id) && worker.id != agent.id)
+                .map(|worker| (*worker, depth + 1)),
+        );
+    }
+    for agent in agents {
+        if seen.insert(agent.id) {
+            ordered.push((agent, 0));
+        }
+    }
+    assert_eq!(ordered.len(), listed.len());
+    ordered
 }
 
 /// One sub-agent task as the clients poll it.
@@ -2064,6 +2189,10 @@ pub struct TeamStatus {
     pub idle_stop_secs: Option<u32>,
     #[serde(default)]
     pub on_harness_switch: SwitchMode,
+    #[serde(default = "depth_default")]
+    pub sub_agent_depth: u8,
+    #[serde(default)]
+    pub child_landing: ChildLanding,
     #[serde(default)]
     pub show_finished: bool,
     #[serde(default)]
@@ -2085,6 +2214,10 @@ pub struct TeamStatus {
     pub events: events::EventsView,
     #[serde(default)]
     pub partial: bool,
+}
+
+fn depth_default() -> u8 {
+    DEPTH_DEFAULT
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -2125,10 +2258,11 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         finished: false,
         wakeable: false,
         wake_note: None,
+        parent: row.get(16)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -2289,6 +2423,91 @@ pub fn on_harness_switch(
         None => Ok(SwitchMode::default()),
         Some(name) => SwitchMode::named(name).ok_or_else(|| error("team_switch_mode_invalid")),
     }
+}
+
+/// The project's nested sub-agent settings: the owner's Sub-agent depth and where a lead's
+/// worker lands, `DEPTH_DEFAULT` and `ChildLanding::Lead` until the owner picks others.
+/// Takes a connection and the project. Returns the settings, or a SQLite failure.
+pub fn nesting(connection: &Connection, project: &ProjectId) -> Result<Nesting, EngineError> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT depth,lands FROM team_nesting WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((depth, lands)) = row else {
+        return Ok(Nesting {
+            depth: DEPTH_DEFAULT,
+            lands: ChildLanding::default(),
+        });
+    };
+    let depth = u8::try_from(depth)
+        .ok()
+        .filter(|depth| DEPTH_CHOICES.contains(depth))
+        .ok_or_else(|| error("team_depth_invalid"))?;
+    let lands = ChildLanding::named(&lands).ok_or_else(|| error("team_landing_invalid"))?;
+    Ok(Nesting { depth, lands })
+}
+
+/// How deep a sub-agent sits under the master: 1 for one the master started, one more for
+/// each lead above it, counted up the recorded parents at most `DEPTH_WALK_MAX` steps.
+/// Takes a connection and the agent. Returns its depth, or a SQLite failure.
+pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineError> {
+    let depth: Option<i64> = connection
+        .query_row(
+            "WITH RECURSIVE chain(id,parent,n) AS (
+                 SELECT id,parent,1 FROM team_agents WHERE id=?1
+                 UNION ALL
+                 SELECT a.id,a.parent,chain.n+1 FROM team_agents a JOIN chain ON a.id=chain.parent
+                 WHERE chain.n<?2)
+             SELECT MAX(n) FROM chain",
+            params![agent, DEPTH_WALK_MAX],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let depth = depth.ok_or_else(|| failure("team_agent_not_found"))?;
+    assert!((1..=DEPTH_WALK_MAX).contains(&depth));
+    Ok(u8::try_from(depth).expect("the walk is bounded"))
+}
+
+/// The most parent links `agent_depth` follows, past the deepest setting so a deeper chain
+/// still reads as past every limit.
+const DEPTH_WALK_MAX: i64 = 8;
+const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
+
+/// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
+/// each task and agent records the lead that started it, NULL for the master's own. A
+/// table the engine has not opened yet gets the column from `initialize`. Takes the
+/// upgrade transaction. Returns any SQLite failure.
+pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    for table in ["team_tasks", "team_agents"] {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            continue;
+        }
+        let present: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='parent')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN parent INTEGER"))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where the project's new sub-agents commit: on their own named branch, the default, or
@@ -2720,6 +2939,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
+    let nested = nesting(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -2727,6 +2947,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         session_limit_secs: limits.session,
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
+        sub_agent_depth: nested.depth,
+        child_landing: nested.lands,
         show_finished: show_finished(connection, project)?,
         agent_branches: agent_branches(connection, project)?,
         live_switch: live_switch(connection, project)?,

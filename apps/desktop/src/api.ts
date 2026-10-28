@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BranchMode, PendingIntent, SwitchMode } from "./engine-client";
+import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1082,6 +1082,19 @@ export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSe
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id
+ * and the depth. Output: the engine receipt, not ready, or a plain error. */
+export function setSubAgentDepth(id: string, depth: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_sub_agent_depth", { id, depth, generation: nextGeneration() });
+}
+
+/** Sets where a lead's worker lands its change set: when the lead accepts it, or only when the
+ * owner does. Inputs: the project id and the mode. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_child_landing", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in

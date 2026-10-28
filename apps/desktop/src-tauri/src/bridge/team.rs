@@ -2,7 +2,7 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{BranchMode, SwitchMode, TeamAction, TeamStatus};
+use crazyagent::team::{BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -168,6 +168,37 @@ impl NativeBridge {
         let project_id = project(id)?;
         let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
         self.team_action(TeamAction::OnHarnessSwitch { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets how deep the project's sub-agents may start workers of their own: 1 lets only
+    /// the master start sub-agents, 2 lets its sub-agents lead workers, 3 lets those workers
+    /// lead too. Takes the project id, the depth and the client generation. Returns the actual
+    /// commit receipt, or the engine's refusal for any other depth.
+    pub async fn team_sub_agent_depth(
+        &mut self,
+        id: &str,
+        depth: u8,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::SubAgentDepth { project_id, depth }, generation)
+            .await
+    }
+
+    /// Sets where a lead's worker lands its change set: `lead` when the lead accepts it onto
+    /// its own branch, `owner` only when the owner accepts it. Takes the project id, the mode
+    /// and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_child_landing(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = ChildLanding::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::ChildLanding { project_id, mode }, generation)
             .await
     }
 

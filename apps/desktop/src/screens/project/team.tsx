@@ -91,7 +91,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       <caption className="pj-sr">Team agents</caption>
       <thead><tr><th scope="col">Agent</th><th scope="col">Harness</th><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current task</th></tr></thead>
       <tbody>{panel.agents.map((row) => <tr key={row.key}>
-        <th scope="row">{renaming && row.rename?.agent === renaming.agent
+        <th scope="row" style={row.depth > 0 ? { paddingInlineStart: `${row.depth * 1.5}rem` } : undefined}>{renaming && row.rename?.agent === renaming.agent
           ? <form className="pj-row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>
             <label htmlFor={`pj-rename-${row.key}`} className="pj-sr">New @name for {displayText(row.name)}</label>
             <span aria-hidden="true">@</span>
@@ -104,6 +104,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
             {row.rename && <button type="button" className="btn quiet small" aria-label={`Rename ${displayText(row.name)}`}
               onClick={() => { const target = row.rename; if (target) setRenaming({ agent: target.agent, text: target.handle }); }}>Rename</button>}</span>}
           {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
+          {row.lead && <span className="pj-small pj-muted pj-block">Worker of {displayText(row.lead)}</span>}
           {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}</th>
         <td>{displayText(row.harness)}</td>
         <td>{displayText(row.account)}</td>

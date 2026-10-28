@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setOnHarnessSwitch, setTeamTimeLimits, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setChildLanding, setOnHarnessSwitch, setSubAgentDepth, setTeamTimeLimits, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BranchMode, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -75,6 +75,20 @@ export function switchMode(status: Pick<TeamStatus, "on_harness_switch">): Switc
   return status.on_harness_switch ?? "carry";
 }
 
+/** The Sub-agent depth choices, 2 as the default: how deep leads may start workers. */
+export const DEPTH_OPTIONS: SelectOption[] = [
+  { value: "1", label: "1: only the master starts sub-agents" },
+  { value: "2", label: "2: sub-agents lead their own workers" },
+  { value: "3", label: "3: workers lead workers too" },
+];
+export const DEPTH_DEFAULT = 2;
+
+/** The choices of where a lead's worker lands, When the lead accepts first as the default. */
+export const LANDING_OPTIONS: SelectOption[] = [
+  { value: "lead", label: "When the lead accepts" },
+  { value: "owner", label: "Only when I accept" },
+];
+
 /** What a team change's result means for the owner. Inputs: the call result, what it did and
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
 export function changeNote(result: Result<IntentReceipt>, missing: string): string {
@@ -101,6 +115,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
   const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
   const [finished, setFinished] = useState<"hide" | "show" | null>(null);
+  const [depth, setDepth] = useState<number | null>(null);
+  const [lands, setLands] = useState<ChildLanding | null>(null);
   const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
@@ -142,6 +158,26 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
     setBusy(false);
     setOnSwitch(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseDepth(value: number) {
+    setDepth(value);
+    setBusy(true);
+    const message = changeNote(await setSubAgentDepth(projectId, value), "the Sub-agent depth setting");
+    setBusy(false);
+    setDepth(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseLanding(mode: ChildLanding) {
+    setLands(mode);
+    setBusy(true);
+    const message = changeNote(await setChildLanding(projectId, mode), "the worker landing setting");
+    setBusy(false);
+    setLands(null);
     setNote(message);
     reload();
   }
@@ -195,6 +231,11 @@ export function TeamControls({ projectId, status, harness, reload }: {
     </div>
     <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth ?? status.sub_agent_depth ?? DEPTH_DEFAULT)} options={DEPTH_OPTIONS}
+      onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
+      helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
+    <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
     <div className="pj-row">
       <span aria-hidden="true">Finished agents</span>
       <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}

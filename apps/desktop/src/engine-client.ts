@@ -742,6 +742,7 @@ export interface TeamAgent {
   finished?: boolean;
   wakeable?: boolean;
   wake_note?: string | null;
+  parent?: number | null;
 }
 
 export interface TeamTask {
@@ -775,6 +776,10 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
+ * or only when the owner accepts it. */
+export type ChildLanding = "lead" | "owner";
+
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
 
@@ -791,6 +796,8 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  sub_agent_depth?: number;
+  child_landing?: ChildLanding;
   show_finished?: boolean;
   agent_branches?: BranchMode;
   partial?: boolean;
@@ -911,6 +918,18 @@ export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs:
 
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+}
+
+/** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth
+ * 1, 2 or 3 and a generation. Output: the engine receipt. */
+export function teamSubAgentDepth(id: string, depth: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_sub_agent_depth", { id, depth, generation });
+}
+
+/** Sets where a lead's worker lands its change set. Inputs: the project id, the mode and a
+ * generation. Output: the engine receipt. */
+export function teamChildLanding(id: string, mode: ChildLanding, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_child_landing", { id, mode, generation });
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the

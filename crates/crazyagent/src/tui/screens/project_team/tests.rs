@@ -75,6 +75,7 @@ fn agent(
         finished: false,
         wakeable: false,
         wake_note: None,
+        parent: None,
     }
 }
 
@@ -133,6 +134,8 @@ fn team() -> TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        sub_agent_depth: crate::team::DEPTH_DEFAULT,
+        child_landing: crate::team::ChildLanding::Lead,
         show_finished: false,
         agent_branches: crate::team::BranchMode::Named,
         live_switch: None,
