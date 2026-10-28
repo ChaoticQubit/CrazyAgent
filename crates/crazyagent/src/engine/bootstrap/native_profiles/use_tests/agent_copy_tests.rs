@@ -30,7 +30,7 @@ fn token(expires: u64) -> String {
 fn id_claims(expires: u64) -> String {
     let full = token(expires);
     let (head, _) = full.rsplit_once('.').unwrap();
-    format!("{head}.")
+    format!("{head}.unexchangeable")
 }
 
 fn codex_auth(expires: u64) -> Vec<u8> {
@@ -121,7 +121,7 @@ fn an_agent_gets_a_codex_copy_that_can_never_refresh_the_account() {
 }
 
 #[test]
-fn a_codex_copy_drops_the_id_token_signature_but_keeps_its_claims_and_the_access_token() {
+fn a_codex_copy_replaces_the_id_token_signature_but_keeps_its_claims_and_the_access_token() {
     let mut case = UseCase::new();
     let expires = now() + 3 * 86_400;
     let part =
@@ -157,9 +157,11 @@ fn a_codex_copy_drops_the_id_token_signature_but_keeps_its_claims_and_the_access
     let written: Value =
         serde_json::from_slice(&std::fs::read(agent.join("auth.json")).unwrap()).unwrap();
     let copied = written["tokens"]["id_token"].as_str().unwrap();
-    assert_eq!(copied, format!("{header}.{payload}."));
+    let (claims_prefix, signature) = copied.rsplit_once('.').unwrap();
+    assert_eq!(claims_prefix, format!("{header}.{payload}"));
     assert_ne!(copied, id_token);
-    assert_eq!(copied.split('.').nth(2), Some(""));
+    assert!(!signature.is_empty());
+    assert_ne!(signature, "ZXhjaGFuZ2VhYmxlc2lnbmF0dXJl");
     let claims_segment = copied.split('.').nth(1).unwrap();
     let claims: Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
