@@ -121,6 +121,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const history = teamHistory(runtime, project);
     const timeline = `section[aria-label="Messages with ${history.label}"]`;
     const rowCount = (page) => page.evaluate(`document.querySelector(${JSON.stringify(timeline)})?.querySelectorAll(".am-row").length ?? 0`);
+    const shown = (page) => page.evaluate(`document.querySelector(${JSON.stringify(timeline)})?.innerText ?? ""`);
 
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
@@ -213,8 +214,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.deepEqual(all.find((row) => row[3] === "Use the staging data"), ["owner", "You", "Task", "Use the staging data"]);
         assert.ok(all.some((row) => row[3] === XSS), "markup shows as text");
         assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(timeline)}).querySelector("img") === null && window.__amXss === undefined`), true, "markup never renders or runs");
-        const finished = await me.waitFor("the result's first line", (text) => text.includes("Built the seed chart"));
-        assert.doesNotMatch(finished, /three/u, "the rest of the result waits");
+        await me.waitFor("the result's first line", (text) => text.includes("Built the seed chart"));
+        const firstLine = await shown(page);
+        assert.match(firstLine, /Built the seed chart/u, "the first line is in the timeline");
+        assert.doesNotMatch(firstLine, /three/u, "the rest of the result waits");
         await me.click("Show result", `${timeline} button`);
         await me.waitFor("the opened result", (text) => /It has three bars/u.test(text));
         assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(timeline)}).querySelector(".am-md strong")?.textContent ?? null`), "three", "an opened result is the existing Markdown view");
@@ -241,7 +244,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(await rowCount(page), history.entries - PROGRESS - 1, "Hidden leaves out the progress events and the owner's own task");
         const kinds = await page.evaluate(`[...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll(".am-row")].map((row) => row.querySelector(".am-kind").textContent)`);
         assert.ok(!kinds.includes("Progress"), "no progress row");
-        const whole = await me.waitFor("the whole result", (text) => text.includes("It has **three** bars"));
+        await me.waitFor("the whole result", (text) => text.includes("It has **three** bars"));
+        const whole = await shown(page);
+        assert.match(whole, /It has \*\*three\*\* bars/u, "the whole result is in the timeline");
         assert.doesNotMatch(whole, /Show result/u, "Full text needs no opening and renders no Markdown");
         const wholeFrame = await page.evaluate(`(() => {
           const texts = [...document.querySelector(${JSON.stringify(timeline)}).querySelectorAll(".am-full")];
