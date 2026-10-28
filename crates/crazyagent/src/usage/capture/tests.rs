@@ -1105,3 +1105,41 @@ fn a_home_whose_scan_leaves_out_an_uncounted_record_reads_as_partial_until_it_is
         "once the home fits one scan the live record is read and the reading is complete"
     );
 }
+
+/// MSL2B-R3-1: a home whose records were all counted, in which one scan leaves out a record
+/// for the first time because one more record arrived, reads as complete: the record left
+/// out was read when it was among the newest, so no usage is missing.
+#[test]
+fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    for index in 0..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    append(
+        &folder.join("s256.jsonl"),
+        &claude_assistant("m256", 1, 1, 0, 0, "end_turn"),
+    );
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((1, 1), Some(0)),
+        "the record left out was counted, so the reading is complete"
+    );
+}
