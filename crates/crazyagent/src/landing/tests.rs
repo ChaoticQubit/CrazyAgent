@@ -3471,6 +3471,60 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
     );
 }
 
+/// An Own branch clone's discarded change set comes back only while the clone's branch
+/// holds exactly the discarded head: commits made since, or a reset of the branch below
+/// it, keep it discarded with `changes_agent_busy`, so a later turn end cannot quietly
+/// replace the restored head with a tip that lacks it (GA-R4).
+#[test]
+fn an_own_branch_restore_needs_the_clone_branch_at_the_discarded_head() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).head, head);
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+    assert_eq!(
+        case.agent_head(),
+        head,
+        "a discard leaves the clone's branch as it was"
+    );
+
+    case.edit("later.txt", "more work\n");
+    case.agent_commit("More work");
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+
+    case.agent(&["reset", "-q", "--hard", &base]);
+    assert_eq!(
+        refused(restore(&case.db, &id, NOW_MS + DAY_MS)),
+        "changes_agent_busy"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Discarded);
+
+    case.agent(&["reset", "-q", "--hard", &head]);
+    restore(&case.db, &id, NOW_MS + DAY_MS).unwrap();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    assert_eq!(
+        case.owner(&[
+            "rev-parse",
+            &format!("refs/crazyagent/pending/{}", id.as_str())
+        ])
+        .trim(),
+        head
+    );
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(
+        case.view(&id).head,
+        head,
+        "the restored head stays the set's"
+    );
+}
+
 /// The owner repository keeps the commit an Own branch clone borrows as its base under an
 /// engine ref that follows the base, so the owner rewriting their branch and pruning
 /// leaves the clone's history readable (GA-R5).
