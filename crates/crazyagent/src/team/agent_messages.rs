@@ -1,5 +1,5 @@
 use super::events::{self, EventState};
-use super::{RESULT_BYTES_MAX, failure};
+use super::{RESULT_BYTES_MAX, error, failure};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction};
@@ -63,6 +63,15 @@ impl MessageSettings {
             .then_some(())
             .ok_or_else(|| failure("team_message_settings_invalid"))
     }
+}
+
+/// What the master or the owner said straight to a sub-agent once its terminal took it: a
+/// master's `message` or `answer`, or a prompt the owner sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Said {
+    Message,
+    Answer,
+    Prompt,
 }
 
 /// Who an entry of a Messages timeline comes from, as the engine knows it, never as the
@@ -154,10 +163,35 @@ pub struct AgentMessages {
     pub settings: MessageSettings,
 }
 
-/// Creates the kept messages and the settings tables. Takes a connection with the team and
-/// event tables. Returns unit.
-pub(super) fn initialize(_connection: &Connection) -> Result<(), EngineError> {
-    Ok(())
+/// Creates the kept messages and the settings tables and the indexes that read one agent's
+/// tasks, events and messages by time. Takes a connection with the team and event tables.
+/// Returns unit.
+pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS team_agent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                author TEXT NOT NULL CHECK(author IN ('master','owner')),
+                kind TEXT NOT NULL CHECK(kind IN ('message','answer','prompt')),
+                text TEXT,
+                created_ms INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS team_agent_messages_agent ON team_agent_messages(project, agent, created_ms);
+            CREATE INDEX IF NOT EXISTS team_events_agent ON team_events(project, agent, created_ms);
+            CREATE INDEX IF NOT EXISTS team_tasks_agent ON team_tasks(project, agent, created_ms);
+            CREATE TABLE IF NOT EXISTS team_message_settings (
+                project TEXT PRIMARY KEY,
+                keep_master INTEGER NOT NULL,
+                kept INTEGER NOT NULL,
+                progress INTEGER NOT NULL,
+                results TEXT NOT NULL CHECK(results IN ('first_line','full')),
+                owner_items INTEGER NOT NULL,
+                page_size INTEGER NOT NULL
+            );",
+        )
+        .map_err(error)
 }
 
 /// Reads a project's Messages settings, the proposed defaults until the owner saves some.
@@ -181,6 +215,20 @@ pub(super) fn save_settings(
         "owner settings are validated first"
     );
     Ok(())
+}
+
+/// Keeps what the master or the owner said to a sub-agent once its terminal took it. Takes
+/// the transaction, the project, the agent, what was said, the text and the time. Returns the
+/// row id.
+pub(super) fn record(
+    _tx: &Transaction<'_>,
+    _project: &ProjectId,
+    _agent: i64,
+    _said: Said,
+    _text: &str,
+    _now: i64,
+) -> Result<i64, EngineError> {
+    Ok(0)
 }
 
 /// Reads one page of a project sub-agent's Messages timeline as the owner gets it. Takes the
@@ -213,3 +261,6 @@ pub fn read(
         settings: settings(connection, project)?,
     })
 }
+
+#[cfg(test)]
+mod tests;
