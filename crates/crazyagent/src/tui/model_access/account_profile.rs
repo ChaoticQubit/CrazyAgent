@@ -106,6 +106,15 @@ impl State {
             return Err("Read the selected connection again before private setup".into());
         }
         validate_connection(&connection)?;
+        if self
+            .native_auth
+            .stuck()
+            .is_some_and(|stuck| crate::config::same_account(stuck, &connection))
+        {
+            return Err(
+                "A sign-in for this account is still open; c clears a stuck sign-in".into(),
+            );
+        }
         let id = crate::engine::owner::random_id()
             .map_err(|_| "account_profile_request_identity_unavailable")?;
         let request = crate::engine::owner::AccountProfileRequest {

@@ -34,6 +34,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         conflicts: Vec::new(),
         message: "Add a file".into(),
         waiting: false,
+        outside: false,
     }
 }
 
@@ -143,7 +144,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
     );
 
     assert!(view.key(key(KeyCode::Char('a')), NOW));
-    assert!(text(&view).contains("Accept these changes?"));
+    assert!(text(&view).contains("Accept the changes of Sub-agent Agent 1?"));
     assert!(view.key(key(KeyCode::Enter), NOW));
     let landed = AcceptOutcome::Landed {
         commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
@@ -190,6 +191,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_conflict",
         "changes_stale",
         "changes_branch_moved",
+        "changes_branch_not_above_base",
         "changes_git_unsupported",
         "changes_restore_expired",
         "changes_agent_has_pending",
@@ -197,6 +199,8 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_not_found",
         "changes_owner_identity_missing",
         "changes_message_invalid",
+        "changes_embedded_repository",
+        "changes_agent_branch_invalid",
         "changes_unavailable",
     ] {
         assert!(
@@ -565,5 +569,299 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
             id: id('2'),
             expected_head: "2".repeat(40),
         })
+    );
+}
+
+/// The whole view text on a screen tall enough that no file row is cut. Input: the view.
+/// Output: the text.
+fn tall(view: &ProjectChanges) -> String {
+    let (rows, _, _) = view.rows(100, 80, NOW, &Look::plain());
+    rows.iter().map(|row| row.text() + "\n").collect()
+}
+
+/// One changed file of a diff page. Input: its path, status, kind and marks. Output: the file.
+fn changed(path: &str, status: FileStatus, kind: FileKind, marks: Vec<FileMark>) -> ChangedFile {
+    ChangedFile {
+        path: path.into(),
+        old_path: None,
+        status,
+        kind,
+        marks,
+    }
+}
+
+/// Opens the diff of one pending set with these files. Input: the files. Output: the view.
+fn diff_of(files: Vec<ChangedFile>) -> ProjectChanges {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files,
+        text: "@@ -0,0 +1 @@\n+x".into(),
+        next: None,
+        truncated: true,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    view
+}
+
+#[test]
+fn a_marked_file_past_the_preview_limit_is_named_with_its_marks_before_plain_files() {
+    let mut files: Vec<ChangedFile> = (0..FILES_SHOWN)
+        .map(|n| {
+            changed(
+                &format!(".github/workflow-{n:02}.yml"),
+                FileStatus::Modified,
+                FileKind::Text,
+                Vec::new(),
+            )
+        })
+        .collect();
+    files.push(changed(
+        "zz/hook.sh",
+        FileStatus::Added,
+        FileKind::Text,
+        vec![FileMark::Executable],
+    ));
+    files.push(changed(
+        "zz/link",
+        FileStatus::Added,
+        FileKind::Symlink,
+        vec![FileMark::Symlink],
+    ));
+    let shown = tall(&diff_of(files));
+    for want in [
+        "Added zz/hook.sh",
+        "! Can run as a program",
+        "Added zz/link",
+        "! Symbolic link: points to another path",
+        "and 2 more files",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(
+        shown.find("zz/link").unwrap() < shown.find(".github/workflow-00.yml").unwrap(),
+        "marked files come first\n{shown}"
+    );
+    assert!(!shown.contains("need checking"), "{shown}");
+
+    let many: Vec<ChangedFile> = (0..FILES_SHOWN + 2)
+        .map(|n| {
+            changed(
+                &format!("bin/tool-{n:02}"),
+                FileStatus::Added,
+                FileKind::Text,
+                vec![FileMark::Executable],
+            )
+        })
+        .chain([changed(
+            "README.md",
+            FileStatus::Modified,
+            FileKind::Text,
+            Vec::new(),
+        )])
+        .collect();
+    let listed = listed_files(&many);
+    assert_eq!(
+        (
+            listed.shown.len(),
+            listed.marked_hidden,
+            listed.plain_hidden
+        ),
+        (FILES_SHOWN, 2, 1)
+    );
+    let shown = tall(&diff_of(many));
+    for want in [
+        "2 more files need checking before you accept.",
+        "and 1 more files",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}
+
+#[test]
+fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its_neighbour() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Conflict),
+        named('2', ChangeState::Conflict),
+        named('3', ChangeState::Conflict),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    reordered(
+        &mut view,
+        vec![
+            named('1', ChangeState::Conflict),
+            named('3', ChangeState::Conflict),
+        ],
+    );
+    let shown = text(&view);
+    assert!(
+        !shown.contains("> Sub-agent"),
+        "no set takes over the highlight\n{shown}"
+    );
+    assert!(
+        shown.contains("The change set you picked left the list. Pick one with"),
+        "{shown}"
+    );
+    for code in [
+        KeyCode::Char('a'),
+        KeyCode::Char('d'),
+        KeyCode::Char('u'),
+        KeyCode::Enter,
+    ] {
+        view.key(key(code), NOW);
+        assert_eq!(view.asking, None, "{code:?} asks nothing");
+        assert!(view.diff.is_none(), "{code:?} opens nothing");
+        assert_eq!(view.next_query(NOW), None, "{code:?} sends nothing");
+    }
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(
+        !help
+            .iter()
+            .any(|(key, _)| ["a", "d", "u", "r"].contains(key)),
+        "{help:?}"
+    );
+
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(
+        text(&view).contains("> Sub-agent Agent 3"),
+        "the first move picks the set now in that place"
+    );
+    assert!(view.key(key(KeyCode::Char('u')), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Update { id: id('3') })
+    );
+}
+
+#[test]
+fn accept_and_discard_name_the_set_they_ask_about() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Pending),
+    ]);
+    assert!(view.key(key(KeyCode::Down), NOW));
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    let shown = text(&view);
+    for want in [
+        "Discard the changes of Sub-agent Agent 2?",
+        "1 file, 1 line added, 0 removed, at 2222222.",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(view.key(key(KeyCode::Char('n')), NOW));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let shown = text(&view);
+    for want in [
+        "Accept the changes of Sub-agent Agent 2?",
+        "1 file, 1 line added, 0 removed, at 2222222.",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}
+
+#[test]
+fn marks_on_file_pages_past_the_text_limit_still_load_and_show() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let padded: String = (0..DIFF_LINES_MAX + 5)
+        .map(|n| format!("+line {n}\n"))
+        .collect();
+    let first = ChangeDiff {
+        files: vec![changed(
+            "notes.txt",
+            FileStatus::Modified,
+            FileKind::Text,
+            Vec::new(),
+        )],
+        text: padded,
+        next: Some(1),
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(first)));
+    assert_eq!(view.diff.as_ref().unwrap().lines.len(), DIFF_LINES_MAX);
+    let second = ChangeDiff {
+        files: vec![changed(
+            "zz/hook.sh",
+            FileStatus::Added,
+            FileKind::Text,
+            vec![FileMark::Executable],
+        )],
+        text: "+more\n".into(),
+        next: Some(2),
+        truncated: false,
+    };
+    let query = reply(&mut view, Ok(ChangesView::Diff(second)));
+    assert_eq!(
+        query,
+        ChangesQuery::Diff {
+            id: id('1'),
+            page: 1
+        },
+        "the file list keeps loading past the text limit"
+    );
+    let third = ChangeDiff {
+        files: Vec::new(),
+        text: "+last\n".into(),
+        next: Some(3),
+        truncated: false,
+    };
+    let query = reply(&mut view, Ok(ChangesView::Diff(third)));
+    assert_eq!(
+        query,
+        ChangesQuery::Diff {
+            id: id('1'),
+            page: 2
+        }
+    );
+    assert_eq!(
+        view.next_query(NOW),
+        None,
+        "once every file is known, no text past the limit is read"
+    );
+    let diff = view.diff.as_ref().unwrap();
+    assert_eq!(diff.lines.len(), DIFF_LINES_MAX);
+    assert!(diff.truncated);
+    let shown = tall(&view);
+    for want in [
+        "Added zz/hook.sh",
+        "! Can run as a program",
+        "Part of this diff is not shown",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}
+
+#[test]
+fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let files: Vec<ChangedFile> = (0..=FILES_MAX)
+        .map(|n| {
+            changed(
+                &format!("gen/file-{n:05}.txt"),
+                FileStatus::Added,
+                FileKind::Text,
+                Vec::new(),
+            )
+        })
+        .collect();
+    let page = ChangeDiff {
+        files,
+        text: "+x\n".into(),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    let diff = view.diff.as_ref().unwrap();
+    assert_eq!(diff.files.len(), FILES_MAX);
+    assert!(diff.files_cut && diff.files_done);
+    assert_eq!(view.next_query(NOW), None);
+    let shown = tall(&view);
+    assert!(
+        shown.contains(&format!(
+            "Only the first {FILES_MAX} changed files are listed."
+        )),
+        "{shown}"
     );
 }

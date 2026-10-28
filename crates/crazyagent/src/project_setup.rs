@@ -620,6 +620,9 @@ pub enum SetupQuery {
     ReadPaths {
         project: ProjectId,
     },
+    AgentPolicy {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -661,6 +664,7 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     ReadPaths(Vec<String>),
+    AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -710,6 +714,10 @@ pub enum SetupAction {
     SetReadPaths {
         project_id: ProjectId,
         paths: Vec<String>,
+    },
+    SetAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::AgentPolicy,
     },
 }
 
@@ -763,6 +771,7 @@ impl SetupAction {
                 }
                 Ok(())
             }
+            Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
             Self::Update { name, setup, .. } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
                     name: name.clone(),
@@ -1763,6 +1772,9 @@ pub(crate) fn execute(
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
+        SetupAction::SetAgentPolicy { project_id, policy } => {
+            set_agent_policy(tx, project_id, policy)
+        }
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2158,16 +2170,25 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 10] = [
+const REMOVED_WITH_PROJECT: [&str; 19] = [
     "research_jobs",
     "onboarding",
     "team_messages",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_time_limits",
+    "team_master_switch",
+    "team_session_switches",
+    "team_finished_view",
+    "team_agent_branches",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
+    "team_wake_requests",
+    "team_owner_stops",
+    "team_agent_conversations",
+    "agent_instruction_settings",
     "project_setups",
 ];
 
@@ -2200,11 +2221,41 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
+/// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
+/// choices. Takes the transaction, project and policy. Returns Applied, or a plain
+/// rejection for an unknown project, an invalid policy or a level this computer cannot run.
+fn set_agent_policy(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    policy: &crate::sandbox::policy::AgentPolicy,
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !exists {
+        return Ok(rejected("invalid_project"));
+    }
+    if let Err(code) = policy.validate() {
+        return Ok(rejected(code));
+    }
+    if policy.access.unavailable().is_some() {
+        return Ok(rejected("agent_access_unavailable"));
+    }
+    crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops. Returns `invalid_project` for an unknown project.
+/// running one stops. Its project-scoped MCP servers, skills, secrets and per-project
+/// switches are cleared too, so a new project reusing the id never inherits them. Returns
+/// `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2229,6 +2280,8 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    crate::scheduling::forget_project(tx, project_id.as_str())?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2249,6 +2302,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
 

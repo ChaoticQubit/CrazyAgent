@@ -97,8 +97,9 @@ const CLAUDE_COMMON: [&str; 12] = [
     "",
     "--settings",
     CLAUDE_SETTINGS,
-    "--no-session-persistence",
+    CLAUDE_NO_TRANSCRIPT,
 ];
+const CLAUDE_NO_TRANSCRIPT: &str = "--no-session-persistence";
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
 /// serialization, arguments or reports and is handed to the child only as an environment value.
@@ -180,6 +181,9 @@ impl AccountBinding {
     }
 }
 
+/// The longest one launched harness process may run: 24 hours.
+pub const RUN_TIME_MAX: Duration = Duration::from_secs(86_400);
+
 /// Bounds for one launched harness process.
 /// `run_time` caps the whole session, `stop_grace` the wait between TERM and KILL,
 /// `output_bytes` the total stdout read and `events` the events delivered.
@@ -203,9 +207,10 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile, the owner's git
-/// identity for the agent's own commits and limits. Every launch is refused unless a
-/// sandbox profile is given.
+/// account, optional model, tools switch, the project sandbox profile, whether the project
+/// gave its agents Full access, the owner's git identity for the agent's own commits and
+/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
+/// `unconfined` set for a Full access project (DEC-102).
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -215,6 +220,7 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     pub tools: bool,
     pub sandbox_profile: Option<PathBuf>,
+    pub unconfined: bool,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
 }
@@ -388,7 +394,8 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
 /// MCP servers, brief, context index and approved memories into the agent home, then
 /// points the harness at them. Input: the launch request and the project's context from
 /// `launch_context::for_project`. Output: the command and the guard that removes the
-/// generated files when dropped; no MCP secret is ever in an argument or the environment.
+/// generated files when dropped, or `launch_secret_in_command` when an MCP secret would be
+/// in an argument or the environment.
 pub fn command_with_context(
     request: &LaunchRequest,
     context: &AgentContext,
@@ -396,15 +403,11 @@ pub fn command_with_context(
     validate(request)?;
     let installed = context.install(&request.harness, request.account.home(), request.tools)?;
     let command = build(request, Some(&installed))?;
-    assert!(
-        command
-            .get_args()
-            .all(|argument| !context.exposes_secret(argument.as_encoded_bytes()))
-    );
-    assert!(command.get_envs().all(|(name, value)| {
-        !context.exposes_secret(name.as_encoded_bytes())
-            && value.is_none_or(|value| !context.exposes_secret(value.as_encoded_bytes()))
-    }));
+    context.refuse_exposed(command.get_args().map(OsStr::as_encoded_bytes).chain(
+        command.get_envs().flat_map(|(name, value)| {
+            std::iter::once(name.as_encoded_bytes()).chain(value.map(OsStr::as_encoded_bytes))
+        }),
+    ))?;
     Ok((command, installed))
 }
 
@@ -428,10 +431,6 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    let profile = request
-        .sandbox_profile
-        .as_ref()
-        .ok_or_else(|| failure("launch_sandbox_required"))?;
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
@@ -462,14 +461,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
-    let mut command = crate::sandbox::agent_command(
-        profile,
-        &request.executable,
-        &base,
-        environment
-            .iter()
-            .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
-    )
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+    let mut command = match &request.sandbox_profile {
+        Some(profile) => {
+            crate::sandbox::agent_command(profile, &request.executable, &base, harness_env)
+        }
+        None => crate::sandbox::unconfined_command(&request.executable, &base, harness_env),
+    }
     .map_err(|_| failure("launch_environment_refused"))?;
     command
         .args(&arguments)
@@ -481,7 +481,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
-    assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(
+        command.get_program() == SANDBOX_EXEC,
+        request.sandbox_profile.is_some() && !request.unconfined
+    );
     assert!(command.get_args().all(|argument| {
         request
             .account
@@ -567,15 +570,25 @@ pub(super) fn codex_configuration(
 }
 
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
-/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]).
-/// Input: the key file of a keyed account. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>) -> String {
-    let Some(key_file) = key_file else {
+/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
+/// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
+/// owner turned on. Setting sources stay off, so no other hook loads. Inputs: the key file
+/// of a keyed account and whether the launch runs hooks. Output: the settings JSON.
+fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
+    if key_file.is_none() && !hooks {
         return CLAUDE_SETTINGS.to_owned();
-    };
+    }
     let mut settings: serde_json::Value =
         serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
-    settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    if let Some(key_file) = key_file {
+        settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if hooks {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
     settings.to_string()
 }
 
@@ -586,9 +599,11 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file);
+    let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
+    let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()
+        .filter(|argument| !(keep && **argument == CLAUDE_NO_TRANSCRIPT))
         .map(|argument| {
             if *argument == CLAUDE_SETTINGS {
                 OsString::from(&settings)
@@ -689,16 +704,17 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
             return Err(failure("launch_url_invalid"));
         }
     }
-    match &request.sandbox_profile {
-        Some(profile) if !profile.is_absolute() || !profile.is_file() => {
+    match (&request.sandbox_profile, request.unconfined) {
+        (Some(_), true) => return Err(failure("launch_sandbox_conflict")),
+        (Some(profile), false) if !profile.is_absolute() || !profile.is_file() => {
             return Err(failure("launch_sandbox_profile_unavailable"));
         }
-        Some(_) => {}
-        None => return Err(failure("launch_sandbox_required")),
+        (Some(_), false) | (None, true) => {}
+        (None, false) => return Err(failure("launch_sandbox_required")),
     }
     let limits = request.limits;
     if limits.run_time.is_zero()
-        || limits.run_time > Duration::from_secs(86_400)
+        || limits.run_time > RUN_TIME_MAX
         || limits.stop_grace > Duration::from_secs(30)
         || !(1..=64 * 1024 * 1024).contains(&limits.output_bytes)
         || !(1..=1_000_000).contains(&limits.events)
@@ -912,8 +928,8 @@ impl Driver {
                 interrupt,
                 server_turn,
             } => {
-                let method: serde_json::Value =
-                    serde_json::from_slice(line).map_err(|_| failure("launch_protocol_failed"))?;
+                let method = crate::adapters::claude::parse_line(line)
+                    .map_err(|_| failure("launch_protocol_failed"))?;
                 let started = method.get("method").and_then(serde_json::Value::as_str)
                     == Some("turn/started");
                 let decoded = protocol
@@ -1012,8 +1028,8 @@ impl Driver {
                 late,
                 ..
             } => {
-                let value: serde_json::Value =
-                    serde_json::from_slice(line).map_err(|_| failure("launch_protocol_failed"))?;
+                let value = crate::adapters::claude::parse_line(line)
+                    .map_err(|_| failure("launch_protocol_failed"))?;
                 match value.get("type").and_then(serde_json::Value::as_str) {
                     Some("control_response") => {
                         let answered = value

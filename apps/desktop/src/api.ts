@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, PendingIntent } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
-export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -81,7 +81,7 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
-  native_auth_recovery_required: "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.",
+  native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -121,6 +121,9 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
+  agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
+  agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -204,6 +207,7 @@ async function change(command: string, args: InvokeArgs): Promise<Result<void>> 
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 /** Connects this window to the engine. Output: whether it is connected and whether an earlier
@@ -293,11 +297,14 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
   memory_delete: "deleting a memory",
+  memory_approve: "approving a memory",
+  memory_agent_writes: "saving Agent memory writes",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -517,6 +524,22 @@ export function profileSettledLine(check: ProfileCheck): string | null {
   return null;
 }
 
+/** The banner line while a sign-in's outcome is unconfirmed. */
+export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
+
+/** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
+ * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
+ * while the engine is still stopping it, or a plain error. */
+export function clearStuckSignIn(): Promise<Result<boolean>> {
+  return call<boolean>("desktop_clear_native_auth");
+}
+
+/** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
+export function stuckClearedLine(result: Result<boolean>): string {
+  if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
+  return result.kind === "error" ? result.message : plainError("unknown");
+}
+
 export interface PoolMember {
   id: string;
   kind: "chatgpt" | "claude" | "api_key" | "url" | "local" | "other";
@@ -707,6 +730,23 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
   return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
 }
 
+/** Reads hooks for global settings (no project) or one project's settings, where global
+ * hooks carry the project's own switch. Output: hooks in engine order. */
+export function listHooks(projectId?: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_plugin_hooks", { projectId: projectId ?? null });
+}
+
+/** Adds the command hooks a plugin folder defines, each turned on; nothing in the folder runs.
+ * Inputs: where they apply and the folder's full path. Output: the added hooks. */
+export function addHooks(scope: PluginScope, folder: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_add_hooks", { scope, folder });
+}
+
+/** Turns a hook on or off where it was added. Inputs: hook id and the switch. */
+export function setHookEnabled(id: string, enabled: boolean): Promise<Result<HookView>> {
+  return call<HookView>("desktop_set_hook_enabled", { id, enabled });
+}
+
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
@@ -817,9 +857,10 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
   return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
-/** What the native folder chooser is for: a skill folder, an existing project folder to add, or
- * the folder that holds the owner's projects. Each shows its own fixed prompt. */
-export type FolderPurpose = "skill" | "project" | "projects_home";
+/** What the native folder chooser is for: a skill folder, an existing project folder to add,
+ * the folder that holds the owner's projects, a folder of memory files to import, or a plugin
+ * folder whose hooks are added. Each shows its own fixed prompt. */
+export type FolderPurpose = "skill" | "project" | "projects_home" | "memory" | "plugin";
 
 /** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
  * chosen folder's full path, or null when the owner closed the chooser. */
@@ -850,9 +891,40 @@ export function addMemory(project: string | null, text: string): Promise<Result<
   return change("desktop_add_memory", { project, text, generation: nextGeneration() });
 }
 
+/** How an import of a memory folder ended: memories saved and markdown files not saved. */
+export interface MemoryImportCounts {
+  imported: number;
+  skipped: number;
+}
+
+/** Imports the markdown memory files of a folder the owner chose into one project's memory,
+ * one memory per file. Inputs: the project id and the folder's full path. Output: the counts,
+ * or the plain error of a change that was refused or is still unconfirmed. */
+export async function importMemory(project: string, folder: string): Promise<Result<MemoryImportCounts>> {
+  const result = await call<MemoryImportCounts & { stopped: IntentReceipt | null }>("desktop_import_memory", { project, folder, generation: nextGeneration() });
+  if (result.kind !== "ok") return result;
+  if (result.value.stopped) {
+    const stopped = receiptResult(result.value.stopped);
+    if (stopped.kind !== "ok") return stopped;
+  }
+  return { kind: "ok", value: { imported: result.value.imported, skipped: result.value.skipped } };
+}
+
 /** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */
 export function deleteMemory(id: string): Promise<Result<void>> {
   return change("desktop_delete_memory", { id, generation: nextGeneration() });
+}
+
+/** Approves one memory an agent asked to save, so agents get it from their next launch.
+ * Input: memory id. Output: ok once approved. */
+export function approveMemory(id: string): Promise<Result<void>> {
+  return change("desktop_approve_memory", { id, generation: nextGeneration() });
+}
+
+/** Saves the owner's Agent memory writes setting: agents save directly, or ask first.
+ * Input: the choice. Output: ok once saved. */
+export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
 }
 
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
@@ -862,14 +934,33 @@ export function suggestionsFrom(project: { id: string; name: string }, items: Me
     .map((item) => ({ project_id: project.id, project_name: project.name, id: item.id, version: item.version, text: item.text }));
 }
 
-/** Reads unreviewed research memories across projects (first page of each, up to 50
+export const MEMORY_PAGES_MAX = 20;
+
+/** Reads a project's memories, research saved for approval included, batch after batch up to
+ * MEMORY_PAGES_MAX batches, for every screen that lists or counts them; one engine batch holds
+ * at most 8 entries of any status. Input: the project id. Output: the memories in id order and
+ * whether more remain unread. */
+export async function loadAllProjectMemories(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
+  const items: MemoryItem[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
+    const batch: Result<MemoryItem[]> = await call<MemoryItem[]>("desktop_project_memories", { id, after });
+    if (batch.kind !== "ok") return batch;
+    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
+    items.push(...batch.value);
+    after = batch.value[batch.value.length - 1].id;
+  }
+  return { kind: "ok", value: { items, more: true } };
+}
+
+/** Reads unreviewed research memories across projects (every memory batch of each, up to 50
  * projects). Input: the projects. Output: the suggestions. */
 export async function memorySuggestions(projects: { id: string; name: string }[]): Promise<Result<Suggestion[]>> {
   const found: Suggestion[] = [];
   for (const project of projects.slice(0, SUGGESTION_PROJECTS_MAX)) {
-    const items = await call<MemoryItem[]>("desktop_project_memories", { id: project.id, after: null });
-    if (items.kind !== "ok") return items;
-    found.push(...suggestionsFrom(project, items.value));
+    const memories = await loadAllProjectMemories(project.id);
+    if (memories.kind !== "ok") return memories;
+    found.push(...suggestionsFrom(project, memories.value.items));
   }
   return { kind: "ok", value: found };
 }
@@ -978,6 +1069,46 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how long one task turn and one agent session of the team may run, and how long a
+ * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
+ * seconds. Output: the engine receipt, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+}
+
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id
+ * and the depth. Output: the engine receipt, not ready, or a plain error. */
+export function setSubAgentDepth(id: string, depth: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_sub_agent_depth", { id, depth, generation: nextGeneration() });
+}
+
+/** Sets where a lead's worker lands its change set: when the lead accepts it, or only when the
+ * owner does. Inputs: the project id and the mode. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_child_landing", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
+ * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+}
+
+/** Sets where the project's new sub-agents commit: each on its own branch crazyagent/agent-<id>
+ * (named) or on a detached HEAD (detached). Inputs: the project id and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setAgentBranches(id: string, mode: BranchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_agent_branches", { id, mode, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running

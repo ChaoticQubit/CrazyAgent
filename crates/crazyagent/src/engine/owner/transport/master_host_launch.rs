@@ -12,6 +12,9 @@ use crate::master_session::MasterBackend;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::policy::AgentPolicy;
+#[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
@@ -37,6 +40,11 @@ const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
 #[cfg(unix)]
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
 #[cfg(unix)]
+const _: () = assert!(
+    crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1
+        < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
+);
+#[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
 #[cfg(unix)]
 const MASTER_HOME: &str = "home";
@@ -46,7 +54,7 @@ const MASTER_PROFILE: &str = "sandbox.sb";
 const HTTPS_PORT: u16 = 443;
 #[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-const MASTER_CONFIG: [&str; 15] = [
+const MASTER_CONFIG: [&str; 16] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"read-only\"",
@@ -62,8 +70,9 @@ const MASTER_CONFIG: [&str; 15] = [
     "features.goals=false",
     "web_search=\"disabled\"",
     "mcp_servers={}",
+    PROJECT_DOCS_OFF,
 ];
-const MASTER_TOOLS_CONFIG: [&str; 9] = [
+const MASTER_TOOLS_CONFIG: [&str; 10] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"danger-full-access\"",
@@ -73,7 +82,9 @@ const MASTER_TOOLS_CONFIG: [&str; 9] = [
     "features.goals=false",
     "features.multi_agent=false",
     "features.multi_agent_v2=false",
+    PROJECT_DOCS_OFF,
 ];
+const PROJECT_DOCS_OFF: &str = "project_doc_max_bytes=0";
 const DELEGATE_SERVERS: &str = "mcp_servers=";
 
 impl OwnerRuntimeHandle {
@@ -117,6 +128,7 @@ impl OwnerRuntimeHandle {
             runtime_ref: &runtime_ref,
             repository: &prepared.repository,
             worktree: &prepared.cwd,
+            policy: &prepared.agent_policy,
         };
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
@@ -126,16 +138,26 @@ impl OwnerRuntimeHandle {
         let wall_time =
             Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
         let delegate = engine.as_deref().map(delegate_engine).transpose()?;
-        let process = crate::agent_home::text(&prepared.agent_project)
+        let context = prepared.tools.then(|| {
+            folder
+                .path
+                .join(MASTER_HOME)
+                .join(crate::agent_home::CONTEXT_FOLDER)
+        });
+        let process = crate::agent_home::text(&prepared.agent_project, context.as_deref())
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let process = match claude {
+            true => claude_process(&prepared.instructions, process),
+            false => process,
+        };
         let turn = if claude {
             claude_master_turn(
                 &place,
                 profile,
                 executable.verified_path()?,
                 &prepared.attempt.connection,
-                &master_prompt(&prepared.instructions, &process),
+                &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
             )?
@@ -150,6 +172,11 @@ impl OwnerRuntimeHandle {
             )?
         };
         require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
+        assert!(
+            context
+                .as_deref()
+                .is_none_or(|context| context == turn.home.join(crate::agent_home::CONTEXT_FOLDER))
+        );
         let harness = if claude {
             crate::agent_home::Harness::Claude
         } else {
@@ -182,9 +209,59 @@ impl OwnerRuntimeHandle {
     }
 }
 
+/// The most bytes of the owner's app and project instructions a Claude master is sure to
+/// take: the Claude host's prompt file limit less the largest project context, the largest
+/// instruction files section and the line `master_prompt` puts between them.
+pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
+    crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
+        - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - crate::instruction_files::SECTION_BYTES_MAX
+        - 1;
+
+const CUT_NOTE: &str = "\n\n[CrazyAgent cut the app and project instructions here: a Claude master takes only this much of them beside its project context and instruction files. Shorten them on the Process page.]\n";
+
+const _: () = assert!(CUT_NOTE.len() < CLAUDE_PROCESS_BYTES_MAX);
+
+/// Fits what a Claude master gets from the Process page within the Claude host's prompt
+/// file limit beside its startup instruction, so no instruction text ever fails a turn:
+/// past the room the owner's app and project instructions are cut at a character boundary
+/// and end with a plain note, which the agent card shows, while the instruction files
+/// section, which has its own reserved room, stays whole. Inputs: the startup instruction
+/// and what `agent_home::text` built. Output: what the master gets and its home records.
+fn claude_process(
+    instructions: &str,
+    process: crate::agent_home::Given,
+) -> crate::agent_home::Given {
+    assert!(instructions.len() <= crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+    assert!(process.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+    assert!(process.section_bytes <= crate::instruction_files::SECTION_BYTES_MAX);
+    assert!(process.section_bytes <= process.text.len());
+    let room = crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize - instructions.len() - 1;
+    if process.text.len() <= room {
+        return process;
+    }
+    let (own, section) = process
+        .text
+        .split_at(process.text.len() - process.section_bytes);
+    let mut keep = room - section.len() - CUT_NOTE.len();
+    assert!(keep < own.len());
+    while !own.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    let text = format!("{}{CUT_NOTE}{section}", &own[..keep]);
+    assert!(text.len() <= room);
+    crate::agent_home::Given {
+        section_bytes: section.len(),
+        text,
+        files: process.files,
+        context: process.context,
+    }
+}
+
 /// Joins a Claude Code master's startup instruction with the owner's app and project
-/// instructions. Claude Code runs with setting sources off, which skips the `CLAUDE.md` in
-/// its home, so its prompt file carries the same text. Input: both texts. Output: the prompt.
+/// instructions and the instruction files the engine read. Claude Code runs with setting
+/// sources off, which skips every `CLAUDE.md`, so its prompt file carries the same text.
+/// Input: both texts. Output: the prompt.
 fn master_prompt(instructions: &str, process: &str) -> String {
     assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     if process.is_empty() {
@@ -200,6 +277,7 @@ pub(super) struct MasterTurnPlace<'a> {
     pub(super) runtime_ref: &'a RequestId,
     pub(super) repository: &'a Path,
     pub(super) worktree: &'a Path,
+    pub(super) policy: &'a AgentPolicy,
 }
 
 /// One master turn's command and Seatbelt boundary, the home both name, the account
@@ -251,6 +329,7 @@ pub(super) fn claude_master_turn(
                 &home,
                 executable,
                 &connection.endpoint,
+                place.policy,
             )?,
             None,
         ),
@@ -264,6 +343,7 @@ pub(super) fn claude_master_turn(
                 executable,
                 &connection.endpoint,
                 engine,
+                place.policy,
             )?;
             let drop = sandbox
                 .sandbox()
@@ -324,6 +404,7 @@ pub(super) fn codex_master_turn(
                 &home,
                 executable,
                 &connection.endpoint,
+                place.policy,
             )?,
             home,
             credential,
@@ -339,6 +420,7 @@ pub(super) fn codex_master_turn(
         executable,
         &connection.endpoint,
         engine,
+        place.policy,
     )?;
     let drop = sandbox
         .sandbox()
@@ -442,6 +524,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "features.multi_agent=false",
             "features.multi_agent_v2=false",
+            PROJECT_DOCS_OFF,
         ]
     } else {
         &[
@@ -453,6 +536,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "web_search=\"disabled\"",
             "mcp_servers={}",
+            PROJECT_DOCS_OFF,
         ]
     };
     let fixed: &[&str] = if tools.is_some() {
@@ -722,12 +806,14 @@ fn delegate_servers(
     Ok(setting)
 }
 
-/// Builds and installs the Seatbelt boundary for one master turn. The master writes only
-/// in the project repository, its leased worktree, the account's managed home and the
-/// turn's own temp folder; it reads the harness install folder and the turn directory,
-/// and reaches only its model endpoint (HTTPS for a native account) because its tools
-/// are off. Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+/// Builds and installs the Seatbelt boundary for one master turn with its tools off. The
+/// master writes only in its leased worktree, the account's managed home and the turn's own
+/// temp folder; it reads the project repository, never writing its refs, reflogs or other
+/// worktrees' admin folders, since the engine makes every ref move, and it reads the harness
+/// install folder and the turn directory, and reaches only its model endpoint (HTTPS for a
+/// native account). Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
     root: &Root,
     runtime_ref: &RequestId,
@@ -736,6 +822,7 @@ pub(super) fn master_sandbox(
     home: &Path,
     executable: &Path,
     endpoint: &ModelEndpoint,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -746,6 +833,7 @@ pub(super) fn master_sandbox(
         executable,
         endpoint,
         None,
+        policy,
     )
 }
 
@@ -765,6 +853,7 @@ pub(super) fn master_tools_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     engine: &Path,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -775,6 +864,7 @@ pub(super) fn master_tools_sandbox(
         executable,
         endpoint,
         Some(engine),
+        policy,
     )
 }
 
@@ -789,7 +879,11 @@ fn turn_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     engine: Option<&Path>,
+    policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
+    if policy.access.unavailable().is_some() {
+        return Err(failure("agent_access_unavailable"));
+    }
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -810,10 +904,13 @@ fn turn_sandbox(
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
     let network = SandboxNetwork::Only(vec![remote]);
-    let tools = Toolchains::detect(repository, &ToolHomes::owner().map_err(refused)?);
+    let tools = Toolchains::grant(
+        &ToolHomes::owner().map_err(refused)?,
+        &policy.allowed(repository),
+    );
     let sandbox = match engine {
-        None => ProjectSandbox::new(repository, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.allow_worktree(worktree)),
+        None => ProjectSandbox::new(worktree, &home, &tmp, network)
+            .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
             let folder = std::fs::canonicalize(engine)
                 .map_err(io_error)?
@@ -832,6 +929,11 @@ fn turn_sandbox(
     .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
+    let installed = if policy.access == AgentAccess::Full {
+        installed.unconfined()
+    } else {
+        installed
+    };
     verify_master_runtime(root, &runtime, &name)?;
     assert!(installed.profile().starts_with(&runtime.path));
     assert!(
@@ -841,11 +943,10 @@ fn turn_sandbox(
             .any(|writable| installed.profile().starts_with(writable))
     );
     assert!(
-        engine.is_none()
-            || installed
-                .sandbox()
-                .writable_roots()
-                .all(|writable| writable != repository)
+        installed
+            .sandbox()
+            .writable_roots()
+            .all(|writable| writable != repository)
     );
     Ok(installed)
 }
@@ -862,6 +963,7 @@ pub(super) fn master_sandbox(
     _home: &Path,
     _executable: &Path,
     _endpoint: &ModelEndpoint,
+    _policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -880,6 +982,7 @@ pub(super) fn master_tools_sandbox(
     _executable: &Path,
     _endpoint: &ModelEndpoint,
     _engine: &Path,
+    _policy: &AgentPolicy,
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -931,18 +1034,16 @@ pub(super) fn allocate_master_capture(
 /// Writes the master's startup instruction into its private turn directory as the 0600
 /// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
 /// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
-/// file's absolute path, or a plain refusal when the directory or file is not the engine's.
+/// file's absolute path, `master_instructions_too_large` past the Claude host's limit
+/// before any credential reaches the turn, or a plain refusal when the directory or file
+/// is not the engine's.
 #[cfg(unix)]
 fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
     text: &str,
 ) -> Result<PathBuf, EngineError> {
-    if text.len()
-        > crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
-            + 1
-            + crate::agent_home::PROCESS_BYTES_MAX
-    {
+    if text.len() as u64 > crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX {
         return Err(failure("master_instructions_too_large"));
     }
     let name = format!("master-runtime-{}", runtime_ref.as_str());
@@ -1185,7 +1286,162 @@ mod tests {
             &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
             &crate::agent_home::render(&full, &full),
         );
-        assert!(write_master_instructions(&root, &runtime_ref, &largest).is_ok());
+        let host_limit =
+            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
+        assert!(largest.len() > host_limit);
+        assert_eq!(
+            write_master_instructions(&root, &runtime_ref, &largest)
+                .unwrap_err()
+                .0,
+            "master_instructions_too_large",
+            "a prompt Claude Code would refuse is never written"
+        );
+        let fits = master_prompt(
+            &"x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX),
+            &"a".repeat(host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1),
+        );
+        assert_eq!(fits.len(), host_limit);
+        assert_eq!(
+            host_limit
+                - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+                - crate::instruction_files::SECTION_BYTES_MAX
+                - 1,
+            CLAUDE_PROCESS_BYTES_MAX,
+            "the Process page warns at exactly the room the largest context and the largest instruction files leave"
+        );
+        assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
+    }
+
+    /// Runs git in a test checkout with no system or global config. Inputs: the folder and
+    /// the arguments. Output: unit.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .args([
+                    "-c",
+                    "user.name=Owner",
+                    "-c",
+                    "user.email=owner@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn a_claude_master_past_the_host_limit_gets_its_owner_text_cut_with_a_note_and_every_instruction_file()
+     {
+        use crate::instruction_files::{Choice, FILE_BYTES_MAX, State};
+        let temporary = private_root();
+        let base = std::fs::canonicalize(temporary.path()).unwrap();
+        let (data, folder, home) = (
+            base.join("data"),
+            base.join("repo"),
+            base.join("master-home"),
+        );
+        for made in [&data, &folder, &home] {
+            std::fs::create_dir(made).unwrap();
+            std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        git_in(&folder, &["init", "-q"]);
+        std::fs::write(folder.join("CLAUDE.md"), "c".repeat(FILE_BYTES_MAX + 1)).unwrap();
+        let agents = format!("AGENTS-RULE-91\n{}\n", "a".repeat(30_000));
+        std::fs::write(folder.join("AGENTS.md"), &agents).unwrap();
+        std::fs::write(folder.join(".gitignore"), ".crazyagent/\n").unwrap();
+        git_in(&folder, &["add", "-A"]);
+        git_in(&folder, &["commit", "-q", "-m", "rules"]);
+        std::fs::create_dir(folder.join(".crazyagent")).unwrap();
+        let full = crate::agent_home::TEXT_BYTES_MAX;
+        crate::agent_home::save_app(&data, &format!("APP-START-92{}", "A".repeat(full - 12)))
+            .unwrap();
+        crate::agent_home::save_project(&folder, &"P".repeat(full)).unwrap();
+        let project = crate::agent_home::AgentProject {
+            data,
+            id: crate::protocol::ProjectId::new("cut-instructions").unwrap(),
+            folder: Some(folder),
+            files: Choice::Project,
+            owner_home: None,
+        };
+        let given = crate::agent_home::text(&project, None).unwrap();
+        let states: Vec<(&str, State)> = given
+            .files
+            .iter()
+            .map(|file| (file.name.as_str(), file.state))
+            .collect();
+        assert_eq!(
+            states,
+            [("CLAUDE.md", State::TooLarge), ("AGENTS.md", State::Given)],
+            "a CLAUDE.md past its limit is left out whole and recorded"
+        );
+        let section = given.text[given.text.len() - given.section_bytes..].to_owned();
+        assert!(section.contains("AGENTS-RULE-91"));
+
+        let instructions = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
+        let host_limit =
+            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
+        assert!(instructions.len() + 1 + given.text.len() > host_limit);
+        let capped = claude_process(&instructions, given.clone());
+        let prompt = master_prompt(&instructions, &capped.text);
+        assert!(prompt.len() <= host_limit, "{} bytes", prompt.len());
+        let root = Root::open(&base).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        assert!(
+            write_master_instructions(&root, &runtime_ref, &prompt).is_ok(),
+            "the turn's prompt file is written, never refused"
+        );
+        assert!(capped.text.starts_with("# Instructions from CrazyAgent\n"));
+        assert!(capped.text.contains("APP-START-92"));
+        assert!(
+            capped
+                .text
+                .contains("CrazyAgent cut the app and project instructions here")
+        );
+        assert!(
+            capped.text.ends_with(&section),
+            "the instruction files section stays whole"
+        );
+        assert_eq!(capped.section_bytes, section.len());
+        assert_eq!(capped.files, given.files);
+
+        crate::agent_home::prepare(&home, crate::agent_home::Harness::Claude, &project, &capped)
+            .unwrap();
+        let card = crate::agent_home::received(&home, crate::agent_home::Harness::Claude)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            card.text, capped.text,
+            "the agent card shows what the master got"
+        );
+        assert!(card.text.contains("Shorten them on the Process page."));
+        assert_eq!(
+            crate::agent_home::given_files(&project.data, &home).unwrap(),
+            given.files
+        );
+
+        let small = crate::agent_home::Given {
+            text: "# Instructions from CrazyAgent\n\nShort.\n".into(),
+            files: Vec::new(),
+            section_bytes: 0,
+            context: Vec::new(),
+        };
+        assert_eq!(
+            claude_process(&instructions, small.clone()),
+            small,
+            "text that fits is never cut"
+        );
     }
 
     #[test]
@@ -1255,6 +1511,7 @@ mod tests {
             &home,
             &executable,
             &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1320,6 +1577,7 @@ mod tests {
             &home,
             &executable,
             &native,
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1339,13 +1597,9 @@ mod tests {
                 .writable_roots()
                 .map(PathBuf::as_path)
                 .collect::<Vec<_>>(),
-            [
-                repository.as_path(),
-                home.as_path(),
-                tmp.as_path(),
-                worktree.as_path()
-            ]
+            [worktree.as_path(), home.as_path(), tmp.as_path()]
         );
+        assert!(sandbox.sandbox().read_roots().contains(&repository));
         assert!(
             sandbox
                 .sandbox()
@@ -1385,6 +1639,8 @@ mod tests {
         ]);
         expected.extend(crate::sandbox::AGENT_GIT_ENV);
         expected.extend(crate::sandbox::AGENT_TLS_ENV);
+        let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
+        expected.insert("TMPPREFIX", prefix.to_str().unwrap());
         let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
         expected.extend(
             tools
@@ -1433,6 +1689,7 @@ mod tests {
         ]);
         expected_claude.extend(crate::sandbox::AGENT_GIT_ENV);
         expected_claude.extend(crate::sandbox::AGENT_TLS_ENV);
+        expected_claude.insert("TMPPREFIX", prefix.to_str().unwrap());
         expected_claude.extend(
             tools
                 .iter()
@@ -1456,7 +1713,6 @@ mod tests {
         };
         for allowed in [
             worktree.join("work.txt"),
-            repository.join("shared.txt"),
             home.join("account.txt"),
             tmp.join("scratch.txt"),
         ] {
@@ -1465,6 +1721,7 @@ mod tests {
         }
         let profile_text = std::fs::read(sandbox.profile()).unwrap();
         for refused in [
+            repository.join("shared.txt"),
             base.join("escape.txt"),
             turn.join("escape.txt"),
             turn.join(format!("capture-{}.jsonl", capture_ref.as_str())),
@@ -1473,6 +1730,7 @@ mod tests {
         ] {
             assert!(!run(&refused), "{}", refused.display());
         }
+        assert!(!repository.join("shared.txt").exists());
         assert!(!base.join("escape.txt").exists());
         assert!(!turn.join("escape.txt").exists());
         assert_eq!(capture.metadata().unwrap().len(), 0);
@@ -1487,7 +1745,8 @@ mod tests {
                 &worktree,
                 &home,
                 &executable,
-                &native
+                &native,
+                &AgentPolicy::default(),
             )
             .is_err()
         );
@@ -1513,7 +1772,8 @@ mod tests {
                     &worktree,
                     &home,
                     &executable,
-                    endpoint
+                    endpoint,
+                    &AgentPolicy::default(),
                 )
                 .unwrap_err()
                 .0,
@@ -1538,6 +1798,7 @@ mod tests {
             &home,
             &executable,
             &endpoint,
+            &AgentPolicy::default(),
         )
         .unwrap()
         .sandbox()
@@ -1545,6 +1806,178 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    /// A tools-off master in a real git worktree lease reads the repository's refs but
+    /// cannot move them: real git and plain writes from inside its boundary are refused for
+    /// the owner's branch, `HEAD`, a new engine ref, the reflog, `packed-refs` and both its
+    /// own and another worktree's admin `HEAD`, and every ref stays where the owner left it.
+    #[test]
+    fn a_tools_off_master_reads_the_repository_but_cannot_move_its_refs() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let leases = base.join("worktrees");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &leases, &home, &install] {
+            private_directory(directory);
+        }
+        let git = crate::research::runner::setup_git();
+        let owner = |args: &[&str]| -> String {
+            let output = crate::spawn_gate::output(
+                Command::new(git)
+                    .args([
+                        "-c",
+                        "user.name=Owner",
+                        "-c",
+                        "user.email=owner@example.invalid",
+                        "-c",
+                        "commit.gpgsign=false",
+                    ])
+                    .args(args)
+                    .current_dir(&repository)
+                    .env_clear()
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        owner(&["init", "-q", "-b", "main"]);
+        std::fs::write(repository.join("main.txt"), "first\n").unwrap();
+        owner(&["add", "main.txt"]);
+        owner(&["commit", "-q", "-m", "first"]);
+        let first = owner(&["rev-parse", "HEAD"]);
+        std::fs::write(repository.join("main.txt"), "owner\n").unwrap();
+        owner(&["commit", "-q", "-am", "owner"]);
+        let tip = owner(&["rev-parse", "HEAD"]);
+        let worktree = leases.join("lease");
+        let other = leases.join("other");
+        for (path, branch) in [(&worktree, "lease"), (&other, "other")] {
+            owner(&[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                path.to_str().unwrap(),
+            ]);
+        }
+        let refs = owner(&["for-each-ref", "--format=%(refname) %(objectname)"]);
+        let git_dir = repository.join(".git");
+        let head = std::fs::read(git_dir.join("HEAD")).unwrap();
+        let reflog = std::fs::read(git_dir.join("logs/HEAD")).unwrap();
+        let lease_head = std::fs::read(git_dir.join("worktrees/lease/HEAD")).unwrap();
+        let other_head = std::fs::read(git_dir.join("worktrees/other/HEAD")).unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+        )
+        .unwrap();
+        let run = |program: &Path, args: &[&str]| {
+            let mut command = Command::new(program);
+            command.args(args).current_dir(&worktree).env("HOME", &home);
+            let mut child = sandbox.wrap(&command).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        let repository_text = repository.to_str().unwrap();
+        let other_admin = git_dir.join("worktrees/other");
+        let other_admin = other_admin.to_str().unwrap();
+        let first = first.as_str();
+        assert!(run(git, &["rev-parse", "--verify", "refs/heads/main"]));
+        assert!(run(
+            git,
+            &["-C", repository_text, "log", "-1", "--format=%H"]
+        ));
+        let refused: [&[&str]; 6] = [
+            &["update-ref", "refs/heads/main", first],
+            &["update-ref", "refs/crazyagent/pending/1", first],
+            &["update-ref", "--no-deref", "HEAD", first],
+            &[
+                "-C",
+                repository_text,
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/other",
+            ],
+            &[
+                "--git-dir",
+                other_admin,
+                "update-ref",
+                "--no-deref",
+                "HEAD",
+                first,
+            ],
+            &["-C", repository_text, "pack-refs", "--all"],
+        ];
+        for args in refused {
+            assert!(!run(git, args), "git {args:?}");
+        }
+        for file in [
+            "HEAD",
+            "packed-refs",
+            "logs/HEAD",
+            "refs/heads/planted",
+            "worktrees/lease/HEAD",
+            "worktrees/other/HEAD",
+        ] {
+            let target = git_dir.join(file);
+            assert!(
+                !run(
+                    Path::new("/bin/sh"),
+                    &["-c", "echo planted >> \"$0\"", target.to_str().unwrap()]
+                ),
+                "{file}"
+            );
+        }
+        assert_eq!(
+            owner(&["for-each-ref", "--format=%(refname) %(objectname)"]),
+            refs
+        );
+        assert_eq!(owner(&["rev-parse", "refs/heads/main"]), tip);
+        assert_eq!(std::fs::read(git_dir.join("HEAD")).unwrap(), head);
+        assert_eq!(std::fs::read(git_dir.join("logs/HEAD")).unwrap(), reflog);
+        assert_eq!(
+            std::fs::read(git_dir.join("worktrees/lease/HEAD")).unwrap(),
+            lease_head
+        );
+        assert_eq!(
+            std::fs::read(git_dir.join("worktrees/other/HEAD")).unwrap(),
+            other_head
+        );
+        assert!(!git_dir.join("packed-refs").exists());
+        assert!(!git_dir.join("refs/heads/planted").exists());
+        assert!(run(Path::new("/bin/sh"), &["-c", "echo agent >> work.txt"]));
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
+            "agent\n"
+        );
     }
 
     #[test]
@@ -1602,6 +2035,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &engine,
+            &AgentPolicy::default(),
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));

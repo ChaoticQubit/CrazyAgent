@@ -17,7 +17,8 @@ import "./intake.css";
 const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping", title: "Map the project" }] as const;
 
 /** The setup review as a view of its state: the graph and mapping steps, the mapping agent's
- * overview, the pre-filled form with missing items marked, and a Confirm that waits for the agent.
+ * overview or a labelled one found in the folder, the pre-filled form with missing items marked,
+ * and a Confirm that waits for the agent.
  * A failed mapping offers Retry and Skip until skipped; a saved setup shows its saved values.
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
  * catalog, field errors, flags, the last problem and the handlers. Output: the page. */
@@ -62,6 +63,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <Button disabled={retrying} onClick={() => onSkipMapping?.()}>Skip mapping</Button>
     </span>}
     {value.overview && <Panel title="Overview"><MarkdownView source={value.overview} onOpenLink={onOpenLink} /></Panel>}
+    {value.folder_overview && <Panel title="Overview found in the folder"><p className="pj-help">The mapping agent did not write this: it came with the folder or was changed since.</p><MarkdownView source={value.folder_overview} onOpenLink={onOpenLink} /></Panel>}
     {draft && missing.length > 0 && <Notice tone="warn">Not found: {missing.join(", ")}. Add them below.</Notice>}
     {draft && <form className="pj-stack" aria-label="Project details" noValidate onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
       <BasicsFields prefix="ob" draft={draft} onChange={onDraft} catalog={catalog} errors={errors} showErrors={showErrors} missing={value.missing} />

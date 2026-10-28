@@ -28,13 +28,11 @@ async function keyPair(root) {
 async function releaseDir(root, env, targets = Object.keys(TARGETS)) {
   const dir = join(root, "assets");
   await mkdir(dir);
-  for (const target of targets) {
-    const names = [...desktopLayout(target, VERSION).map((item) => item.to), cliArchiveName(VERSION, target)];
-    for (const name of names) {
-      await writeFile(join(dir, name), `${target} ${name}\n`);
-      await signFile({ file: join(dir, name), version: VERSION, env });
-    }
-  }
+  const assets = targets.flatMap((target) => [...desktopLayout(target, VERSION).map((item) => item.to), cliArchiveName(VERSION, target)].map((name) => ({ target, name })));
+  await Promise.all(assets.map(async ({ target, name }) => {
+    await writeFile(join(dir, name), `${target} ${name}\n`);
+    await signFile({ file: join(dir, name), version: VERSION, env });
+  }));
   return dir;
 }
 

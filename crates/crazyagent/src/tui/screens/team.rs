@@ -24,6 +24,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 
 mod cleanup;
+mod finished;
 #[cfg(test)]
 mod tests;
 
@@ -39,9 +40,11 @@ const PAGE_STEP: usize = 10;
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
-const MASTER_STOPPED: &str =
-    "The live master is stopped. Its terminal opens again once you start it.";
+const MASTER_STOPPED: &str = "The live master is stopped.";
+const MASTER_RESTART: &str =
+    "It starts again when you open this view again or press n for a new session.";
 const MASTER_HEAD_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,7 @@ struct TreeRow {
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
+    switched: Option<String>,
 }
 
 struct Attached {
@@ -120,6 +124,7 @@ pub struct Team {
     attached: Option<Attached>,
     task: Option<i64>,
     cleanup: cleanup::Cleanup,
+    finished: finished::Finished,
     instructions: Option<Instructions>,
 }
 
@@ -142,13 +147,14 @@ impl Team {
             attached: None,
             task: None,
             cleanup: cleanup::Cleanup::new(),
+            finished: finished::Finished::new(),
             instructions: None,
         }
     }
 
-    /// The master view of one project: a header with the live master switch, then the
+    /// The master view of one project: a header with the live master's state, then the
     /// live master's own terminal filling the body, opened as soon as the team shows it.
-    /// The first open of a project whose switch was never set turns the master on.
+    /// Every open turns the master on; it stops only on the master idle stop or app quit.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
@@ -164,18 +170,15 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
-    fn turn_live(&mut self, on: bool, ctx: &mut Ctx) {
+    fn start_live(&mut self, ctx: &mut Ctx) {
         self.asked = true;
-        self.want = Some(on);
+        self.want = Some(true);
         self.refused = None;
-        if !on {
-            self.detach(ctx);
-        }
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
-                on,
+                on: true,
             },
             generation,
         }));
@@ -188,7 +191,8 @@ impl Team {
     }
 
     /// Takes a team status read or a live switch change of this master view: a good read
-    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// replaces the switch, and the first one of this open turns a switch that is not on
+    /// on; a failed read changes nothing;
     /// an accepted change is the switch until the next read, which is read at once.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
@@ -208,14 +212,15 @@ impl Team {
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
+                    switched: status.live_switch.as_ref().map(switched_words),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
                 }
-                let never = switch.on.is_none();
+                let off = switch.on != Some(true);
                 self.switch = Some(switch);
-                if never && !self.asked {
-                    self.turn_live(true, ctx);
+                if off && !self.asked {
+                    self.start_live(ctx);
                 }
             }
             SetupQuery::TeamChange {
@@ -224,22 +229,17 @@ impl Team {
             } if *project_id == self.project => match result {
                 Ok(_) => {
                     self.want = None;
+                    let switched = self.switch.take().and_then(|switch| switch.switched);
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
+                        switched,
                     });
                     self.read_switch(ctx);
                 }
                 Err(code) => {
                     self.want = None;
-                    if *on {
-                        self.refused = Some(code.clone());
-                    } else {
-                        ctx.say(Message::warning(
-                            "The live master could not be stopped.",
-                            plain_problem(code).unwrap_or(code.as_str()),
-                        ));
-                    }
+                    self.refused = Some(code.clone());
                 }
             },
             _ => {}
@@ -279,13 +279,14 @@ impl Team {
             .is_some_and(|attached| attached.closed.is_none());
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
-            Key::Char('s') => {
-                let on = self.live_on() == Some(false);
-                self.turn_live(on, ctx);
-            }
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char(code @ ('n' | 'l')) => {
+                ctx.sessions_key = Some((self.project.clone(), *code));
+                self.detach(ctx);
+                return Flow::Back;
+            }
             Key::Esc => {
                 self.detach(ctx);
                 return Flow::Back;
@@ -342,14 +343,8 @@ impl Team {
                 attached.started = true;
             }
             TerminalFrame::Output { bytes } => attached.pane.feed(bytes),
-            TerminalFrame::Closed { reason } => {
-                attached.closed = Some(reason.clone());
-                self.focus = Focus::Tree;
-            }
-            TerminalFrame::Rejected { code } => {
-                attached.closed = Some(code.clone());
-                self.focus = Focus::Tree;
-            }
+            TerminalFrame::Closed { reason } => attached.closed = Some(reason.clone()),
+            TerminalFrame::Rejected { code } => attached.closed = Some(code.clone()),
         }
     }
 
@@ -463,7 +458,6 @@ impl Team {
             });
         }
         attached.closed = Some(STOPPED.into());
-        self.focus = Focus::Tree;
     }
 
     fn show_task(&mut self, edge: usize) {
@@ -521,7 +515,9 @@ impl Team {
         };
         open.read = match &event.result {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
-            Ok(ProcessReply::Text(_)) => return,
+            Ok(ProcessReply::Text(_) | ProcessReply::Saved(_) | ProcessReply::Settings(_)) => {
+                return;
+            }
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),
         };
@@ -547,6 +543,10 @@ impl Team {
         }
     }
 
+    /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
+    /// master view, any other key goes to the open terminal. A terminal that closed keeps
+    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
+    /// view. Inputs: the key and the context. Output: handled.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
             self.focus = Focus::Tree;
@@ -557,7 +557,6 @@ impl Team {
             return Flow::Handled;
         };
         if attached.closed.is_some() {
-            self.focus = Focus::Tree;
             return Flow::Handled;
         }
         for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {
@@ -680,31 +679,30 @@ impl Team {
         Some(lines)
     }
 
-    fn switch_control(&self) -> &'static str {
-        if self.live_on() == Some(false) {
-            "Start live master"
-        } else {
-            "Stop live master"
-        }
-    }
-
-    /// The master view's header: whether the live master is on, and the key that switches it
-    /// at the right edge. Inputs: the width and context. Output: the line.
+    /// The master view's header: whether the live master is on, where the live session's
+    /// master harness last switched, and the session keys at the right edge.
+    /// Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
-        let state = if self.live_on() == Some(false) {
-            MASTER_OFF
-        } else {
-            MASTER_ON
+        let switched = self
+            .switch
+            .as_ref()
+            .and_then(|switch| switch.switched.as_deref());
+        let state = match (self.live_on() == Some(false), switched) {
+            (true, None) => MASTER_OFF.to_owned(),
+            (true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
+            (false, None) => MASTER_ON.to_owned(),
+            (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
-        let control = format!("s {}", self.switch_control());
+        let control = "n New session  l Sessions".to_owned();
         let room = limit.saturating_sub(width(&control));
-        if room < width(state) + 2 {
+        if room < width(MASTER_OFF) + 2 {
             return styled(
                 cut(&control, limit, ctx.glyphs.ellipsis),
                 Role::Muted,
                 &ctx.theme,
             );
         }
+        let state = cut(&state, room - 2, ctx.glyphs.ellipsis);
         join([
             Line::raw(format!("{state:<room$}")),
             styled(control, Role::Muted, &ctx.theme),
@@ -716,6 +714,10 @@ impl Team {
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
         if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
+            boxed(frame, area, &title, false, lines, ctx);
+            return None;
+        }
+        if let Some((title, lines)) = self.finished.lines(limit, usize::from(inner.height), ctx) {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
         }
@@ -754,7 +756,7 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap("Press s to start it.", limit)
+                wrap(MASTER_RESTART, limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -838,13 +840,17 @@ impl Screen for Team {
             {
                 hints.push(hint("Enter", "Terminal"));
             }
-            hints.push(hint("s", self.switch_control()));
-            hints.push(hint("Esc", "Earlier conversation"));
+            hints.push(hint("n", "New session"));
+            hints.push(hint("l", "Sessions"));
+            hints.push(hint("Esc", "Back"));
             hints.push(hint("r", "Refresh"));
             return hints;
         }
         if self.cleanup.open() {
             return self.cleanup.hints();
+        }
+        if self.finished.open() {
+            return self.finished.hints();
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let mut hints = vec![
@@ -866,6 +872,7 @@ impl Screen for Team {
                 hints.push(hint("Esc", "Close"));
             }
             None => {
+                hints.push(hint("f", "Finished"));
                 hints.push(hint("c", "Clean up"));
                 hints.push(hint("Esc", "Back"));
             }
@@ -883,6 +890,11 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if !self.cleanup.open()
+            && let Some(flow) = self.finished.key(key, &self.project, ctx)
+        {
+            return flow;
         }
         if let Some(flow) = self.cleanup.key(key, &self.project, ctx) {
             return flow;
@@ -939,6 +951,7 @@ impl Screen for Team {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.cleanup.arrive(arrival, &self.project, ctx);
+        self.finished.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
@@ -1243,8 +1256,9 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
 }
 
-/// The lines of an agent's Instructions box: the instruction file with its size and
-/// text, then the skills installed for it, or why nothing can be shown.
+/// The lines of an agent's Instructions box: what its harness reported loading and
+/// invoking, the instruction file with its size and text, then the skills installed for
+/// it, or why nothing can be shown.
 /// Inputs: the read, the box width and context. Output: the lines, unscrolled.
 fn instruction_lines(
     read: &Load<Box<AgentInstructions>>,
@@ -1275,13 +1289,14 @@ fn instruction_lines(
         Load::Ready(view) => view,
     };
     let file = Harness::from_id(&view.harness).map_or("Instructions", Harness::instruction_file);
-    let mut lines = match view.text.is_empty() {
+    let mut lines = reported_lines(view, limit, ctx);
+    lines.extend(match view.text.is_empty() {
         true => muted("No app or project instructions were given at its last launch."),
         false => vec![Line::from(vec![
             Span::styled(file, theme.heading),
             Span::styled(format!("  {}", size(view.text.len())), theme.muted),
         ])],
-    };
+    });
     lines.push(Line::default());
     for text in sanitize(&view.text).lines() {
         match text.is_empty() {
@@ -1292,6 +1307,25 @@ fn instruction_lines(
     if !view.text.is_empty() {
         lines.push(Line::default());
     }
+    lines.push(styled("Instruction files", Role::Heading, theme));
+    match view.files.is_empty() {
+        true => lines.extend(muted("No instruction files were found at its last launch.")),
+        false => lines.extend(view.files.iter().flat_map(|file| {
+            wrap(
+                &format!(
+                    "{} {}  {}, {}",
+                    ctx.glyphs.dot,
+                    plain(&file.name),
+                    size(file.bytes.try_into().unwrap_or(usize::MAX)),
+                    file_state(file.state)
+                ),
+                limit,
+            )
+            .into_iter()
+            .map(Line::raw)
+        })),
+    }
+    lines.push(Line::default());
     lines.push(styled("Skills", Role::Heading, theme));
     match view.skills.is_empty() {
         true => lines.extend(muted("No skills were installed at its last launch.")),
@@ -1302,6 +1336,61 @@ fn instruction_lines(
         ),
     }
     lines
+}
+
+/// The lines saying what an agent's harness reported in its own session records: the
+/// instruction file names it loaded and the skills it invoked, then each file's place.
+/// Inputs: the view, the box width and context. Output: the lines and a blank line.
+fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let mut names: Vec<&str> = Vec::new();
+    for file in &view.loaded {
+        if !names.contains(&file.name.as_str()) {
+            names.push(&file.name);
+        }
+    }
+    let listed = |list: &[&str], none: &str| match list.is_empty() {
+        true => none.to_owned(),
+        false => list.join(", "),
+    };
+    let used: Vec<&str> = view.skills_used.iter().map(String::as_str).collect();
+    let (files, skills) = match view.sessions {
+        0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
+        _ => (
+            listed(&names, "none loaded by its harness"),
+            listed(&used, "none"),
+        ),
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for text in [
+        format!("Instructions: {files}"),
+        format!("Skills used: {skills}"),
+    ] {
+        lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
+    }
+    for file in &view.loaded {
+        let place = plain(&format!("{} {}  {}", ctx.glyphs.dot, file.name, file.path));
+        lines.extend(
+            wrap(&place, limit)
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, &ctx.theme)),
+        );
+    }
+    lines.push(Line::default());
+    lines
+}
+
+/// What became of one instruction file at an agent's last launch, in the owner's words.
+/// Input: the engine's record of it. Output: the words.
+fn file_state(state: crate::instruction_files::State) -> &'static str {
+    use crate::instruction_files::State;
+    match state {
+        State::Given => "given",
+        State::Same => "left out: the same text as the instructions or a file above",
+        State::TooLarge => "left out: larger than CrazyAgent gives",
+        State::Unsafe => "left out: a link or not a plain file",
+        State::Invalid => "left out: not plain text",
+        State::Unreadable => "left out: couldn't be read",
+    }
 }
 
 /// Task text safe to draw in a terminal cell grid: tabs become spaces and
@@ -1370,6 +1459,16 @@ fn inside(area: Rect) -> Rect {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     )
+}
+
+/// The master header's words for the live session's last master harness switch.
+/// Takes the switch. Returns "Switched to <harness>, carried over" or ", started fresh".
+fn switched_words(switch: &crate::team::SessionSwitch) -> String {
+    let what = match switch.mode {
+        crate::team::SwitchMode::Carry => "carried over",
+        crate::team::SwitchMode::Fresh => "started fresh",
+    };
+    format!("Switched to {}, {what}.", plain(&switch.harness))
 }
 
 /// Splits the master view into its header row with the live master switch and the body.

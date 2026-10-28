@@ -847,23 +847,35 @@ fn finish_attempt_inner(
         return Err(error("gateway_completion_bounds"));
     }
     if record_observation && let AttemptOutcome::Failed(kind) = &completion.outcome {
+        let latest = persistence::latest_observation(tx, &attempt.connection_revision)?;
+        let observed_at_ms = latest.as_ref().map_or(completion.finished_at_ms, |value| {
+            completion.finished_at_ms.max(value.observed_at_ms)
+        });
+        let shift = observed_at_ms - completion.finished_at_ms;
+        let retry_at_ms = completion
+            .retry_at_ms
+            .map(|retry| {
+                retry
+                    .checked_add(shift)
+                    .ok_or_else(|| error("gateway_observation_bounds"))
+            })
+            .transpose()?;
         let kind = match kind {
-            FailureKind::QuotaExhausted => ObservationKind::QuotaExhausted {
-                retry_at_ms: completion.retry_at_ms,
-            },
-            FailureKind::RateLimited => ObservationKind::RateLimited {
-                retry_at_ms: completion.retry_at_ms,
-            },
+            FailureKind::QuotaExhausted => ObservationKind::QuotaExhausted { retry_at_ms },
+            FailureKind::RateLimited => ObservationKind::RateLimited { retry_at_ms },
             FailureKind::InvalidAuthentication => ObservationKind::InvalidAuthentication,
-            FailureKind::TransientFailure => ObservationKind::TransientFailure {
-                retry_at_ms: completion.retry_at_ms,
-            },
+            FailureKind::TransientFailure => ObservationKind::TransientFailure { retry_at_ms },
             FailureKind::Unknown => ObservationKind::Unknown,
         };
-        let latest = persistence::latest_observation(tx, &attempt.connection_revision)?;
         let sequence = latest
             .map_or(Some(1), |value| value.sequence.checked_add(1))
             .ok_or_else(|| error("gateway_observation_bounds"))?;
+        let valid_until_ms = match retry_at_ms {
+            Some(retry) => retry,
+            None => observed_at_ms
+                .checked_add(FAILURE_HOLD_MS)
+                .ok_or_else(|| error("gateway_observation_bounds"))?,
+        };
         let observation = Observation {
             id: RequestId::new(format!(
                 "failure:{}",
@@ -872,12 +884,18 @@ fn finish_attempt_inner(
             .map_err(error)?,
             connection: attempt.connection.clone(),
             sequence,
-            observed_at_ms: completion.finished_at_ms,
-            valid_until_ms: completion
-                .retry_at_ms
-                .unwrap_or(completion.finished_at_ms + FAILURE_HOLD_MS),
+            observed_at_ms,
+            valid_until_ms,
             kind,
         };
+        assert!(observation.observed_at_ms >= completion.finished_at_ms);
+        assert_eq!(
+            observation.valid_until_ms - observation.observed_at_ms,
+            completion
+                .retry_at_ms
+                .unwrap_or(completion.finished_at_ms + FAILURE_HOLD_MS)
+                - completion.finished_at_ms
+        );
         validate_observation(&observation)?;
         persistence::insert_observation(tx, &observation)?;
     }

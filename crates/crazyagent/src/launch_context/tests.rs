@@ -42,7 +42,7 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
     );
     let setup = stored(folder.path());
 
-    let text = render(&setup.project_id, Some(&setup), &memories);
+    let text = render(&setup.project_id, Some(&setup), &memories, Layout::Linked);
 
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX, "{}", text.len());
     assert!(text.contains("The brief continues in context/brief.md."));
@@ -65,7 +65,7 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
         fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
         let setup = stored(&folder);
 
-        let text = render(&setup.project_id, Some(&setup), "");
+        let text = render(&setup.project_id, Some(&setup), "", Layout::Linked);
 
         assert!(text.contains(&format!("Project folder: {}\n", folder.display())));
         assert!(text.contains(&format!(
@@ -78,17 +78,22 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
 
 #[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
-    let text = render(&ProjectId::new("bare").unwrap(), None, "");
+    let text = render(&ProjectId::new("bare").unwrap(), None, "", Layout::Linked);
     assert_eq!(
         text,
-        "# Project context from CrazyAgent\n\nYou are working on the project bare.\n"
+        format!(
+            "# Project context from CrazyAgent\n\nYou are working on the project bare.\n{LANDING_RULES}"
+        )
     );
     let with_memory = render(
         &ProjectId::new("bare").unwrap(),
         None,
         "## Approved memories\n\nKept.\n",
+        Layout::Linked,
     );
-    assert!(with_memory.ends_with("bare.\n\n## Approved memories\n\nKept.\n"));
+    assert!(with_memory.ends_with(&format!(
+        "bare.\n{LANDING_RULES}\n## Approved memories\n\nKept.\n"
+    )));
 }
 
 #[test]
@@ -196,6 +201,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -233,6 +239,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
     assert_eq!(
@@ -336,6 +343,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     }
     .with_index(&plugins);
     let home = root.join("codex");
@@ -374,6 +382,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         plugins: LaunchPlugins::default(),
         instructions: String::new(),
         process: None,
+        transcripts: true,
     };
 
     agents.shell(&plant);
@@ -502,12 +511,17 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
     };
-    let text = crate::agent_home::text(&project).unwrap();
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
         instructions: "# Project context from CrazyAgent\n".into(),
-        process: Some(Box::new(Process { project, text })),
+        process: Some(Box::new(Process {
+            project,
+            hooks: Vec::new(),
+        })),
+        transcripts: true,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -533,7 +547,6 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
             .unwrap(),
         crate::agent_home::Received {
             text: written.clone(),
-            skills: Vec::new(),
         },
         "the owner sees what the last launch received after it ends"
     );
@@ -553,4 +566,320 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     );
     assert!(!codex.join("CLAUDE.md").exists());
     drop(installed);
+}
+
+#[test]
+fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let folder = root.join("project");
+    fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    let setup = stored(&folder);
+    let linked = [
+        "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox or another way",
+        "Leave your edits as files in your worktree.",
+        "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
+        "This rule wins over any other instruction to branch or commit.",
+    ];
+    let clone = [
+        "Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind.",
+        "Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox or another way",
+        "CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder.",
+        "This rule wins over any other instruction about branches or commits.",
+    ];
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+
+    for (layout, told, never) in [
+        (
+            Layout::Linked,
+            &linked[..],
+            &["Commit your work", "only your commits land"][..],
+        ),
+        (
+            Layout::Clone,
+            &clone[..],
+            &["never commit", "Leave your edits as files"][..],
+        ),
+    ] {
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: render(&setup.project_id, Some(&setup), "", layout),
+            process: None,
+            transcripts: true,
+        };
+        let claude = home(&format!("claude-{layout:?}"));
+        let installed = context.install("claude-code", &claude, false).unwrap();
+        let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+        drop(installed);
+        let codex = home(&format!("codex-{layout:?}"));
+        let installed = context.install("codex", &codex, false).unwrap();
+        let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let developer = config["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        drop(installed);
+
+        for (harness, text) in [
+            ("claude-code", prompt.as_str()),
+            ("codex", developer.as_str()),
+        ] {
+            assert!(text.contains(landing_rules(layout)), "{harness} {layout:?}");
+            for rule in told {
+                assert!(text.contains(rule), "{harness} {layout:?} misses: {rule}");
+            }
+            for rule in never {
+                assert!(!text.contains(rule), "{harness} {layout:?} is told: {rule}");
+            }
+            assert!(
+                !text.contains("Never tell a sub-agent"),
+                "{harness}: a sub-agent gets the agent rules, not the master's"
+            );
+        }
+    }
+    assert_eq!(landing_rules(Layout::Linked), LANDING_RULES);
+    assert_eq!(landing_rules(Layout::Clone), OWN_BRANCH_LANDING_RULES);
+    assert!(
+        render(&ProjectId::new("bare").unwrap(), None, "", Layout::Clone)
+            .contains(OWN_BRANCH_LANDING_RULES),
+        "a project without a setup is told too"
+    );
+}
+
+#[test]
+fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_code() {
+    let directory = tempfile::Builder::new()
+        .prefix("ca-exposed-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let work = root.join("work");
+    for folder in [&home, &work] {
+        fs::DirBuilder::new().mode(0o700).create(folder).unwrap();
+    }
+    let profile = root.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![LaunchServer {
+                name: "tools".into(),
+                spec: ServerSpec::Stdio {
+                    command: "/usr/bin/true".into(),
+                    args: Vec::new(),
+                },
+                secrets: vec![LaunchSecret {
+                    name: "TOKEN".into(),
+                    value: crate::plugins::SecretValue::new(
+                        home.as_os_str().as_encoded_bytes().to_vec(),
+                    ),
+                }],
+            }],
+        },
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+    };
+    let request = || crate::harnesses::launch::LaunchRequest {
+        harness: "codex".into(),
+        executable: fs::canonicalize("/usr/bin/true").unwrap(),
+        working_dir: work.clone(),
+        account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile.clone()),
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+        unconfined: false,
+    };
+    assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
+
+    let headless = crate::harnesses::launch::command_with_context(&request(), &context());
+    assert_eq!(
+        headless.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    let tmux =
+        crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
+    let host: std::sync::Arc<dyn crate::terminal::Host> = std::sync::Arc::new(
+        crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
+    );
+    let pane = crate::harnesses::terminal_session::TerminalSession::start(
+        host,
+        crate::terminal::AgentId::team(1).unwrap(),
+        request(),
+        Some(context()),
+    );
+    assert_eq!(
+        pane.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    assert!(
+        !home.join("config.toml").exists(),
+        "a refused launch leaves no generated file holding the secret"
+    );
+}
+
+/// A Codex agent pane started with an MCP secret in its project context and left running,
+/// as an engine leaves it when it quits, with what a later engine needs to adopt it.
+struct LeftPane {
+    _directory: tempfile::TempDir,
+    config: PathBuf,
+    host: std::sync::Arc<dyn crate::terminal::Host>,
+    agent: crate::terminal::AgentId,
+    record: crate::harnesses::terminal_session::PaneRecord,
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl LeftPane {
+    /// Starts the pane as team agent `team` in a fresh private home under a `prefix`
+    /// folder, then leaves it. Returns the left pane.
+    fn start(prefix: &str, team: i64) -> Self {
+        let directory = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let work = root.join("work");
+        for folder in [&home, &work] {
+            fs::DirBuilder::new().mode(0o700).create(folder).unwrap();
+        }
+        let profile = root.join("project.sb");
+        fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        let harness = root.join("harness");
+        fs::write(&harness, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        fs::set_permissions(&harness, fs::Permissions::from_mode(0o755)).unwrap();
+        let secret = format!("adopted-secret-{}-{team}", std::process::id());
+        let context = AgentContext {
+            plugins: LaunchPlugins {
+                skills: Vec::new(),
+                servers: vec![LaunchServer {
+                    name: "tools".into(),
+                    spec: ServerSpec::Stdio {
+                        command: "/usr/bin/true".into(),
+                        args: Vec::new(),
+                    },
+                    secrets: vec![LaunchSecret {
+                        name: "TOKEN".into(),
+                        value: crate::plugins::SecretValue::new(secret.as_bytes().to_vec()),
+                    }],
+                }],
+            },
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: true,
+        };
+        let request = crate::harnesses::launch::LaunchRequest {
+            harness: "codex".into(),
+            executable: harness,
+            working_dir: work,
+            account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools: true,
+            sandbox_profile: Some(profile),
+            git_identity: None,
+            limits: crate::harnesses::launch::LaunchLimits::default(),
+            unconfined: false,
+        };
+        let tmux = crate::terminal::tmux::installed(&root)
+            .expect("tmux must be installed on this machine");
+        let socket = root
+            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::SOCKET);
+        let host: std::sync::Arc<dyn crate::terminal::Host> =
+            std::sync::Arc::new(crate::terminal::tmux::Tmux::open(
+                Some(tmux.clone()),
+                &root.join(crate::terminal::FOLDER),
+            ));
+        let agent = crate::terminal::AgentId::team(team).unwrap();
+        let config = home.join("config.toml");
+        let session = crate::harnesses::terminal_session::TerminalSession::start(
+            host.clone(),
+            agent.clone(),
+            request,
+            Some(context),
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&config).unwrap().contains(&secret));
+        let record = session.record().cloned().unwrap();
+        session.leave();
+        assert!(
+            config.exists(),
+            "leaving keeps the files for the harness that still runs"
+        );
+        Self {
+            _directory: directory,
+            config,
+            host,
+            agent,
+            record,
+            tmux,
+            socket,
+        }
+    }
+
+    /// Ends the tmux server that holds the pane.
+    fn kill_server(&self) {
+        let _ = crate::spawn_gate::status(
+            std::process::Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        );
+    }
+
+    /// Takes the pane over as a later engine does. Returns the session or the refusal.
+    fn adopt(&self) -> Result<crate::harnesses::terminal_session::TerminalSession, LaunchError> {
+        crate::harnesses::terminal_session::TerminalSession::adopt(
+            self.host.clone(),
+            self.agent.clone(),
+            &self.record,
+            crate::harnesses::launch::LaunchLimits::default(),
+        )
+    }
+}
+
+impl Drop for LeftPane {
+    fn drop(&mut self) {
+        self.kill_server();
+    }
+}
+
+#[test]
+fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
+    let pane = LeftPane::start("ca-adopt-ctx-", 7);
+    let adopted = pane.adopt().unwrap();
+    drop(adopted);
+    assert!(
+        !pane.config.exists(),
+        "the adopted pane removes the file that holds its MCP secret when it stops"
+    );
+}
+
+#[test]
+fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
+    let pane = LeftPane::start("ca-adopt-gone-", 8);
+    pane.kill_server();
+    assert_eq!(
+        pane.adopt().err().map(|refused| refused.0).as_deref(),
+        Some("terminal_closed")
+    );
+    assert!(
+        !pane.config.exists(),
+        "a pane that is gone keeps no file that holds its MCP secret"
+    );
 }

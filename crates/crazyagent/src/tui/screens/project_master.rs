@@ -224,6 +224,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::RepositoryConfigRefused) => {
             "a Git setting in this project's repository runs commands or redirects Git."
         }
+        Some(MasterReason::InstructionsTooLarge) => {
+            "the app and project instructions are too long for a Claude master. Shorten them on the Process page."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {
@@ -272,6 +275,10 @@ pub(in crate::tui) fn master_problem(code: &str) -> String {
         "master_turn_outstanding" => "The master is still working on the last message.",
         "master_turn_capacity" => "This conversation is full. Press e to end it, then send again.",
         "master_turn_not_current" => "That turn already ended.",
+        "master_session_live" => "The live session cannot be deleted.",
+        "master_session_files_kept" => {
+            "Its transcript could not be removed from the master's home, so nothing was deleted."
+        }
         "stale_revision" => "Something changed meanwhile. Try again.",
         _ => "The engine refused it.",
     };
@@ -373,6 +380,26 @@ mod tests {
             ]
         );
         assert_ne!(transcript.status, MasterStatus::Thinking { since_ms: None });
+    }
+
+    #[test]
+    fn a_turn_whose_instructions_are_too_long_says_to_shorten_them_on_the_process_page() {
+        let inputs = [entry(3, "Plan the dashboard.")];
+        let mut stopped = turn(
+            1,
+            3,
+            MasterTurnPhase::Failed,
+            Some(MasterReason::InstructionsTooLarge),
+        );
+        stopped.cause = Some("master_instructions_too_large".into());
+        let transcript = build(Some(MasterSessionPhase::Configured), &[stopped], &inputs);
+        let last = &transcript.messages.last().unwrap().text;
+        assert!(
+            last.ends_with(
+                " stopped: the app and project instructions are too long for a Claude master. Shorten them on the Process page. (master_instructions_too_large) Press r to try again."
+            ),
+            "{last}"
+        );
     }
 
     #[test]
@@ -562,6 +589,7 @@ mod tests {
                 "unsupported_capability",
             ),
             (MasterReason::RepositoryMissing, "repository_missing"),
+            (MasterReason::InstructionsTooLarge, "instructions_too_large"),
             (MasterReason::Cancelled, "cancelled"),
         ];
         for (reason, code) in named {

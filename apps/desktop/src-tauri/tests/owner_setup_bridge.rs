@@ -2,6 +2,7 @@
 
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
+use crazyagent::scheduling::{ScheduleChange, Strategy};
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -162,4 +163,84 @@ fn owner_setup_commands_use_the_local_main_window_acl() {
                 .is_none()
         );
     }
+}
+
+async fn large_schedule(root: &Path) -> Result<(), String> {
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    bridge.connect().await.map_err(|e| e.code.to_owned())?;
+    let project = |n: u64| {
+        crazyagent::protocol::CredentialRef::new(format!("{n:04}{}", "p".repeat(120))).unwrap()
+    };
+    for n in 0..600 {
+        let change = ScheduleChange::ProjectStrategy {
+            project: project(n),
+            strategy: Some(Strategy::Balanced),
+        };
+        let receipt = bridge
+            .set_account_schedule(change, n + 1)
+            .await
+            .map_err(|e| format!("{n}: {}", e.code))?;
+        assert!(matches!(receipt.outcome, ActionOutcome::Applied), "{n}");
+    }
+    let shrink = ScheduleChange::ProjectStrategy {
+        project: project(0),
+        strategy: None,
+    };
+    let receipt = bridge
+        .set_account_schedule(shrink, 601)
+        .await
+        .map_err(|e| e.code.to_owned())?;
+    assert!(
+        matches!(receipt.outcome, ActionOutcome::Applied),
+        "the owner can still shrink a schedule past one reply"
+    );
+    let read = bridge
+        .account_schedule()
+        .await
+        .map_err(|e| e.code.to_owned())?;
+    let ids: Vec<_> = read.projects.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        ids,
+        (1..600).map(project).collect::<Vec<_>>(),
+        "the desktop reads a schedule past one reply whole"
+    );
+    Ok(())
+}
+
+/// A schedule of 600 project overrides, more than one owner reply carries, still takes
+/// desktop changes, including one that shrinks it: a change never reads the whole schedule.
+/// The desktop then reads it whole, page by page.
+#[tokio::test]
+async fn the_desktop_bridge_changes_and_reads_a_schedule_larger_than_one_reply() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-desk-sched-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, CATALOG).unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let path = root.path().to_path_buf();
+    let mut body = tokio::spawn(async move { large_schedule(&path).await });
+    let result = tokio::time::timeout(Duration::from_secs(120), &mut body).await;
+    if result.is_err() {
+        body.abort();
+        let _ = body.await;
+    }
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(
+        matches!(cleanup, Ok(Ok(()))),
+        "actual owner service must stop"
+    );
+    result.unwrap().unwrap().unwrap();
 }

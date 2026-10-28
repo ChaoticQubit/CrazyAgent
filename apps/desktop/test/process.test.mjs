@@ -149,11 +149,97 @@ test("the tags read the engine's one-line description when the catalog carries i
 test("every engine refusal a Process action can show has a plain sentence", () => {
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
   const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
-  const codes = [...listed.matchAll(/"((?:process|agent_instructions)_[a-z_]+)"/g)].map((match) => match[1]);
+  const codes = [...listed.matchAll(/"((?:process|agent_instructions|instruction_settings)_[a-z_]+)"/g)].map((match) => match[1]);
   for (const code of client.PROCESS_REFUSALS) assert.ok(codes.includes(code), `${code} is not an engine code`);
   for (const code of ["process_text_too_large", "process_text_invalid", "process_text_unsafe", "process_project_folder_missing", "process_import_missing"]) {
     assert.ok(client.PROCESS_REFUSALS.includes(code), code);
     assert.doesNotMatch(client.processMessage({ kind: "error", code, message: "" }), /process_/);
   }
   assert.equal(client.processMessage({ kind: "not_ready" }), "Instructions aren't ready in this build yet.");
+});
+
+test("a save a Claude master may refuse names what it takes and what agents now get, and the page shows it", () => {
+  const fits = "Instructions saved. Agents started from now on get them.";
+  assert.equal(client.savedMessage({ bytes: 24, claude_bytes_max: 28159 }), fits);
+  assert.equal(client.savedMessage({ bytes: 28159, claude_bytes_max: 28159 }), fits, "exactly the limit fits");
+  assert.equal(client.savedMessage({ bytes: 40000, claude_bytes_max: 28159 }),
+    "Instructions saved, but a project's agents now get 39.1 KB of app and project instructions and a Claude master takes only 27.5 KB. Shorten them before a Claude master's next turn.");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
+  assert.match(engine, /pub struct ProcessSaved \{\s*pub bytes: u32,\s*pub claude_bytes_max: u32,\s*\}/, "the engine sends the fields this page reads");
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /showToast\(savedMessage\(result\.value\)\)/, "the page shows the line for the save it made");
+});
+
+test("unsaved instruction text survives a save reply, another client's save and a skill link", () => {
+  assert.equal(view.keptDraft("", null, "Saved.\n"), "Saved.\n", "the first read fills the editor");
+  assert.equal(view.keptDraft("Saved.\n", "Saved.\n", "From the TUI.\n"), "From the TUI.\n", "an untouched editor follows a save made elsewhere");
+  assert.equal(view.keptDraft("Mine, not saved.\n", "Saved.\n", "From the TUI.\n"), "Mine, not saved.\n", "unsaved typing is never replaced");
+  assert.equal(view.keptDraft("A then B", "Saved.\n", "A"), "A then B", "text typed after Save is not replaced by the saved part");
+
+  const saving = page({ draft: "Use tdd and code-review.\n", busy: "save" });
+  assert.match(saving, /<textarea[^>]*readonly=""/i, "the editor takes no typing while its text is being saved");
+  assert.doesNotMatch(page({ draft: "Use tdd and code-review.\n" }), /<textarea[^>]*readonly/i);
+
+  const asked = page({ draft: "Use tdd and code-review.\n", leaving: SKILLS[2] });
+  assert.match(asked, /<dialog/);
+  assert.match(asked, /Open code-review without saving\?/);
+  assert.match(asked, /Your instructions changes will be lost\./);
+  assert.match(asked, /Keep editing/);
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /<TaggedText text=\{draft\} skills=\{skills\} onOpen=\{onOpenSkill\} \/>/, "a tag under the editor asks before leaving");
+  assert.match(source, /<TaggedText text=\{preview\.text\} skills=\{skills\} onOpen=\{onOpenSkill\} \/>/, "a tag in the preview asks before leaving");
+});
+
+function agentSettings(extra = {}) {
+  return renderToStaticMarkup(createElement(view.AgentSettingsView, {
+    settings: { kind: "ok", value: client.DEFAULT_INSTRUCTION_SETTINGS }, busy: false, failure: "", onSave: never("onSave"), ...extra,
+  }));
+}
+
+test("a project's agent settings offer every instruction files option and the transcript switch, the defaults first", () => {
+  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { files: "project", transcripts: true });
+  assert.deepEqual(client.INSTRUCTION_CHOICES.map((choice) => [choice.value, choice.label]),
+    [["project", "Project files"], ["project_and_user", "Project and user files"], ["none", "None"]]);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  for (const choice of client.INSTRUCTION_CHOICES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  const markup = agentSettings();
+  assert.match(markup, /Agent instruction files/);
+  for (const label of ["Project files", "Project and user files", "None"]) assert.match(markup, new RegExp(`role="radio"[^>]*>${label}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
+  assert.match(markup, /as committed in your checkout/);
+  assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
+  assert.match(markup, /Keep transcripts for headless Claude runs/);
+  assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
+  for (const choice of client.INSTRUCTION_CHOICES) {
+    const shown = agentSettings({ settings: { kind: "ok", value: { files: choice.value, transcripts: false } } });
+    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${choice.label}</`));
+    assert.ok(shown.includes(choice.note.replaceAll("'", "&#x27;")), choice.value);
+    assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
+    assert.match(shown, /keep no transcript/);
+  }
+});
+
+test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
+  const markup = agentSettings({ settings: { kind: "error", code: "instruction_settings_invalid", message: "" } });
+  assert.match(markup, /value CrazyAgent doesn&#x27;t know/);
+  assert.doesNotMatch(markup, /instruction_settings_/);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
+  assert.match(agentSettings({ failure: "This project's agent settings couldn't be read. Try again." }), /couldn&#x27;t be read/);
+  assert.match(agentSettings({ busy: true }), /Saving\.\.\./);
+  assert.match(agentSettings({ settings: { kind: "not_ready" } }), /ready/);
+  for (const code of ["instruction_settings_invalid", "instruction_settings_unavailable"]) assert.ok(client.PROCESS_REFUSALS.includes(code), code);
+});
+
+test("a project's Process page reads and saves its agent settings through the engine commands", () => {
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /<AgentSettings projectId=\{scope\.id\} \/>/);
+  assert.match(source, /if \(scope\.kind === "app"\) return editor;/, "the app page has no agent settings");
+  const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
+  assert.match(api, /call<InstructionSettings>\("desktop_instruction_settings", \{ projectId \}\)/);
+  assert.match(api, /call<InstructionSettings>\("desktop_save_instruction_settings", \{ projectId, settings \}\)/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  for (const command of ["desktop_instruction_settings", "desktop_save_instruction_settings"]) {
+    assert.match(lib, new RegExp(`async fn ${command}\\(`));
+    assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
+  }
 });

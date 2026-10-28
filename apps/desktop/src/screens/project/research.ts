@@ -90,6 +90,34 @@ export interface TeamAgentRow {
   task: string;
   folder: string;
   rename: { agent: number; handle: string } | null;
+  depth: number;
+  lead: string | null;
+}
+
+/** Orders agents as their lead tree (N2): each lead followed by its own workers, depth first,
+ * siblings in the given order; an agent whose lead is not listed starts a tree of its own.
+ * Input: the agents in display order. Output: each agent once with its depth under the listed
+ * leads, 0 for a top agent. */
+export function leadTree<T extends { id: number; parent?: number | null }>(agents: T[]): { agent: T; depth: number }[] {
+  const listed = new Set(agents.map((agent) => agent.id));
+  const top = agents.filter((agent) => agent.parent == null || agent.parent === agent.id || !listed.has(agent.parent));
+  const stack = [...top].reverse().map((agent) => ({ agent, depth: 0 }));
+  const seen = new Set<number>();
+  const ordered: { agent: T; depth: number }[] = [];
+  for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+    if (seen.has(next.agent.id)) continue;
+    seen.add(next.agent.id);
+    ordered.push(next);
+    const lead = next;
+    const workers = agents.filter((item) => item.parent === lead.agent.id && item.id !== lead.agent.id);
+    stack.push(...[...workers].reverse().map((agent) => ({ agent, depth: lead.depth + 1 })));
+  }
+  for (const agent of agents) {
+    if (seen.has(agent.id)) continue;
+    seen.add(agent.id);
+    ordered.push({ agent, depth: 0 });
+  }
+  return ordered;
 }
 
 export interface TeamTaskRow {
@@ -127,15 +155,18 @@ export function accountName(accounts: { id: string; name: string }[], id: string
 /** Builds the Team panel: each agent with its role, plain name, harness, account, current task
  * (between tasks, its last one) and the folder it works in (the master in the project folder, a
  * sub-agent in its own worktree), then the tasks handed from the master or the owner to a
- * sub-agent. "running" hides stopped agents and finished tasks. Each agent keeps the engine's
- * name, such as "Ada (@onboarding-fix)" or "Sub-agent 3", as in the graph.
+ * sub-agent. "running" hides stopped agents and finished tasks. Agents the engine marks
+ * finished leave the rows for the Finished fold-out unless the owner chose Show. Each agent
+ * keeps the engine's name, such as "Ada (@onboarding-fix)" or "Sub-agent 3", as in the graph.
  * Inputs: the team status, the account names, a harness namer, the filter and now in milliseconds.
  * Output: the agent rows and task rows in engine order. */
-export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
+export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_finished">, accounts: { id: string; name: string }[], harnessLabel: (id: string) => string,
   filter: TeamFilter, now: number): { agents: TeamAgentRow[]; tasks: TeamTaskRow[] } {
   const names = new Map(status.agents.map((agent) => [agent.id, agent.label]));
   const account = (id: string | null) => accountName(accounts, id);
-  const agents = status.agents.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
+  const listed = status.agents.filter((agent) => status.show_finished === true || agent.finished !== true);
+  const shown = listed.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed"));
+  const agents = leadTree(shown).map(({ agent, depth }): TeamAgentRow => {
     const held = status.tasks.find((item) => item.id === agent.task);
     const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
       item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
@@ -149,6 +180,8 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
       task: agent.problem ?? (held ? firstLine(held.prompt) : last ? `Last task: ${firstLine(last.prompt)}` : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
       rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
+      depth,
+      lead: agent.parent != null ? names.get(agent.parent) ?? null : null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
@@ -163,6 +196,54 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks">, accounts
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** One agent in the Finished fold-out: its name, harness, status word, what it last worked on
+ * with that task's full result, when it finished, how many tasks it ran, whether its Wake button
+ * can wake it and, when not, the engine's reason. */
+export interface FinishedRow {
+  key: string;
+  agent: number;
+  name: string;
+  harness: string;
+  word: string;
+  task: string;
+  result: string | null;
+  ended: string;
+  tasks: number;
+  wakeable: boolean;
+  wakeNote: string | null;
+}
+
+/** The fold-out's toggle text. Input: how many agents it holds. Output: "Finished (N)". */
+export function finishedLabel(count: number): string {
+  return `Finished (${Math.max(0, Math.floor(count))})`;
+}
+
+/** Builds the Finished fold-out (DEC-102): every agent the engine marks finished, newest first.
+ * It stays under Show too, where the list and graph also hold them, so Wake is always one
+ * click away. Inputs: the team status, a harness namer and now in milliseconds.
+ * Output: the rows. */
+export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harnessLabel: (id: string) => string, now: number): FinishedRow[] {
+  const rows = status.agents.filter((agent) => agent.finished === true).map((agent): FinishedRow => {
+    const own = status.tasks.filter((item) => item.agent === agent.id);
+    const last = own.reduce<(typeof own)[number] | undefined>((newest, item) => newest === undefined || item.id > newest.id ? item : newest, undefined);
+    const at = agent.stopped_ms ?? (agent.status === "idle" ? agent.heartbeat_ms : null);
+    return {
+      key: `finished-${agent.id}`,
+      agent: agent.id,
+      name: agent.label,
+      harness: harnessLabel(agent.harness),
+      word: teamAgentWord(agent.status),
+      task: agent.problem ?? (last ? `Last task: ${firstLine(last.prompt)}` : "No task yet"),
+      result: last?.result ?? null,
+      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
+      tasks: own.length,
+      wakeable: agent.wakeable === true,
+      wakeNote: agent.wakeable === true ? null : agent.wake_note ?? "This version of the engine can't wake agents.",
+    };
+  });
+  return rows.sort((a, b) => b.agent - a.agent);
 }
 
 /** What one owner change on the project page tells the owner: a toast when the engine applied it,
@@ -320,6 +401,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["capture_incomplete", "its reply was cut off"],
   ["output_limit", "its reply was longer than the limit"],
   ["unsupported_capability", "it cannot lead a project yet"],
+  ["instructions_too_large", "the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again"],
   ["cancelled", "you stopped this turn"],
 ]);
 

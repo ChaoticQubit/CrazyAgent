@@ -5,8 +5,8 @@ use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
 use crate::landing::{
-    AcceptOutcome, AgentKind, ChangeSetId, ChangeSetView, ChangeState, ChangedFile, FileKind,
-    FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
+    AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches, TurnOutcome,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -19,6 +19,7 @@ const DIFF_AHEAD: usize = 40;
 const DIFF_PAGE_ROWS: usize = 20;
 const LIST_ROWS_MAX: usize = 8;
 const FILES_SHOWN: usize = 10;
+const FILES_MAX: usize = 10_000;
 const CONFLICTS_SHOWN: usize = 5;
 const SHORT_COMMIT: usize = 7;
 const TAB_SPACES: &str = "    ";
@@ -40,6 +41,8 @@ struct Diff {
     id: ChangeSetId,
     head: String,
     files: Vec<ChangedFile>,
+    files_done: bool,
+    files_cut: bool,
     lines: Vec<String>,
     next: Option<u16>,
     truncated: bool,
@@ -47,8 +50,56 @@ struct Diff {
 }
 
 impl Diff {
+    /// Opens a change set's diff with nothing read yet. Inputs: the set's id and the head
+    /// shown. Output: the diff, waiting for its first page.
+    fn of(id: ChangeSetId, head: String) -> Self {
+        Self {
+            id,
+            head,
+            files: Vec::new(),
+            files_done: false,
+            files_cut: false,
+            lines: Vec::new(),
+            next: Some(0),
+            truncated: false,
+            top: 0,
+        }
+    }
+
+    /// Whether the next page is wanted now: while the file list is not complete, so every
+    /// engine risk mark is shown even past the text limit, else while the owner scrolls
+    /// toward the end of the text read so far.
     fn wants_more(&self) -> bool {
-        self.next.is_some() && self.top + DIFF_AHEAD >= self.lines.len()
+        self.next.is_some()
+            && (!self.files_done
+                || (self.lines.len() < DIFF_LINES_MAX && self.top + DIFF_AHEAD >= self.lines.len()))
+    }
+
+    /// Takes one page: its files up to `FILES_MAX` and its text up to `DIFF_LINES_MAX` lines.
+    /// The file list is complete at the first page without files or at the last page; text
+    /// past the limit is not read once the file list is complete. Input: the page.
+    fn add(&mut self, page: &ChangeDiff) {
+        let room = FILES_MAX - self.files.len();
+        self.files_cut |= page.files.len() > room;
+        self.files.extend(page.files.iter().take(room).cloned());
+        self.files_done |= self.files_cut || page.files.is_empty() || page.next.is_none();
+        if self.lines.len() < DIFF_LINES_MAX {
+            self.lines.extend(page.text.lines().map(diff_line));
+        } else {
+            self.truncated |= !page.text.is_empty();
+        }
+        if self.lines.len() > DIFF_LINES_MAX {
+            self.lines.truncate(DIFF_LINES_MAX);
+            self.truncated = true;
+        }
+        self.truncated |= page.truncated;
+        self.next = page.next;
+        if self.files_done && self.lines.len() >= DIFF_LINES_MAX {
+            self.next = None;
+        }
+        assert!(self.lines.len() <= DIFF_LINES_MAX);
+        assert!(self.files.len() <= FILES_MAX);
+        assert!(self.files_done || self.next.is_some());
     }
 }
 
@@ -63,9 +114,13 @@ pub(in crate::tui) struct ProjectChanges {
     not_ready: bool,
     cursor: usize,
     selected: Option<ChangeSetId>,
+    dropped: bool,
     diff: Option<Diff>,
     asking: Option<Ask>,
     target: Option<(ChangeSetId, String)>,
+    branches: Option<(ChangeSetId, TargetBranches)>,
+    branch: usize,
+    wanted_branches: Option<ChangeSetId>,
     message: TextInput,
     notice: Option<Notice>,
     queued: Option<ChangesQuery>,
@@ -86,9 +141,13 @@ impl ProjectChanges {
             not_ready: false,
             cursor: 0,
             selected: None,
+            dropped: false,
             diff: None,
             asking: None,
             target: None,
+            branches: None,
+            branch: 0,
+            wanted_branches: None,
             message: TextInput::multi(MESSAGE_BYTES_MAX),
             notice: None,
             queued: None,
@@ -113,6 +172,8 @@ impl ProjectChanges {
         }
         let query = if let Some(action) = self.queued.take() {
             action
+        } else if let Some(id) = self.wanted_branches.take() {
+            ChangesQuery::Branches { id }
         } else if let Some(diff) = self.diff.as_ref().filter(|diff| diff.wants_more()) {
             ChangesQuery::Diff {
                 id: diff.id.clone(),
@@ -140,7 +201,10 @@ impl ProjectChanges {
             return;
         };
         self.stale = true;
-        if !matches!(lost, ChangesQuery::List { .. } | ChangesQuery::Diff { .. }) {
+        if !matches!(
+            lost,
+            ChangesQuery::List { .. } | ChangesQuery::Diff { .. } | ChangesQuery::Branches { .. }
+        ) {
             self.notice = Some(Notice::problem(
                 "The engine connection dropped before it answered. Check the list before trying again.",
             ));
@@ -192,16 +256,7 @@ impl ProjectChanges {
                 if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
                     && diff.next == Some(*page)
                 {
-                    diff.files.extend(page_diff.files.iter().cloned());
-                    diff.lines.extend(page_diff.text.lines().map(diff_line));
-                    diff.truncated |= page_diff.truncated;
-                    diff.next = page_diff.next;
-                    if diff.lines.len() > DIFF_LINES_MAX {
-                        diff.lines.truncate(DIFF_LINES_MAX);
-                        diff.truncated = true;
-                        diff.next = None;
-                    }
-                    assert!(diff.lines.len() <= DIFF_LINES_MAX);
+                    diff.add(page_diff);
                 }
             }
             (ChangesQuery::Diff { .. }, Err(code)) => {
@@ -210,6 +265,22 @@ impl ProjectChanges {
                 }
                 self.notice = Some(Notice::problem(format!(
                     "Couldn't load the changes. {}",
+                    refusal(code)
+                )));
+            }
+            (ChangesQuery::Branches { id }, Ok(ChangesView::Branches(listed))) => {
+                if self.target.as_ref().is_some_and(|(asked, _)| asked == id) {
+                    self.branch = listed
+                        .current
+                        .as_ref()
+                        .and_then(|current| listed.branches.iter().position(|name| name == current))
+                        .unwrap_or(0);
+                    self.branches = Some((id.clone(), listed.clone()));
+                }
+            }
+            (ChangesQuery::Branches { .. }, Err(code)) => {
+                self.notice = Some(Notice::problem(format!(
+                    "Couldn't list your branches, so these changes land on the checked-out branch. {}",
                     refusal(code)
                 )));
             }
@@ -230,18 +301,27 @@ impl ProjectChanges {
 
     /// Keeps the highlight on the change set the owner chose, not on its place in the list,
     /// since each read can reorder the sets: on the set a question was asked about while it
-    /// is open, else on the selected set, else on the nearest place. Then drops a question
-    /// whose set is gone. Input: the view. Output: none.
+    /// is open, else on the selected set. A chosen set that left the list takes the selection
+    /// with it, so no key acts on the set now in its place until the owner picks again; the
+    /// first set is picked only before the owner picked any. Then drops a question whose set
+    /// is gone. Input: the view. Output: none.
     fn clamp(&mut self) {
         let anchor = match (&self.asking, &self.target) {
             (Some(_), Some((id, _))) => Some(id),
             _ => self.selected.as_ref(),
         };
-        let anchored = anchor.and_then(|id| self.sets.iter().position(|set| &set.id == id));
-        if let Some(index) = anchored {
-            self.cursor = index;
+        match anchor.map(|id| self.sets.iter().position(|set| &set.id == id)) {
+            Some(Some(index)) => self.cursor = index,
+            Some(None) => {
+                self.selected = None;
+                self.dropped = true;
+            }
+            None => {}
         }
-        self.select(self.cursor);
+        self.cursor = self.cursor.min(self.sets.len().saturating_sub(1));
+        if self.selected.is_none() && !self.dropped {
+            self.select(self.cursor);
+        }
         let target_listed = self
             .target
             .as_ref()
@@ -250,6 +330,11 @@ impl ProjectChanges {
             self.asking = None;
         }
         assert!(self.sets.is_empty() || self.cursor < self.sets.len());
+        assert!(
+            self.selected
+                .as_ref()
+                .is_none_or(|id| self.sets.get(self.cursor).is_some_and(|set| &set.id == id))
+        );
     }
 
     /// Moves the highlight to a place in the list and remembers the set there by its id.
@@ -257,13 +342,15 @@ impl ProjectChanges {
     fn select(&mut self, index: usize) {
         self.cursor = index.min(self.sets.len().saturating_sub(1));
         self.selected = self.sets.get(self.cursor).map(|set| set.id.clone());
+        self.dropped = false;
     }
 
     fn chosen(&self) -> Option<&ChangeSetView> {
-        match &self.diff {
-            Some(diff) => self.sets.iter().find(|set| set.id == diff.id),
-            None => self.sets.get(self.cursor),
-        }
+        let id = match &self.diff {
+            Some(diff) => &diff.id,
+            None => self.selected.as_ref()?,
+        };
+        self.sets.iter().find(|set| &set.id == id)
     }
 
     fn reviewed_head(&self) -> Option<String> {
@@ -287,7 +374,13 @@ impl ProjectChanges {
                         self.act(Ask::Accept);
                     }
                 }
-                KeyCode::Esc => self.asking = None,
+                KeyCode::Esc => {
+                    self.asking = None;
+                    self.branches = None;
+                    self.wanted_branches = None;
+                }
+                KeyCode::Tab => self.turn_branch(true),
+                KeyCode::BackTab => self.turn_branch(false),
                 _ => {
                     self.message.handle(key);
                 }
@@ -320,6 +413,9 @@ impl ProjectChanges {
                 let proposed = self.chosen().map(|set| set.message.clone());
                 self.message.set(&proposed.unwrap_or_default());
                 self.ask(Ask::Accept);
+                self.branches = None;
+                self.branch = 0;
+                self.wanted_branches = self.target.as_ref().map(|(id, _)| id.clone());
                 true
             }
             (KeyCode::Char('d'), Some(actions)) if actions.discard => {
@@ -358,21 +454,15 @@ impl ProjectChanges {
 
     fn list_key(&mut self, code: KeyCode) -> bool {
         match code {
+            KeyCode::Up | KeyCode::Down if self.dropped => self.select(self.cursor),
             KeyCode::Up => self.select(self.cursor.saturating_sub(1)),
             KeyCode::Down => self.select(self.cursor.saturating_add(1)),
             KeyCode::Enter => {
-                let Some(set) = self.sets.get(self.cursor) else {
+                let Some(set) = self.chosen() else {
                     return true;
                 };
-                self.diff = Some(Diff {
-                    id: set.id.clone(),
-                    head: set.head.clone(),
-                    files: Vec::new(),
-                    lines: Vec::new(),
-                    next: Some(0),
-                    truncated: false,
-                    top: 0,
-                });
+                let diff = Diff::of(set.id.clone(), set.head.clone());
+                self.diff = Some(diff);
             }
             _ => return false,
         }
@@ -400,7 +490,12 @@ impl ProjectChanges {
     fn queue(&mut self, query: ChangesQuery) {
         if self.queued.is_some()
             || self.sent.as_ref().is_some_and(|sent| {
-                !matches!(sent, ChangesQuery::List { .. } | ChangesQuery::Diff { .. })
+                !matches!(
+                    sent,
+                    ChangesQuery::List { .. }
+                        | ChangesQuery::Diff { .. }
+                        | ChangesQuery::Branches { .. }
+                )
             })
         {
             self.notice = Some(Notice::problem(
@@ -422,14 +517,58 @@ impl ProjectChanges {
         let Some((id, expected_head)) = self.target.take() else {
             return;
         };
-        self.queue(match ask {
-            Ask::Accept => ChangesQuery::Accept {
+        let message = self.message.value().trim().to_owned();
+        let target = self.chosen_branch();
+        self.branches = None;
+        self.wanted_branches = None;
+        self.queue(match (ask, target) {
+            (Ask::Accept, Some(target)) => ChangesQuery::AcceptInto {
                 id,
                 expected_head,
-                message: self.message.value().trim().to_owned(),
+                message,
+                target,
             },
-            Ask::Discard => ChangesQuery::Discard { id, expected_head },
+            (Ask::Accept, None) => ChangesQuery::Accept {
+                id,
+                expected_head,
+                message,
+            },
+            (Ask::Discard, _) => ChangesQuery::Discard { id, expected_head },
         });
+    }
+
+    /// Moves the Accept target to the next or previous listed branch, wrapping around.
+    /// Input: true for the next one. Output: none; nothing moves before the list arrives.
+    fn turn_branch(&mut self, forward: bool) {
+        let Some((_, listed)) = &self.branches else {
+            return;
+        };
+        let count = listed.branches.len();
+        if count == 0 {
+            return;
+        }
+        self.branch = if forward {
+            (self.branch + 1) % count
+        } else {
+            (self.branch + count - 1) % count
+        };
+        assert!(self.branch < count);
+    }
+
+    /// The branch the owner picked for Accept, when it is not the checked-out one, which
+    /// is the engine's default. Output: the branch, or None for the default.
+    fn chosen_branch(&self) -> Option<String> {
+        let (_, listed) = self.branches.as_ref()?;
+        let name = listed.branches.get(self.branch)?;
+        (listed.current.as_ref() != Some(name)).then(|| name.clone())
+    }
+
+    /// The branch Accept lands on, once the list arrived, and whether it is checked out.
+    /// Output: the branch and that answer, or None before the list arrives.
+    fn landing_branch(&self) -> Option<(&str, bool)> {
+        let (_, listed) = self.branches.as_ref()?;
+        let name = listed.branches.get(self.branch)?;
+        Some((name.as_str(), listed.current.as_ref() == Some(name)))
     }
 
     fn update(&mut self) {
@@ -515,14 +654,19 @@ impl ProjectChanges {
             lines.push(list_row(
                 columns(&widths, cells),
                 content,
-                index == self.cursor,
+                index == self.cursor && self.selected.as_ref() == Some(&set.id),
                 true,
                 look,
             ));
         }
         lines.push(Row::default());
-        if let Some(set) = self.sets.get(self.cursor) {
+        if let Some(set) = self.chosen() {
             lines.extend(details(set, content, now_ms, look));
+        } else if self.dropped {
+            lines.push(Row::of(
+                "The change set you picked left the list. Pick one with \u{2191}\u{2193}.",
+                look.muted,
+            ));
         }
         lines.truncate(room.max(1));
         lines
@@ -545,16 +689,34 @@ impl ProjectChanges {
             ));
             lines.extend(details(set, content, now_ms, look).into_iter().skip(1));
         }
-        for file in diff.files.iter().take(FILES_SHOWN) {
+        let listed = listed_files(&diff.files);
+        for file in listed.shown {
             lines.push(Row::of(format!("  {}", file_line(file)), look.fg));
             for mark in file_marks(file) {
                 lines.push(Row::of(format!("    ! {mark}"), look.warning));
             }
         }
-        if diff.files.len() > FILES_SHOWN {
+        if listed.marked_hidden > 0 {
             lines.push(Row::of(
-                format!("  and {} more files", diff.files.len() - FILES_SHOWN),
+                match listed.marked_hidden {
+                    1 => "  1 more file needs checking before you accept.".to_owned(),
+                    hidden => format!("  {hidden} more files need checking before you accept."),
+                },
+                look.warning,
+            ));
+        }
+        if listed.plain_hidden > 0 {
+            lines.push(Row::of(
+                format!("  and {} more files", listed.plain_hidden),
                 look.muted,
+            ));
+        }
+        if diff.files_cut {
+            lines.push(Row::of(
+                format!(
+                    "Only the first {FILES_MAX} changed files are listed. Files after them, and their marks, are not shown."
+                ),
+                look.warning,
             ));
         }
         if diff.truncated {
@@ -589,13 +751,15 @@ impl ProjectChanges {
         if ask == Ask::Accept {
             return self.message_rows(content, look);
         }
+        let (question, size) = self.question(ask);
         let mut rows = vec![
-            Row::of("Discard these changes?", look.warning)
+            Row::of(question, look.warning)
                 .push("   y", look.heading)
                 .push(" Discard   ", look.fg)
                 .push("n", look.heading)
                 .push(" Keep reviewing", look.fg),
         ];
+        rows.extend(size.map(|size| Row::of(size, look.fg)));
         let explain = "The agent's working copy goes back to your branch. You can restore these changes for 7 days.";
         rows.extend(
             wrap_words(explain, content)
@@ -605,16 +769,51 @@ impl ProjectChanges {
         (rows, None)
     }
 
+    /// The question an open Accept or Discard asks, naming the change set it is about, with
+    /// that set's size and the short head it was reviewed at. Input: the question.
+    /// Output: the question line and the size line, or a plain question if the set is gone.
+    fn question(&self, ask: Ask) -> (String, Option<String>) {
+        let verb = match ask {
+            Ask::Accept => "Accept",
+            Ask::Discard => "Discard",
+        };
+        let asked = self.target.as_ref().and_then(|(id, head)| {
+            let set = self.sets.iter().find(|set| &set.id == id)?;
+            let short = head.get(..SHORT_COMMIT).unwrap_or(head);
+            Some((agent_name(set), format!("{}, at {short}.", size_line(set))))
+        });
+        match asked {
+            Some((name, size)) => (format!("{verb} the changes of {name}?"), Some(size)),
+            None => (format!("{verb} these changes?"), None),
+        }
+    }
+
     fn message_rows(&self, content: usize, look: &Look) -> (Vec<Row>, Option<(usize, usize)>) {
-        let mut rows = vec![Row::of("Accept these changes?", look.warning)];
+        let (question, size) = self.question(Ask::Accept);
+        let mut rows = vec![Row::of(question, look.warning)];
+        rows.extend(size.map(|size| Row::of(size, look.fg)));
+        let landing = match self.landing_branch() {
+            None => "They land as one commit on the branch checked out in your project folder, under your own Git name.".to_owned(),
+            Some((name, true)) => format!(
+                "They land as one commit on {name}, the branch checked out in your project folder, under your own Git name."
+            ),
+            Some((name, false)) => format!(
+                "They land as one commit on {name}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are."
+            ),
+        };
         rows.extend(
             wrap_words(
-                "They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them. Edit the commit message if you like.",
+                &format!(
+                    "{landing} CrazyAgent did not check them. Edit the commit message if you like."
+                ),
                 content,
             )
             .into_iter()
             .map(|line| Row::of(line, look.muted)),
         );
+        if let Some((name, _)) = self.landing_branch() {
+            rows.push(Row::of("Branch", look.heading).push(format!("  {name}"), look.fg));
+        }
         rows.push(Row::of("Commit message", look.heading));
         let (lines, (line, column)) = self.message.wrap(content.saturating_sub(2).max(1));
         let first = window(line, lines.len(), MESSAGE_ROWS);
@@ -631,11 +830,19 @@ impl ProjectChanges {
     fn help(&self, now_ms: i64) -> Help {
         match self.asking {
             Some(Ask::Accept) => {
-                return vec![
+                let mut help = vec![
                     ("Enter", "Accept"),
                     ("Ctrl-J", "New line"),
                     ("Esc", "Keep reviewing"),
                 ];
+                if self
+                    .branches
+                    .as_ref()
+                    .is_some_and(|(_, listed)| listed.branches.len() > 1)
+                {
+                    help.insert(1, ("Tab", "Branch"));
+                }
+                return help;
             }
             Some(Ask::Discard) => return vec![("y", "Discard"), ("n", "Keep reviewing")],
             None => {}
@@ -725,6 +932,15 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
                 .to_owned(),
             look.fg,
         )),
+        ChangeState::Accepted if set.outside => notes.push((
+            "Your branch already has these changes. They were landed outside the app.".to_owned(),
+            look.fg,
+        )),
+        ChangeState::Discarded if set.outside => notes.push((
+            "The agent's copy of these changes was removed outside the app, so they cannot be restored."
+                .to_owned(),
+            look.fg,
+        )),
         ChangeState::Discarded => notes.push((restore_note(set, now_ms), look.fg)),
         _ => {}
     }
@@ -765,7 +981,9 @@ fn state_word(set: &ChangeSetView) -> &'static str {
         ChangeState::Conflict => "Conflicts with your branch",
         ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
         ChangeState::Updating => "Agent is updating",
+        ChangeState::Accepted if set.outside => "Landed outside the app",
         ChangeState::Accepted => "Accepted",
+        ChangeState::Discarded if set.outside => "Removed outside the app",
         ChangeState::Discarded => "Discarded",
     }
 }
@@ -805,6 +1023,39 @@ fn file_line(file: &ChangedFile) -> String {
         (Some(old), FileStatus::Renamed) => format!("Renamed {old} to {}", file.path),
         _ => format!("{word} {}", file.path),
     }
+}
+
+/// The changed files the diff view names, with counts of those it leaves out.
+struct ListedFiles<'a> {
+    shown: Vec<&'a ChangedFile>,
+    marked_hidden: usize,
+    plain_hidden: usize,
+}
+
+/// Picks the files the diff view names: every file the engine marked comes first, so a risk
+/// mark never hides behind plain files, then plain files, at most `FILES_SHOWN` in all.
+/// Input: the diff's files. Output: the files to name and how many marked and plain files
+/// are left out.
+fn listed_files(files: &[ChangedFile]) -> ListedFiles<'_> {
+    let (marked, plain): (Vec<&ChangedFile>, Vec<&ChangedFile>) =
+        files.iter().partition(|file| !file_marks(file).is_empty());
+    let marked_shown = marked.len().min(FILES_SHOWN);
+    let plain_shown = plain.len().min(FILES_SHOWN - marked_shown);
+    let listed = ListedFiles {
+        shown: marked[..marked_shown]
+            .iter()
+            .chain(&plain[..plain_shown])
+            .copied()
+            .collect(),
+        marked_hidden: marked.len() - marked_shown,
+        plain_hidden: plain.len() - plain_shown,
+    };
+    assert!(listed.shown.len() <= FILES_SHOWN);
+    assert_eq!(
+        listed.shown.len() + listed.marked_hidden + listed.plain_hidden,
+        files.len()
+    );
+    listed
 }
 
 fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
@@ -880,7 +1131,7 @@ fn done(view: &ChangesView) -> Notice {
         }
         ChangesView::Restored => Notice::plain("Restored. The changes are ready to review again."),
         ChangesView::Updating => Notice::plain(UPDATED_NOTICE),
-        ChangesView::List(_) | ChangesView::Diff(_) => Notice::plain(""),
+        ChangesView::List(_) | ChangesView::Diff(_) | ChangesView::Branches(_) => Notice::plain(""),
     }
 }
 
@@ -907,6 +1158,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_branch_moved" => {
             "Your branch moved while these changes were landing, so nothing changed. Review and accept again."
         }
+        "changes_branch_not_above_base" => {
+            "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard."
+        }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
         }
@@ -923,6 +1177,21 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_owner_identity_missing" => {
             "Git doesn't know your name and email yet. Set user.name and user.email, then accept again."
+        }
+        "changes_embedded_repository" => {
+            "These changes add a folder Git would treat as a repository of its own inside the project, such as a submodule. Ask the agent to remove it."
+        }
+        "changes_agent_branch_invalid" => {
+            "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard."
+        }
+        "changes_agent_branch_exists" => {
+            "A branch with this agent's name is already in your project. Rename or delete it, then start the agent again."
+        }
+        "changes_target_invalid" => {
+            "That branch isn't a local branch of your project any more. Pick another branch, then accept again."
+        }
+        "changes_target_checked_out" => {
+            "That branch is checked out in another working copy CrazyAgent doesn't manage. Pick another branch, or check it out in your project folder."
         }
         "changes_master_tools_off" => {
             "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard."

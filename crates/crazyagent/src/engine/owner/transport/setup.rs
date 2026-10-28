@@ -16,6 +16,7 @@ struct Prepared {
     source: String,
     skills: Vec<PathBuf>,
     server: Option<(String, ServerSpec)>,
+    plugin: Option<PathBuf>,
 }
 
 const RECHECK_AFTER: Duration = Duration::from_secs(30);
@@ -38,7 +39,7 @@ impl Drop for CheckGuard {
     }
 }
 
-fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
+pub(super) fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
     authority.root.verify()?;
     authority
         .root
@@ -65,10 +66,10 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run starts installing in the background, and an applied removal sweeps
-/// the folders and secrets it left. Inputs: the engine, its authority, the request, its
-/// reply and the exchange deadline. Output: the reply, with the dependencies filled in
-/// for a setup status read.
+/// applied setup run starts installing in the background, and every removal, applied or
+/// not, sweeps the folders and secrets it moved aside or left. Inputs: the engine, its
+/// authority, the request, its reply and the exchange deadline. Output: the reply, with
+/// the dependencies filled in for a setup status read.
 pub(super) async fn after_owner(
     engine: &Engine,
     authority: &Authority,
@@ -76,6 +77,12 @@ pub(super) async fn after_owner(
     result: Result<OwnerReply, EngineError>,
     deadline: Instant,
 ) -> Result<OwnerReply, EngineError> {
+    if let OwnerOperation::Apply {
+        mutation: OwnerMutation::RemovePackEntry { .. },
+    } = &request.operation
+    {
+        let _ = storage(&engine.storage.sender, Command::Sweep).await;
+    }
     let mut reply = result?;
     match (&request.operation, &mut reply.response) {
         (
@@ -89,19 +96,13 @@ pub(super) async fn after_owner(
                 status.dependencies = dependency_rows(&root, deadline).await;
             }
         }
-        (OwnerOperation::Apply { mutation }, OwnerResponse::Applied { operation })
-            if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) =>
-        {
-            let sender = engine.storage.sender.clone();
-            match mutation {
-                OwnerMutation::RunSetup { pack } => {
-                    start_run(sender, engine_root(authority)?, pack)?;
-                }
-                OwnerMutation::RemovePackEntry { .. } => {
-                    let _ = storage(&sender, Command::Sweep).await;
-                }
-                _ => {}
-            }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::RunSetup { pack },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
         }
         _ => {}
     }
@@ -239,11 +240,13 @@ fn prepare(
 ) -> Result<Prepared, InstallError> {
     let folder = fetch::entry_folder(setup, entry, bundled)?;
     let source = source_key(&entry.source);
+    let plugin = fetch::plugin_folder(setup, entry);
     match entry.kind {
         PackKind::Skill => Ok(Prepared {
             source,
             skills: fetch::skill_folders(&folder)?,
             server: None,
+            plugin,
         }),
         PackKind::McpServer => {
             let resolve = |name: &str| installer.program(name);
@@ -256,6 +259,7 @@ fn prepare(
                 source,
                 skills: Vec::new(),
                 server: Some((fetch::server_name(entry)?, spec)),
+                plugin,
             })
         }
     }
@@ -285,17 +289,33 @@ async fn install_entry(
     })
     .await;
     let outcome = match prepared {
-        Ok(Ok(prepared)) => storage(
-            sender,
-            Command::Install {
-                id: id.clone(),
-                source: prepared.source,
-                skills: prepared.skills,
-                server: prepared.server,
-            },
-        )
-        .await
-        .map_err(|problem| problem.0),
+        Ok(Ok(prepared)) => {
+            let installed = storage(
+                sender,
+                Command::Install {
+                    id: id.clone(),
+                    source: prepared.source,
+                    skills: prepared.skills,
+                    server: prepared.server,
+                },
+            )
+            .await
+            .map_err(|problem| problem.0);
+            if installed.is_ok()
+                && let Some(plugin) = prepared.plugin
+                && let Err(problem) = storage(
+                    sender,
+                    Command::SeedHooks {
+                        id: id.clone(),
+                        plugin,
+                    },
+                )
+                .await
+            {
+                eprintln!("pack_hooks_not_added entry={id} cause={}", problem.0);
+            }
+            installed
+        }
         Ok(Err(code)) => Err(code.0.to_owned()),
         Err(_) => Err("setup_install_failed".to_owned()),
     };
@@ -349,6 +369,48 @@ fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Adds the hooks of every installed default-pack entry whose pinned checkout is already
+/// in the setup folder, so entries installed before hooks were seeded get them too.
+/// Nothing is downloaded, a linked checkout is skipped and an entry whose hooks are present
+/// is left alone. Inputs: the storage job sender and the engine root. Output: nothing; an
+/// entry that fails is logged and the rest still run.
+#[cfg(unix)]
+pub(super) async fn backfill_hooks(sender: mpsc::Sender<Job>, root: PathBuf) {
+    let setup = root.join("setup");
+    let cached = tokio::task::spawn_blocking(move || {
+        let manifest = crate::setup::pack::default_pack().ok()?;
+        Some(
+            manifest
+                .entries
+                .iter()
+                .filter_map(|entry| Some((entry.id.clone(), fetch::plugin_folder(&setup, entry)?)))
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await;
+    let Ok(Some(cached)) = cached else {
+        return;
+    };
+    for (id, plugin) in cached {
+        if let Err(problem) = storage(
+            &sender,
+            Command::SeedHooks {
+                id: id.clone(),
+                plugin,
+            },
+        )
+        .await
+        {
+            eprintln!("pack_hooks_not_added entry={id} cause={}", problem.0);
+        }
+    }
+}
+
+/// Adds no hooks where pack checkouts cannot be installed. Takes the same inputs as the
+/// Unix version, unused. Returns nothing.
+#[cfg(not(unix))]
+pub(super) async fn backfill_hooks(_sender: mpsc::Sender<Job>, _root: PathBuf) {}
+
 async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackManifestEntry>) {
     let installer = platform_installer(root);
     let graph_tool = progress::snapshot(root).graph_tool;
@@ -367,4 +429,5 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
     for entry in entries {
         install_entry(sender, installer.clone(), root, bundled.clone(), entry).await;
     }
+    backfill_hooks(sender.clone(), root.to_path_buf()).await;
 }

@@ -1,21 +1,54 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setChildLanding, setOnHarnessSwitch, setSubAgentDepth, setTeamTimeLimits, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { IntentReceipt, TeamStatus } from "../../engine-client";
-import { Button, Select, Switch, keyLabel, shortcutKey } from "../../ui";
+import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
+export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
+export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
+export const MASTER_IDLE_STOP_SECS = 900;
 const ANY_HARNESS = "";
+const NO_LIMIT = "off";
 const encoder = new TextEncoder();
+export const PARTIAL_LINE = "Older team history is hidden so the team fits in one view. Queued and running work stays listed.";
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
  * "Any sub-agent" first. Inputs: the team status and a harness name lookup. Output: options. */
 export function delegateOptions(status: Pick<TeamStatus, "harnesses">, harness: (id: string) => string = (id) => id): SelectOption[] {
   const subs = [...new Set(status.harnesses.filter((item) => item.role === "sub").map((item) => item.harness))];
   return [{ value: ANY_HARNESS, label: "Any sub-agent" }, ...subs.map((id) => ({ value: id, label: harness(id) }))];
+}
+
+/** Names a time limit the way the engine's notes do: whole hours as "1 h", whole minutes as
+ * "30 min", anything else in seconds, and no limit as "Off". Input: seconds or null. Output:
+ * the words. */
+export function limitLabel(secs: number | null): string {
+  if (secs === null) return "Off";
+  if (secs >= 3600 && secs % 3600 === 0) return `${secs / 3600} h`;
+  if (secs >= 60 && secs % 60 === 0) return `${secs / 60} min`;
+  return `${secs} s`;
+}
+
+/** The choices for one time limit: Off first, then each of `listed`, plus the stored value
+ * when it is none of those. Inputs: the stored limit and the listed choices, 30 min to 8 h by
+ * default. Output: options whose value is the seconds, or "off". */
+export function limitOptions(current: number | null, listed: readonly number[] = LIMIT_CHOICES_SECS): SelectOption[] {
+  const choices: (number | null)[] = [null, ...listed];
+  if (current !== null && !choices.includes(current)) choices.push(current);
+  return choices.map((secs) => ({ value: secs === null ? NO_LIMIT : String(secs), label: limitLabel(secs) }));
+}
+
+/** Keeps the session limit not below the task limit, as the engine requires, after the owner
+ * changed one of them; Off on either bounds nothing, so a session limit needs no task limit. Inputs: both limits, which one changed and its
+ * new value. Output: the pair to send. */
+export function limitPair(turn: number | null, session: number | null, changed: "turn" | "session", value: number | null): { turn: number | null; session: number | null } {
+  const below = (a: number | null, b: number | null) => a !== null && b !== null && a < b;
+  if (changed === "turn") return { turn: value, session: below(session, value) ? value : session };
+  return { turn: below(value, turn) ? value : turn, session: value };
 }
 
 /** Checks a task before it is handed to a sub-agent, with the engine's own rules: not blank,
@@ -30,6 +63,32 @@ export function taskInput(text: string): { kind: "ok"; prompt: string } | { kind
   return { kind: "ok", prompt };
 }
 
+/** The choices of the On harness switch setting, Carry over first as the default. */
+export const SWITCH_OPTIONS: SelectOption[] = [
+  { value: "carry", label: "Carry conversation over" },
+  { value: "fresh", label: "Start fresh" },
+];
+
+/** The On harness switch mode a team status holds, Carry over when an older engine sends none.
+ * Input: the status. Output: the mode. */
+export function switchMode(status: Pick<TeamStatus, "on_harness_switch">): SwitchMode {
+  return status.on_harness_switch ?? "carry";
+}
+
+/** The Sub-agent depth choices, 2 as the default: how deep leads may start workers. */
+export const DEPTH_OPTIONS: SelectOption[] = [
+  { value: "1", label: "1: only the master starts sub-agents" },
+  { value: "2", label: "2: sub-agents lead their own workers" },
+  { value: "3", label: "3: workers lead workers too" },
+];
+export const DEPTH_DEFAULT = 2;
+
+/** The choices of where a lead's worker lands, When the lead accepts first as the default. */
+export const LANDING_OPTIONS: SelectOption[] = [
+  { value: "lead", label: "When the lead accepts" },
+  { value: "owner", label: "Only when I accept" },
+];
+
 /** What a team change's result means for the owner. Inputs: the call result, what it did and
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
 export function changeNote(result: Result<IntentReceipt>, missing: string): string {
@@ -40,8 +99,11 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
-/** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, and hand one task
- * straight to a sub-agent when the master should not plan it. Inputs: the project id, the
+/** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
+ * task and an agent session may run, choose what a master harness switch does with the
+ * conversation, choose whether finished agents stay in the list and graph or move to the
+ * Finished fold-out, and hand one task straight to a sub-agent when the master should not
+ * plan it. Inputs: the project id, the
  * latest team status, a harness name lookup and a reload. Output: the controls. */
 export function TeamControls({ projectId, status, harness, reload }: {
   projectId: string;
@@ -50,6 +112,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
   reload: () => void;
 }) {
   const [warm, setWarm] = useState<boolean | null>(null);
+  const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
+  const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
+  const [finished, setFinished] = useState<"hide" | "show" | null>(null);
+  const [depth, setDepth] = useState<number | null>(null);
+  const [lands, setLands] = useState<ChildLanding | null>(null);
+  const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -57,6 +125,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [sent, setSent] = useState("");
   const options = delegateOptions(status, harness);
   const checked = warm ?? status.keep_warm;
+  const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
   const check = taskInput(text);
   const subs = options.length > 1;
 
@@ -66,6 +135,69 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const message = changeNote(await keepTeamWarm(projectId, on), "keeping agents ready");
     setBusy(false);
     setWarm(null);
+    setNote(message);
+    reload();
+  }
+
+  async function limit(changed: "turn" | "session" | "idle", value: string) {
+    if (busy) return;
+    const secs = value === NO_LIMIT ? null : Number(value);
+    const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
+    setLimits(next);
+    setBusy(true);
+    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle), "team time limits");
+    setBusy(false);
+    setLimits(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseSwitch(mode: SwitchMode) {
+    setOnSwitch(mode);
+    setBusy(true);
+    const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
+    setBusy(false);
+    setOnSwitch(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseDepth(value: number) {
+    setDepth(value);
+    setBusy(true);
+    const message = changeNote(await setSubAgentDepth(projectId, value), "the Sub-agent depth setting");
+    setBusy(false);
+    setDepth(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseLanding(mode: ChildLanding) {
+    setLands(mode);
+    setBusy(true);
+    const message = changeNote(await setChildLanding(projectId, mode), "the worker landing setting");
+    setBusy(false);
+    setLands(null);
+    setNote(message);
+    reload();
+  }
+
+  async function view(choice: "hide" | "show") {
+    setFinished(choice);
+    setBusy(true);
+    const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
+    setBusy(false);
+    setFinished(null);
+    setNote(message);
+    reload();
+  }
+
+  async function branches(choice: BranchMode) {
+    setBranchMode(choice);
+    setBusy(true);
+    const message = changeNote(await setAgentBranches(projectId, choice), "choosing where new agents commit");
+    setBusy(false);
+    setBranchMode(null);
     setNote(message);
     reload();
   }
@@ -84,8 +216,38 @@ export function TeamControls({ projectId, status, harness, reload }: {
   }
 
   return <section className="tg-controls" aria-label="Team controls">
+    {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
     <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
       onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
+    <div className="tg-limits" role="group" aria-label="Time limits">
+      <Select id={`tg-turn-limit-${projectId}`} label="Each task may run" value={shown.turn === null ? NO_LIMIT : String(shown.turn)} options={limitOptions(shown.turn)}
+        onValue={(value) => void limit("turn", value)} />
+      <Select id={`tg-session-limit-${projectId}`} label="Each agent session may run" value={shown.session === null ? NO_LIMIT : String(shown.session)} options={limitOptions(shown.session)}
+        onValue={(value) => void limit("session", value)}
+        helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
+      <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
+        onValue={(value) => void limit("idle", value)}
+        helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
+    </div>
+    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth ?? status.sub_agent_depth ?? DEPTH_DEFAULT)} options={DEPTH_OPTIONS}
+      onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
+      helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
+    <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
+    <div className="pj-row">
+      <span aria-hidden="true">Finished agents</span>
+      <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
+        options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
+      <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Agent branches</span>
+      <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
+        options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
+      <span className="tg-terminal-note">Named branch gives each new agent its own branch, crazyagent/agent-N. Detached keeps the older detached HEAD.</span>
+    </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

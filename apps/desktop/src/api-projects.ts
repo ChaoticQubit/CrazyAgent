@@ -1,6 +1,6 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
@@ -114,6 +114,27 @@ export interface ContextChunk {
   next_offset: number | null;
 }
 
+/** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
+export type AgentAccess = "sandboxed" | "own_branch" | "full";
+
+/** A toolchain family the engine detects in the owner's home folder and the project. */
+export type Toolchain = "rust" | "node" | "python";
+
+/** A project's saved agent policy: the level and the toolchain switches that differ from the
+ * project's own use. */
+export interface AgentPolicy {
+  access: AgentAccess;
+  toolchains: { toolchain: Toolchain; allowed: boolean }[];
+}
+
+/** The engine's view of a project's agent policy: the level, the levels this computer offers
+ * with the reason one can't run, and every detected toolchain. */
+export interface PolicyView {
+  access: AgentAccess;
+  levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+}
+
 export interface PoolChoice {
   pool: AccountPool;
   members: ModelConnection[];
@@ -171,6 +192,7 @@ const copy: Record<string, string> = {
   team_agent_range_invalid: "At most must be at least 1 and not less than At least.",
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
+  team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
   team_agent_not_found: "That agent is no longer part of this team.",
   team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",
@@ -188,6 +210,9 @@ const copy: Record<string, string> = {
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
   team_agent_unknown: "That agent is not running anymore.",
+  team_agent_running: "That agent is already running.",
+  team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",
+  team_agents_unavailable: "Team agents can't run on this system in this version.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -215,6 +240,8 @@ const copy: Record<string, string> = {
   master_turn_running: "The master is still answering. Stop that reply to switch sessions.",
   master_session_live: "That session is already the live one.",
   master_session_closed: "That session ended with its project and can't be resumed.",
+  master_session_unused: "This session has no messages yet, so it already is a new session.",
+  master_session_files_kept: "Its transcript couldn't be removed from the master's home, so nothing was deleted.",
   master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
   master_turn_not_current: "That reply already finished.",
   master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
@@ -231,10 +258,11 @@ const copy: Record<string, string> = {
 
 /** Plain sentence for one engine failure, never opaque.
  * Input: the code, or a failure with the engine cause behind it. Output: what happened and
- * what to do, or the generic fallback naming the code. */
+ * what to do, the cause's sentence when the code has none, or the generic fallback naming the
+ * code. */
 export function failureCopy(failure: string | { code: string; cause?: string }): string {
   const { code, cause } = typeof failure === "string" ? { code: failure, cause: undefined } : failure;
-  return namedFailure(failureSentence(code), code, cause);
+  return namedFailure(failureSentence(code) ?? (cause === undefined ? undefined : failureSentence(cause)), code, cause);
 }
 
 /** The sentence the project screens have for a code. Input: the code. Output: the sentence,
@@ -372,6 +400,13 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
   return call<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
 }
 
+/** Wakes a finished sub-agent by its team id (DEC-102): the same agent comes back in its own
+ * worktree and harness session. Inputs: the project id, the team agent id and a generation.
+ * Output: the engine receipt. */
+export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
 export const RESEARCH_LOG_LINES_MAX = 200;
 
 /** Reads the latest plain lines of one research agent's log.
@@ -407,14 +442,6 @@ export interface MemoryItem {
 
 export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
 
-export const MEMORY_PAGES_MAX = 20;
-
-/** Reads a project's memories, research saved for approval included, page by page.
- * Inputs: the project id and the last memory id already shown, or null.
- * Output: one engine batch of memories. */
-export function loadProjectMemories(id: string, after: string | null): Promise<Result<MemoryItem[]>> {
-  return call<MemoryItem[]>("desktop_project_memories", { id, after });
-}
 
 /** Saves, dismisses or deletes one memory; Keep is the owner's one-click approval.
  * Inputs: project id, memory id, the version shown, the decision and a generation.
@@ -446,6 +473,19 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
  * Inputs: project id, the folders and a generation. Output: the receipt. */
 export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
+/** Reads this project's agent access level and the toolchains its agents may use.
+ * Input: project id. Output: the engine's view of the saved policy. */
+export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
+  return call<PolicyView>("desktop_project_agent_policy", { id });
+}
+
+/** Replaces this project's agent access level and toolchain switches; the engine refuses a
+ * level this computer can't enforce. Inputs: project id, the policy and a generation.
+ * Output: the receipt. */
+export function saveAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
 }
 
 /** Deletes one document or research report from the project folder.
@@ -583,6 +623,13 @@ export function startNewSession(ticket: string, cancelRunning: boolean, generati
  * owner confirmed stopping a running reply, and a draft generation. Output: the receipt. */
 export function resumeSession(ticket: string, session: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => resumeMasterSession(ticket, session, cancelRunning, generation));
+}
+
+/** Deletes a session that is not live: the engine removes its stored turns and its
+ * transcript in the master's private home. Inputs: the master ticket, the session id and a
+ * draft generation. Output: the receipt. */
+export function deleteSession(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => deleteMasterSession(ticket, session, generation));
 }
 
 /** Asks the engine to stop the master's reply in progress.

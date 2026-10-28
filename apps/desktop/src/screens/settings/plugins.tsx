@@ -1,8 +1,9 @@
 import { createRef, useRef, useState, type RefObject } from "react";
 import {
-  addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret, removeMcpServer,
-  removeSkill, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type ImportCandidate, type ImportedSkill,
-  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView,
+  addHooks, addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listHooks, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret,
+  removeMcpServer, removeSkill, setHookEnabled, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type HookView,
+  type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
+  type Result, type SkillDetail, type SkillView,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
@@ -14,6 +15,7 @@ import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
+import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -21,7 +23,7 @@ const SECRETS_MAX = 16;
 const NAME_COPY = "Use 1 to 64 lowercase letters, digits, - or _ for the name.";
 const SECRET_NAME_COPY = "Use letters, digits, _ or - for the secret name, starting with a letter.";
 const COMMAND_COPY = "Enter the full path to the command, starting with /.";
-const ARGS_COPY = "Use up to 32 arguments, each on one line.";
+const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.";
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
@@ -127,6 +129,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
+/** Says that agents do not get a stored skill the engine refuses now, and why.
+ * Input: the refusal code. Output: the sentence. */
+export function skillUnused(code: string): string {
+  return `Agents don't get this skill. ${plainError(code)}`;
+}
+
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
 export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen, onToggle, onRemove, onRetry }: {
@@ -159,7 +167,8 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
         return <div className="item-row" key={skill.id}>
           <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
             onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
-            <span className="mono muted small">{homePath(skill.source)}</span></div>
+            <span className="mono muted small">{homePath(skill.source)}</span>
+            {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span className="secondary">{skillUnused(skill.refused)}</span></span>}</div>
           <span className="row">
             <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
             <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -172,14 +181,28 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
   </div>;
 }
 
-/** Drops the frontmatter block at the top of a SKILL.md, which the detail view shows as the
- * skill's name and description instead. Input: the file text. Output: the Markdown body. */
+/** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
+ * skill's name and description, plus any other header line agents read. Input: the file text.
+ * Output: the Markdown body. */
 export function skillBody(text: string): string {
   const source = text.replace(/^\uFEFF/, "");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   return end < 0 ? source : lines.slice(end + 1).join("\n").replace(/^(\s*\n)+/, "");
+}
+
+/** The SKILL.md header lines agents read that the detail view does not already show as the
+ * skill's name and description: every non-blank line of a closed frontmatter block other
+ * than the plain `name:` and `description:` lines. Inputs: the file text and the skill.
+ * Output: the lines in file order, none when the file has no closed header. */
+export function skillHeaderExtra(text: string, skill: { name: string; description: string }): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split("\n").map((line) => line.replace(/\r$/, ""));
+  if (lines[0]?.trimEnd() !== "---") return [];
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (end < 0) return [];
+  return lines.slice(1, end)
+    .filter((line) => line.trim() !== "" && line !== `name: ${skill.name}` && line !== `description: ${skill.description}`);
 }
 
 /** A file size as the detail view lists it. Input: bytes. Output: such as "812 B" or "4.2 KB". */
@@ -205,8 +228,12 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
   if (detail.kind === "error") return <LoadError message={detail.message} onRetry={onRetry} />;
   const { skill, text, files, files_more } = detail.value;
   const on = pluginSwitch(skill, projectId);
+  const extra = skillHeaderExtra(text, skill);
   return <div className="stack">
     <p className="secondary">{skill.description}</p>
+    {skill.refused && <Notice tone="danger">{skillUnused(skill.refused)} Remove it in Settings, Plugins and skills.</Notice>}
+    {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
+      <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
       <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -297,7 +324,7 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
   const { found, more } = list.value;
   return <div className="stack-small">
     <p className="secondary">From ~/.claude/skills and ~/.codex/skills. Ticked skills are copied into CrazyAgent and turned on for every project. Dotfiles and files that look like keys or passwords are left out, and your folders don't change.</p>
-    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{importSentence(outcome)}</Notice>)}
+    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{displayText(importSentence(outcome))}</Notice>)}
     {found.length === 0 ? <EmptyState icon="folder-input" title="No skills found in those folders" compact /> : <Panel padded={false}><div className="rows">
       {found.map((item) => {
         const word = importWord(item.state);
@@ -305,8 +332,8 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
           : item.state.kind === "differs" ? "Importing replaces the added copy and keeps its project switches." : "";
         return <div className="item-row" key={item.folder}>
           <Checkbox checked={ticked.has(item.folder)} disabled={!importable(item.state)} onChecked={(on) => onTick(item, on)}
-            label={<span className="stack-small"><span className="title">{item.name}</span>{item.line && <span className="secondary">{item.line}</span>}
-              <span className="mono muted small">{IMPORT_FROM[item.from]}: {homePath(item.folder)}</span>{why && <span className="secondary">{why}</span>}</span>} />
+            label={<span className="stack-small"><span className="title">{displayText(item.name)}</span>{item.line && <span className="secondary">{displayText(item.line)}</span>}
+              <span className="mono muted small">{IMPORT_FROM[item.from]}: {displayText(homePath(item.folder))}</span>{why && <span className="secondary">{why}</span>}</span>} />
           {word && <StatusBadge word={word} tone={item.state.kind === "unusable" ? "danger" : item.state.kind === "differs" ? "warn" : "neutral"} />}
         </div>;
       })}
@@ -417,6 +444,52 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
   </div>;
 }
 
+/** What one hook row says it runs on: its event and, when set, its matcher.
+ * Input: the hook. Output: the line. */
+export function hookTrigger(hook: HookView): string {
+  return hook.matcher ? `${hook.event}, matching ${hook.matcher}` : hook.event;
+}
+
+/** The hooks list as a pure view of the engine read: each hook with its plugin, event,
+ * command and switch. Inputs: the read, the project id when shown in a project, the last
+ * failure and the actions. */
+export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry }: {
+  hooks: Loaded<HookView[]>;
+  projectId?: string;
+  failure: string;
+  onAdd: () => void;
+  onToggle: (hook: HookView, on: boolean) => void;
+  onRetry: () => void;
+}) {
+  if (hooks.kind === "loading") return <Skeleton shape="row" count={4} />;
+  if (hooks.kind === "not_ready") return <NotReady what="Hooks" compact />;
+  if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
+  const add = <Button icon="folder-plus" onClick={onAdd}>Add hooks from a plugin</Button>;
+  return <div className="stack-small">
+    <div className="row between">
+      <p className="secondary">Hooks are commands Claude Code agents run on events such as session start or a tool call. They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.</p>
+      {hooks.value.length > 0 && add}
+    </div>
+    {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {hooks.value.length === 0 ? <EmptyState icon="zap" title="No hooks yet" compact action={add} /> : <Panel padded={false}><div className="rows">
+      {hooks.value.map((hook, index) => {
+        const on = pluginSwitch(hook, projectId);
+        return <div className="item-row" key={hook.id}>
+          <div className="stack-small">
+            <span className="row"><span className="title">{hook.plugin}</span><span className="secondary">{hookTrigger(hook)}</span></span>
+            <span className="mono muted small">{hook.command}</span>
+            {hook.follows && <span className="secondary">Runs while {hook.follows} is on.</span>}
+          </div>
+          <span className="row">
+            <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
+              disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
+          </span>
+        </div>;
+      })}
+    </div></Panel>}
+  </div>;
+}
+
 /** The Add skill dialog: the macOS folder chooser, or a typed full path when the chooser is
  * unavailable. Inputs: open, where the skill applies, a starting message, close and added. */
 export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
@@ -465,16 +538,35 @@ export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
 }
 
 interface SecretRow {
+  id: number;
   name: string;
   value: RefObject<HTMLInputElement | null>;
 }
 
-function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
+/** Reads each secret row's name with the value in that row's own masked field.
+ * Input: the rows. Output: name and value pairs in row order. */
+export function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
   return rows.map((row) => ({ name: row.name, value: row.value.current?.value ?? "" }));
 }
 
 function clearSecrets(rows: SecretRow[]): void {
   for (const row of rows) if (row.value.current) row.value.current.value = "";
+}
+
+/** The secret rows of Add MCP server: a name and a masked value each, keyed by an id that never
+ * changes, so removing one row never moves a typed value onto another row's name. Add secret
+ * stops at the secrets limit. Inputs: the rows and their change handler. */
+export function SecretRows({ rows, onRows }: { rows: SecretRow[]; onRows: (rows: SecretRow[]) => void }) {
+  return <>
+    {rows.map((row) => <div className="row" key={row.id}>
+      <TextField id={`server-secret-name-${row.id}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
+        onValue={(value) => onRows(rows.map((other) => other.id === row.id ? { ...other, name: value } : other))} />
+      <SecretField id={`server-secret-value-${row.id}`} label="Value" inputRef={row.value} />
+      <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; onRows(rows.filter((other) => other.id !== row.id)); }} />
+    </div>)}
+    {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus"
+      onClick={() => onRows([...rows, { id: Math.max(0, ...rows.map((other) => other.id)) + 1, name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+  </>;
 }
 
 /** The Add MCP server dialog: name, a command on this Mac or a URL, and secrets by name.
@@ -531,13 +623,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
       <div className="stack-small">
         <span className="title">Secrets</span>
         <p className="secondary">{form.kind === "stdio" ? "Each secret is given to the command as an environment value." : "Each secret is sent to the URL as a header."} CrazyAgent's engine keeps them privately; you won't see them again.</p>
-        {rows.map((row, index) => <div className="row" key={index}>
-          <TextField id={`server-secret-name-${index}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
-            onValue={(value) => setRows(rows.map((other, at) => at === index ? { ...other, name: value } : other))} />
-          <SecretField id={`server-secret-value-${index}`} label="Value" inputRef={row.value} />
-          <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; setRows(rows.filter((_, at) => at !== index)); }} />
-        </div>)}
-        {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus" onClick={() => setRows([...rows, { name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+        <SecretRows rows={rows} onRows={setRows} />
         {errors.secrets && <span className="field-error" role="alert">{errors.secrets}</span>}
       </div>
       {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
@@ -615,9 +701,10 @@ type Removing = { kind: "skill"; skill: SkillView } | { kind: "server"; server: 
 export function PluginsAndSkills({ projectId, skill }: { projectId?: string; skill?: string } = {}) {
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
-  const [section, setSection] = useState<"skills" | "servers">("skills");
+  const [section, setSection] = useState<"skills" | "servers" | "hooks">("skills");
   const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
+  const [hooks, reloadHooks] = useLoad(() => listHooks(projectId), [projectId], "hooks");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
@@ -652,6 +739,19 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on) : setSkillEnabled(skill.id, on),
       () => on ? "Skill turned on." : "Skill turned off.", reloadSkills);
   };
+  const addHooksFromChooser = async () => {
+    setFailure("");
+    const picked = await pickFolder("plugin");
+    if (picked.kind !== "ok") return setFailure(picked.kind === "not_ready" ? "The folder chooser isn't ready in this build." : picked.message);
+    const folder = picked.value;
+    if (folder === null) return;
+    await act(folder, () => addHooks(scope, folder), (added) => `Added ${added.length} ${added.length === 1 ? "hook" : "hooks"}.`, reloadHooks);
+  };
+  const toggleHook = (hook: HookView, on: boolean) => {
+    const target = pluginSwitch(hook, projectId);
+    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on) : setHookEnabled(hook.id, on),
+      () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+  };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
     void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on) : setMcpServerEnabled(server.id, on),
@@ -667,8 +767,9 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   return <div className="stack">
     <Segmented label="Plugins and skills" value={section} onValue={(next) => { setFailure(""); setSection(next); }}
-      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }]} />
-    {section === "skills"
+      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }, { value: "hooks", label: "Hooks", icon: "zap" }]} />
+    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
+    {section === "hooks" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}

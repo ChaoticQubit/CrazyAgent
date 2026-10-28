@@ -15,6 +15,17 @@ fn project(root: &Path) -> AgentProject {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    }
+}
+
+fn given(text: &str) -> Given {
+    Given {
+        text: text.into(),
+        files: Vec::new(),
+        section_bytes: 0,
+        context: Vec::new(),
     }
 }
 
@@ -25,7 +36,7 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     let folder = project.folder.clone().unwrap();
     assert_eq!(read_app(&project.data).unwrap(), "");
     assert_eq!(read_project(&folder).unwrap(), "");
-    assert_eq!(text(&project).unwrap(), "");
+    assert_eq!(text(&project, None).unwrap().text, "");
 
     save_app(&project.data, "Use TDD.\n").unwrap();
     save_project(&folder, "Run make check.\n").unwrap();
@@ -75,7 +86,7 @@ fn the_size_bound_holds_on_save_and_on_read() {
     save_app(&project.data, &full).unwrap();
     save_project(&folder, &full).unwrap();
     assert_eq!(read_app(&project.data).unwrap().len(), TEXT_BYTES_MAX);
-    let rendered = text(&project).unwrap();
+    let rendered = text(&project, None).unwrap().text;
     assert!(rendered.len() <= PROCESS_BYTES_MAX);
 
     let over = "a".repeat(TEXT_BYTES_MAX + 1);
@@ -98,7 +109,10 @@ fn the_size_bound_holds_on_save_and_on_read() {
         read_project(&folder).unwrap_err().0,
         "process_text_too_large"
     );
-    assert_eq!(text(&project).unwrap_err().0, "process_text_too_large");
+    assert_eq!(
+        text(&project, None).unwrap_err().0,
+        "process_text_too_large"
+    );
 }
 
 #[test]
@@ -173,13 +187,13 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     let project = project(&root);
     save_app(&project.data, "App rule.\n").unwrap();
     save_project(project.folder.as_deref().unwrap(), "Project rule.\n").unwrap();
-    let rendered = text(&project).unwrap();
+    let rendered = text(&project, None).unwrap().text;
     let app = rendered.find("App rule.").unwrap();
     let own = rendered.find("Project rule.").unwrap();
     assert!(app < own, "project text goes last");
 
     let claude = home(&root, "claude");
-    prepare(&claude, Harness::Claude, &project, &rendered).unwrap();
+    prepare(&claude, Harness::Claude, &project, &given(&rendered)).unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         rendered
@@ -195,7 +209,7 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     );
 
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, &rendered).unwrap();
+    prepare(&codex, Harness::Codex, &project, &given(&rendered)).unwrap();
     assert_eq!(
         fs::read_to_string(codex.join("AGENTS.md")).unwrap(),
         rendered
@@ -212,15 +226,15 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
     let (_directory, root) = folder();
     let project = project(&root);
     let codex = home(&root, "codex");
-    prepare(&codex, Harness::Codex, &project, "# old\n").unwrap();
-    prepare(&codex, Harness::Codex, &project, "").unwrap();
+    prepare(&codex, Harness::Codex, &project, &given("# old\n")).unwrap();
+    prepare(&codex, Harness::Codex, &project, &given("")).unwrap();
     assert!(!codex.join("AGENTS.md").exists());
 
     let outside = root.join("outside.md");
     fs::write(&outside, "owner file").unwrap();
     let claude = home(&root, "claude");
     std::os::unix::fs::symlink(&outside, claude.join("CLAUDE.md")).unwrap();
-    prepare(&claude, Harness::Claude, &project, "# new\n").unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# new\n")).unwrap();
     assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
     assert!(
         !fs::symlink_metadata(claude.join("CLAUDE.md"))
@@ -235,15 +249,20 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 
     fs::remove_file(claude.join("CLAUDE.md")).unwrap();
     fs::create_dir_all(claude.join("CLAUDE.md/inner")).unwrap();
-    prepare(&claude, Harness::Claude, &project, "# again\n").unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# again\n")).unwrap();
     assert_eq!(
         fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
         "# again\n"
     );
     assert_eq!(
-        prepare(Path::new("relative"), Harness::Claude, &project, "x")
-            .unwrap_err()
-            .0,
+        prepare(
+            Path::new("relative"),
+            Harness::Claude,
+            &project,
+            &given("x")
+        )
+        .unwrap_err()
+        .0,
         "agent_home_invalid"
     );
 }
@@ -252,31 +271,34 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 #[test]
 fn a_relaunch_replaces_a_planted_skills_record_in_place_without_writing_through_it() {
     let (_directory, root) = folder();
+    let data = project(&root).data;
     let outside = root.join("outside.txt");
     fs::write(&outside, "owner file").unwrap();
     let codex = home(&root, "codex");
-    std::os::unix::fs::symlink(&outside, codex.join(SKILLS_FILE)).unwrap();
-    record_skills(&codex, &["tdd"]).unwrap();
+    record_skills(&data, &codex, &[]).unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &codex).unwrap();
+    let record = records.join(name);
+    fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink(&outside, &record).unwrap();
+    record_skills(&data, &codex, &["tdd"]).unwrap();
     assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
-    let record = fs::symlink_metadata(codex.join(SKILLS_FILE)).unwrap();
-    assert!(record.is_file() && !record.file_type().is_symlink());
-    assert_eq!(
-        fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(),
-        "tdd\n"
-    );
+    let held = fs::symlink_metadata(&record).unwrap();
+    assert!(held.is_file() && !held.file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&record).unwrap(), "tdd\n");
 
-    fs::remove_file(codex.join(SKILLS_FILE)).unwrap();
-    fs::create_dir_all(codex.join(SKILLS_FILE).join("inner")).unwrap();
-    record_skills(&codex, &[]).unwrap();
-    assert_eq!(fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(), "");
-    record_skills(&codex, &["code-review"]).unwrap();
+    fs::remove_file(&record).unwrap();
+    fs::create_dir_all(record.join("inner")).unwrap();
+    record_skills(&data, &codex, &[]).unwrap();
+    assert_eq!(fs::read_to_string(&record).unwrap(), "");
+    record_skills(&data, &codex, &["code-review"]).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex).unwrap(),
-        Some(Received {
-            text: String::new(),
-            skills: vec!["code-review".into()],
-        }),
+        given_skills(&data, &codex).unwrap(),
+        ["code-review"],
         "the last record replaces the one before it"
+    );
+    assert!(
+        fs::read_dir(&codex).unwrap().next().is_none(),
+        "nothing is recorded in the agent's home"
     );
 }
 
@@ -296,36 +318,31 @@ fn what_an_agent_received_is_read_back_from_its_own_home() {
         Some(Received::default())
     );
 
-    prepare(&claude, Harness::Claude, &project, "# given\n").unwrap();
-    record_skills(&claude, &["tdd", "release-notes"]).unwrap();
+    prepare(&claude, Harness::Claude, &project, &given("# given\n")).unwrap();
+    record_skills(&project.data, &claude, &["tdd", "release-notes"]).unwrap();
     assert_eq!(
         received(&claude, Harness::Claude).unwrap(),
         Some(Received {
             text: "# given\n".into(),
-            skills: vec!["tdd".into(), "release-notes".into()],
         })
+    );
+    assert_eq!(
+        given_skills(&project.data, &claude).unwrap(),
+        ["tdd", "release-notes"]
     );
     assert_eq!(
         received(&claude, Harness::Codex).unwrap().unwrap().text,
         "",
         "each harness reads only its own file"
     );
-    assert_eq!(
-        fs::metadata(claude.join(SKILLS_FILE))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
+    let (records, name) = record_place(&project.data, SKILLS_FOLDER, &claude).unwrap();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&records.join(name)), 0o600);
+    assert_eq!(mode(&records), 0o700);
 
-    record_skills(&claude, &[]).unwrap();
+    record_skills(&project.data, &claude, &[]).unwrap();
     assert!(
-        received(&claude, Harness::Claude)
-            .unwrap()
-            .unwrap()
-            .skills
-            .is_empty(),
+        given_skills(&project.data, &claude).unwrap().is_empty(),
         "a launch without skills clears the last list"
     );
 }
@@ -370,9 +387,16 @@ fn the_received_view_refuses_links_and_entries_the_launch_did_not_write() {
     );
     fs::remove_file(&file).unwrap();
 
-    std::os::unix::fs::symlink(&secret, claude.join(SKILLS_FILE)).unwrap();
-    assert_eq!(refused(&claude), "agent_instructions_unsafe");
-    fs::remove_file(claude.join(SKILLS_FILE)).unwrap();
+    let data = project(&root).data;
+    record_skills(&data, &claude, &[]).unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &claude).unwrap();
+    fs::remove_file(records.join(&name)).unwrap();
+    std::os::unix::fs::symlink(&secret, records.join(&name)).unwrap();
+    assert_eq!(
+        given_skills(&data, &claude).unwrap_err().0,
+        "agent_instructions_unsafe"
+    );
+    fs::remove_file(records.join(&name)).unwrap();
 
     let linked = root.join("linked-home");
     std::os::unix::fs::symlink(&claude, &linked).unwrap();
@@ -410,30 +434,103 @@ fn the_received_view_holds_its_bounds() {
         .map(|index| format!("skill-{index}"))
         .collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    record_skills(&codex, &names).unwrap();
+    let data = project(&root).data;
+    record_skills(&data, &codex, &names).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex)
-            .unwrap()
-            .unwrap()
-            .skills
-            .len(),
+        given_skills(&data, &codex).unwrap().len(),
         SKILLS_RECORD_MAX
     );
-    fs::write(
-        codex.join(SKILLS_FILE),
-        format!("{}\nextra\n", names.join("\n")),
-    )
-    .unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &codex).unwrap();
+    let record = records.join(name);
+    fs::write(&record, format!("{}\nextra\n", names.join("\n"))).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex).unwrap_err().0,
+        given_skills(&data, &codex).unwrap_err().0,
         "agent_instructions_too_large"
     );
     for planted in ["Upper\n", "with space\n", "-dash\n", "\n"] {
-        fs::write(codex.join(SKILLS_FILE), planted).unwrap();
+        fs::write(&record, planted).unwrap();
         assert_eq!(
-            received(&codex, Harness::Codex).unwrap_err().0,
+            given_skills(&data, &codex).unwrap_err().0,
             "agent_instructions_invalid",
             "{planted:?}"
         );
+    }
+}
+
+/// A FIFO that replaces the instruction file between any check and the open never makes
+/// the read wait for a writer: every read ends with the text or `process_text_unsafe`.
+#[cfg(unix)]
+#[test]
+fn a_fifo_swapped_in_for_the_instruction_file_never_blocks_the_read() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let folder = project.folder.clone().unwrap();
+    let state = folder.join(".crazyagent");
+    let path = state.join("instructions.md");
+    let plain = root.join("plain.md");
+    let fifo = root.join("fifo.md");
+    let swapped = state.join("swapped.md");
+    fs::write(&plain, "Use TDD.\n").unwrap();
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    fs::hard_link(&plain, &path).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = std::thread::spawn({
+        let (stop, path) = (stop.clone(), path.clone());
+        move || {
+            let mut swaps = 0_u64;
+            while !stop.load(Ordering::SeqCst) {
+                for source in [&fifo, &plain] {
+                    fs::hard_link(source, &swapped).unwrap();
+                    fs::rename(&swapped, &path).unwrap();
+                    swaps += 1;
+                }
+            }
+            swaps
+        }
+    });
+    let (sent, received) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut outcomes = Vec::new();
+        while Instant::now() < deadline {
+            outcomes.push(read_project(&folder).map_err(|problem| problem.0));
+        }
+        let _ = sent.send(outcomes);
+    });
+    let outcomes = received.recv_timeout(Duration::from_secs(20));
+    stop.store(true, Ordering::SeqCst);
+    let swaps = swapper.join().unwrap();
+    let outcomes = outcomes.expect("a read waited on the FIFO swapped in for the instruction file");
+    assert!(swaps > 0 && !outcomes.is_empty());
+    for outcome in &outcomes {
+        assert!(
+            matches!(
+                outcome.as_deref().map_err(String::as_str),
+                Ok("Use TDD.\n") | Err("process_text_unsafe")
+            ),
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn the_default_process_leaves_commits_to_the_landing_rules_of_each_access_level() {
+    for told in ["Commit with", "never commit", "Leave your edits as files"] {
+        assert!(!DEFAULT_PROCESS.contains(told), "{told}");
+    }
+    for rule in [
+        "Commit or leave your edits as the \"How your work lands\" section CrazyAgent gives you says; it follows the project's agent access.",
+        "Never create, switch, rename, delete or push a branch, and never write inside the project folder's `.git` or rewrite history.",
+        "The owner accepts your work in the project's Changes view.",
+        "never retry it outside the sandbox",
+    ] {
+        assert!(DEFAULT_PROCESS.contains(rule), "{rule}");
     }
 }

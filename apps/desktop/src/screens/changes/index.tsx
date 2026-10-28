@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, notReady, restoreChange, updateChange } from "../../api-changes";
-import type { ChangeDiff, ChangeSet } from "../../api-changes";
-import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
+import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
+import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
+import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
 import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
@@ -24,24 +25,47 @@ export function ChangesNotReady() {
   return <NotReady what="reviewing and landing agent changes isn't in this engine yet." />;
 }
 
-/** The Accept dialog: says where the changes land and shows the proposed commit message
- * for the owner to edit first; Accept stays off while the message is empty or too long.
- * Inputs: the change set, whether the accept runs, and the handlers. Output: the dialog. */
+/** The Accept dialog: says where the changes land, lets the owner pick the local branch
+ * they land on, the checked-out one first, and shows the proposed commit message for the
+ * owner to edit first, hidden characters as escapes with a warning; Accept stays off while
+ * the message is empty, too long or holds hidden characters.
+ * Inputs: the change set, whether the accept runs, and the handlers; Accept gets the
+ * message and the picked branch, null for the checked-out one. Output: the dialog. */
 export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   set: ChangeSet;
   pending: boolean;
   onCancel: () => void;
-  onAccept: (message: string) => void;
+  onAccept: (message: string, target: string | null) => void;
 }) {
-  const [text, setText] = useState(set.message);
+  const shown = displayText(set.message);
+  const [text, setText] = useState(shown);
+  const [branches, setBranches] = useState<TargetBranches | null>(null);
+  const [target, setTarget] = useState("");
   const id = useId();
+  const branchId = useId();
   const message = commitMessage(text);
+  useEffect(() => {
+    let current = true;
+    void loadTargetBranches(set.id).then((result) => {
+      if (!current || result.kind !== "ok") return;
+      setBranches(result.value);
+      setTarget(result.value.current ?? result.value.branches[0] ?? "");
+    });
+    return () => { current = false; };
+  }, [set.id]);
+  const picked = branches !== null && target !== "" && target !== branches.current ? target : null;
   return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
-      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message); }}>Accept</Button></>}>
-    <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
+      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message, picked); }}>Accept</Button></>}>
+    {picked === null
+      ? <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
+      : <p>They land as one commit on {picked}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.</p>}
+    {branches !== null && branches.branches.length > 0 &&
+      <Select id={branchId} label="Branch" value={target} onValue={setTarget}
+        options={branches.branches.map((name) => ({ value: name, label: name === branches.current ? `${name} (checked out)` : name }))} />}
+    {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
-      error={message === null ? "Write a commit message of up to 4096 bytes to accept." : undefined} />
+      error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />
   </Dialog>;
 }
 
@@ -144,9 +168,9 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     setRound((value) => value + 1);
   }
 
-  async function accept(set: ChangeSet, message: string) {
+  async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(await acceptChange(set.id, set.head, message), acceptNote);
+    await settle(await acceptChange(set.id, set.head, message, target), acceptNote);
   }
 
   async function discard(set: ChangeSet) {
@@ -183,7 +207,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
-      onCancel={() => setAsking(null)} onAccept={(message) => void accept(asking.set, message)} />}
+      onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
       The agent's working copy goes back to your branch. You can restore these changes for 7 days.

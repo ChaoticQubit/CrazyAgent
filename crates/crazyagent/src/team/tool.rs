@@ -30,6 +30,34 @@ pub const ANSWER_TOOL: &str = "answer";
 pub const STATUS_TOOL: &str = "status";
 pub const CHANGES_TOOL: &str = "changes";
 pub const ESCALATE_TOOL: &str = "escalate";
+pub const WAKE_TOOL: &str = "wake";
+pub const SESSIONS_TOOL: &str = "sessions";
+pub const SESSION_TOOL: &str = "session";
+pub const REMEMBER_TOOL: &str = "remember";
+pub const RECALL_TOOL: &str = "recall";
+pub const ACCEPT_TOOL: &str = "accept";
+/// The engine subcommand that serves a sub-agent's team tools, `AGENT_TOOLS`.
+pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
+/// The team tools a sub-agent gets: past conversations and memory, and the lead tools that
+/// reach only its own workers, whose `delegate` the engine refuses past the owner's Sub-agent
+/// depth setting. A live master gets all but `accept` with its own.
+pub const AGENT_TOOLS: [&str; 11] = [
+    SESSIONS_TOOL,
+    SESSION_TOOL,
+    REMEMBER_TOOL,
+    RECALL_TOOL,
+    TOOL_NAME,
+    STATUS_TOOL,
+    MESSAGE_TOOL,
+    ANSWER_TOOL,
+    WAKE_TOOL,
+    CHANGES_TOOL,
+    ACCEPT_TOOL,
+];
+/// The one instructions line that names the past-conversation tools.
+pub const HISTORY_LINE: &str = "Past conversations: sessions(query) in the crazyagent-team MCP server searches every earlier master and sub-agent conversation of this project, of any age, and session(id, offset) reads one page by page.\n";
+/// The one instructions line that names the saved-memory tools.
+pub const MEMORY_LINE: &str = "Saved memory: remember(text, scope) in the crazyagent-team MCP server keeps one fact, decision or lesson for later sessions, scope project or app, and recall(query) searches the saved memories. The owner sees each one with your name and may have to approve it first.\n";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -49,6 +77,15 @@ const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000
 const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
+const SESSIONS_INVALID: &str =
+    "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
+const SESSION_INVALID: &str =
+    "Not read: give a conversation id from sessions() and a message number from 0.";
+const REMEMBER_INVALID: &str =
+    "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
+const ACCEPT_INVALID: &str =
+    "Not accepted: give the change set id that changes() lists, 32 letters and digits.";
+const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -61,8 +98,12 @@ const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
-/// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
-/// and `escalate` raises an app notification for a decision only the owner makes.
+/// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
+/// and `changes` read the team and its pending change sets, `escalate` raises an app
+/// notification for a decision only the owner makes, `sessions` and `session` search and
+/// read the project's past conversations, and `remember` and `recall` save and search
+/// memories. A sub-agent makes those four, and as a lead the team calls that reach its own
+/// workers and `accept`, which lands a worker's change set on the lead's branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -79,11 +120,49 @@ pub enum Call {
         agent: String,
         text: String,
     },
+    Wake {
+        agent: String,
+        text: String,
+    },
     Status,
     Changes,
     Escalate {
         text: String,
     },
+    Sessions {
+        query: String,
+    },
+    Session {
+        id: String,
+        offset: u64,
+    },
+    Remember {
+        text: String,
+        scope: MemoryReach,
+    },
+    Recall {
+        query: String,
+    },
+    Accept {
+        change_set: String,
+    },
+}
+
+/// Where a memory an agent saves applies: its own project, or every project of the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReach {
+    Project,
+    App,
+}
+
+impl MemoryReach {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::App => "app",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -120,6 +199,93 @@ pub fn serve_live(input: impl BufRead, output: impl Write, mailbox: &Path) -> st
         ));
     }
     rpc(input, output, |request| answer_live(request, mailbox))
+}
+
+/// Serves a sub-agent's team tools, `AGENT_TOOLS`, as an MCP server over stdio until its
+/// client closes input: each call goes into the mailbox folder in the agent's private
+/// temporary folder and its result is the engine's answer. Takes the client's input and
+/// output and the absolute mailbox folder the engine made. Returns an input or output
+/// failure, or a refusal when the mailbox is not a plain folder.
+pub fn serve_agent(input: impl BufRead, output: impl Write, mailbox: &Path) -> std::io::Result<()> {
+    let plain = std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir());
+    if !mailbox.is_absolute() || !plain {
+        return Err(std::io::Error::other(
+            "the mailbox must be an absolute plain folder",
+        ));
+    }
+    rpc(input, output, |request| answer_agent(request, mailbox))
+}
+
+/// What a sub-agent reads for each lead tool, which reaches only the workers it started.
+const LEAD_DESCRIPTIONS: [(&str, &str); 6] = [
+    (
+        TOOL_NAME,
+        "Start one worker of your own for part of your task. It runs in its own git worktree and branch cut from your current commit, and the engine tells you when it ends. The engine refuses past the owner's Sub-agent depth setting.",
+    ),
+    (
+        STATUS_TOOL,
+        "Read your own workers: each one, its job and state.",
+    ),
+    (
+        MESSAGE_TOOL,
+        "Type a message into one of your own workers' terminals, such as a correction or more detail.",
+    ),
+    (
+        ANSWER_TOOL,
+        "Answer the question one of your own workers is waiting on; the answer is typed into its terminal.",
+    ),
+    (
+        WAKE_TOOL,
+        "Wake one of your own finished workers by its name: it starts again in its own worktree and gets your text as its next task.",
+    ),
+    (
+        CHANGES_TOOL,
+        "List your own workers' change sets that are waiting to land.",
+    ),
+];
+
+fn agent_tools() -> Value {
+    let mut tools: Vec<Value> = live_tools()["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(|name| AGENT_TOOLS.contains(&name))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    for tool in &mut tools {
+        let lead = LEAD_DESCRIPTIONS
+            .iter()
+            .find(|(name, _)| tool["name"].as_str() == Some(*name));
+        if let Some((_, description)) = lead {
+            tool["description"] = json!(description);
+        }
+    }
+    tools.push(json!({
+        "name": ACCEPT_TOOL,
+        "description": "Land one of your own workers' change sets on your own branch, as one squash commit. The owner's setting may keep that for the owner's own Accept; then this says so.",
+        "inputSchema": {"type": "object", "properties": {"change_set": {"type": "string", "description": "The change set id that changes() lists."}}, "required": ["change_set"], "additionalProperties": false},
+    }));
+    assert_eq!(tools.len(), AGENT_TOOLS.len());
+    json!({ "tools": tools })
+}
+
+fn answer_agent(request: &Value, mailbox: &Path) -> Option<Value> {
+    let id = request.get("id")?.clone();
+    let named = request["params"]["name"]
+        .as_str()
+        .is_some_and(|name| AGENT_TOOLS.contains(&name));
+    match request.get("method").and_then(Value::as_str) {
+        Some("tools/list") => Some(json!({"jsonrpc": "2.0", "id": id, "result": agent_tools()})),
+        Some("tools/call") if !named => Some(failure(id, -32602, "Unknown tool")),
+        _ => answer_live(request, mailbox),
+    }
 }
 
 fn rpc(
@@ -246,6 +412,11 @@ fn live_tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"agent": agent, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
         },
         {
+            "name": WAKE_TOOL,
+            "description": "Wake a finished sub-agent by its name: it starts again under the same name in its own worktree, continuing its own conversation where its harness can, and gets your text as its next task.",
+            "inputSchema": {"type": "object", "properties": {"agent": {"type": "string", "description": "The finished sub-agent: its persona name, its @role handle or its number."}, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
+        },
+        {
             "name": STATUS_TOOL,
             "description": "Read the team: each sub-agent, its job and state, and the tasks waiting or running.",
             "inputSchema": none,
@@ -254,6 +425,26 @@ fn live_tools() -> Value {
             "name": CHANGES_TOOL,
             "description": "List the change sets waiting for the owner's review in Changes.",
             "inputSchema": none,
+        },
+        {
+            "name": SESSIONS_TOOL,
+            "description": "Search every past master and sub-agent conversation of this project, of any age: each hit gives the conversation id, the message number and an excerpt. With no query it lists the conversations, newest first.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Words that must all appear in one message; leave empty to list the conversations."}}, "additionalProperties": false},
+        },
+        {
+            "name": SESSION_TOOL,
+            "description": "Read one past conversation of this project from a message number on, one page at a time; the page ends with the number to read next.",
+            "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false},
+        },
+        {
+            "name": REMEMBER_TOOL,
+            "description": "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false},
+        },
+        {
+            "name": RECALL_TOOL,
+            "description": "Search the saved memories of this project and the app-wide ones, newest first. Leave the query empty for the newest.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Words the memory holds, on one line of up to 100 bytes."}}, "additionalProperties": false},
         },
         {
             "name": ESCALATE_TOOL,
@@ -330,6 +521,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             .map(|(agent, text)| Call::Message { agent, text }),
         ANSWER_TOOL => typed(argument("agent"), argument("text"))
             .map(|(agent, text)| Call::Answer { agent, text }),
+        WAKE_TOOL => typed(argument("agent"), argument("text"))
+            .map(|(agent, text)| Call::Wake { agent, text }),
         STATUS_TOOL => Ok(Call::Status),
         CHANGES_TOOL => Ok(Call::Changes),
         ESCALATE_TOOL => match argument("text") {
@@ -339,6 +532,73 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 })
             }
             _ => Err(ESCALATE_INVALID),
+        },
+        SESSIONS_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= super::history::QUERY_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Sessions {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(SESSIONS_INVALID),
+        },
+        SESSION_TOOL => {
+            let offset = match arguments.and_then(|arguments| arguments.get("offset")) {
+                None | Some(Value::Null) => Some(0),
+                Some(value) => value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok())),
+            };
+            match (argument("id").map(str::trim), offset) {
+                (Some(id), Some(offset))
+                    if super::history::id_valid(id) && offset <= super::history::OFFSET_MAX =>
+                {
+                    Ok(Call::Session {
+                        id: id.to_owned(),
+                        offset,
+                    })
+                }
+                _ => Err(SESSION_INVALID),
+            }
+        }
+        REMEMBER_TOOL => {
+            let scope = match argument("scope").map(str::trim) {
+                None | Some("" | "project") => Some(MemoryReach::Project),
+                Some("app") => Some(MemoryReach::App),
+                Some(_) => None,
+            };
+            match (argument("text"), scope) {
+                (Some(text), Some(scope))
+                    if super::text_valid(text, crate::memory::library::NOTE_BYTES_MAX) =>
+                {
+                    Ok(Call::Remember {
+                        text: text.trim().to_owned(),
+                        scope,
+                    })
+                }
+                _ => Err(REMEMBER_INVALID),
+            }
+        }
+        RECALL_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= crate::memory::library::SEARCH_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Recall {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(RECALL_INVALID),
+        },
+        ACCEPT_TOOL => match argument("change_set").map(str::trim) {
+            Some(change_set) if crate::landing::ChangeSetId::new(change_set).is_ok() => {
+                Ok(Call::Accept {
+                    change_set: change_set.to_owned(),
+                })
+            }
+            _ => Err(ACCEPT_INVALID),
         },
         _ => return None,
     })
@@ -358,9 +618,18 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         ),
         Call::Message { agent, text } => (MESSAGE_TOOL, json!({"agent": agent, "text": text})),
         Call::Answer { agent, text } => (ANSWER_TOOL, json!({"agent": agent, "text": text})),
+        Call::Wake { agent, text } => (WAKE_TOOL, json!({"agent": agent, "text": text})),
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
+        Call::Sessions { query } => (SESSIONS_TOOL, json!({"query": query})),
+        Call::Session { id, offset } => (SESSION_TOOL, json!({"id": id, "offset": offset})),
+        Call::Remember { text, scope } => (
+            REMEMBER_TOOL,
+            json!({"text": text, "scope": scope.as_str()}),
+        ),
+        Call::Recall { query } => (RECALL_TOOL, json!({"query": query})),
+        Call::Accept { change_set } => (ACCEPT_TOOL, json!({"change_set": change_set})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {
@@ -824,10 +1093,11 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
 }
 
 /// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the record.
-/// Takes the drop file in the master's private temporary folder; a link or other non-file is never read.
+/// Takes the drop file in the master's private temporary folder; a link or other non-file is never
+/// read, nor a file reached through a link the master put in place of that folder.
 /// Returns at most eight valid proposals in call order, none when there is no record.
 pub fn take(drop: &Path) -> Vec<Delegation> {
-    let opened = open_recorded(drop);
+    let opened = open_taken(drop);
     clear(drop);
     let Ok(file) = opened else {
         return Vec::new();
@@ -857,9 +1127,55 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
 }
 
 /// Removes a master's drop file so a new turn starts with no recorded proposal.
-/// Takes the drop file path; a link there is removed, never followed.
+/// Takes the drop file path; a link there is removed, never followed, and nothing is removed
+/// through a link the master put in place of its private temporary folder.
 /// Returns nothing; a missing file is already clear.
 pub fn clear(drop: &Path) {
+    remove_drop(drop);
+}
+
+/// Opens the master's private temporary folder that holds its drop file, for the engine,
+/// refusing a link at that folder or at the agent folder above it, which the master can
+/// replace. Takes the drop file path. Returns the folder handle and the file's name.
+#[cfg(unix)]
+fn drop_folder(drop: &Path) -> std::io::Result<(Mailbox, &str)> {
+    let refused = || std::io::Error::other("the drop file is not inside a folder");
+    let name = drop
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(refused)?;
+    let folder = drop.parent().ok_or_else(refused)?;
+    Ok((Mailbox::open_for_engine(folder)?, name))
+}
+
+/// Opens the drop file for the engine through its folder's handle, without following a link
+/// or blocking on a FIFO. Takes its path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    let (folder, name) = drop_folder(drop)?;
+    folder.read(name)
+}
+
+/// Opens the drop file for the engine as the reparse point itself, never a link's target.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    open_recorded(drop)
+}
+
+/// Removes the drop file through its folder's handle; a link there is removed, never
+/// followed, and a folder of that name stays. Takes its path.
+#[cfg(unix)]
+fn remove_drop(drop: &Path) {
+    if let Ok((folder, name)) = drop_folder(drop) {
+        let _ = folder.remove(name);
+    }
+}
+
+/// Removes the drop file by its path unless a folder is there; a link is removed, never
+/// followed. Takes its path.
+#[cfg(windows)]
+fn remove_drop(drop: &Path) {
     if std::fs::symlink_metadata(drop).is_ok_and(|metadata| !metadata.is_dir()) {
         let _ = std::fs::remove_file(drop);
     }

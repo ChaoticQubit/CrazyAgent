@@ -500,6 +500,14 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 .join("nested")
                 .join(".git"),
         ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
     ] {
         write_refused(&sandbox, &profile, &script, &target);
     }
@@ -554,6 +562,26 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 wt = quoted(&worktree)
             ),
             worktree.join("filed").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!(
+                "mkdir -p {a}/evil/.git",
+                a = quoted(&case.project.join(".git").join("worktrees").join("one"))
+            ),
+            case.project
+                .join(".git")
+                .join("worktrees")
+                .join("one")
+                .join("evil")
+                .join(".git"),
         ),
     ] {
         write_refused(&confined, &profile, &script, &target);
@@ -617,6 +645,192 @@ fn network_is_open_only_when_tools_are_on() {
     );
     assert!(connect(&model, "model-a.sb", allowed_port));
     assert!(!connect(&model, "model-b.sb", other_port));
+}
+
+/// Starts `nc -l` on one address and port inside the sandbox, sends it a line from inside
+/// the sandbox when `connect` is set, and stops it. Returns what the listener received and
+/// what it reported.
+fn listen(
+    sandbox: &ProjectSandbox,
+    case: &Case,
+    name: &str,
+    host: &str,
+    port: u16,
+    connect: bool,
+) -> (String, String) {
+    let got = case.tmp.join(format!("{name}.got"));
+    let said = case.tmp.join(format!("{name}.err"));
+    let client = if connect {
+        format!("printf hello | /usr/bin/nc -w 2 {host} {port}; ")
+    } else {
+        String::new()
+    };
+    let script = format!(
+        "/usr/bin/nc -l {host} {port} > {} 2> {} & pid=$!; /bin/sleep 1; {client}/bin/sleep 0.3; kill $pid 2>/dev/null; wait $pid; exit 0",
+        quoted(&got),
+        quoted(&said)
+    );
+    let output = run(sandbox, &case.profiles.join(name), &script);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        fs::read_to_string(&got).unwrap_or_default(),
+        fs::read_to_string(&said).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    assert_eq!(
+        listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
+        ("hello".to_owned(), String::new()),
+        "an agent's dev server on loopback takes connections"
+    );
+    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
+    for port in crazyagent::sandbox::OWNER_PORTS {
+        for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
+            let (got, said) = listen(&open, &case, &name, host, port, false);
+            assert_eq!(got, "", "{host} {port}");
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from the owner's tool: {said}"
+            );
+        }
+    }
+}
+
+/// One owner model connection in settings, at `url`. Input: its id and URL. Output: the
+/// connection as the settings file writes it.
+fn connection(id: &str, url: &str) -> String {
+    format!(
+        r#"{{ id = "{id}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "{url}" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}"#
+    )
+}
+
+/// Writes owner settings whose one local model connection listens on `port`, as the owner
+/// configures LM Studio or vLLM, and reads them back through the engine's settings
+/// resolution. Input: the case and the port. Output: the model access settings.
+fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess {
+    use std::os::unix::fs::PermissionsExt;
+    let global = case.root.join("global.toml");
+    fs::write(
+        &global,
+        format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{}]\npools = [{{ id = \"local-pool\", members = [\"local-connection\"], projects = [], roles = [], fallback_allowed = false }}]\n",
+            connection("local-connection", &format!("http://127.0.0.1:{port}/v1"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
+    crazyagent::config::resolve_config(&global, &case.root.join("project.toml"))
+        .unwrap()
+        .settings
+        .model_access
+        .unwrap()
+}
+
+#[test]
+fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
+    let case = case();
+    let server = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let ports = crazyagent::sandbox::owner_ports(&local_model_access(&case, port));
+    assert_eq!(ports, [port]);
+    let open = sandbox(&case, SandboxNetwork::Open)
+        .keep_ports(&ports)
+        .unwrap();
+    assert!(
+        open.profile().contains(&format!(
+            "(deny network-bind (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"))"
+        )),
+        "{}",
+        open.profile()
+    );
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp_std(&server).unwrap();
+        let mut got = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut got).unwrap();
+        got
+    });
+    let sent = run(
+        &open,
+        &case.profiles.join("reach-model.sb"),
+        &format!("printf hello | /usr/bin/nc -w 2 127.0.0.1 {port}"),
+    );
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert_eq!(
+        served.join().unwrap(),
+        "hello",
+        "a tools-on agent still reaches the owner's model server on a kept port"
+    );
+    for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+        let name = format!("kept-{port}-{}.sb", host.replace([':', '.'], "-"));
+        let (got, said) = listen(&open, &case, &name, host, port, false);
+        assert_eq!(got, "", "{host} {port}");
+        assert!(
+            said.contains("Operation not permitted"),
+            "an agent cannot take {host}:{port} from the owner's model server: {said}"
+        );
+    }
+}
+
+#[test]
+fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
+    let access: crazyagent::config::ModelAccess = toml::from_str(&format!(
+        "accounts = [\"local-account\"]\nconnections = [{}]\n",
+        [
+            connection("a", "http://localhost:1234/v1"),
+            connection("b", "http://[::1]:8000/v1"),
+            connection("c", "https://LOCALHOST/v1"),
+            connection("d", "http://127.0.0.1:8080/v1"),
+            connection("e", "http://127.0.0.1:8080/v2"),
+            connection("f", "http://10.0.0.5:9000/v1"),
+            connection("g", "https://api.example.com/v1"),
+            connection("h", "not a url"),
+        ]
+        .join(", ")
+    ))
+    .unwrap();
+    assert_eq!(
+        crazyagent::sandbox::owner_ports(&access),
+        [443, 1234, 8000, 8080],
+        "loopback endpoints only, each port once, the scheme's port when none is named"
+    );
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    assert!(matches!(
+        open.clone().keep_ports(&[0]),
+        Err(SandboxError::Invalid(_))
+    ));
+    let many: Vec<u16> =
+        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+    assert!(matches!(
+        open.clone().keep_ports(&many),
+        Err(SandboxError::Invalid(_))
+    ));
+    let kept = open
+        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .unwrap()
+        .keep_ports(&[1455, 11434, 20_000])
+        .unwrap();
+    assert_eq!(
+        kept.profile().matches("(local ip \"*:20000\")").count(),
+        2,
+        "a kept port is denied once for bind and once for inbound"
+    );
 }
 
 #[test]
@@ -837,6 +1051,127 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
 }
 
 #[test]
+fn a_confined_agent_cannot_move_its_worktree_head_but_git_still_works_there() {
+    let (case, sandbox, profile, linked) = git_case();
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let worktree = worktrees.join("engine-one");
+    let placed = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "move",
+            linked.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert!(placed.status.success(), "{placed:?}");
+    let moved = owner_git(
+        &case.project,
+        &case.home,
+        &["commit", "-q", "--allow-empty", "-m", "second"],
+    );
+    assert!(moved.status.success(), "{moved:?}");
+    let second = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    let second = String::from_utf8(second.stdout).unwrap().trim().to_owned();
+    let admin = case
+        .project
+        .join(".git")
+        .join("worktrees")
+        .join("engine-one");
+    let head = admin.join("HEAD");
+    let before = fs::read_to_string(&head).unwrap();
+    assert_ne!(before.trim(), second);
+    let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+    let place = quoted(&worktree);
+    let quiet = run(
+        &confined,
+        &profile,
+        &format!("cd {place} && git status --short && git reset -q --hard HEAD && echo ok"),
+    );
+    assert!(
+        quiet.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout), "ok\n");
+    for script in [
+        format!("cd {place} && git update-ref --no-deref HEAD {second}"),
+        format!("cd {place} && git checkout -q --detach {second}"),
+        format!("printf 'ref: refs/heads/main\\n' > {}", quoted(&head)),
+        format!("mv {} {}", quoted(&head), quoted(&admin.join("HEAD.old"))),
+        format!("rm {}", quoted(&head)),
+    ] {
+        let output = run(&confined, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+        assert_eq!(fs::read_to_string(&head).unwrap(), before, "{script}");
+    }
+    assert!(!admin.join("HEAD.lock").exists());
+    assert!(!admin.join("HEAD.old").exists());
+}
+
+#[test]
+fn a_confined_sandbox_guards_a_real_admin_submodule_store_and_refuses_a_planted_one() {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let store = case.project.join(".git/worktrees/one/modules");
+    assert!(fs::symlink_metadata(&store).is_err());
+    let confine =
+        || sandbox(&case, SandboxNetwork::Only(Vec::new())).confine_to_worktree(&worktree);
+    let confined = confine().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(&store).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    assert!(confined.protected_paths().contains(&store));
+    assert!(
+        !sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .protected_paths()
+            .contains(&store)
+    );
+    assert!(confine().unwrap().protected_paths().contains(&store));
+    fs::remove_dir(&store).unwrap();
+    fs::write(&store, b"planted").unwrap();
+    let result = confine();
+    assert!(
+        matches!(result, Err(SandboxError::Invalid(_))),
+        "{:?}",
+        result.map(|sandbox| sandbox.profile())
+    );
+    assert_eq!(fs::read(&store).unwrap(), b"planted");
+    fs::remove_file(&store).unwrap();
+    std::os::unix::fs::symlink(&case.outside, &store).unwrap();
+    assert!(matches!(confine(), Err(SandboxError::Invalid(_))));
+    assert!(
+        fs::symlink_metadata(&store)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
 fn an_agent_cannot_plant_the_git_redirect_files_the_engine_rejects() {
     let plants: [(&str, &str, &str); 12] = [
         (
@@ -1035,4 +1370,731 @@ fn a_confined_agent_cannot_add_shadow_or_link_a_git_object_in_the_shared_store()
     );
     assert_eq!(String::from_utf8_lossy(&wrote.stdout), "wrote\n");
     assert_eq!(fs::read_to_string(one.join("mine.txt")).unwrap(), "mine");
+}
+
+const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// A project whose agent works in its own clone (DEC-102 Own branch): a committed
+/// repository with a real `.crazyagent` folder and `<project>/.crazyagent/worktrees/agent-1`
+/// cloned from it with `--shared`, so the clone borrows the project's objects, then readied
+/// as the engine readies a clone before each launch. Output: the case, the clone and the
+/// project's HEAD before the agent ran.
+fn clone_case() -> (Case, PathBuf, String) {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let clone = worktrees.join("agent-1");
+    let cloned = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "clone",
+            "-q",
+            "--shared",
+            case.project.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    assert!(cloned.status.success(), "{cloned:?}");
+    crazyagent::landing::ready_agent_clone(&clone).unwrap();
+    let head = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+    (case, clone.canonicalize().unwrap(), head)
+}
+
+#[test]
+fn an_own_branch_agent_commits_in_its_own_clone_but_never_writes_the_project_git() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {clone} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} checkout -q -b agent/agent-1 && {git} rev-parse HEAD",
+            clone = quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+    let agent_head = String::from_utf8(committed.stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_ne!(agent_head, head);
+    let project_git = case.project.join(".git");
+    for target in [
+        project_git.join("planted"),
+        project_git.join("objects").join("planted"),
+        project_git.join("refs").join("heads").join("planted"),
+        case.project.join("planted.txt"),
+    ] {
+        write_refused(
+            &confined,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let pushed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && {git} push -q origin HEAD:refs/heads/planted",
+            quoted(&clone)
+        ),
+    );
+    assert!(!pushed.status.success(), "{pushed:?}");
+    let after = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    assert_eq!(String::from_utf8(after.stdout).unwrap().trim(), head);
+    let planted = owner_git(
+        &case.project,
+        &case.home,
+        &["rev-parse", "--verify", "-q", "refs/heads/planted"],
+    );
+    assert!(!planted.status.success());
+}
+
+#[test]
+fn an_own_branch_agent_never_repoints_the_store_its_clone_borrows() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git_dir = clone.join(".git");
+    let objects = git_dir.join("objects");
+    let info = objects.join("info");
+    let alternates = info.join("alternates");
+    let line = fs::read(&alternates).unwrap();
+    assert_eq!(
+        line,
+        format!("{}\n", case.project.join(".git").join("objects").display()).into_bytes()
+    );
+    let elsewhere = case.home.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&info.join("http-alternates"))),
+            info.join("http-alternates"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&git_dir.join("OBJECTS").join("INFO").join("HTTP-ALTERNATES"))
+            ),
+            info.join("http-alternates"),
+        ),
+        (
+            format!("printf x > {}", quoted(&git_dir.join("commondir"))),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&clone.join(".GIT").join("COMMONDIR"))
+            ),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&git_dir.join("OBJECTS").join("cd"))
+            ),
+            objects.join("cd").join("elsewhere"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&objects.join("ab").join("0123"))
+            ),
+            objects.join("ab").join("0123"),
+        ),
+        (
+            format!(
+                "rmdir {ab} && ln -s {} {ab}",
+                quoted(&elsewhere),
+                ab = quoted(&objects.join("ab"))
+            ),
+            objects.join("ab").join("elsewhere"),
+        ),
+        (
+            format!("mv {} {}", quoted(&info), quoted(&objects.join("moved"))),
+            objects.join("moved"),
+        ),
+        (
+            format!("mv {} {}", quoted(&objects), quoted(&git_dir.join("moved"))),
+            git_dir.join("moved"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+    for fanout in ["ab", "cd"] {
+        assert!(fs::symlink_metadata(objects.join(fanout)).unwrap().is_dir());
+    }
+    for script in [
+        format!(
+            "printf '%s\\n' {} >> {}",
+            quoted(&elsewhere),
+            quoted(&alternates)
+        ),
+        format!("printf x > {}", quoted(&alternates)),
+        format!(
+            "printf x > {}",
+            quoted(&git_dir.join("OBJECTS").join("INFO").join("ALTERNATES"))
+        ),
+        format!("rm -f {}", quoted(&alternates)),
+        format!(
+            "printf x > {} && mv {} {}",
+            quoted(&case.tmp.join("swap")),
+            quoted(&case.tmp.join("swap")),
+            quoted(&alternates)
+        ),
+    ] {
+        let output = run(&confined, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+        assert_eq!(fs::read(&alternates).unwrap(), line, "{script}");
+    }
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} repack -q -a -d",
+            quoted(&clone),
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "the clone's own objects and packs stay writable: {committed:?}"
+    );
+    assert_eq!(fs::read(&alternates).unwrap(), line);
+}
+
+#[test]
+fn an_own_branch_agent_never_redirects_or_replaces_its_clones_git_folder() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git_dir = clone.join(".git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&git_dir.join("commondir"))),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!("printf 'gitdir: x\\n' > {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mkdir {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&git_dir.join(".git"))
+            ),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mv {} {}", quoted(&git_dir), quoted(&clone.join("moved"))),
+            clone.join("moved"),
+        ),
+        (
+            format!(
+                "mv {} {}",
+                quoted(&clone.join(".GIT")),
+                quoted(&clone.join("moved-upper"))
+            ),
+            clone.join("moved-upper"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+        assert!(
+            fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir()),
+            "{script}"
+        );
+    }
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+}
+
+#[test]
+fn an_own_branch_agent_never_plants_the_fallback_repository_upload_pack_tries() {
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let fallback = clone.join(".git.git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for script in [
+        format!("mkdir {}", quoted(&fallback)),
+        format!("mkdir {}", quoted(&clone.join(".GIT.GIT"))),
+        format!("printf 'gitdir: x\\n' > {}", quoted(&fallback)),
+        format!("ln -s {} {}", quoted(&elsewhere), quoted(&fallback)),
+        format!(
+            "mkdir {} && mv {} {}",
+            quoted(&elsewhere.join("repo")),
+            quoted(&elsewhere.join("repo")),
+            quoted(&fallback)
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &fallback);
+    }
+}
+
+#[test]
+fn an_own_branch_agent_never_writes_a_multi_pack_index_into_its_clone() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let pack = clone.join(".git").join("objects").join("pack");
+    fs::create_dir_all(&pack).unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} repack -q -a -d",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&pack.join("multi-pack-index"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&pack.join("multi-pack-index-0123.bitmap"))
+            ),
+            pack.join("multi-pack-index-0123.bitmap"),
+        ),
+        (
+            format!("mkdir {}", quoted(&pack.join("multi-pack-index.d"))),
+            pack.join("multi-pack-index.d"),
+        ),
+        (
+            format!("cd {} && {git} multi-pack-index write", quoted(&clone)),
+            pack.join("multi-pack-index"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+}
+
+/// An Own branch agent's clone the engine made and checked once (DEC-102), for the tests
+/// of what an agent plants after that check: a committed project, `add_agent_clone`,
+/// `record_worktree_start`, the agent's sandbox, its first commit and the turn end where
+/// the engine checks the clone's store and fetches it.
+struct CheckedClone {
+    case: Case,
+    clone: PathBuf,
+    git_dir: PathBuf,
+    db: rusqlite::Connection,
+    workspace: crazyagent::landing::Workspace,
+    confined: ProjectSandbox,
+    profile: PathBuf,
+    git: String,
+}
+
+impl CheckedClone {
+    /// Makes and checks the clone. Output: the clone and the change set its first turn
+    /// end made.
+    fn new() -> (Self, crazyagent::landing::ChangeSetId) {
+        use crazyagent::landing::{AgentKind, ChangeAgent, Workspace};
+        assert!(Path::new(AGENT_GIT).is_file());
+        let case = case();
+        for arguments in [
+            &["init", "-q"][..],
+            &["config", "user.email", "owner@local"],
+            &["config", "user.name", "owner"],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            let made = owner_git(&case.project, &case.home, arguments);
+            assert!(made.status.success(), "{made:?}");
+        }
+        let worktrees = case.project.join(".crazyagent").join("worktrees");
+        fs::create_dir_all(&worktrees).unwrap();
+        let clone = worktrees.join("agent-1");
+        crazyagent::landing::add_agent_clone(&case.project, &clone).unwrap();
+        let clone = clone.canonicalize().unwrap();
+        let git_dir = crazyagent::agent_git::git_dir(&clone);
+        let engine = case.root.join("engine");
+        fs::create_dir(&engine).unwrap();
+        let db = crazyagent::landing::open(&engine).unwrap();
+        crazyagent::landing::record_worktree_start(&db, &case.project, &clone, &git_dir).unwrap();
+        let workspace = Workspace {
+            project: crazyagent::protocol::ProjectId::new("project-1").unwrap(),
+            agent: ChangeAgent {
+                kind: AgentKind::Sub,
+                id: "1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: case.project.clone(),
+            worktree: clone.clone(),
+            git_dir: git_dir.clone(),
+        };
+        let profile = case.profiles.join("agent.sb");
+        let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .confine_to_clone(&clone)
+            .unwrap();
+        let checked = Self {
+            case,
+            clone,
+            git_dir,
+            db,
+            workspace,
+            confined,
+            profile,
+            git: format!(
+                "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+            ),
+        };
+        checked.commit("one.txt");
+        let set = checked
+            .turn_end("turn-1")
+            .expect("the engine checked and fetched the clone");
+        (checked, set)
+    }
+
+    /// Runs a script as the agent, under its profile. Input: the script. Output: its result.
+    fn agent(&self, script: &str) -> Output {
+        run(&self.confined, &self.profile, script)
+    }
+
+    /// Commits one new file as the agent. Input: the file name.
+    fn commit(&self, file: &str) {
+        let committed = self.agent(&format!(
+            "cd {} && printf 'agent work\\n' > {file} && {git} add {file} && {git} commit -q -m {file}",
+            quoted(&self.clone),
+            git = self.git,
+        ));
+        assert!(committed.status.success(), "{committed:?}");
+    }
+
+    /// Ends one successful turn, where the engine checks the clone's store and fetches its
+    /// commits. Input: the turn name. Output: the change set the work belongs to.
+    fn turn_end(&self, name: &str) -> Option<crazyagent::landing::ChangeSetId> {
+        use crazyagent::landing::{TurnEnd, TurnOutcome};
+        crazyagent::landing::record_turn_end(
+            &self.db,
+            &self.workspace,
+            &TurnEnd {
+                outcome: TurnOutcome::Succeeded,
+                turn: name.into(),
+                prompt_line: "Write work".into(),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Makes a second commit and turn end, then checks that the engine's check passed and
+    /// the project's one change set ends at the clone's HEAD, so only the agent's own
+    /// commits landed. Input: the set the first turn end made.
+    fn lands_only_its_own_commits(&self, set: &crazyagent::landing::ChangeSetId) {
+        self.commit("two.txt");
+        let again = self
+            .turn_end("turn-2")
+            .expect("the next check passes: nothing foreign was planted");
+        assert_eq!(&again, set);
+        let head = self.agent(&format!(
+            "cd {} && {} rev-parse HEAD",
+            quoted(&self.clone),
+            self.git
+        ));
+        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        let sets = crazyagent::landing::list(&self.db, &self.workspace.project).unwrap();
+        assert_eq!(sets.len(), 1, "{sets:#?}");
+        assert_eq!(
+            sets[0].head, head,
+            "the set holds only the agent's own commits"
+        );
+    }
+}
+
+#[test]
+fn a_multi_pack_index_an_agent_plants_after_the_engine_checked_its_clone_never_lands() {
+    let (checked, set) = CheckedClone::new();
+    let git = &checked.git;
+    let pack = checked.git_dir.join("objects").join("pack");
+    let index = pack.join("multi-pack-index");
+    for script in [
+        format!("printf x > {}", quoted(&index)),
+        format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+        format!(
+            "cd {} && {git} repack -q -a -d && {git} multi-pack-index write",
+            quoted(&checked.clone)
+        ),
+    ] {
+        write_refused(&checked.confined, &checked.profile, &script, &index);
+    }
+    checked.lands_only_its_own_commits(&set);
+    assert!(!index.exists());
+}
+
+/// A pack and a loose object in a repository outside the project, the objects an agent
+/// would slip into its clone's store. Input: the case. Output: the pack file, its index,
+/// the loose object's file and its id, and the id of a commit only the pack holds.
+fn foreign_objects(case: &Case) -> (PathBuf, PathBuf, PathBuf, String, String) {
+    let foreign = case.outside.join("foreign");
+    fs::create_dir(&foreign).unwrap();
+    let git = |arguments: &[&str]| {
+        let done = owner_git(&foreign, &case.home, arguments);
+        assert!(done.status.success(), "{done:?}");
+        String::from_utf8(done.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q"]);
+    fs::write(foreign.join("foreign.txt"), "foreign work\n").unwrap();
+    git(&["add", "foreign.txt"]);
+    git(&["commit", "-q", "-m", "foreign"]);
+    let commit = git(&["rev-parse", "HEAD"]);
+    git(&["repack", "-q", "-a", "-d"]);
+    fs::write(foreign.join("loose.txt"), "foreign loose\n").unwrap();
+    let loose = git(&["hash-object", "-w", "loose.txt"]);
+    let objects = foreign.join(".git").join("objects");
+    let named = |suffix: &str| {
+        fs::read_dir(objects.join("pack"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.to_str().unwrap().ends_with(suffix))
+            .unwrap()
+    };
+    let file = objects.join(&loose[..2]).join(&loose[2..]);
+    assert!(file.is_file());
+    (named(".pack"), named(".idx"), file, loose, commit)
+}
+
+#[test]
+fn a_folder_an_agent_moves_into_its_clones_store_after_the_engine_checked_it_never_lands() {
+    let (checked, set) = CheckedClone::new();
+    let (pack_file, index_file, loose_file, loose, commit) = foreign_objects(&checked.case);
+    let objects = checked.git_dir.join("objects");
+    let fanout = objects.join(&loose[..2]);
+    assert!(objects.join("pack").is_dir() && fanout.is_dir());
+    let stage = checked.clone.join("stage");
+    let staged_pack = stage.join("pack");
+    let staged_fanout = stage.join(&loose[..2]);
+    let pack_name = pack_file.file_name().unwrap().to_str().unwrap();
+    let index_name = index_file.file_name().unwrap().to_str().unwrap();
+    let staged = checked.agent(&format!(
+        "mkdir -p {sp} {sf} && ln -s {pf} {sp}/{pack_name} && ln -s {xf} {sp}/{index_name} && printf x > {sp}/multi-pack-index && ln -s {lf} {sf}/{rest} && mkdir {stage}/control && /usr/bin/perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' {stage}/control {stage}/renamed",
+        sp = quoted(&staged_pack),
+        sf = quoted(&staged_fanout),
+        pf = quoted(&pack_file),
+        xf = quoted(&index_file),
+        lf = quoted(&loose_file),
+        rest = &loose[2..],
+        stage = quoted(&stage),
+    ));
+    assert!(staged.status.success(), "{staged:?}");
+    assert!(
+        stage.join("renamed").is_dir(),
+        "perl renames a folder in the sandbox"
+    );
+    let rename = |from: &Path, to: &Path| {
+        format!(
+            "/usr/bin/perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' {} {}",
+            quoted(from),
+            quoted(to)
+        )
+    };
+    let pack = objects.join("pack");
+    let planted_pack = pack.join(pack_name);
+    let planted_loose = fanout.join(&loose[2..]);
+    let upper = objects.join(loose[..2].to_uppercase());
+    for (script, target) in [
+        (
+            format!(
+                "mv {} {}",
+                quoted(&pack),
+                quoted(&objects.join("pack-away"))
+            ),
+            objects.join("pack-away"),
+        ),
+        (
+            format!(
+                "mv {} {} && mv {} {}",
+                quoted(&pack),
+                quoted(&objects.join("pack-away")),
+                quoted(&staged_pack),
+                quoted(&pack)
+            ),
+            planted_pack.clone(),
+        ),
+        (rename(&staged_pack, &pack), planted_pack.clone()),
+        (format!("rmdir {}", quoted(&fanout)), stage.join("never")),
+        (rename(&staged_fanout, &fanout), planted_loose.clone()),
+        (
+            format!("mv {} {}", quoted(&upper), quoted(&stage.join("moved"))),
+            stage.join("moved"),
+        ),
+        (
+            format!(
+                "rmdir {} && mv {} {}",
+                quoted(&fanout),
+                quoted(&staged_fanout),
+                quoted(&fanout)
+            ),
+            planted_loose.clone(),
+        ),
+    ] {
+        write_refused(&checked.confined, &checked.profile, &script, &target);
+    }
+    assert!(pack.is_dir() && fanout.is_dir());
+    assert!(!pack.join("multi-pack-index").exists());
+    fs::remove_dir_all(&stage).unwrap();
+    checked.lands_only_its_own_commits(&set);
+    for id in [loose.as_str(), commit.as_str()] {
+        let found = owner_git(
+            &checked.case.project,
+            &checked.case.home,
+            &["cat-file", "-e", id],
+        );
+        assert!(
+            !found.status.success(),
+            "the project store never holds {id}"
+        );
+    }
+}
+
+#[test]
+fn an_own_branch_agent_keeps_commit_repack_gc_prune_and_fsck_in_its_clone() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let objects = clone.join(".git").join("objects");
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let made = fs::read_dir(&objects)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit()))
+        .count();
+    assert_eq!(made, 256, "the engine made every fan-out folder");
+    assert!(objects.join("pack").is_dir());
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let kept = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'w\\n' > w && {git} add w && {git} commit -q -m w && printf 'v\\n' > v && {git} add v && {git} commit -q -m v && {git} repack -q -a -d && {git} gc -q && {git} prune --expire=now && {git} fsck --no-progress && printf 'z\\n' > z && {git} add z && {git} commit -q -m z && {git} cat-file -e HEAD",
+            quoted(&clone),
+        ),
+    );
+    assert!(kept.status.success(), "{kept:?}");
+    assert!(objects.join("pack").is_dir());
+}
+
+#[test]
+fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let worktree = worktrees.join("agent-1");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let worktree = worktree.canonicalize().unwrap();
+    let head = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_worktree(&worktree)
+        .unwrap();
+    assert!(matches!(
+        sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .confine_to_worktree(&worktree)
+            .unwrap()
+            .confine_to_clone(&worktree),
+        Err(SandboxError::Invalid(_))
+    ));
+    let git = format!("{AGENT_GIT} -c user.email=agent@local -c user.name=agent");
+    let edited = run(
+        &confined,
+        &profile,
+        &format!(
+            "printf 'agent work\\n' > {}",
+            quoted(&worktree.join("work.txt"))
+        ),
+    );
+    assert!(edited.status.success(), "{edited:?}");
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && {git} add work.txt && {git} commit -q -m work",
+            quoted(&worktree)
+        ),
+    );
+    assert!(!committed.status.success(), "{committed:?}");
+    let after = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    assert_eq!(after.stdout, head.stdout);
 }

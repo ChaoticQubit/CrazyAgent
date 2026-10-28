@@ -16,6 +16,7 @@ use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
@@ -180,6 +181,7 @@ pub(in crate::tui) struct ProjectPage {
     sent: Vec<SetupQuery>,
     assigning: Option<(Option<CredentialRef>, Option<String>)>,
     recording: Option<u64>,
+    created_access: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
@@ -189,6 +191,8 @@ pub(in crate::tui) struct ProjectPage {
     team_asked: Option<(i64, bool)>,
     files_asked: Option<String>,
     covered: bool,
+    from_master: bool,
+    reopen_master: bool,
 }
 
 impl ProjectPage {
@@ -207,6 +211,7 @@ impl ProjectPage {
             sent: Vec::new(),
             assigning: None,
             recording: None,
+            created_access: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
@@ -216,12 +221,36 @@ impl ProjectPage {
             team_asked: None,
             files_asked: None,
             covered: false,
+            from_master: false,
+            reopen_master: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
         page.screen.transcript = page.transcript();
         page.redraw(ctx);
         page
+    }
+
+    /// Saves the agent access level the owner picked in New project, right after the project
+    /// was made; until it lands the project stays Sandboxed, and a refusal says so.
+    /// Takes the picked level and the context. Returns nothing; the reply arrives later.
+    pub(in crate::tui) fn save_created_access(&mut self, access: AgentAccess, ctx: &mut Ctx) {
+        assert_ne!(access, AgentAccess::Sandboxed);
+        let generation = ctx.next_generation();
+        self.created_access = Some(generation);
+        self.send(
+            SetupQuery::Change {
+                action: SetupAction::SetAgentPolicy {
+                    project_id: self.screen.project.clone(),
+                    policy: AgentPolicy {
+                        access,
+                        toolchains: Vec::new(),
+                    },
+                },
+                generation,
+            },
+            ctx,
+        );
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
@@ -462,6 +491,13 @@ impl ProjectPage {
         {
             return;
         }
+        if code == "master_session_unused" {
+            ctx.say(Message::warning(
+                "This session has no messages yet, so it already is a new session.",
+                "",
+            ));
+            return;
+        }
         let lead = match &submission.action {
             MasterOwnerAction::Submit { text, .. } => {
                 if self.screen.input.value().is_empty() {
@@ -476,6 +512,7 @@ impl ProjectPage {
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
             MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
+            MasterOwnerAction::DeleteSession { .. } => "The session was not deleted.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {
@@ -486,10 +523,17 @@ impl ProjectPage {
     }
 
     /// Carries on after the engine confirmed a master request: an opened master takes the
-    /// waiting message, and a conversation ended for a renewal opens a new one.
+    /// waiting message, a conversation ended for a renewal opens a new one, and a session
+    /// switch the owner started from the live master view opens that view again.
     /// Takes the confirmed action.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
+            MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. }
+                if self.from_master =>
+            {
+                self.from_master = false;
+                self.reopen_master = true;
+            }
             MasterOwnerAction::Open { .. } => {
                 let Some(waiting) = self.waiting.take() else {
                     return;
@@ -552,6 +596,21 @@ impl ProjectPage {
                 ctx.say(Message::warning(
                     "The pool is changed, but the project details still name the old one.",
                     "Pick the pool again to save it.",
+                ));
+            }
+            return;
+        }
+        if self.created_access == Some(*generation) {
+            self.created_access = None;
+            if !applied {
+                let why = match &event.result {
+                    Err(code) => plain_problem(code),
+                    Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
+                    Ok(_) => plain_problem("change_outcome_unknown"),
+                };
+                ctx.say(Message::warning(
+                    "The project is made, but its agents stay Sandboxed.",
+                    &format!("{why} Choose Agent access again on the Settings tab with c."),
                 ));
             }
             return;
@@ -845,6 +904,17 @@ impl ProjectPage {
             ProjectReply::Session(action) => {
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
+                } else if matches!(action, super::sessions::SessionsAction::New { .. })
+                    && self.screen.live_master()
+                {
+                    let generation = ctx.next_generation();
+                    ctx.request(Request::Setup(SetupQuery::TeamChange {
+                        action: crate::team::TeamAction::LiveMaster {
+                            project_id: self.screen.project.clone(),
+                            on: true,
+                        },
+                        generation,
+                    }));
                 }
                 Flow::Handled
             }
@@ -903,7 +973,7 @@ impl ProjectPage {
             SettingsEvent::Schedule(Err(code)) => {
                 self.screen.problem = Some(failed(code, "Could not read the account order."));
             }
-            SettingsEvent::ScheduleSet(result) => {
+            SettingsEvent::ScheduleSet(_, result) => {
                 if let Err(code) = result {
                     self.screen.problem = Some(failed(code, "Could not save the account order."));
                 }
@@ -936,6 +1006,9 @@ impl ProjectPage {
             }
             PluginsReply::AddServer => {
                 return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
+            }
+            PluginsReply::AddHooks => {
+                return Flow::Replace(Box::new(AddPlugin::hooks().for_project(project, name)));
             }
             PluginsReply::OpenSkill { id, name: skill } => {
                 return Flow::Replace(Box::new(
@@ -971,6 +1044,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
+            || self.screen.access.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
@@ -1083,6 +1157,12 @@ impl Screen for ProjectPage {
         self.say_problem(ctx);
         self.ask_team(ctx);
         self.redraw(ctx);
+        if std::mem::take(&mut self.reopen_master) && !self.covered && self.screen.live_master() {
+            return Flow::Open(Place::Master {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            });
+        }
         Flow::Handled
     }
 
@@ -1091,6 +1171,19 @@ impl Screen for ProjectPage {
         ctx.request(Request::PoolProjects);
         self.schedule_asked = false;
         self.covered = false;
+        if let Some((_, code)) = ctx
+            .sessions_key
+            .take_if(|(project, _)| *project == self.screen.project)
+        {
+            assert!(matches!(code, 'n' | 'l'));
+            self.from_master = true;
+            self.screen.open(Tab::Conversation);
+            self.screen.typing = false;
+            let reply = self
+                .screen
+                .key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE));
+            let _ = self.reply(reply, ctx);
+        }
         self.ask_team(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
@@ -1123,6 +1216,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
             || self.screen.folders.is_some()
+            || self.screen.access.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
 
@@ -1133,6 +1227,8 @@ impl Screen for ProjectPage {
             "Your project changes will be lost."
         } else if self.screen.folders.is_some() {
             "Your read-only folders will not be saved."
+        } else if self.screen.access.is_some() {
+            "Your agent access changes will not be saved."
         } else {
             "Your unsent message will be lost."
         }

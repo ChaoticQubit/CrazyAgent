@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
+mod clone;
+#[cfg(unix)]
 mod diff;
 #[cfg(unix)]
 mod flow;
@@ -109,7 +111,8 @@ impl From<ChangeSetId> for String {
 
 /// The agent worktree a turn or task ended in, as the engine computed it. Fields: the
 /// project, the agent, the owner's checkout root the worktree was added from, the
-/// worktree folder and its git metadata folder under the checkout's `.git/worktrees`.
+/// worktree folder and its git metadata folder: under the checkout's `.git/worktrees`
+/// for a linked worktree, `agent_git::git_dir` of the worktree for an agent's own clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub project: ProjectId,
@@ -132,7 +135,10 @@ pub struct TurnEnd {
 /// CrazyAgent check ran. `conflicts` names the files the last Accept conflicted on.
 /// `message` is the commit message an Accept proposes for the owner to edit. `waiting` is
 /// true while an updating change set is merged but its agent was not yet handed the work
-/// that resolves it.
+/// that resolves it. `outside` is true when the engine closed it because its work was
+/// landed outside the app (Accepted) or removed outside the app (Discarded, never
+/// restorable). While open, `files`, `added` and `removed` count only what is not yet on
+/// the owner's branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -154,6 +160,8 @@ pub struct ChangeSetView {
     pub message: String,
     #[serde(default)]
     pub waiting: bool,
+    #[serde(default)]
+    pub outside: bool,
 }
 
 /// How a file changed between a change set's base and head.
@@ -221,6 +229,22 @@ pub enum AcceptOutcome {
     Conflict { files: Vec<String> },
 }
 
+/// The local branches of a change set's repository that an Accept can land on, at most
+/// `BRANCHES_MAX`, and the checked-out one, the default target; None when the owner's
+/// checkout is on a detached HEAD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetBranches {
+    pub branches: Vec<String>,
+    pub current: Option<String>,
+}
+
+/// The most local branches a target listing carries.
+pub const BRANCHES_MAX: usize = 256;
+
+/// The longest branch name an Accept target may have, in bytes.
+pub const BRANCH_BYTES_MAX: usize = 255;
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -237,6 +261,87 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     #[cfg(unix)]
     store::initialize(&db)?;
     Ok(db)
+}
+
+/// Makes an agent's own clone of the owner repository in a new worktree folder for the
+/// Own branch and Full access levels (DEC-102): its own git folder at
+/// `agent_git::git_dir`, the project's objects borrowed read-only, its branch
+/// `agent_git::branch` checked out at the owner's HEAD commit. The engine runs no git in
+/// the clone after this but the fetch that reads its branch. Inputs: the owner's
+/// checkout root and the new worktree folder. Output: Ok once checked out, else a plain
+/// `changes_*` code.
+pub fn add_agent_clone(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+    add_agent_clone_at(repository, worktree, None)
+}
+
+/// Makes an agent's own clone as `add_agent_clone` does, at a lead's commit for a worker
+/// cut from its lead (N1). Inputs: the owner checkout root, the new worktree and the
+/// commit, None for the owner's HEAD. Output: Ok, else as `add_agent_clone`.
+pub fn add_agent_clone_at(
+    repository: &Path,
+    worktree: &Path,
+    base: Option<&str>,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::add(repository, worktree, base);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, worktree, base);
+        Err(unavailable())
+    }
+}
+
+/// The commit a lead's worktree holds now, which its new worker's worktree is cut from
+/// (N1). Inputs: the store, the owner's checkout root, the lead's worktree and its git
+/// metadata folder. Output: the commit id.
+pub fn agent_tip(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::tip(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
+/// Readies an agent's own clone for another launch: makes any of its pack and
+/// loose-object folders that are missing, as `add_agent_clone` does for a new one, since
+/// the Own branch sandbox keeps the agent from making them itself (RL-3). Input: the
+/// clone's worktree. Output: Ok, else `changes_workspace_invalid`.
+pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::store_folders(worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = worktree;
+        Err(unavailable())
+    }
+}
+
+/// Puts a newly added linked agent worktree on its own branch `crazyagent/agent-<id>`,
+/// created at the worktree's HEAD and checked out there, so the agent's turns commit on
+/// it. Call it once, right after the worktree is added and before any agent runs in it.
+/// Inputs: the store, the owner's checkout root, the worktree and its git metadata
+/// folder. Output: the branch, or `changes_agent_branch_exists` when a branch of that
+/// name is already there.
+pub fn name_agent_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::name_branch(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
 }
 
 /// Records the commit a newly added agent worktree starts from, so the change sets it
@@ -256,6 +361,110 @@ pub fn record_worktree_start(
         let _ = (db, repository, worktree, git_dir);
         Err(unavailable())
     }
+}
+
+/// One file as committed in the owner's checkout: its bytes up to the reader's bound, its
+/// size and whether the bound cut it.
+#[derive(Debug)]
+pub struct HeadBlob {
+    pub bytes: Vec<u8>,
+    pub size: u64,
+    pub cut: bool,
+}
+
+/// What reading one committed file found: its blob, none when nothing is at the path, or
+/// `instruction_file_unsafe` for a link, folder or submodule there.
+pub type HeadEntry = Result<Option<HeadBlob>, EngineError>;
+
+const HEAD_ENTRY_BYTES_MAX: usize = 4096;
+
+/// Reads regular files as committed at the commit the owner's checkout's HEAD names, with
+/// one engine git repository that runs nothing the repository configures, never from a
+/// work tree. Inputs: the checkout root, the distinct paths inside the repository, each
+/// without pathspec magic, and the most bytes to keep of each. Output: one entry per path
+/// in order, every one none when HEAD names no commit, or a plain git code for the
+/// repository.
+pub fn head_files(
+    checkout: &Path,
+    paths: &[&str],
+    limit: usize,
+) -> Result<Vec<HeadEntry>, EngineError> {
+    #[cfg(unix)]
+    return committed_files(checkout, paths, limit);
+    #[cfg(not(unix))]
+    {
+        let _ = (checkout, paths, limit);
+        Err(unavailable())
+    }
+}
+
+#[cfg(unix)]
+fn committed_files(
+    checkout: &Path,
+    paths: &[&str],
+    limit: usize,
+) -> Result<Vec<HeadEntry>, EngineError> {
+    assert!(paths.iter().enumerate().all(|(at, path)| {
+        !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
+    }));
+    let git_failed = || git::failure("changes_git_failed");
+    let owner = git::Repo::open(checkout, &checkout.join(".git"), None)?;
+    let Some(head) = owner.commit_of("HEAD")? else {
+        return Ok(paths.iter().map(|_| Ok(None)).collect());
+    };
+    let mut arguments = vec![
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)%x09%(path)",
+        head.as_str(),
+        "--",
+    ];
+    arguments.extend_from_slice(paths);
+    let listing = owner.capture(&arguments, HEAD_ENTRY_BYTES_MAX * paths.len())?;
+    let mut entries: Vec<(&str, &str, &str, &str, &str)> = Vec::new();
+    for entry in listing.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let entry = std::str::from_utf8(entry).map_err(|_| git_failed())?;
+        let (fields, named) = entry.split_once('\t').ok_or_else(git_failed)?;
+        let fields: Vec<&str> = fields.split(' ').collect();
+        let [mode, kind, object, size] = fields.as_slice() else {
+            return Err(git_failed());
+        };
+        entries.push((named, mode, kind, object, size));
+    }
+    if !listing.is_empty() && !listing.ends_with(b"\0") {
+        return Err(git_failed());
+    }
+    let read = |path: &str| -> HeadEntry {
+        let Some(&(_, mode, kind, object, size)) =
+            entries.iter().find(|(named, ..)| *named == path)
+        else {
+            return Ok(None);
+        };
+        if kind != "blob" || !matches!(mode, "100644" | "100755") {
+            return Err(EngineError("instruction_file_unsafe".into()));
+        }
+        if !git::is_object_id(object) {
+            return Err(git_failed());
+        }
+        let size: u64 = size.parse().map_err(|_| git_failed())?;
+        let output = owner.exec(&["cat-file", "blob", object], None, &[], limit)?;
+        if output.code != 0 {
+            return Err(git_failed());
+        }
+        assert!(output.stdout.len() <= limit);
+        Ok(Some(HeadBlob {
+            bytes: output.stdout,
+            size,
+            cut: output.overflow,
+        }))
+    };
+    let found: Vec<HeadEntry> = paths.iter().map(|path| read(path)).collect();
+    assert_eq!(found.len(), paths.len());
+    Ok(found)
 }
 
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
@@ -312,15 +521,66 @@ pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, 
     }
 }
 
-/// Reads one page of a change set's diff between its base and head, produced by the
-/// engine with no external diff or text conversion. Inputs: the store, the change set
-/// and the page. Output: the page.
+/// Reads one change set by its id, however many change sets its project holds.
+/// Inputs: the store and the id. Output: its project and view, or None when no change
+/// set has that id.
+pub fn change_set(
+    db: &Connection,
+    id: &ChangeSetId,
+) -> Result<Option<(ProjectId, ChangeSetView)>, EngineError> {
+    #[cfg(unix)]
+    return Ok(store::find(db, id)?.map(|record| (record.project.clone(), record.view())));
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
+        Err(unavailable())
+    }
+}
+
+/// Reads the change set open in one agent worktree, the one its next turn end adds to,
+/// however many change sets its project holds. Inputs: the store and the worktree.
+/// Output: the view, or None when nothing is open there.
+pub fn open_change_set(
+    db: &Connection,
+    worktree: &Path,
+) -> Result<Option<ChangeSetView>, EngineError> {
+    #[cfg(unix)]
+    {
+        let Some(worktree) = worktree.to_str() else {
+            return Ok(None);
+        };
+        Ok(store::open_for(db, worktree)?
+            .as_ref()
+            .map(store::Record::view))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree);
+        Err(unavailable())
+    }
+}
+
+/// Reads one page of a change set's diff, produced by the engine with no external diff or
+/// text conversion: for an open set, first noticed against the owner's branch, only what
+/// is not yet on that branch when the owner landed part of it outside the app, else the
+/// whole change between its base and head. Inputs: the store, the change set and the page.
+/// Output: the page.
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
-        diff::page(&record.repository, &record.base, &record.head, page)
+        let remainder = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
+            eprintln!(
+                "landing_observe_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        });
+        match remainder {
+            Some((tip, tree)) => diff::page(&record.repository, &tip, &tree, page),
+            None => diff::page(&record.repository, &record.base, &record.head, page),
+        }
     }
     #[cfg(not(unix))]
     {
@@ -346,6 +606,50 @@ pub fn accept(
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message);
+        Err(unavailable())
+    }
+}
+
+/// Lands a change set as one squash commit on a chosen local branch: the owner's
+/// checked-out branch through the owner's checkout as [`accept`] does, a branch checked
+/// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
+/// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
+/// the store, the owner's home folder, the change set, the head the owner reviewed, the
+/// edited message, None for the proposed one, and the target branch. Output: the landed
+/// commit and branch, or the conflicting files.
+pub fn accept_into(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target_branch: &str,
+) -> Result<AcceptOutcome, EngineError> {
+    #[cfg(unix)]
+    return owner::accept_to(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        message,
+        Some(target_branch),
+        &|_| false,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id, expected_head, message, target_branch);
+        Err(unavailable())
+    }
+}
+
+/// Lists the local branches an Accept of a change set can land on and the owner's
+/// checked-out branch. Inputs: the store and the change set. Output: the branches.
+pub fn target_branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
+    #[cfg(unix)]
+    return owner::branches(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
         Err(unavailable())
     }
 }
@@ -436,11 +740,30 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
     }
 }
 
+/// Notices what the owner did outside the app to each open change set, one project's or
+/// every project's: closes one whose work the owner's checked-out branch already holds as
+/// landed outside the app, closes one whose agent copy, branch or commit is gone as
+/// removed outside the app, and counts only what is not yet on the owner's branch for the
+/// rest. A change set that cannot be judged now is logged by its plain code and left as it
+/// was, so it never stops the others. Inputs: the store and the project, None for every
+/// project. Output: Ok once each open change set was judged or left.
+pub fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return owner::observe(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(unavailable())
+    }
+}
+
 /// Says why a finished agent's worktree cannot be removed now, as a plain code:
 /// `cleanup_changes_open`, `cleanup_changes_restorable`, `cleanup_worktree_invalid`,
-/// `cleanup_commits_unlanded` or `cleanup_worktree_dirty`. Inputs: the store, the owner's
-/// checkout root, the worktree, its git folder and the time now. Output: None when it can
-/// be removed.
+/// `cleanup_commits_unlanded`, `cleanup_refs_unlanded`, `cleanup_worktree_dirty` or
+/// `cleanup_worktree_unreadable` when git cannot read this one worktree. An agent's own
+/// clone is judged through the engine's fetch of its branch and its ref names read as
+/// data, with no git run in it. Inputs: the store, the owner's checkout root, the
+/// worktree, its git folder and the time now. Output: None when it can be removed.
 pub fn retire_blocker(
     db: &Connection,
     repository: &Path,
@@ -457,10 +780,12 @@ pub fn retire_blocker(
     }
 }
 
-/// Removes a finished agent's worktree with the host git, never forcing, after checking
-/// `retire_blocker` again while no landing step can run on its repository. Inputs: the
-/// store, the owner's checkout root, the worktree, its git folder and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// Removes a finished agent's worktree with the host git, never forcing, or an agent's
+/// own clone as a folder with no git, after checking `retire_blocker` again while no
+/// landing step can run on its repository. Inputs: the store, the owner's checkout root,
+/// the worktree, its git folder and the time now. Output: Ok once removed,
+/// `cleanup_worktree_leftover` when git deleted its record of the worktree, or a clone's
+/// folder was deleted, only part way, or the plain code that kept it.
 pub fn retire_worktree(
     db: &Connection,
     repository: &Path,

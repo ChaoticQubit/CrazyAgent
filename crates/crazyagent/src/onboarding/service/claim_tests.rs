@@ -123,3 +123,31 @@ fn run_names_differ_between_onboardings_of_one_project_id_and_stay_in_bound() {
         format!("onboard-m-{long}-1761500000000-1")
     );
 }
+
+#[test]
+fn an_unreadable_row_fails_plainly_instead_of_being_claimed_again_and_again() {
+    let database = database();
+    waiting_to_map(&database, "broken", 1);
+    waiting_to_map(&database, "shop", 2);
+    database
+        .execute(
+            "UPDATE onboarding SET drafted='{\"from\":\"another engine\"}' WHERE project='broken'",
+            [],
+        )
+        .unwrap();
+
+    assert_eq!(
+        claim(&database, "claim-test").unwrap().map(|c| c.project),
+        None
+    );
+    let row: (String, Option<String>, Option<String>, i64) = database
+        .query_row(
+            "SELECT mapping_state,mapping_reason,claimer,runs FROM onboarding WHERE project='broken'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(row, ("failed".into(), Some(ROW_UNREADABLE.into()), None, 0));
+    assert_eq!(claimed(&database).as_deref(), Some("shop"));
+    assert_eq!(recover_stale(&database).unwrap(), 0);
+}

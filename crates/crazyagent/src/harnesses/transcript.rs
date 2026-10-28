@@ -153,9 +153,10 @@ impl TranscriptReader {
         self.consumed
     }
 
-    /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes.
-    /// Output: the facts in order, none while the record does not exist yet, or a plain
-    /// code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
+    /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
+    /// walking its lines by offset and draining the used ones once, so many short lines cost
+    /// one pass. Output: the facts in order, none while the record does not exist yet, or a
+    /// plain code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -181,9 +182,11 @@ impl TranscriptReader {
             .map_err(|_| failure("launch_transcript_unavailable"))?;
         self.consumed += count as u64;
         let mut events = Vec::new();
-        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = self.pending.drain(..=end).collect();
-            let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+        let mut used = 0;
+        while let Some(length) = self.pending[used..].iter().position(|byte| *byte == b'\n') {
+            let line = &self.pending[used..=used + length];
+            used += length + 1;
+            let Ok(value) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
             let facts = match self.source {
@@ -200,6 +203,7 @@ impl TranscriptReader {
                 break;
             }
         }
+        self.pending.drain(..used);
         if self.pending.len() > LINE_BYTES_MAX {
             return Err(failure("launch_transcript_line_too_long"));
         }
@@ -227,7 +231,7 @@ impl TranscriptReader {
 /// the open takes the reparse point rather than following it. Takes the path.
 /// Returns the file, or none for a link, a directory or an open failure.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -238,7 +242,7 @@ fn open_plain(path: &Path) -> Option<File> {
 }
 
 #[cfg(unix)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY
@@ -348,7 +352,7 @@ fn newest(folder: &Path, keep: usize) -> Vec<PathBuf> {
 /// Tells whether a record lies inside a folder through plain folders only: no `..`, no
 /// link between the folder and the record. Takes the folder and the record. Returns true
 /// when every step is a plain name and every folder on the way is a real folder.
-fn plain_below(folder: &Path, record: &Path) -> bool {
+pub(crate) fn plain_below(folder: &Path, record: &Path) -> bool {
     let Ok(rest) = record.strip_prefix(folder) else {
         return false;
     };
@@ -584,6 +588,19 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     }
     assert!(messages.len() <= EXCERPT_MESSAGES_MAX);
     messages.into()
+}
+
+/// Reads one line of a harness conversation record as `conversation_messages` reads it:
+/// a Codex rollout `message` item or Claude Code `user` and `assistant` text. Takes the
+/// catalog harness id and the line. Returns the speaker and text, or none for any other
+/// line, a harness without a reader or a line that is not JSON.
+pub fn record_message(harness: &str, line: &[u8]) -> Option<(Speaker, String)> {
+    let value = serde_json::from_slice::<Value>(line).ok()?;
+    match harness {
+        "codex" => codex_message(&value),
+        "claude-code" => claude_message(&value),
+        _ => None,
+    }
 }
 
 fn codex_message(value: &Value) -> Option<(Speaker, String)> {

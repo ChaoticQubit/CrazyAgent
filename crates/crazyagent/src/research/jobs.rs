@@ -471,14 +471,19 @@ impl ResearchJobs {
     }
 
     /// Reads what every agent launched for `project` receives, its approved
-    /// skills, MCP servers, brief and memories, from the engine database this
+    /// skills, MCP servers, brief and memories with the landing rules of a
+    /// linked worktree, where research runs, from the engine database this
     /// queue lives in. Returns the context, or a plain launch code such as
     /// `plugin_project_unknown` for a project the engine does not know.
     pub fn project_context(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> Result<crate::launch_context::AgentContext, crate::harnesses::launch::LaunchError> {
-        crate::launch_context::for_project(&self.connection, project)
+        crate::launch_context::for_project(
+            &self.connection,
+            project,
+            crate::agent_git::Layout::Linked,
+        )
     }
 
     /// Reads the extra read-only folders the owner saved for a project's agents, see
@@ -488,6 +493,15 @@ impl ResearchJobs {
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
         crate::sandbox::extra_paths::load(&self.connection, project.as_str())
+    }
+
+    /// Reads the agent policy the owner saved for a project, see
+    /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
+    pub fn agent_policy(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<crate::sandbox::policy::AgentPolicy> {
+        crate::sandbox::policy::load(&self.connection, project.as_str())
     }
 
     /// Proves a managed connection is signed in for the running engine, with

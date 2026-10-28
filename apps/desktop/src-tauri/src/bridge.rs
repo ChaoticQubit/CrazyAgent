@@ -108,6 +108,7 @@ fn caused(code: &'static str, engine: &str) -> BridgeError {
 pub struct ConnectionStatus {
     pub connected: bool,
     pub pending: bool,
+    pub stuck_sign_in: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +388,9 @@ impl NativeBridge {
                     .controller
                     .as_ref()
                     .is_some_and(|c| c.pending().is_some()),
+            stuck_sign_in: self
+                .stuck_auth()
+                .map(|connection| connection.id.as_str().to_owned()),
         }
     }
 
@@ -521,7 +525,7 @@ impl NativeBridge {
     }
 
     fn prepare(&mut self, ticket: &str, revoke: bool) -> Result<(), BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -627,6 +631,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectAgentPolicy { project_id, .. } => (
+                "project_agent_policy",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::Team { action } => (
                 "team",
                 action.project().map(|project| project.as_str().to_owned()),
@@ -686,6 +695,9 @@ impl NativeBridge {
                     Some(project_id.as_str().to_owned()),
                     None,
                 ),
+                crazyagent::memory::library::LibraryAction::Import { project_id, .. } => {
+                    ("memory_add", Some(project_id.as_str().to_owned()), None)
+                }
                 crazyagent::memory::library::LibraryAction::SaveSelection {
                     project_id, ..
                 } => (
@@ -693,6 +705,12 @@ impl NativeBridge {
                     Some(project_id.as_str().to_owned()),
                     None,
                 ),
+                crazyagent::memory::library::LibraryAction::Approve { .. } => {
+                    ("memory_approve", None, None)
+                }
+                crazyagent::memory::library::LibraryAction::AgentWrites { .. } => {
+                    ("memory_agent_writes", None, None)
+                }
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
@@ -702,9 +720,10 @@ impl NativeBridge {
                 | crazyagent::master_session::MasterOwnerAction::Resume { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
-                | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
-                    ("master", Some(project_id.as_str().to_owned()), None)
-                }
+                | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::DeleteSession {
+                    project_id, ..
+                } => ("master", Some(project_id.as_str().to_owned()), None),
                 crazyagent::master_session::MasterOwnerAction::Resolve { .. }
                 | crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
                     return Err(failure("unexpected_pending_intent"));
@@ -913,7 +932,7 @@ impl NativeBridge {
         spec: ProjectSpec,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -1076,7 +1095,7 @@ impl NativeBridge {
         generation: u64,
         brief: bool,
     ) -> Result<(), BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }

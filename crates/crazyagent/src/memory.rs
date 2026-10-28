@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+pub mod import;
 pub mod library;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1128,7 +1129,10 @@ fn read(
     for body in rows {
         let entry: KnowledgeEntry = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
         entry.assert_consistent();
-        if live_entry(tx, &entry)? && (!global || globally_approved(tx, &entry)?) {
+        if live_entry(tx, &entry)?
+            && !hidden_text(&entry.text)
+            && (!global || globally_approved(tx, &entry)?)
+        {
             entries.push(entry);
         }
         if entries.len() >= bounds.batch_size {

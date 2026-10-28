@@ -23,13 +23,42 @@ function block(text, indent, name) {
   return lines.slice(start, end < 0 ? lines.length : end);
 }
 
-test("CI runs for pull requests and as a reusable workflow, with a concurrency group that needs no pull request", async () => {
+test("CI runs for pull requests and as a reusable workflow; a pull request cancels its own older run, and a release's CI never shares a group with another ref or gets cancelled", async () => {
   const ci = await workflow("ci.yml");
   const on = block(ci, 0, "on");
   assert(on.includes("  pull_request:"));
   assert(on.includes("  workflow_call:"));
-  assert.match(ci, /^ {2}group: ci-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}$/m);
+  assert.deepEqual(block(ci, 0, "concurrency").filter(Boolean), [
+    "concurrency:",
+    "  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}-{1}', github.ref, github.sha) }}",
+    "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+  ]);
   assert.doesNotMatch(ci, /secrets\./);
+});
+
+test("a stable release ships only from a v* tag on a commit that master already holds", async () => {
+  const release = await workflow("release.yml");
+  const prepare = steps(release, "prepare");
+  const checkout = prepare.find((step) => step.includes("uses: actions/checkout@"));
+  assert.match(checkout, /\n {10}fetch-depth: 0(\n|$)/, "prepare sees master's history");
+  const version = prepare.find((step) => step.includes("- id: version"));
+  const tagBranch = version.slice(version.indexOf('if [ "$REF_TYPE" = tag ]; then'), version.indexOf("          else"));
+  assert.match(tagBranch, /git merge-base --is-ancestor "\$GITHUB_SHA" refs\/remotes\/origin\/master \|\| \{ echo "::error::[^"]+"; exit 1; \}/);
+  assert(tagBranch.indexOf("git merge-base") < tagBranch.indexOf("version.mjs stable"), "the commit is checked before a stable version is made");
+  assert(block(release, 2, "publish").includes("    needs: [prepare, build]"), "nothing publishes without prepare");
+});
+
+test("signing secrets reach only the build job, which is bound to the release environment", async () => {
+  const release = await workflow("release.yml");
+  const jobs = block(release, 0, "jobs").join("\n");
+  const build = block(jobs, 2, "build");
+  assert(build.includes("    environment: release"), "build runs in the release environment");
+  for (const job of ["prepare", "ci", "publish"]) {
+    const lines = block(jobs, 2, job);
+    assert(!lines.some((line) => line.includes("secrets.")), `${job} reads no secret`);
+    assert(!lines.some((line) => /^ {4}environment:/.test(line)), `${job} needs no environment`);
+  }
+  assert(release.split("\n").filter((line) => line.includes("secrets.")).length > 0);
 });
 
 test("every release, dev or stable, builds only after the whole CI workflow passes, and CI gets no secrets", async () => {
@@ -149,7 +178,8 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 });
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
-  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"]]) {
+  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"],
+    ["release.yml", "build", "Install pinned Node on the owner's runner"], ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -157,6 +187,40 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
     assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
     assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
   }
+});
+
+test("a release on the owner's runner signs with pinned, checksum-checked Node, bun and Rust, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
+  const release = await workflow("release.yml");
+  for (const pin of ["BUN_DARWIN_ARM64_SHA256", "NODE_DARWIN_ARM64_SHA256", "RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) {
+    assert.match(release, new RegExp(`^ {2}${pin}: [0-9a-f]{64}$`, "m"), pin);
+  }
+  const all = steps(release, "build");
+  const at = (pattern) => all.findIndex((step) => pattern.test(step));
+  for (const shared of [/uses: actions\/setup-node@/, /uses: oven-sh\/setup-bun@/, /rustup toolchain install/]) {
+    const step = all[at(shared)];
+    assert(step, String(shared));
+    assert.match(step, /^ {6}- (?:id: \S+\n {8})?(?:name: [^\n]+\n {8})?if: runner\.environment == 'github-hosted'\n/, `${shared} runs only on GitHub's fresh runners`);
+  }
+  const rust = all[at(/name: Install pinned Rust on the owner's runner/)];
+  assert(rust, "the release on the owner's runner installs its own Rust");
+  assert.match(rust, /\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.doesNotMatch(rust, /\brustup\b|\.rustup|RUSTUP_/, "no rustup, toolchain or proxy left on the runner");
+  for (const pin of ["RUSTC_DARWIN_ARM64_SHA256", "CARGO_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_ARM64_SHA256", "RUST_STD_DARWIN_X64_SHA256"]) assert(rust.includes(`$${pin}`), pin);
+  assert.match(rust, /\n\s+if ! echo "\$sha  \$work\/\$archive" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n\s+curl [^\n]+\n\s+echo "\$sha  \$work\/\$archive" \| shasum -a 256 -c -\n/, "every Rust archive, cached or downloaded, matches its pin");
+  assert.match(rust, /\n\s+cp "\$work\/\$archive" "\$prefix\/\$archive\.\$\$"\n\s+mv "\$prefix\/\$archive\.\$\$" "\$prefix\/\$archive"\n/);
+  assert.match(rust, /\n\s+tar -xJf "\$work\/\$archive" -C "\$work"\n/, "it unpacks only the copy it just checked");
+  assert.match(rust, /dir="\$\(dirname "\$GITHUB_WORKSPACE"\)"\n\s+while :; do\n\s+for config in "\$dir\/\.cargo\/config\.toml" "\$dir\/\.cargo\/config"; do\n\s+if \[ -e "\$config" \]; then\n[^\n]+::error::[^\n]+\n\s+exit 1\n/, "Cargo settings above the checkout stop the release");
+  assert.match(rust, /test "\$\(command -v rustc\)" = "\$work\/bin\/rustc"\n\s+test "\$\(command -v cargo\)" = "\$work\/bin\/cargo"\n/);
+  assert.match(rust, /\n\s+echo "\$work\/bin" >> "\$GITHUB_PATH"\n?$/);
+  const node = at(/name: Install pinned Node on the owner's runner/);
+  const bun = at(/id: bun-arm64\n/);
+  for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
+  assert.match(all[node], /node-v\$NODE_VERSION-darwin-arm64\.tar\.gz/);
+  assert.match(all[bun], /bun-darwin-aarch64\.zip/);
+  assert(node < at(/\bnode scripts\//) && node < at(/\bnpm ci\b/), "no node or npm run comes before the pinned Node");
+  assert(at(/name: Install pinned Rust/) < at(/\bcargo build\b/), "no cargo run comes before the pinned Rust");
+  assert.match(all[at(/name: Use a clean Rust build folder/)], /echo "BUN_INSTALL_CACHE_DIR=\$RUNNER_TEMP\/crazyagent-release\/bun-cache" >> "\$GITHUB_ENV"/);
+  assert(at(/name: Use a clean Rust build folder/) < at(/install --frozen-lockfile/), "bun installs into a fresh cache");
 });
 
 test("make test and test-rust-selected give every cargo test the native-auth host, desktop tests included", async () => {
@@ -234,6 +298,6 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", asyn
   assert.match(bun, /echo "\$BUN_DARWIN_X64_SHA256  \$work\/bun\.zip" \| shasum -a 256 -c -/);
   assert.match(bun, /"\$RUNNER_TOOL_CACHE\/bun\/\$BUN_VERSION\/x64"/);
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
-    assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
+    assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
   }
 });

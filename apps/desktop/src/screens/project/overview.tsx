@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../ui";
-import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
-import { failureCopy, loadProjectMemories, retryResearch } from "../../api-projects";
+import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
+import { failureCopy, loadAgentPolicy, retryResearch } from "../../api-projects";
 import type { ResearchJob } from "../../api-projects";
 import { displayText } from "../conversation";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
@@ -9,6 +9,7 @@ import { anyHarnessTotal, poolName, poolSummary } from "../new-project/wizard";
 import { poolReadiness } from "../settings/pools";
 import { useLoad } from "../../state";
 import { homePath } from "../settings/harnesses";
+import { accessSummary } from "./access";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { ACTIVITY_ROWS, activity, ago, changeOutcome, memoryGroups, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
@@ -45,7 +46,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [suggested, setSuggested] = useState(0);
   useEffect(() => {
     let live = true;
-    void loadProjectMemories(data.id, null).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value).suggested.length : 0); });
+    void loadAllProjectMemories(data.id).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value.items).suggested.length : 0); });
     return () => { live = false; };
   }, [data.id, data.now]);
   const [retrying, setRetrying] = useState<number | null>(null);
@@ -53,6 +54,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
   const [skills] = useLoad(() => listSkills(data.id), [data.id], "skills");
   const [servers] = useLoad(() => listMcpServers(data.id), [data.id], "mcp-servers");
   const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
+  const [policy] = useLoad(() => loadAgentPolicy(data.id), [data.id], "agent-policy");
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
   const signIn = signInLine(assignedSummary);
   const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
@@ -109,6 +111,7 @@ export function OverviewTab({ data }: { data: ProjectData }) {
           : data.pools?.kind === "ok" ? <Badge word="Needs a pool" tone="warn" /> : <span className="pj-muted">{data.pools === undefined ? "Loading..." : "Unknown"}</span>}</dd></div>
         {setup && <div><dt>Team</dt><dd>Master: {harnessName(harnesses, setup.team.master)}</dd>
           <dd className="pj-secondary">{setup.team.sub_harnesses.length ? `Agents: ${setup.team.sub_harnesses.map((slot) => `${harnessName(harnesses, slot.harness)} x${slot.agents}`).join(", ")}` : anyHarnessTotal(setup.team)}</dd></div>}
+        <div><dt>Agent access</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=access`)}>{policy.kind === "ok" ? accessSummary(policy.value) : policy.kind === "loading" ? "Loading..." : "Project settings"}</button></dd></div>
         {setup && setup.documents.length > 0 && <div><dt>Documents</dt><dd>{setup.documents.length} attached</dd></div>}
         <div><dt>Skills</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(skills, "skill", "skills") ?? "Project settings"}</button></dd></div>
         <div><dt>MCP servers</dt><dd><button type="button" className="pj-link" onClick={() => data.navigate(`${base}/settings?section=plugins`)}>{onFact(servers, "server", "servers") ?? "Project settings"}</button></dd></div>

@@ -119,6 +119,28 @@ fn main() -> ExitCode {
     }
     if args
         .first()
+        .is_some_and(|arg| arg == crazyagent::team::tool::AGENT_SERVER_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent team-mcp-agent MAILBOX_DIR".to_owned())
+        } else {
+            crazyagent::team::tool::serve_agent(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                Path::new(&args[1]),
+            )
+            .map_err(|e| e.to_string())
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::LIVE_SERVER_COMMAND)
     {
         let result = if args.len() != 2 {
@@ -886,9 +908,13 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .ok_or("HOME is not set")?;
-        let link = crazyagent::service::link_cli(&executable, &home.join(".local").join("bin"))
+        let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+        let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+        let target = crazyagent::service::persistable(&executable, &layout, appdir.as_deref())
             .map_err(|e| e.to_string())?;
-        println!("Linked {} to {}", link.display(), executable.display());
+        let link = crazyagent::service::link_cli(&target, &home.join(".local").join("bin"))
+            .map_err(|e| e.to_string())?;
+        println!("Linked {} to {}", link.display(), target.display());
         return Ok(());
     }
     let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;

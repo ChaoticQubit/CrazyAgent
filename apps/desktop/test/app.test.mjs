@@ -57,6 +57,8 @@ test("an engine of another version asks for a restart with both versions, not th
   assert.match(markup, /Engine is version 0\.1\.0, this app is 0\.2\.0; restart the engine/);
   assert.match(markup, /class="btn primary"[^>]*>[\s\S]*Restart engine<\/button>/);
   assert.match(markup, /Try again<\/button>/);
+  assert.doesNotMatch(markup, /disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine/);
+  assert.match(view({ installing: true }), /class="btn primary" disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
   assert.match(view({ restart: { kind: "busy" } }), /Restarting\.\.\./);
   assert.match(view({ restart: { kind: "failed", message: "CrazyAgent's engine didn't start. Try again." } }), /role="alert"[^>]*>CrazyAgent&#x27;s engine didn&#x27;t start/);
   const hostile = view({ versions: { kind: "ok", value: { engine: "9\u202e1", app: "0.2.0", message: "Engine is version 9\u202e1, this app is 0.2.0; restart the engine" } } });

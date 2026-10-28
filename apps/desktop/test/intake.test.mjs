@@ -34,7 +34,7 @@ const view = (extra = {}) => ({
   project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
-  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", finished: false, ...extra,
+  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", folder_overview: null, finished: false, ...extra,
 });
 
 test("each folder state has its badge, line and one action", () => {
@@ -146,6 +146,37 @@ test("each folder chooser names what the folder is for, and adding a project nev
   const picker = source("../src-tauri/src/bridge/picker.rs");
   assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*\}/,
     "the web view's purpose names are the engine's");
+});
+
+test("Show more reads one page at a time, so a double click can't add the same page twice", async () => {
+  const reads = [];
+  let finish = noop;
+  const guarded = intake.oneAtATime((page) => {
+    reads.push(page);
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  const first = guarded(2);
+  assert.equal(await guarded(2), null, "a second click while the page loads reads nothing");
+  assert.deepEqual(reads, [2]);
+  finish("page 2");
+  assert.equal(await first, "page 2");
+  const second = guarded(3);
+  finish("page 3");
+  assert.equal(await second, "page 3");
+  assert.deepEqual(reads, [2, 3], "the next page reads once the last one arrived");
+
+  let attempts = 0;
+  const failing = intake.oneAtATime(async () => { attempts += 1; throw new Error("offline"); });
+  await assert.rejects(failing(4), /offline/);
+  await assert.rejects(failing(4), /offline/, "a failed read frees the guard");
+  assert.equal(attempts, 2);
+
+  const clone = readFileSync(new URL("../src/screens/intake/clone.tsx", import.meta.url), "utf8");
+  assert.match(clone, /const \[readMore\] = useState\(\(\) => oneAtATime\(loadGitHubRepos\)\);/, "one guard lives as long as the page");
+  assert.match(clone, /setLoadingMore\(true\);\s*const result = await readMore\(next\);\s*if \(result === null\) return;\s*setLoadingMore\(false\);/,
+    "an ignored click leaves the running page's pending state alone");
+  assert.doesNotMatch(clone, /await loadGitHubRepos\(next\)/, "Show more never reads past the guard");
+  assert.match(clone, /loadingMore=\{loadingMore\} onMore=/);
 });
 
 test("the GitHub account line names the sign-in method", () => {
@@ -440,7 +471,7 @@ test("GitHub sign-in shows the three ways, then the device code, and the token f
 
 test("the repository list shows each repository with Clone and a search", () => {
   const repos = [{ full_name: "mira/plant-shop", private: true, default_branch: "main", size_kb: 2048 }];
-  const base = { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, query: "", onQuery: noop, more: false, onMore: noop, cloning: null, onClone: noop };
+  const base = { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, query: "", onQuery: noop, more: false, loadingMore: false, onMore: noop, cloning: null, onClone: noop };
   const markup = html(RepoListView, { ...base, repos: ok(repos) });
   assert.match(markup, /Signed in to GitHub as mira\./);
   assert.match(markup, /mira\/plant-shop/);
@@ -449,7 +480,39 @@ test("the repository list shows each repository with Clone and a search", () => 
   assert.match(html(RepoListView, { ...base, repos: ok([]) }), /No repositories on this account\./);
   assert.match(html(RepoListView, { ...base, query: "zzz", repos: ok(repos) }), /No repositories match/);
   assert.match(html(RepoListView, { ...base, repos: ok(repos), more: true }), />Show more<\/button>/);
+  const loading = html(RepoListView, { ...base, repos: ok(repos), more: true, loadingMore: true });
+  assert.match(loading, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*Loading more\.\.\.<\/button>/, "a page on its way blocks another Show more");
+  assert.doesNotMatch(loading, />Show more<\/button>/);
   assert.match(html(RepoListView, { ...base, repos: notReady }), /Not ready yet/);
+});
+
+test("an overview the engine did not write is shown apart and labelled, never as the mapping agent's", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const engine = html(OnboardingReviewView, { ...base, view: ok(view()) });
+  assert.match(engine, />Overview</);
+  assert.doesNotMatch(engine, /Overview found in the folder|did not write this/);
+  const found = html(OnboardingReviewView, { ...base, view: ok(view({ overview: null, folder_overview: "# Shipped\n\nFrom the repository." })) });
+  assert.match(found, /Overview found in the folder/);
+  assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
+  assert.match(found, /From the repository\./);
+  assert.doesNotMatch(found, />Overview</);
+});
+
+test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
+  const repos = [
+    { full_name: "octo-cat/.github", private: false, default_branch: "main", size_kb: 4, refused: "github_repo_name_unsupported" },
+    { full_name: "octo-cat/notes", private: false, default_branch: "main", size_kb: 4, refused: null },
+  ];
+  const base = { status: { signed_in: true, login: "octo-cat", method: "token", waiting: false, problem: null }, query: "", onQuery: noop, more: false, loadingMore: false, onMore: noop, cloning: null, onClone: noop };
+  const rows = html(RepoListView, { ...base, repos: ok(repos) }).split("<li").slice(1);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /octo-cat\/\.github/);
+  assert.match(rows[0], /CrazyAgent can(&#x27;|')t clone a repository whose name starts with a dot/);
+  assert.match(rows[0], /<button[^>]*disabled=""[^>]*>.*Clone<\/button>/);
+  assert.doesNotMatch(rows[0], /github_repo_name_unsupported/);
+  assert.match(rows[1], /Public, 4 KB, branch main/);
+  assert.doesNotMatch(rows[1], /disabled=""/);
 });
 
 test("the setup review shows the steps, the overview, missing items and a confirm that waits", () => {
@@ -524,6 +587,34 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
+});
+
+test("a failed setup read keeps the shown setup, says so, backs off, and a newer read clears it", () => {
+  const installing = { dependencies: [dep("uv", { state: "installing" })], pack, running: true };
+  const shown = intake.foldSetupRead(intake.SETUP_READS, ok(installing));
+  assert.deepEqual(shown, { seen: installing, latest: installing, failures: 0, line: "" });
+  assert.equal(intake.foldSetupRead(shown, { kind: "loading" }), shown);
+  const once = intake.foldSetupRead(shown, failed("setup_owner_unavailable", "CrazyAgent's engine isn't running."));
+  assert.notEqual(once, shown);
+  assert.deepEqual(once, { seen: installing, latest: installing, failures: 1, line: "Couldn't refresh setup progress: CrazyAgent's engine isn't running." });
+  assert.equal(intake.foldSetupRead(once, ok(installing)), once);
+  assert.equal(intake.foldSetupRead(once, { kind: "loading" }), once);
+  const twice = intake.foldSetupRead(once, failed("setup_owner_unavailable", "CrazyAgent's engine isn't running."));
+  assert.notEqual(twice, once);
+  assert.equal(twice.failures, 2);
+  const thrice = intake.foldSetupRead(twice, notReady);
+  assert.equal(thrice.failures, 3);
+  assert.equal(thrice.latest, installing);
+  assert.equal(thrice.line, "Couldn't refresh setup progress: Tool setup isn't in this build.");
+  const done = { dependencies: [dep("uv", { state: "installed" })], pack, running: false };
+  assert.deepEqual(intake.foldSetupRead(thrice, ok(done)), { seen: done, latest: done, failures: 0, line: "" });
+  const started = { ...shown, latest: { ...installing } };
+  assert.equal(intake.foldSetupRead(started, ok(installing)), started);
+  assert.deepEqual([0, 1, 2, 3, 4, 5, 9, 4000].map(intake.setupPollMs), [2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000]);
+  const base = { status: ok(installing), ticks: intake.packTicks(pack), onTick: noop, busy: false, started: true, problem: "", onRun: noop, onContinue: noop };
+  const stale = html(ToolsSetupView, { ...base, stale: once.line });
+  assert.match(stale, /Installing: \d+ of \d+ done\.[\s\S]*<p class="pj-error" role="alert">Couldn&#x27;t refresh setup progress: CrazyAgent&#x27;s engine isn&#x27;t running\.<\/p>/);
+  assert.doesNotMatch(html(ToolsSetupView, base), /role="alert"/);
 });
 
 test("first run walks profile, projects folder, tools and accounts in that order", () => {

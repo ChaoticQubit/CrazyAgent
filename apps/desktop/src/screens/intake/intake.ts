@@ -15,6 +15,7 @@ export const FOUND_POLL_MS = 3000;
 export const ONBOARDING_POLL_MS = 2000;
 export const GITHUB_POLL_MS = 3000;
 export const SETUP_POLL_MS = 2000;
+export const SETUP_POLL_MAX_MS = 30000;
 export const REPO_PAGES_MAX = 100;
 
 export type FoundAction = "setup" | "continue" | "open" | "remove" | null;
@@ -137,6 +138,22 @@ export function deviceLine(expiresS: number, startedMs: number, nowMs: number): 
  * is signed in, and now in milliseconds. Output: true while the status should be polled. */
 export function devicePolling(device: { code: { expires_s: number }; started: number } | null, signedIn: boolean, nowMs: number): boolean {
   return device !== null && !signedIn && !deviceLine(device.code.expires_s, device.started, nowMs).expired;
+}
+
+/** Lets one call of an async read run at a time: a call made while one is still running reads
+ * nothing and gives null, so a double click can't read the same page twice. A failed read
+ * frees the guard like a finished one. Input: the read. Output: the guarded read. */
+export function oneAtATime<A extends unknown[], T>(read: (...args: A) => Promise<T>): (...args: A) => Promise<T | null> {
+  let running = false;
+  return async (...args: A) => {
+    if (running) return null;
+    running = true;
+    try {
+      return await read(...args);
+    } finally {
+      running = false;
+    }
+  };
 }
 
 /** Allows only a GitHub page over https as the device sign-in page.
@@ -343,14 +360,14 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
   return `Continuing lets your agents run these MCP servers: ${servers.join(", ")}. You can turn any of them off later.`;
 }
 
-/** Tells whether setup is still working. Input: the status. Output: true while it runs or
- * anything is installing. */
 /** Tells whether the engine is still checking any tool's version, so setup reads again.
  * Input: the status. Output: true while a tool shows Checking. */
 export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
 }
 
+/** Tells whether setup is still working. Input: the status. Output: true while it runs or
+ * anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
   return status.running || status.dependencies.some((item) => item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
 }
@@ -362,6 +379,34 @@ export function setupProgress(status: SetupStatus, ticked: string[]): { done: nu
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
   const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
+}
+
+/** What the setup screen knows from its reads: the setup the loader last read, the newest setup
+ * to show, how many reads failed in a row since, and the last failure's sentence. */
+export interface SetupReads {
+  seen: SetupStatus | null;
+  latest: SetupStatus | null;
+  failures: number;
+  line: string;
+}
+
+export const SETUP_READS: SetupReads = { seen: null, latest: null, failures: 0, line: "" };
+
+/** Folds one setup read into what the screen knows. A newly read setup replaces the shown one and
+ * clears the failures; a read in flight or the loader showing its last read again changes nothing;
+ * a failed read keeps the shown setup, counts and says why. Inputs: what the screen knew and the
+ * read. Output: what it knows now, a new object whenever the read changed it. */
+export function foldSetupRead(known: SetupReads, read: Loaded<SetupStatus>): SetupReads {
+  if (read.kind === "loading") return known;
+  if (read.kind === "ok") return read.value === known.seen ? known : { seen: read.value, latest: read.value, failures: 0, line: "" };
+  const reason = read.kind === "error" ? read.message : "Tool setup isn't in this build.";
+  return { ...known, failures: known.failures + 1, line: `Couldn't refresh setup progress: ${reason}` };
+}
+
+/** How long the setup screen waits before reading again, doubling after each failed read up to
+ * `SETUP_POLL_MAX_MS`. Input: the failed reads in a row. Output: the wait in milliseconds. */
+export function setupPollMs(failures: number): number {
+  return Math.min(SETUP_POLL_MS * 2 ** Math.min(Math.max(failures, 0), 5), SETUP_POLL_MAX_MS);
 }
 
 const TOOLS: DependencyName[] = ["tmux", "uv", "graphify"];

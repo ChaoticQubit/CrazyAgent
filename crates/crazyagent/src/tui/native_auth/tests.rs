@@ -1434,3 +1434,90 @@ async fn unit_refused_logout_names_a_master_conversation_and_a_research_job_and_
     })
     .await;
 }
+
+async fn stuck_sign_in(case: &Case, ui: &mut Ui) {
+    ui.connections(1).await;
+    ui.key(KeyCode::F(2));
+    let inspected = ui.auth().await;
+    ui.apply(inspected);
+    let lock = crate::landing::open(case.root.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    ui.key(KeyCode::Enter);
+    let started = ui.auth().await;
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        started.result.as_ref().err().map(String::as_str),
+        Some("native_auth_outcome_unknown_read_same_operation")
+    );
+    ui.apply(started);
+    ui.key(KeyCode::Esc);
+}
+
+#[tokio::test]
+async fn real_unconfirmed_sign_in_leaves_other_owner_changes_open() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        stuck_sign_in(&case, &mut ui).await;
+        assert!(!ui.app.model_access.has_pending(), "{}", ui.render(160, 50));
+    })
+    .await;
+}
+
+async fn remove_elsewhere(case: &Case, id: &str) {
+    let mut other = OwnerController::attach(
+        case.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(2),
+    )
+    .await
+    .unwrap();
+    let read = other.read(record_query(id)).await.unwrap();
+    let OwnerData::ModelAccessRecord { source_hash, .. } = read.data else {
+        panic!("actual connection record required");
+    };
+    other
+        .begin_mutation(
+            crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::RemoveConnectedAccount { id: reference(id) },
+            },
+            1,
+        )
+        .unwrap();
+    let removed = other.send_pending().await.unwrap();
+    assert!(matches!(
+        removed,
+        crate::engine::owner::OwnerResponse::Applied { operation }
+            if operation.result == crate::engine::owner::OwnerResult::Applied
+    ));
+}
+
+#[tokio::test]
+async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        stuck_sign_in(&case, &mut ui).await;
+        assert!(ui.app.model_access.signing_in());
+        assert!(
+            ui.render(160, 50).contains("c clears a stuck sign-in"),
+            "{}",
+            ui.render(160, 50)
+        );
+        remove_elsewhere(&case, "b-claude").await;
+        ui.key(KeyCode::Char('c'));
+        let cleared = ui.auth().await;
+        assert_eq!(
+            cleared.result.as_ref().err().map(String::as_str),
+            Some("native_profile_source_conflict")
+        );
+        ui.apply(cleared);
+        assert!(!ui.app.model_access.signing_in());
+        assert!(
+            ui.render(160, 50).contains("Stuck sign-in cleared"),
+            "{}",
+            ui.render(160, 50)
+        );
+    })
+    .await;
+}

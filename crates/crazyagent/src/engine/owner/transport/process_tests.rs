@@ -165,13 +165,19 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
         "review your own diff",
         "No comments in code, except a short docstring",
         "Never use an em dash",
-        "Never add a Co-Authored-By trailer",
+        "never write inside the project folder's `.git` or rewrite history",
+        "Commit or leave your edits as the \"How your work lands\" section CrazyAgent gives you says",
+        "The owner accepts your work in the project's Changes view",
         "Never put a secret",
         "asks the master",
         "escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions",
     ] {
         assert!(text.contains(rule), "the default process misses: {rule}");
     }
+    assert!(
+        !text.contains("never commit"),
+        "an Own branch agent lands only its commits, so the seed defers to the layout rule"
+    );
     for tool in [
         "graphify",
         "context-mode",
@@ -232,6 +238,45 @@ fn a_mismatched_or_oversized_request_is_refused() {
     );
 }
 
+#[test]
+fn saves_at_once_each_read_back_the_settings_they_stored() {
+    use crate::instruction_files::Choice;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+        .into_iter()
+        .flat_map(|files| {
+            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        })
+        .collect();
+    assert_eq!(options.len(), 6);
+    let start = std::sync::Barrier::new(options.len());
+    std::thread::scope(|scope| {
+        let saves: Vec<_> = options
+            .iter()
+            .map(|&settings| {
+                let (root, project, start) = (&root, &project, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        assert_eq!(
+                            instruction_settings(root, project, Some(settings)),
+                            Ok(settings)
+                        );
+                    }
+                })
+            })
+            .collect();
+        for save in saves {
+            save.join()
+                .expect("every save reads back what it stored, whatever saves beside it");
+        }
+    });
+    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+}
+
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();
@@ -285,6 +330,10 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
@@ -292,10 +341,18 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let text = |text: &str| crate::agent_home::Given {
+        text: text.into(),
+        files: Vec::new(),
+        section_bytes: 0,
+        context: Vec::new(),
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, "# Sub rules\n").unwrap();
-    record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
+    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
+    record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
         AgentInstructions {
@@ -304,11 +361,52 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: true,
             text: "# Sub rules\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
+    let rollout = sub_home.join("sessions/2026/10/27/rollout-2026-10-27T18-00-00-0199.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let said = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            said(&format!(
+                "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\nOWNER-SECRET-78\n</INSTRUCTIONS>",
+                folder.display()
+            )),
+            said("<skill>\n<name>tdd</name>\n<path>/skills/tdd/SKILL.md</path>\n</skill>")
+        ),
+    )
+    .unwrap();
+    let reported = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(reported.sessions, 1);
+    assert_eq!(
+        reported.loaded,
+        vec![crate::agent_home::LoadedFile {
+            name: "AGENTS.md".into(),
+            path: folder.display().to_string(),
+        }]
+    );
+    assert_eq!(reported.skills_used, vec!["tdd".to_owned()]);
+    assert!(!format!("{reported:?}").contains("OWNER-SECRET-78"));
+
     let master_home = launched_home(&root, master);
-    prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();
+    prepare(
+        &master_home,
+        Harness::Claude,
+        &given,
+        &text("# Master rules\n"),
+    )
+    .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
     assert_eq!(
         shown.agent, master,
@@ -346,6 +444,121 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         "agent_instructions_unsafe",
         "a link the agent planted in its home is never followed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare};
+    use crate::instruction_files::{Choice, Record, State};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "claude-code");
+    let home = launched_home(&root, sub);
+    let files = vec![
+        Record {
+            name: "CLAUDE.md".into(),
+            bytes: 120,
+            state: State::Given,
+        },
+        Record {
+            name: "AGENTS.md".into(),
+            bytes: 40_000,
+            state: State::TooLarge,
+        },
+    ];
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: files.clone(),
+        section_bytes: 0,
+        context: Vec::new(),
+    };
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: Choice::Project,
+        owner_home: None,
+    };
+    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .files,
+        files
+    );
+
+    let forged = "given\t5\tCLAUDE.local.md\n";
+    let mut planted = vec![home.join("crazyagent-instruction-files")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "CLAUDE.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_skills_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare, record_skills};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    let home = launched_home(&root, sub);
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: Vec::new(),
+        section_bytes: 0,
+        context: Vec::new(),
+    };
+    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
+    let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .skills,
+        installed
+    );
+
+    let forged = "secret-exfiltration\n";
+    let mut planted = vec![home.join("crazyagent-skills")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "AGENTS.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.skills, installed,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
 }
 
 #[test]

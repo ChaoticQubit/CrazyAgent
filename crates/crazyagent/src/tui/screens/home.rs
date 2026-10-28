@@ -505,19 +505,8 @@ impl Home {
         );
         let corner = match (card.activity.notifications, card.activity.suggestions) {
             (0, 0) => styled(created, Role::Muted, theme),
-            (0, count) => styled(
-                format!(
-                    "{count} suggested memor{}",
-                    if count == 1 { "y" } else { "ies" }
-                ),
-                Role::Warning,
-                theme,
-            ),
-            (count, _) => styled(
-                format!(
-                    "{count} new team notification{}",
-                    if count == 1 { "" } else { "s" }
-                ),
+            (notifications, suggestions) => styled(
+                activity_corner(notifications, suggestions, limit - 2),
                 Role::Warning,
                 theme,
             ),
@@ -1081,6 +1070,38 @@ impl Screen for Home {
     fn place(&self) -> Option<Place> {
         Some(Place::Home)
     }
+}
+
+/// The Home card's corner for unseen team notifications and suggested memories, both
+/// shown with notifications first; a card too narrow for "new team" drops those words so
+/// both counts still fit. Inputs: the two counts, not both 0, and the card width. Output:
+/// the text.
+fn activity_corner(notifications: usize, suggestions: usize, width: usize) -> String {
+    assert!(notifications > 0 || suggestions > 0);
+    let memories = (suggestions > 0).then(|| {
+        format!(
+            "{suggestions} suggested memor{}",
+            if suggestions == 1 { "y" } else { "ies" }
+        )
+    });
+    let corner = |team: &str| {
+        let notices = (notifications > 0).then(|| {
+            format!(
+                "{notifications} {team}notification{}",
+                if notifications == 1 { "" } else { "s" }
+            )
+        });
+        [notices, memories.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let long = corner("new team ");
+    if long.chars().count() <= width {
+        return long;
+    }
+    corner("")
 }
 
 #[cfg(test)]

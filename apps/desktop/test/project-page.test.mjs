@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -135,6 +135,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
+  assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),
+    "The master stopped: the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again. (master_instructions_too_large)");
   for (const phase of ["failed", "blocked", "uncertain"]) {
     const line = research.turnLine(turn(phase, "unknown", null));
     assert.equal(line, `The master stopped. (${phase})`);
@@ -807,4 +809,26 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
   assert.equal(research.changesLine({ id: "t2", ordinal: 2, phase: "failed", reason: null, reply: null, changes: null }), null);
   assert.equal(research.changesLine({ id: "t3", ordinal: 3, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
   assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
+});
+
+test("every desktop memory list and count reads all memory batches, never one engine batch of 8", async () => {
+  const shared = await import("../src/api.ts");
+  assert.equal(typeof shared.loadAllProjectMemories, "function");
+  const root = new URL("../src/", import.meta.url);
+  const source = (path) => readFileSync(new URL(path, root), "utf8");
+  const sources = (dir) => readdirSync(new URL(dir, root), { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+    ? sources(`${dir}${entry.name}/`) : /\.tsx?$/.test(entry.name) ? [`${dir}${entry.name}`] : []);
+  const screens = sources("").filter((path) => path !== "engine-client.ts");
+  const readers = screens.filter((path) => source(path).includes('"desktop_project_memories"'));
+  assert.deepEqual(readers, ["api.ts"], "one engine batch holds at most 8 entries of any status, so only the paging loader reads it");
+  assert.deepEqual(screens.filter((path) => /\bprojectMemories\(/.test(source(path))), [], "nothing reads one batch through the typed client");
+  const body = (text, name) => text.match(new RegExp(`export async function ${name}[\\s\\S]*?\\n}\\n`))?.[0] ?? "";
+  const all = body(source("api.ts"), "loadAllProjectMemories");
+  assert.match(all, /page < MEMORY_PAGES_MAX/);
+  assert.match(all, /"desktop_project_memories", \{ id, after \}/);
+  assert.match(all, /after = batch\.value\[batch\.value\.length - 1\]\.id/);
+  assert.match(all, /batch\.value\.length === 0\) return \{ kind: "ok", value: \{ items, more: false \} \}/);
+  assert.match(body(source("api.ts"), "memorySuggestions"), /loadAllProjectMemories\(project\.id\)[\s\S]*suggestionsFrom\(project, memories\.value\.items\)/);
+  assert.match(source("screens/project/overview.tsx"), /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
+  assert.match(source("screens/project/memory.tsx"), /loadAllProjectMemories\(data\.id\)/);
 });

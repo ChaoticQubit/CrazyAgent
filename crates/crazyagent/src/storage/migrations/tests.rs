@@ -695,3 +695,130 @@ fn setups_or_text(db: &Connection) -> BTreeMap<String, String> {
         .collect::<Result<_, _>>()
         .unwrap()
 }
+
+#[test]
+fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         CREATE TABLE plugin_items (
+             id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+             kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+             scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+             body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
+             UNIQUE(kind, scope, name));
+         CREATE TABLE plugin_switches (
+             project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+             item TEXT NOT NULL CHECK(length(item) BETWEEN 1 AND 64),
+             PRIMARY KEY(project, item));
+         CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+
+    db.execute("INSERT INTO projects VALUES ('live','{}')", [])
+        .unwrap();
+    db.execute(
+        "INSERT INTO file_trash VALUES ('mcp_secret','pending-secret')",
+        [],
+    )
+    .unwrap();
+    for row in [
+        ["sk-ghost", "skill", "project:ghost", "notes", "{}"],
+        ["sk-live", "skill", "project:live", "guide", "{}"],
+    ] {
+        db.execute("INSERT INTO plugin_items VALUES (?1,?2,?3,?4,?5)", row)
+            .unwrap();
+    }
+    db.execute(
+        "INSERT INTO plugin_switches VALUES ('ghost','sw-ghost')",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO plugin_switches VALUES ('live','sw-live')", [])
+        .unwrap();
+
+    let ghost_folder = root
+        .path()
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("ghost");
+    let live_folder = root
+        .path()
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("live");
+    std::fs::create_dir_all(&ghost_folder).unwrap();
+    std::fs::create_dir_all(&live_folder).unwrap();
+
+    db.execute_batch("PRAGMA user_version = 4").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+
+    let ghost_items: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghost_items, 0, "the orphaned project's rows are swept");
+    let ghost_switches: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project='ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghost_switches, 0, "the orphaned switches are swept");
+
+    let live_items: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:live'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live_items, 1, "a live project keeps its plugins");
+
+    let kept: i64 = db
+        .query_row(
+            "SELECT count(*) FROM file_trash WHERE kind='mcp_secret' AND name='pending-secret'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept, 1,
+        "step 5 rebuilds file_trash and keeps its pending notes"
+    );
+    let queued: i64 = db
+        .query_row(
+            "SELECT count(*) FROM file_trash WHERE kind='skill_folder' AND name='ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued, 1,
+        "the orphaned skill folder is queued for the sweep"
+    );
+
+    crate::storage::trash::sweep(&db, root.path()).unwrap();
+    assert!(
+        !ghost_folder.exists(),
+        "the orphaned skill folder is reclaimed"
+    );
+    assert!(
+        live_folder.exists(),
+        "a live project keeps its skill folder"
+    );
+}

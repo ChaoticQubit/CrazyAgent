@@ -24,6 +24,8 @@ import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens
 import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
 import { nativeAuthFailureCode, reduceNativeAuth, nativeClaudeInputAllowed, validateClaudeAuthCode } from "./native-auth";
 import type { NativeAuthCommand, NativeAuthState } from "./native-auth";
+import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
+import type { InputChoice } from "./screens/team/terminal-io";
 type PanelAction = NativeAuthCommand | "confirm_logout" | "back" | "refresh";
 
 export interface Draft {
@@ -968,6 +970,26 @@ export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
+const MASTER_INPUT_KEY = "crazyagent.master-input";
+
+/** Reads where the owner types to a live master, as kept in this app (not in the engine).
+ * Output: the choice; the default when storage is unavailable or holds something else. */
+export function readMasterInput(): InputChoice {
+  try {
+    return inputChoice(window.localStorage.getItem(MASTER_INPUT_KEY));
+  } catch {
+    return INPUT_DEFAULT;
+  }
+}
+
+/** Remembers where the owner types to a live master. Input: the choice. Output: none. */
+export function saveMasterInput(choice: InputChoice): void {
+  try {
+    window.localStorage.setItem(MASTER_INPUT_KEY, choice);
+  } catch {
+    return;
+  }
+}
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).
  * Output: system, light or dark; system when storage is unavailable. */
@@ -1002,6 +1024,9 @@ export function engineState(result: Result<api.ConnectionStatus>): EngineState {
   return result.kind === "ok" && result.value.connected ? "running" : "down";
 }
 
+/** The refusal codes after which the session reads again whether a sign-in is stuck. */
+export const STUCK_SIGN_IN_CODES = ["native_auth_recovery_required", "native_auth_outcome_unknown_read_same_operation"];
+
 /** The change the bridge still keeps unconfirmed, the last check's outcome, and whether a
  * check or retry is running. */
 export interface Unconfirmed {
@@ -1014,6 +1039,7 @@ export interface Session {
   engine: EngineState;
   unconfirmed: Unconfirmed | null;
   profileCheck: { busy: boolean } | null;
+  stuckSignIn: { busy: boolean } | null;
   profile: Loaded<OwnerProfile | null>;
   projects: Loaded<ProjectRow[]>;
   projectsMore: boolean;
@@ -1022,6 +1048,7 @@ export interface Session {
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
   checkProfile: () => Promise<void>;
+  clearStuckSignIn: () => Promise<void>;
   retryUnconfirmed: () => Promise<void>;
   dropUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -1040,6 +1067,7 @@ export function useSession(): Session {
   const tracking = useRef(false);
   const [profileCheck, setProfileCheck] = useState<{ busy: boolean } | null>(null);
   const profileTracking = useRef(false);
+  const [stuckSignIn, setStuckSignIn] = useState<{ busy: boolean } | null>(null);
   const [profile, setProfile] = useState<Loaded<OwnerProfile | null>>({ kind: "loading" });
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
   const [projectsMore, setProjectsMore] = useState(false);
@@ -1049,7 +1077,13 @@ export function useSession(): Session {
 
   function noteResult<T>(result: Result<T>): Result<T> {
     if (result.kind === "error" && result.code === "engine_unreachable") setEngine("down");
+    if (result.kind === "error" && STUCK_SIGN_IN_CODES.includes(result.code)) void refreshStuckSignIn();
     return result;
+  }
+
+  async function refreshStuckSignIn() {
+    const native = await api.status();
+    setStuckSignIn(native.kind === "ok" && native.value.stuck_sign_in !== null ? { busy: false } : null);
   }
 
   function showToast(message: string) {
@@ -1140,6 +1174,7 @@ export function useSession(): Session {
     const result = await api.connect();
     const state = engineState(result);
     setEngine(state);
+    setStuckSignIn(result.kind === "ok" && result.value.stuck_sign_in !== null ? { busy: false } : null);
     if (state !== "running") return;
     await Promise.all([refreshProfile(), refreshProjects()]);
     setRevision((value) => value + 1);
@@ -1152,10 +1187,15 @@ export function useSession(): Session {
   }, []);
 
   return {
-    engine, unconfirmed, profileCheck, profile, projects, projectsMore, toast, revision,
+    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, revision,
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },
+    clearStuckSignIn: async () => {
+      setStuckSignIn({ busy: true });
+      showToast(api.stuckClearedLine(noteResult(await api.clearStuckSignIn())));
+      await refreshStuckSignIn();
+    },
     retryUnconfirmed: async () => { await settle(api.retryUnconfirmed); },
     dropUnconfirmed: async () => {
       setUnconfirmed((old) => old && { ...old, busy: true });

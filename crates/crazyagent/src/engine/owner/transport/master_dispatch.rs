@@ -12,7 +12,7 @@ use tokio::time::{Instant, timeout_at};
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const DRIVE_ATTEMPTS: u32 = 6;
-const DRIVE_PAUSE: Duration = Duration::from_millis(750);
+pub(super) const DRIVE_PAUSE: Duration = Duration::from_millis(750);
 pub(super) const UNKNOWN_OUTCOME: &str = "owner_outcome_unknown_reconcile_same_identity";
 
 struct Dispatch {

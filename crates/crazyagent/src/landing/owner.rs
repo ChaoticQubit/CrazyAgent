@@ -1,14 +1,22 @@
-use super::diff::{self, plain};
+use super::clone;
+use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
-use super::{AcceptOutcome, ChangeSetId, ChangeState, MESSAGE_BYTES_MAX};
+use super::{
+    AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
+    MESSAGE_BYTES_MAX, TargetBranches,
+};
 use crate::engine::EngineError;
+use crate::protocol::ProjectId;
 use rusqlite::Connection;
-use std::path::Path;
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 
 const IDENTITY_BYTES_MAX: usize = 256;
+const JUDGED_MAX: usize = 256;
 const BUSY_STATE: [&str; 11] = [
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
@@ -168,9 +176,10 @@ fn merge(
     Ok((tree, conflicts))
 }
 
-/// The owner's checked-out branch and its commit, refusing a detached HEAD or an
-/// unfinished git operation. Input: the owner checkout. Output: the ref and commit.
-fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), EngineError> {
+/// Refuses an owner repository in the middle of a merge, rebase, cherry-pick, revert or
+/// bisect, or holding git's index or HEAD lock. Input: the owner checkout root. Output:
+/// Ok, or `changes_git_busy`.
+fn idle(repository: &Path) -> Result<(), EngineError> {
     let metadata = repository.join(".git");
     if BUSY_STATE
         .iter()
@@ -178,20 +187,139 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
     {
         return Err(failure("changes_git_busy"));
     }
+    Ok(())
+}
+
+/// The ref the owner's checkout has checked out. Input: the owner checkout. Output: the
+/// `refs/heads/` ref, or None for a detached HEAD.
+fn current_branch(owner: &Repo) -> Result<Option<String>, EngineError> {
     let output = owner.exec(&["symbolic-ref", "-q", "HEAD"], None, &[], 1024)?;
     let reference = match output.code {
         0 => String::from_utf8(output.stdout).map_err(|_| failure("changes_git_unsupported"))?,
-        1 => return Err(failure("changes_detached_head")),
+        1 => return Ok(None),
         _ => return Err(failure("changes_git_failed")),
     };
     let reference = reference.trim_end_matches('\n').to_owned();
-    if !reference.starts_with("refs/heads/") {
-        return Err(failure("changes_detached_head"));
-    }
+    Ok(reference.starts_with("refs/heads/").then_some(reference))
+}
+
+/// The owner's checked-out branch and its commit, refusing a detached HEAD or an
+/// unfinished git operation. Input: the owner checkout. Output: the ref and commit.
+fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), EngineError> {
+    idle(repository)?;
+    let reference = current_branch(owner)?.ok_or_else(|| failure("changes_detached_head"))?;
     let tip = owner
         .commit_of(&reference)?
         .ok_or_else(|| failure("changes_git_unsupported"))?;
     Ok((reference, tip))
+}
+
+/// Where an Accept writes: the owner's checked-out branch through the owner's checkout, a
+/// branch checked out nowhere as its ref alone, or an agent's own branch through that
+/// agent's linked worktree.
+enum Target {
+    Checkout,
+    Ref,
+    Agent(flow::Agent),
+}
+
+/// Finds the worktree, other than the owner's checkout, that has a branch checked out.
+/// Inputs: the owner checkout and the branch ref. Output: the worktree, or None when no
+/// other worktree has it checked out.
+fn checked_out_elsewhere(
+    owner: &Repo,
+    repository: &Path,
+    reference: &str,
+) -> Result<Option<PathBuf>, EngineError> {
+    let listing = owner.capture(
+        &["worktree", "list", "--porcelain", "-z"],
+        super::git::OUTPUT_BYTES_MAX,
+    )?;
+    let wanted = format!("branch {reference}");
+    let mut current: Option<PathBuf> = None;
+    for field in listing.split(|byte| *byte == 0) {
+        let field = std::str::from_utf8(field).map_err(|_| failure("changes_git_unsupported"))?;
+        if let Some(path) = field.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path));
+        } else if field == wanted {
+            return Ok(current.filter(|path| path != repository));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolves the branch an Accept lands on: the owner's checked-out branch when none is
+/// named, else the named local branch, refusing one that is not a plain local branch or
+/// that another worktree than an engine agent worktree on its own branch has checked out.
+/// Inputs: the store, the owner checkout, its root and the named branch. Output: the ref,
+/// its commit and where to write, or `changes_git_busy`, `changes_detached_head`,
+/// `changes_target_invalid` or `changes_target_checked_out`.
+fn landing_target(
+    db: &Connection,
+    owner: &Repo,
+    repository: &Path,
+    target: Option<&str>,
+) -> Result<(String, String, Target), EngineError> {
+    let Some(name) = target else {
+        let (reference, tip) = owner_branch(owner, repository)?;
+        return Ok((reference, tip, Target::Checkout));
+    };
+    idle(repository)?;
+    let reference = format!("refs/heads/{name}");
+    if name.is_empty()
+        || name.len() > BRANCH_BYTES_MAX
+        || name.starts_with('-')
+        || !owner.test(&["check-ref-format", &reference])?
+        || owner.test(&["symbolic-ref", "-q", &reference])?
+    {
+        return Err(failure("changes_target_invalid"));
+    }
+    let tip = owner
+        .commit_of(&reference)?
+        .ok_or_else(|| failure("changes_target_invalid"))?;
+    if current_branch(owner)?.as_deref() == Some(reference.as_str()) {
+        return Ok((reference, tip, Target::Checkout));
+    }
+    let Some(worktree) = checked_out_elsewhere(owner, repository, &reference)? else {
+        return Ok((reference, tip, Target::Ref));
+    };
+    let agents = crate::projects_home::state_folder(repository).join("worktrees");
+    if worktree.parent() != Some(agents.as_path())
+        && worktree.parent() != Some(repository.join("worktrees").as_path())
+    {
+        return Err(failure("changes_target_checked_out"));
+    }
+    let agent = flow::linked_git_dir(&worktree)
+        .and_then(|git_dir| flow::open_agent(db, AgentKind::Sub, repository, &worktree, &git_dir))
+        .map_err(|_| failure("changes_target_checked_out"))?;
+    if agent.branch() != Some(name) {
+        return Err(failure("changes_target_checked_out"));
+    }
+    Ok((reference, tip, Target::Agent(agent)))
+}
+
+/// Lists the local branches of a change set's repository, in git's order and at most
+/// `BRANCHES_MAX`, with the owner's checked-out one. Inputs: the store and the change
+/// set. Output: the branches.
+pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let owner = Repo::open(&repository, &repository.join(".git"), Some(&repository))?;
+    let listing = owner.capture(
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        super::git::OUTPUT_BYTES_MAX,
+    )?;
+    let branches: Vec<String> = String::from_utf8_lossy(&listing)
+        .lines()
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .filter(|name| !name.is_empty() && name.len() <= BRANCH_BYTES_MAX)
+        .take(BRANCHES_MAX)
+        .map(str::to_owned)
+        .collect();
+    let current = current_branch(&owner)?
+        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned));
+    assert!(branches.len() <= BRANCHES_MAX);
+    Ok(TargetBranches { branches, current })
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
@@ -254,12 +382,15 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
-/// `MESSAGE_BYTES_MAX` bytes and plain text. Input: the text. Output: the message, else
-/// `changes_message_invalid`.
+/// `MESSAGE_BYTES_MAX` bytes and without a character `memory::hidden_text` finds. Input:
+/// the text. Output: the message, else `changes_message_invalid`.
 fn edited(text: &str) -> Result<String, EngineError> {
     let message = text.replace("\r\n", "\n");
     let message = message.trim();
-    if message.is_empty() || message.len() > MESSAGE_BYTES_MAX || plain(message) != message {
+    if message.is_empty()
+        || message.len() > MESSAGE_BYTES_MAX
+        || crate::memory::hidden_text(message)
+    {
         return Err(failure("changes_message_invalid"));
     }
     Ok(message.to_owned())
@@ -267,9 +398,9 @@ fn edited(text: &str) -> Result<String, EngineError> {
 
 /// Lands a change set as one squash commit on the owner's checked-out branch: refuses
 /// an unusable checkout or a configured filter or merge driver, merges with
-/// merge-tree, makes the commit with the owner's identity, records the intent, writes
-/// the index and files with a two-tree read-tree and moves the branch by compare and
-/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
+/// merge-tree, refuses a merge that completes a bare-repository layout (SR1-1), makes
+/// the commit with the owner's identity, records the intent, writes the index and files
+/// with a two-tree read-tree and moves the branch by compare and swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
 /// owner's edited message and where a test stops it. Output: the landed commit and branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
@@ -277,6 +408,23 @@ pub(super) fn accept(
     id: &ChangeSetId,
     expected_head: &str,
     message: Option<&str>,
+    stopped: &dyn Fn(Step) -> bool,
+) -> Result<AcceptOutcome, EngineError> {
+    accept_to(db, home, id, expected_head, message, None, stopped)
+}
+
+/// Lands a change set as one squash commit on a target branch, the owner's checked-out
+/// branch when none is named: as [`accept`] through the owner's checkout, by moving the
+/// ref alone for a branch checked out nowhere, or through an agent's worktree for that
+/// agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
+/// commit and branch, or the conflicts.
+pub(super) fn accept_to(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target: Option<&str>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
     let edited = message.map(edited).transpose()?;
@@ -292,9 +440,9 @@ pub(super) fn accept(
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
-    let owner = Repo::open(&git_dir, Some(&repository))?;
-    let (reference, tip) = owner_branch(&owner, &repository)?;
-    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
+    let (reference, tip, target) = landing_target(db, &owner, &repository, target)?;
+    verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -311,7 +459,16 @@ pub(super) fn accept(
     if uses_configured_commands(&owner, &paths, &[&tree])? {
         return Err(failure("changes_git_unsupported"));
     }
-    check_clean(&owner, &repository, &tip, &tree)?;
+    flow::check_layout(&owner, &record.base, &record.head, &tree)?;
+    match &target {
+        Target::Checkout => check_clean(&owner, &repository, &tip, &tree)?,
+        Target::Ref => {}
+        Target::Agent(agent) => {
+            if agent.head()? != tip || !flow::holds_only(&agent.repo, &tip)? {
+                return Err(failure("changes_agent_busy"));
+            }
+        }
+    }
     if tree == owner.tree_of(&tip)? {
         finish(db, &mut record, &tip)?;
         return Ok(AcceptOutcome::Landed {
@@ -323,7 +480,7 @@ pub(super) fn accept(
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
-    verify_objects(&git_dir, &[&commit], &[&tip, &record.head, &record.base])?;
+    verify_objects(&repository, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
         old: tip.clone(),
@@ -333,11 +490,20 @@ pub(super) fn accept(
     if stopped(Step::Recorded) {
         return Err(failure("changes_git_failed"));
     }
-    let written = owner.exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?;
-    if written.code != 0 {
+    let written = match &target {
+        Target::Checkout => Some((&owner, "changes_owner_dirty")),
+        Target::Ref => None,
+        Target::Agent(agent) => Some((&agent.repo, "changes_agent_busy")),
+    };
+    if let Some((checkout, refused)) = written
+        && checkout
+            .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
+            .code
+            != 0
+    {
         record.intent = None;
         store::save(db, &record)?;
-        return Err(failure("changes_owner_dirty"));
+        return Err(failure(refused));
     }
     if stopped(Step::FilesWritten) {
         return Err(failure("changes_git_failed"));
@@ -347,15 +513,32 @@ pub(super) fn accept(
         ("GIT_COMMITTER_EMAIL", identity.1),
     ];
     let message = format!("CrazyAgent: accept {}", id.as_str());
-    let moved = owner.exec(
-        &["update-ref", "-m", &message, &reference, &commit, &tip],
-        None,
-        &env,
-        256,
-    )?;
-    if moved.code != 0 {
-        if owner.test(&["diff-index", "--cached", "--quiet", &commit, "--"])? {
-            let _ = owner.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
+    let moved = match &target {
+        Target::Checkout | Target::Ref => {
+            owner
+                .exec(
+                    &["update-ref", "-m", &message, &reference, &commit, &tip],
+                    None,
+                    &env,
+                    256,
+                )?
+                .code
+                == 0
+        }
+        Target::Agent(agent) => agent
+            .move_head(Some(tip.as_str()), &commit, &message)
+            .is_ok(),
+    };
+    if !moved {
+        let checkout = match &target {
+            Target::Checkout => Some(&owner),
+            Target::Ref => None,
+            Target::Agent(agent) => Some(&agent.repo),
+        };
+        if let Some(checkout) = checkout
+            && checkout.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
+        {
+            let _ = checkout.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
         }
         record.intent = None;
         store::save(db, &record)?;
@@ -381,14 +564,29 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(db, &record)?;
-    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
-        return Err(failure("changes_agent_busy"));
-    }
     let git_dir = repository.join(".git");
-    let owner = Repo::open(&git_dir, Some(&repository))?;
+    let agent = if flow::in_clone(&record) {
+        flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
+        let fetched = clone::fetch(
+            &shared(&repository)?,
+            &repository,
+            &record.worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?;
+        if fetched != record.head {
+            return Err(failure("changes_agent_busy"));
+        }
+        None
+    } else {
+        let agent = flow::agent(db, &record)?;
+        if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
+            return Err(failure("changes_agent_busy"));
+        }
+        Some(agent)
+    };
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
-    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
+    verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -396,7 +594,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
-    verify_objects(&git_dir, &[&merged], &[&record.head, &tip, &record.base])?;
+    verify_objects(&repository, &[&merged], &[&record.head, &tip, &record.base])?;
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
@@ -406,6 +604,9 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
+    let Some(agent) = agent else {
+        return store::save(db, &record);
+    };
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });
@@ -461,7 +662,11 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             old,
             new,
         }) => {
-            let owner = Repo::open(&record.repository.join(".git"), Some(&record.repository))?;
+            let owner = Repo::open(
+                &record.repository,
+                &record.repository.join(".git"),
+                Some(&record.repository),
+            )?;
             let tip = owner.commit_of(&reference)?;
             let written = tip.as_deref() == Some(old.as_str())
                 && owner.test(&["diff-index", "--cached", "--quiet", &new, "--"])?;
@@ -514,4 +719,250 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     }
     assert!(record.intent.is_none());
     Ok(())
+}
+
+/// What the owner's branch tip leaves of one open change set's work: the tip and the tree
+/// merging the work onto it makes, when that merge is clean and adds something, and the
+/// counts the Changes view shows, of that remainder or else of the whole change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Shown {
+    remainder: Option<(String, String)>,
+    counts: (u32, u32, u32),
+}
+
+/// What judging one open change set against the owner's branch tip found.
+enum Judged {
+    Landed,
+    Removed,
+    Open(Shown),
+}
+
+/// The change set judgements made for a repository, base, head and tip, newest last, so a
+/// Changes read whose owner branch and change set did not move runs no git for it.
+type JudgedKey = (PathBuf, String, String, String);
+static JUDGED: Mutex<VecDeque<(JudgedKey, Shown)>> = Mutex::new(VecDeque::new());
+
+/// Says whether a change set's agent copy is gone, read from the disk with no git run: its
+/// worktree folder or its git folder no longer exists, or an agent's own clone no longer
+/// holds its branch. Input: the change set. Output: the answer.
+fn copy_gone(record: &Record) -> Result<bool, EngineError> {
+    let missing = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    if missing(&record.worktree) || missing(&record.git_dir) {
+        return Ok(true);
+    }
+    if flow::in_clone(record) {
+        return Ok(!clone::has_branch(&record.worktree)?);
+    }
+    Ok(false)
+}
+
+/// Judges one open change set against the owner's branch tip with engine git only, reading
+/// and writing objects but never a work tree: removed when its head commit is gone, landed
+/// when the tip holds its head or merging its work onto the tip changes nothing, else the
+/// remainder a clean merge adds. An empty change, a conflicting merge or a configured
+/// filter or merge driver leaves the whole change shown. Inputs: the owner repository, the
+/// change set and the tip. Output: the judgement.
+fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
+    if owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str()) {
+        return Ok(Judged::Removed);
+    }
+    let whole = |owner: &Repo| -> Result<Judged, EngineError> {
+        let stats = diff::stats(owner, &record.base, &record.head)?;
+        Ok(Judged::Open(Shown {
+            remainder: None,
+            counts: (stats.files, stats.added, stats.removed),
+        }))
+    };
+    if owner.tree_of(&record.base)? == owner.tree_of(&record.head)? {
+        return whole(owner);
+    }
+    if owner.test(&["merge-base", "--is-ancestor", &record.head, tip])? {
+        return Ok(Judged::Landed);
+    }
+    let paths = diff::changed_paths(owner, &record.base, &record.head)?;
+    if uses_configured_commands(owner, &paths, &[&record.base, tip, &record.head])? {
+        return whole(owner);
+    }
+    let (tree, conflicts) = merge(owner, &record.base, tip, &record.head)?;
+    if !conflicts.is_empty() {
+        return whole(owner);
+    }
+    if tree == owner.tree_of(tip)? {
+        return Ok(Judged::Landed);
+    }
+    assert!(super::git::is_object_id(&tree));
+    let stats = diff::stats(owner, tip, &tree)?;
+    Ok(Judged::Open(Shown {
+        remainder: Some((tip.to_owned(), tree)),
+        counts: (stats.files, stats.added, stats.removed),
+    }))
+}
+
+/// Judges a change set, reusing the judgement made for the same repository, base, head and
+/// tip. Inputs: the owner repository, the change set and the tip. Output: the judgement.
+fn judged(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
+    let key = (
+        record.repository.clone(),
+        record.base.clone(),
+        record.head.clone(),
+        tip.to_owned(),
+    );
+    let kept = JUDGED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(seen, _)| *seen == key)
+        .map(|(_, shown)| shown.clone());
+    if let Some(shown) = kept {
+        return Ok(Judged::Open(shown));
+    }
+    let found = judge(owner, record, tip)?;
+    if let Judged::Open(shown) = &found {
+        let mut recent = JUDGED.lock().unwrap_or_else(PoisonError::into_inner);
+        recent.retain(|(seen, _)| *seen != key);
+        recent.push_back((key, shown.clone()));
+        while recent.len() > JUDGED_MAX {
+            recent.pop_front();
+        }
+        assert!(recent.len() <= JUDGED_MAX);
+    }
+    Ok(found)
+}
+
+/// Closes a change set whose agent copy, branch or commit is gone as removed outside the
+/// app: discarded, never restorable, its pending ref dropped while the owner repository is
+/// still there. Inputs: the store and the open change set. Output: Ok once closed.
+fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
+    assert!(record.is_open() && record.intent.is_none());
+    record.state = ChangeState::Discarded;
+    record.outside = true;
+    record.restorable_until_ms = None;
+    record.pruned = true;
+    record.waiting = false;
+    record.conflicts.clear();
+    record.updated_ms = flow::now_ms()?;
+    store::save(db, record)?;
+    if std::fs::symlink_metadata(record.repository.join(".git")).is_ok_and(|found| found.is_dir()) {
+        flow::set_engine_ref(
+            &shared(&record.repository)?,
+            &record.repository,
+            &pending_ref(&record.id),
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// Notices what the owner did outside the app to one open change set. The caller holds
+/// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
+/// owner's branch tip, when one is readable, a pending or conflicting set the tip holds
+/// closes as landed outside like an Accept onto that tip, and otherwise its counts become
+/// what is not yet on the tip. Inputs: the store, the change set and the owner repository
+/// with its tip, None while the owner's HEAD is detached, busy or unreadable. Output: the
+/// tip and remainder tree its diff shows, None to show its whole change.
+fn observe_one(
+    db: &Connection,
+    id: &ChangeSetId,
+    owner: Option<&(Repo, String)>,
+) -> Result<Option<(String, String)>, EngineError> {
+    let mut record = settled(db, id)?;
+    if !record.is_open() {
+        return Ok(None);
+    }
+    if copy_gone(&record)? {
+        close_removed(db, &mut record)?;
+        return Ok(None);
+    }
+    let Some((owner, tip)) = owner else {
+        return Ok(None);
+    };
+    if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict) {
+        return Ok(None);
+    }
+    match judged(owner, &record, tip)? {
+        Judged::Removed => {
+            close_removed(db, &mut record)?;
+            Ok(None)
+        }
+        Judged::Landed => {
+            record.outside = true;
+            finish(db, &mut record, tip)?;
+            assert!(!record.is_open());
+            Ok(None)
+        }
+        Judged::Open(shown) => {
+            let (files, added, removed) = shown.counts;
+            if (record.files, record.added, record.removed) != shown.counts {
+                (record.files, record.added, record.removed) = (files, added, removed);
+                store::save(db, &record)?;
+            }
+            Ok(shown.remainder)
+        }
+    }
+}
+
+/// Opens the owner repository for object and ref work and reads its checked-out branch
+/// tip. Input: the owner checkout root. Output: the repository and tip, None while its
+/// HEAD is detached, an operation is unfinished or it cannot be read; an unreadable one is
+/// logged by its plain code.
+fn owner_tip(repository: &Path) -> Option<(Repo, String)> {
+    let found = shared(repository)
+        .and_then(|owner| owner_branch(&owner, repository).map(|(_, tip)| (owner, tip)));
+    match found {
+        Ok(found) => Some(found),
+        Err(error) => {
+            if !matches!(
+                error.0.as_str(),
+                "changes_git_busy" | "changes_detached_head"
+            ) {
+                eprintln!(
+                    "landing_observe_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Notices what the owner did outside the app to every open change set of one project, or
+/// of every project, one repository at a time under its hold, reading each owner tip once.
+/// A change set that cannot be judged now is logged by its plain code and left as it was.
+/// Inputs: the store and the project, None for every project. Output: Ok once each was
+/// judged or left.
+pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let mut by_repository: BTreeMap<PathBuf, Vec<ChangeSetId>> = BTreeMap::new();
+    for record in store::open_of(db, project)? {
+        by_repository
+            .entry(record.repository)
+            .or_default()
+            .push(record.id);
+    }
+    for (repository, ids) in by_repository {
+        let _held = hold(&repository);
+        let owner = owner_tip(&repository);
+        for id in ids {
+            if let Err(error) = observe_one(db, &id, owner.as_ref()) {
+                eprintln!(
+                    "landing_observe_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Notices what the owner did outside the app to one change set before its diff is read.
+/// Inputs: the store and the change set. Output: the tip and remainder tree to show, None
+/// to show its whole change, also once it closed.
+pub(super) fn observe_for_diff(
+    db: &Connection,
+    id: &ChangeSetId,
+) -> Result<Option<(String, String)>, EngineError> {
+    let repository = store::load(db, id)?.repository;
+    let _held = hold(&repository);
+    let owner = owner_tip(&repository);
+    observe_one(db, id, owner.as_ref())
 }

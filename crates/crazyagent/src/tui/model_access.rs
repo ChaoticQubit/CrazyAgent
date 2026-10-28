@@ -215,8 +215,15 @@ impl State {
         self.assert_consistent();
     }
 
+    /// Tells whether an owner change of this screen awaits its outcome. A sign-in still
+    /// open holds only its own account, so it is not one; see `signing_in`.
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some() || self.native_auth.has_pending() || self.profile.has_pending()
+        self.pending.is_some() || self.profile.has_pending()
+    }
+
+    /// Tells whether a native sign-in is still running or its outcome is not confirmed.
+    pub fn signing_in(&self) -> bool {
+        self.native_auth.has_pending()
     }
 
     pub fn loading(&self) -> bool {
@@ -538,6 +545,10 @@ impl State {
                     self.needs_page = true;
                 }
             }
+            UiEvent::Character('c') if self.native_auth.stuck().is_some() => {
+                self.native_auth.clear(self.identity.clone())?;
+                self.notice = self.native_auth.notice().to_owned();
+            }
             UiEvent::Character('x') => {
                 self.form = None;
                 self.notice = "Retained form explicitly discarded".into();
@@ -719,6 +730,15 @@ impl State {
             return Err("Wait for the current metadata read".into());
         }
         edit.validate().map_err(|error| error.to_string())?;
+        if self
+            .native_auth
+            .stuck()
+            .is_some_and(|stuck| edit.touches(stuck))
+        {
+            return Err(
+                "A sign-in for this account is still open; c clears a stuck sign-in".into(),
+            );
+        }
         let generation = self.advance()?;
         let submission = Submission {
             basis,
@@ -751,7 +771,11 @@ impl State {
             }
             Event::NativeAuth(event) => {
                 self.native_auth.apply(*event)?;
-                self.notice = "Native authentication observation updated; metadata retained".into();
+                self.notice = if self.native_auth.is_open() {
+                    "Native authentication observation updated; metadata retained".into()
+                } else {
+                    self.native_auth.notice().to_owned()
+                };
             }
             Event::Read {
                 identity,

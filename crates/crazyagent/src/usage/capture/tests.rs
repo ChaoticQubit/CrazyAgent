@@ -363,6 +363,56 @@ fn a_replaced_or_shortened_record_starts_over_and_an_overlong_line_is_skipped() 
     assert_eq!(Format::of("aider"), None);
 }
 
+#[test]
+fn a_record_that_grows_while_it_is_read_counts_each_line_once_at_the_next_scan() {
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s9.jsonl");
+    append(&record, &claude_assistant("g1", 6, 2, 0, 0, "end_turn"));
+    let mut progress = Progress::default();
+    let opened = open_record(&record).unwrap();
+    let length = opened.2;
+    append(&record, &claude_assistant("g2", 3, 1, 0, 0, "end_turn"));
+    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW);
+    assert_eq!(
+        growth,
+        Tokens {
+            input: 6,
+            output: 2,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+    assert_eq!(progress.offset, length);
+    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 1);
+    assert_eq!(
+        growth,
+        Tokens {
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+    let grown = std::fs::metadata(&record).unwrap().len();
+    assert_eq!(progress.offset, grown);
+
+    let line = claude_assistant("g3", 5, 5, 0, 0, "end_turn");
+    let (head, tail) = line.split_at(25);
+    append(&record, head);
+    let opened = open_record(&record).unwrap();
+    append(&record, tail);
+    let (growth, _) = read_opened(opened, Format::Claude, &mut progress, NOW + 2);
+    assert_eq!(growth, Tokens::default());
+    assert_eq!(progress.offset, grown);
+    let (growth, _) = read_record(&record, Format::Claude, &mut progress, NOW + 3);
+    assert_eq!((growth.input, growth.output), (5, 5));
+    assert_eq!(progress.offset, std::fs::metadata(&record).unwrap().len());
+    assert_eq!(
+        read_record(&record, Format::Claude, &mut progress, NOW + 4).0,
+        Tokens::default()
+    );
+}
+
 fn unattributed(harness: &str) -> Attribution {
     Attribution {
         kind: RunKind::Research,
@@ -836,5 +886,134 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
     assert!(
         scan_runs(&db, |_, _| None, later + 1).unwrap().is_empty(),
         "a kept home registered again never counts its records twice"
+    );
+}
+
+/// One scan that sees limit windows in two Codex records keeps the reading of the most
+/// recently changed one, not that of the older record read after it.
+#[test]
+fn one_scan_keeps_the_limits_of_the_most_recently_changed_codex_record() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let window = |used: f64| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null, "rate_limits": {
+                    "primary": {"used_percent": used, "window_minutes": 300, "resets_in_seconds": 600}
+                }}
+            })
+        )
+    };
+    let older = home
+        .path()
+        .join("sessions/2026/10/26/rollout-2026-10-26T03-00-00-old.jsonl");
+    let newer = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-new.jsonl");
+    append(&older, &window(90.0));
+    append(&newer, &window(10.0));
+    for (path, secs) in [(&older, 1_793_000_000), (&newer, 1_793_000_600)] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    let mut who = attribution(RunKind::Research, None);
+    who.account = Some(CredentialRef::new("codex-a").unwrap());
+    who.harness = "codex".into();
+    scan_home(&db, home.path(), Format::Codex, &who, NOW).unwrap();
+    let stored = super::super::limits(&db, who.account.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.five_hour.map(|window| window.used_percent),
+        Some(10.0),
+        "the newer record's reading is kept"
+    );
+}
+
+/// The record walk examines a bounded number of entries in one home in all, not per folder:
+/// in a home an agent filled with 20 folders of 1,000 records, whose newest records are
+/// spread over every folder, the scan stops before it has seen every folder.
+#[test]
+fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
+    const FOLDERS: usize = 20;
+    const FILES: usize = 1000;
+    let home = tempfile::tempdir().unwrap();
+    for folder in 0..FOLDERS {
+        let dir = home.path().join("projects").join(format!("f{folder:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..FILES {
+            let changed = 1_700_000_000 + u64::try_from(file * FOLDERS + folder).unwrap();
+            std::fs::File::create(dir.join(format!("s{file:04}.jsonl")))
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(changed))
+                .unwrap();
+        }
+    }
+    let found = records(home.path(), Format::Claude);
+    assert_eq!(found.len(), FILES_PER_SCAN_MAX);
+    let folders: std::collections::BTreeSet<&Path> =
+        found.iter().map(|path| path.parent().unwrap()).collect();
+    assert!(
+        folders.len() < FOLDERS,
+        "the walk read all {FOLDERS} folders of 1,000 records"
+    );
+}
+
+/// A home past the entry bound still counts the record that changed last: the walk enters
+/// the most recently changed folder first and reads every entry of it, so the bound leaves
+/// out only folders that changed before. Here that record is the last entry of a folder of
+/// 1,100 records that a walk in plain directory order reaches last.
+#[test]
+fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+    const FOLDERS: usize = 20;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("projects");
+    let at =
+        |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + secs);
+    for folder in 0..FOLDERS {
+        let dir = projects.join(format!("f{folder:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..1100 {
+            std::fs::File::create(dir.join(format!("s{file:04}.jsonl")))
+                .unwrap()
+                .set_modified(at(u64::try_from(file).unwrap()))
+                .unwrap();
+        }
+    }
+    let listed = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let folders = listed(&projects);
+    let last = folders[0].clone();
+    for dir in &folders[1..] {
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(at(0))
+            .unwrap();
+    }
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    let added = scan_home(
+        &db,
+        home.path(),
+        Format::Claude,
+        &attribution(RunKind::Agent, None),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (added.input, added.output),
+        (7, 3),
+        "the record that changed last is counted"
     );
 }

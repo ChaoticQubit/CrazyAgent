@@ -18,6 +18,8 @@ const EXPIRY_MAX: Duration = Duration::from_secs(1800);
 const UNREACHABLE_MAX: u32 = 5;
 const GH_TIME: Duration = Duration::from_secs(10);
 const LOGIN_BYTES_MAX: usize = 39;
+const REPO_NAME_SHOWN_MAX: usize = 201;
+const BRANCH_SHOWN_MAX: usize = 255;
 
 /// Where the engine talks to GitHub: the REST API and the web host that serves the device
 /// flow and git. `allow_http` is true only for a loopback server on 127.0.0.1.
@@ -107,6 +109,22 @@ fn short_text(value: &str, max: usize) -> Result<String, EngineError> {
         return Err(failure("github_reply_invalid"));
     }
     Ok(value.to_owned())
+}
+
+/// Shows text from GitHub the way the owner can read it: control and hidden characters,
+/// line breaks and tabs included, escaped, then cut to at most `max` bytes on a character
+/// boundary. Inputs: the text and the byte bound. Output: the visible text.
+fn shown(value: &str, max: usize) -> String {
+    let flat = value.replace('\n', "\\u000a").replace('\t', "\\u0009");
+    let mut text = crate::memory::visible_text(&flat);
+    let mut end = text.len().min(max);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    assert!(text.len() <= max);
+    assert!(!text.chars().any(char::is_control));
+    text
 }
 
 /// Asks GitHub for a device code with the `repo read:user` scopes.
@@ -313,18 +331,28 @@ pub fn repos(
         return Err(failure("github_reply_invalid"));
     }
     let full = listed.len() == REPOS_PER_PAGE as usize;
-    let repos = listed
+    let repos: Vec<GitHubRepo> = listed
         .into_iter()
         .map(|repo| {
-            super::clone::full_name(&repo.full_name)?;
-            Ok(GitHubRepo {
-                full_name: repo.full_name,
+            let refused = super::clone::full_name(&repo.full_name).is_err();
+            let branch = repo
+                .default_branch
+                .as_deref()
+                .filter(|branch| !branch.is_empty());
+            GitHubRepo {
+                full_name: if refused {
+                    shown(&repo.full_name, REPO_NAME_SHOWN_MAX)
+                } else {
+                    repo.full_name
+                },
                 private: repo.private,
-                default_branch: short_text(repo.default_branch.as_deref().unwrap_or("main"), 255)?,
+                default_branch: shown(branch.unwrap_or("main"), BRANCH_SHOWN_MAX),
                 size_kb: repo.size,
-            })
+                refused: refused.then(|| "github_repo_name_unsupported".to_owned()),
+            }
         })
-        .collect::<Result<Vec<_>, EngineError>>()?;
+        .collect();
+    assert!(repos.len() <= REPOS_PER_PAGE as usize);
     Ok(GitHubRepoPage {
         repos,
         next: (full && page < REPO_PAGE_MAX).then_some(page + 1),

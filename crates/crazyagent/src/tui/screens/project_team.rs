@@ -8,8 +8,9 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, DelegationPath, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
-    TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, BranchMode, ChildLanding, DelegationPath, SwitchMode,
+    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
+    TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -250,6 +251,15 @@ impl TeamView {
     /// top, then stopped agents, each oldest first.
     /// Takes the view. Returns the agents, empty before the first read.
     pub fn agents(&self) -> Vec<&TeamAgent> {
+        self.agent_tree()
+            .into_iter()
+            .map(|(agent, _)| agent)
+            .collect()
+    }
+
+    /// Lists the agents as `agents` does, each with its depth under its lead (N2), so a
+    /// lead's workers show right below it. Takes the view. Returns the agents and depths.
+    fn agent_tree(&self) -> Vec<(&TeamAgent, usize)> {
         let mut agents: Vec<&TeamAgent> = self
             .status
             .iter()
@@ -262,7 +272,7 @@ impl TeamView {
                 agent.id,
             )
         });
-        agents
+        crate::team::lead_tree(&agents)
     }
 
     /// Lists the tasks in display order: unfinished first, oldest first, then
@@ -365,6 +375,13 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('w') => self.keep_warm(),
+            KeyCode::Char('t') => self.time_limit(Limit::Task),
+            KeyCode::Char('l') => self.time_limit(Limit::Session),
+            KeyCode::Char('i') => self.time_limit(Limit::Idle),
+            KeyCode::Char('h') => self.harness_switch(),
+            KeyCode::Char('d') => self.sub_agent_depth(),
+            KeyCode::Char('k') => self.child_landing(),
+            KeyCode::Char('b') => self.agent_branches(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -829,6 +846,194 @@ impl TeamView {
         })
     }
 
+    /// Moves one time limit to its next choice. The task and session limits go Off, then
+    /// 30 min up to 8 h, then Off again; when both are set, the other follows so a session is
+    /// never shorter than a task, and Off on either bounds nothing. The idle stop goes Off,
+    /// 2 min, 10 min, 1 h. Takes which limit. Returns the
+    /// change, or Handled while the team loads or saves.
+    fn time_limit(&mut self, which: Limit) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let below = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if a < b);
+        let limits = &crate::team::LIMIT_CHOICES_SECS;
+        let (turn, kept, idle) = (
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+        );
+        let (turn, kept, idle) = match which {
+            Limit::Task => {
+                let next = next_limit(limits, turn);
+                (next, if below(kept, next) { next } else { kept }, idle)
+            }
+            Limit::Session => {
+                let next = next_limit(limits, kept);
+                (if below(next, turn) { next } else { turn }, next, idle)
+            }
+            Limit::Idle => (
+                turn,
+                kept,
+                next_limit(&crate::team::IDLE_CHOICES_SECS, idle),
+            ),
+        };
+        self.changing = Some(match which {
+            Limit::Idle => format!(
+                "{} An idle master stops {} after its work is done.",
+                idle.map_or_else(
+                    || "Idle sub-agents now keep running until the team stops.".to_owned(),
+                    |secs| {
+                        format!(
+                            "An idle sub-agent now stops after {}.",
+                            crate::team::span_words(secs.into())
+                        )
+                    },
+                ),
+                crate::team::span_words(crate::team::MASTER_IDLE_STOP_SECS.into())
+            ),
+            Limit::Task | Limit::Session => format!(
+                "Each task may now run {}, each agent session {}.",
+                limit_words(turn),
+                limit_words(kept)
+            ),
+        });
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: self.project.clone(),
+            turn_secs: turn,
+            session_secs: kept,
+            idle_secs: idle,
+        })
+    }
+
+    /// Flips the On harness switch setting between Carry over and Start fresh.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn harness_switch(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.on_harness_switch {
+            SwitchMode::Carry => SwitchMode::Fresh,
+            SwitchMode::Fresh => SwitchMode::Carry,
+        };
+        self.changing = Some(
+            match mode {
+                SwitchMode::Carry => {
+                    "When the master harness changes, the new harness gets the earlier conversation."
+                }
+                SwitchMode::Fresh => {
+                    "When the master harness changes, the new harness starts fresh."
+                }
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
+    /// Moves the Sub-agent depth setting to its next choice, 1 after 3.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn sub_agent_depth(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let choices = crate::team::DEPTH_CHOICES;
+        let depth = choices
+            .iter()
+            .position(|choice| *choice == status.sub_agent_depth)
+            .map_or(choices[0], |at| choices[(at + 1) % choices.len()]);
+        self.changing = Some(depth_note(depth).to_owned());
+        TeamReply::Change(TeamAction::SubAgentDepth {
+            project_id: self.project.clone(),
+            depth,
+        })
+    }
+
+    /// Flips where a lead's worker lands its change set between the lead's Accept and the
+    /// owner's own. Output: the change to send, or Handled with a notice while loading or
+    /// saving.
+    fn child_landing(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.child_landing {
+            ChildLanding::Lead => ChildLanding::Owner,
+            ChildLanding::Owner => ChildLanding::Lead,
+        };
+        self.changing = Some(
+            match mode {
+                ChildLanding::Lead => {
+                    "A lead's worker now lands on the lead's branch when the lead accepts it."
+                }
+                ChildLanding::Owner => "A lead's worker now lands only when you accept it.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::ChildLanding {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
+    /// Flips the Agent branches setting between Named branch and Detached.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn agent_branches(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.agent_branches {
+            BranchMode::Named => BranchMode::Detached,
+            BranchMode::Detached => BranchMode::Named,
+        };
+        self.changing = Some(
+            match mode {
+                BranchMode::Named => "Each new agent now works on its own branch.",
+                BranchMode::Detached => "New agents now work on a detached HEAD.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -855,7 +1060,7 @@ impl TeamView {
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
-        let mut lines = vec![self.summary(content, look)];
+        let mut lines = self.summary(content, look);
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
@@ -883,7 +1088,8 @@ impl TeamView {
         if wide {
             lines.push(Row::default());
         }
-        let agents = self.agents();
+        let tree = self.agent_tree();
+        let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
         let (panel, caret) = match (&self.draft, self.wake) {
             (Some(draft), _) => {
@@ -925,8 +1131,14 @@ impl TeamView {
         for (index, agent) in agents.iter().enumerate().skip(first).take(agent_rows) {
             let current = agent.task.and_then(|id| self.task(id));
             let last = current.is_none().then(|| self.last_task(agent)).flatten();
+            let depth = tree[index].1;
+            let shown = if depth == 0 {
+                agent.label.clone()
+            } else {
+                format!("{}\u{21b3} {}", "  ".repeat(depth - 1), agent.label)
+            };
             let mut cells = vec![
-                Row::of(agent.label.clone(), look.fg),
+                Row::of(shown, look.fg),
                 Row::of(harness_name(&agent.harness, None), look.fg),
             ];
             if wide {
@@ -990,9 +1202,16 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    fn summary(&self, content: usize, look: &Look) -> Row {
+    /// The Team rows: the agent counts and alerts, then every team setting in order (Keep
+    /// warm, Task, Session, Idle stop, On harness switch, Sub-agent depth, Worker lands, Agent
+    /// branches), each whole. A
+    /// setting that does not fit on the row starts the next one, right-aligned under the
+    /// first. Counts wider
+    /// than the content are cut with an ellipsis like any row. Inputs: the content width and
+    /// the look. Output: one row, or more when the settings wrap.
+    fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
         let Some(status) = &self.status else {
-            return Row::of("Team", look.accent).pad(content);
+            return vec![Row::of("Team", look.accent).pad(content)];
         };
         let count = |wanted: &[AgentStatus]| {
             status
@@ -1032,9 +1251,57 @@ impl TeamView {
                 .push("  ", Style::new())
                 .push("auto-wake paused", look.warning);
         }
-        let right = Row::of("Keep warm  ", look.muted)
-            .push(if status.keep_warm { "On" } else { "Off" }, look.fg);
-        spread(content, left, right)
+        if status.partial {
+            left = left
+                .push("  ", Style::new())
+                .push("older history hidden", look.muted);
+        }
+        let setting = |label: &str, value: String| {
+            Row::of(format!("{label}  "), look.muted).push(value, look.fg)
+        };
+        let settings = [
+            setting(
+                "Keep warm",
+                if status.keep_warm { "On" } else { "Off" }.to_owned(),
+            ),
+            setting("Task", limit_label(status.turn_limit_secs)),
+            setting("Session", limit_label(status.session_limit_secs)),
+            setting("Idle stop", limit_label(status.idle_stop_secs)),
+            setting(
+                "On harness switch",
+                switch_words(status.on_harness_switch).to_owned(),
+            ),
+            setting("Sub-agent depth", status.sub_agent_depth.to_string()),
+            setting(
+                "Worker lands",
+                landing_words(status.child_landing).to_owned(),
+            ),
+            setting(
+                "Agent branches",
+                branch_words(status.agent_branches).to_owned(),
+            ),
+        ];
+        let mut rows = Vec::new();
+        let mut right = Row::default();
+        for item in settings {
+            let used = match (left.width(), right.width()) {
+                (0, 0) => 0,
+                (0, taken) | (taken, 0) => taken + 2,
+                (lead, taken) => lead + 2 + taken + 2,
+            };
+            if used > 0 && used + item.width() > content {
+                rows.push(spread(content, left, right));
+                left = Row::default();
+                right = Row::default();
+            }
+            right = if right.width() == 0 {
+                item
+            } else {
+                right.push("  ", look.muted).cat(item)
+            };
+        }
+        rows.push(spread(content, left, right));
+        rows
     }
 
     fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
@@ -1219,6 +1486,13 @@ impl TeamView {
             ("n", "New task"),
             ("x", "Cancel task"),
             ("w", "Keep warm"),
+            ("t", "Task limit"),
+            ("l", "Session limit"),
+            ("i", "Idle stop"),
+            ("h", "On harness switch"),
+            ("d", "Sub-agent depth"),
+            ("k", "Worker lands"),
+            ("b", "Agent branches"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1234,6 +1508,43 @@ impl TeamView {
         help.extend([TABS, ("Esc", "Home")]);
         help
     }
+}
+
+/// Which team time limit a key moves.
+#[derive(Clone, Copy)]
+enum Limit {
+    Task,
+    Session,
+    Idle,
+}
+
+/// The time limit choice after `current`: Off, then each of `choices`, then Off again; a
+/// stored value outside the choices goes to Off. Inputs: the choices in seconds, ascending,
+/// and the limit now. Output: the next.
+fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
+    match current {
+        None => Some(choices[0]),
+        Some(secs) => choices
+            .iter()
+            .position(|choice| *choice == secs)
+            .and_then(|at| choices.get(at + 1).copied()),
+    }
+}
+
+/// A time limit as Team settings shows it, "Off" for none. Input: the limit in seconds.
+fn limit_label(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "Off".to_owned(),
+        |secs| crate::team::span_words(secs.into()),
+    )
+}
+
+/// A time limit in a sentence: "as long as it needs" for none, else "up to 1 h".
+fn limit_words(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "as long as it needs".to_owned(),
+        |secs| format!("up to {}", crate::team::span_words(secs.into())),
+    )
 }
 
 /// Turns a team refusal code into the sentence shown to the owner.
@@ -1257,6 +1568,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_task_limit" => "This project has reached its task limit.".into(),
         "team_wake_cap_invalid" => "Set the hourly limit between 0 and 500 wakes.".into(),
+        "team_time_limits_invalid" => {
+            "Pick a listed time limit; an agent session may not be shorter than a task.".into()
+        }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
         other => plain_problem(other),
@@ -1401,6 +1715,41 @@ fn tools_word(on: bool) -> &'static str {
         "On, inside the project folder"
     } else {
         "Off"
+    }
+}
+
+/// The short words for the On harness switch setting on the team summary row.
+/// Takes the mode. Returns its choice name.
+/// What the owner reads after picking a Sub-agent depth. Input: the depth, 1 to 3.
+/// Output: the sentence.
+fn depth_note(depth: u8) -> &'static str {
+    match depth {
+        1 => "Only the master starts sub-agents now.",
+        2 => "The master's sub-agents can now lead workers of their own.",
+        _ => "Workers can now lead workers of their own, three levels deep.",
+    }
+}
+
+fn landing_words(mode: ChildLanding) -> &'static str {
+    match mode {
+        ChildLanding::Lead => "When the lead accepts",
+        ChildLanding::Owner => "Only when I accept",
+    }
+}
+
+fn switch_words(mode: SwitchMode) -> &'static str {
+    match mode {
+        SwitchMode::Carry => "Carry over",
+        SwitchMode::Fresh => "Start fresh",
+    }
+}
+
+/// The short words for the Agent branches setting on the team summary row.
+/// Takes the mode. Returns its choice name.
+fn branch_words(mode: BranchMode) -> &'static str {
+    match mode {
+        BranchMode::Named => "Named branch",
+        BranchMode::Detached => "Detached",
     }
 }
 

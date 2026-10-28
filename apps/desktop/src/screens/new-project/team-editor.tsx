@@ -3,7 +3,7 @@ import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
-  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TEAM_FULL_NOTE, addHarnessRow, agentTotalText, anyHarnessNote, harnessChoices, harnessLabel,
+  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TEAM_FULL_NOTE, addHarnessRow, agentTotalText, anyHarnessNote, entry, harnessChoices, harnessLabel,
   poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamFull, teamNotes,
 } from "./wizard";
 import type { TeamDraft } from "./wizard";
@@ -37,9 +37,10 @@ function HarnessSelect({ id, value, harnesses, onChange, label }: {
 }) {
   const choices = harnesses ? harnessChoices(harnesses) : Object.entries(KNOWN).map(([key, name]) => ({ id: key, label: name, group: "", disabled: false }));
   const groups = [...new Set(choices.map((choice) => choice.group))];
-  const known = choices.some((choice) => choice.id === value);
-  return <select className="pj-select" id={id} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
-    {!known && <option value={value}>{harnessName(harnesses, value) || "Pick a harness"}</option>}
+  const shown = entry(harnesses, value)?.id ?? value;
+  const known = choices.some((choice) => choice.id === shown);
+  return <select className="pj-select" id={id} aria-label={label} value={shown} onChange={(event) => onChange(event.target.value)}>
+    {!known && <option value={shown}>{harnessName(harnesses, shown) || "Pick a harness"}</option>}
     {groups.map((group) => group
       ? <optgroup key={group} label={group}>{choices.filter((choice) => choice.group === group).map((choice) => <option key={choice.id} value={choice.id} disabled={choice.disabled}>{choice.label}</option>)}</optgroup>
       : choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>))}

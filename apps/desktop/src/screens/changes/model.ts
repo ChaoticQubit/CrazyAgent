@@ -48,8 +48,11 @@ export function sizeLine(set: ChangeSet): string {
   return `${plural(set.files, "file", "files")}, ${plural(set.added, "line", "lines")} added, ${set.removed} removed`;
 }
 
-/** The status word and tone of a change set's state. Input: the change set. */
+/** The status word and tone of a change set's state, saying when the engine closed it
+ * because its work was landed or removed outside the app. Input: the change set. */
 export function stateBadge(set: ChangeSet): { word: string; tone: Tone } {
+  if (set.outside && set.state === "accepted") return { word: "Landed outside the app", tone: "ok" };
+  if (set.outside && set.state === "discarded") return { word: "Removed outside the app", tone: "neutral" };
   return set.state === "updating" && set.waiting ? { word: "Updated, waiting for the agent", tone: "warn" } : STATES[set.state];
 }
 
@@ -123,9 +126,12 @@ function restorable(set: ChangeSet, now: number): boolean {
   return set.restorable_until_ms !== null && set.restorable_until_ms > now;
 }
 
-/** Says until when discarded changes can be restored. Inputs: the change set and now in
- * milliseconds. Output: the note, or null for a change set that is not discarded. */
+/** Says until when discarded changes can be restored, or that work landed or removed
+ * outside the app needs nothing more. Inputs: the change set and now in milliseconds.
+ * Output: the note, or null for a change set that is neither discarded nor closed outside. */
 export function restoreNote(set: ChangeSet, now: number): string | null {
+  if (set.outside && set.state === "accepted") return "Your branch already has these changes. They were landed outside the app.";
+  if (set.outside && set.state === "discarded") return "The agent's copy of these changes was removed outside the app, so they cannot be restored.";
   if (set.state !== "discarded") return null;
   if (!restorable(set, now)) return "These changes can no longer be restored.";
   const until = new Date(set.restorable_until_ms ?? now).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
@@ -148,11 +154,11 @@ export function conflictNote(set: ChangeSet): string | null {
 }
 
 /** The owner's edited commit message as Accept sends it: line ends made \n, trimmed.
- * Input: the editor text. Output: the message, or null when it is empty or longer than
- * the engine takes. */
+ * Input: the editor text. Output: the message, or null when it is empty, longer than the
+ * engine takes or holds a character displayText would show as an escape. */
 export function commitMessage(text: string): string | null {
   const message = text.replace(/\r\n/g, "\n").trim();
-  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX ? message : null;
+  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX && displayText(message) === message ? message : null;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own
@@ -179,4 +185,18 @@ export function fileMarks(file: ChangedFile): string[] {
  * codes, become visible escapes; newlines and tabs stay. Input: the text. Output: the text. */
 export function diffText(text: string): string {
   return displayText(text);
+}
+
+/** Counts the change sets waiting for the owner: ready to review or conflicting with their
+ * branch. One its agent is updating waits on the agent instead. Input: the change sets.
+ * Output: the count. */
+export function waitingCount(sets: readonly ChangeSet[]): number {
+  return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
+}
+
+/** The line that tells the owner change sets wait in Changes. Input: the count. Output: the
+ * line, or null when none wait. */
+export function waitingLine(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1 ? "1 change set is waiting for you in Changes" : `${count} change sets are waiting for you in Changes`;
 }

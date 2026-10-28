@@ -42,7 +42,7 @@ export function TextField({ id, label, value, onValue, helper, error, maxLength,
 
 /** A labelled multi-line text area with helper, error and an optional near-limit counter.
  * Inputs: id, label, value, change handler, rows, helper, error, max length, counter threshold. */
-export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt }: {
+export function TextArea({ id, label, value, onValue, rows = 3, helper, error, maxLength, counterAt, readOnly = false }: {
   id: string;
   label: string;
   value: string;
@@ -52,10 +52,11 @@ export function TextArea({ id, label, value, onValue, rows = 3, helper, error, m
   error?: string;
   maxLength?: number;
   counterAt?: number;
+  readOnly?: boolean;
 }) {
   return <div className="field">
     <label htmlFor={id}>{label}</label>
-    <textarea id={id} className="textarea" rows={rows} value={value} maxLength={maxLength} aria-invalid={error ? true : undefined}
+    <textarea id={id} className="textarea" rows={rows} value={value} maxLength={maxLength} readOnly={readOnly} aria-invalid={error ? true : undefined}
       aria-describedby={describedBy(id, helper, error)} onChange={(event) => onValue(event.target.value)} />
     <Counter value={value} maxLength={maxLength} counterAt={counterAt} />
     <Messages id={id} helper={helper} error={error} />

@@ -88,3 +88,110 @@ fn the_master_counts_as_its_projects_master_and_an_agent_without_an_account_is_u
         ]
     );
 }
+
+#[test]
+fn a_step_that_panics_ends_only_that_step_and_the_next_step_still_counts() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch(
+        "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
+            connection TEXT, status TEXT, stopped_ms INTEGER);
+         INSERT INTO team_agents VALUES (4,'alpha','sub_agent','claude-code',NULL,'working',NULL);
+         CREATE TABLE held (n INTEGER);",
+    )
+    .unwrap();
+    append(
+        &team.join("agents/agent-4/home/projects/f/s4.jsonl"),
+        &assistant("m4", 9),
+    );
+    let mut usage = Usage::open(
+        &root.join("engine.db"),
+        &team,
+        Box::new(|| None),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let panicked = guarded(|| {
+        let tx = usage.db.unchecked_transaction().map_err(storage)?;
+        tx.execute("INSERT INTO held (n) VALUES (1)", [])
+            .map_err(storage)?;
+        panic!("a step broke an invariant");
+    });
+    assert_eq!(panicked.as_deref(), Some("usage_step_panicked"));
+    let held: i64 = db
+        .query_row("SELECT COUNT(*) FROM held", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(held, 0);
+    assert_eq!(guarded(|| usage.step(NOW)), None);
+    let counted: i64 = db
+        .query_row(
+            "SELECT SUM(input) FROM usage_tokens WHERE agent='team-4'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(counted, 9);
+    assert_eq!(
+        guarded(|| Err(failure("usage_unavailable"))).as_deref(),
+        Some("usage_unavailable")
+    );
+}
+
+#[test]
+fn a_step_that_keeps_panicking_is_logged_once_and_waits_longer_each_time() {
+    let mut pace = Pace::default();
+    let panicked = || Some(STEP_PANICKED.to_owned());
+    let unavailable = || Some("usage_unavailable".to_owned());
+    assert_eq!(pace.after(None), (Vec::new(), SCAN_EVERY));
+    assert_eq!(
+        pace.after(guarded(|| panic!("a step broke an invariant"))),
+        (
+            vec!["usage: usage_step_panicked".to_owned()],
+            SCAN_EVERY * 2
+        )
+    );
+    let pauses: Vec<Duration> = (0..10)
+        .map(|_| {
+            let (lines, pause) = pace.after(panicked());
+            assert!(lines.is_empty(), "{lines:?}");
+            pause
+        })
+        .collect();
+    assert_eq!(
+        pauses[..3],
+        [SCAN_EVERY * 4, SCAN_EVERY * 8, SCAN_EVERY * 16]
+    );
+    assert!(pauses.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(pauses.last(), Some(&PANIC_PAUSE_MAX));
+    assert_eq!(
+        pace.after(None),
+        (
+            vec!["usage: 11 steps in a row panicked before this one".to_owned()],
+            SCAN_EVERY
+        )
+    );
+
+    assert_eq!(
+        pace.after(unavailable()),
+        (vec!["usage: usage_unavailable".to_owned()], SCAN_EVERY)
+    );
+    assert_eq!(pace.after(unavailable()), (Vec::new(), SCAN_EVERY));
+    assert_eq!(
+        pace.after(panicked()),
+        (
+            vec!["usage: usage_step_panicked".to_owned()],
+            SCAN_EVERY * 2
+        )
+    );
+    assert_eq!(
+        pace.after(unavailable()),
+        (vec!["usage: usage_unavailable".to_owned()], SCAN_EVERY),
+        "one panic needs no count line"
+    );
+    for _ in 0..u32::BITS + 2 {
+        pace.after(panicked());
+    }
+    assert_eq!(pace.after(panicked()).1, PANIC_PAUSE_MAX);
+}

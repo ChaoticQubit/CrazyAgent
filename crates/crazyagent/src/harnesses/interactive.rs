@@ -218,11 +218,10 @@ pub fn command(
         .working_dir
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let profile = request
-        .sandbox_profile
-        .as_deref()
-        .ok_or_else(|| failure("launch_sandbox_required"))?;
-    let mut argv = vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?];
+    let mut argv = match request.sandbox_profile.as_deref() {
+        Some(profile) => vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?],
+        None => Vec::new(),
+    };
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let mut env = vec![
         ("HOME".to_owned(), home.clone()),
@@ -305,7 +304,7 @@ pub fn command(
     if let Some(key) = request.account.key() {
         assert!(!exposes(&built, key));
     }
-    assert_eq!(built.argv[0], SANDBOX_EXEC);
+    assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
     Ok(built)
 }
 
@@ -378,6 +377,12 @@ fn claude(
     });
     if let Some(key_file) = key_file {
         settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if installed.is_some_and(Installed::runs_hooks) {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
     }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),

@@ -10,6 +10,7 @@ pub mod cleanup;
 pub mod direct;
 pub mod events;
 pub mod graph;
+pub mod history;
 pub mod master;
 pub mod names;
 pub mod runtime;
@@ -33,9 +34,24 @@ const TASK_HISTORY: &str =
 pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
+pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
+const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
 pub const DELEGATE_MARKER: &str = "DELEGATE";
+pub const WAKE_MARKER: &str = "WAKE";
+pub const WAKE_NAME_BYTES_MAX: usize = 64;
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
+/// The task and session time limits the owner may choose, in seconds: 30 min, 1 h, 2 h,
+/// 4 h and 8 h. No limit is the default and is stored as none.
+pub const LIMIT_CHOICES_SECS: [u32; 5] = [1800, 3600, 7200, 14_400, 28_800];
+/// How long an idle sub-agent may wait for work before it stops, in seconds: 2 min, 10 min
+/// and 1 h. Never stopping is the other choice, stored as zero.
+pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
+/// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
+/// stopped while that work still runs, and no owner setting changes it.
+pub const MASTER_IDLE_STOP_SECS: u32 = 900;
+/// The idle stop a team starts with: 10 minutes.
+pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
 
 /// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
 /// on the agent's task until the master hears a short note of it on its next turn.
@@ -336,6 +352,115 @@ pub fn delegation_path(harness: &str, tools: bool) -> DelegationPath {
     }
 }
 
+/// The owner's setting for a master harness switch: `Carry` continues the session's
+/// conversation on the new harness with a bounded handoff of its earlier turns and open
+/// tasks, `Fresh` starts the new harness's conversation without them. Carry is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMode {
+    #[default]
+    Carry,
+    Fresh,
+}
+
+impl SwitchMode {
+    /// The stored name of the mode. Output: `carry` or `fresh`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Carry => "carry",
+            Self::Fresh => "fresh",
+        }
+    }
+
+    /// Reads a stored mode name. Input: the name. Output: the mode, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Carry, Self::Fresh]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// The owner's Sub-agent depth choices: 1 lets only the master start sub-agents, 2 lets
+/// the master's sub-agents lead workers of their own, 3 lets those workers lead too.
+pub const DEPTH_CHOICES: [u8; 3] = [1, 2, 3];
+/// The Sub-agent depth a project has until the owner picks another.
+pub const DEPTH_DEFAULT: u8 = 2;
+const _: () = assert!(DEPTH_DEFAULT >= DEPTH_CHOICES[0] && DEPTH_DEFAULT <= DEPTH_CHOICES[2]);
+
+/// The owner's setting for where a lead's worker lands its change set: `Lead` lets the lead
+/// accept it onto the lead's own branch, `Owner` keeps every change set for the owner's own
+/// Accept in Changes. Lead is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildLanding {
+    #[default]
+    Lead,
+    Owner,
+}
+
+impl ChildLanding {
+    /// The stored name of the setting. Output: `lead` or `owner`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Lead, Self::Owner]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// The owner's setting for where a new sub-agent commits: `Named` checks out the engine's
+/// branch `crazyagent/agent-<id>` in the agent's worktree, so each agent works on its own
+/// branch; `Detached` keeps the older detached HEAD. Named is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMode {
+    #[default]
+    Named,
+    Detached,
+}
+
+impl BranchMode {
+    /// The stored name of the mode. Output: `named` or `detached`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Detached => "detached",
+        }
+    }
+
+    /// Reads a stored mode name. Input: the name. Output: the mode, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Named, Self::Detached]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// A project's nested sub-agent settings: how deep leads may start workers and where a
+/// worker's change set lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nesting {
+    pub depth: u8,
+    pub lands: ChildLanding,
+}
+
+/// The latest master harness switch of the project's live session, for the divider its
+/// conversation shows: the harness's display name, what it was given under the owner's
+/// setting and the note that says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSwitch {
+    pub harness: String,
+    pub mode: SwitchMode,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum TeamAction {
@@ -355,6 +480,24 @@ pub enum TeamAction {
     KeepWarm {
         project_id: ProjectId,
         on: bool,
+    },
+    TimeLimits {
+        project_id: ProjectId,
+        turn_secs: Option<u32>,
+        session_secs: Option<u32>,
+        idle_secs: Option<u32>,
+    },
+    OnHarnessSwitch {
+        project_id: ProjectId,
+        mode: SwitchMode,
+    },
+    SubAgentDepth {
+        project_id: ProjectId,
+        depth: u8,
+    },
+    ChildLanding {
+        project_id: ProjectId,
+        mode: ChildLanding,
     },
     LiveMaster {
         project_id: ProjectId,
@@ -383,6 +526,18 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
         handle: String,
+    },
+    FinishedAgents {
+        project_id: ProjectId,
+        show: bool,
+    },
+    AgentBranches {
+        project_id: ProjectId,
+        mode: BranchMode,
+    },
+    WakeAgent {
+        project_id: ProjectId,
+        agent: i64,
     },
 }
 
@@ -441,7 +596,38 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::TimeLimits {
+                turn_secs,
+                session_secs,
+                idle_secs,
+                ..
+            } => {
+                let choice =
+                    |secs: &Option<u32>| secs.is_none_or(|secs| LIMIT_CHOICES_SECS.contains(&secs));
+                let idle = idle_secs.is_none_or(|secs| IDLE_CHOICES_SECS.contains(&secs));
+                let ordered = match (turn_secs, session_secs) {
+                    (Some(turn), Some(session)) => session >= turn,
+                    _ => true,
+                };
+                (choice(turn_secs) && choice(session_secs) && idle && ordered)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_time_limits_invalid"))
+            }
+            Self::WakeAgent { agent, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                Ok(())
+            }
+            Self::SubAgentDepth { depth, .. } => DEPTH_CHOICES
+                .contains(depth)
+                .then_some(())
+                .ok_or_else(|| failure("team_depth_invalid")),
             Self::KeepWarm { .. }
+            | Self::ChildLanding { .. }
+            | Self::OnHarnessSwitch { .. }
+            | Self::FinishedAgents { .. }
+            | Self::AgentBranches { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -457,6 +643,12 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::TimeLimits { project_id, .. }
+            | Self::OnHarnessSwitch { project_id, .. }
+            | Self::SubAgentDepth { project_id, .. }
+            | Self::ChildLanding { project_id, .. }
+            | Self::FinishedAgents { project_id, .. }
+            | Self::AgentBranches { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -467,7 +659,9 @@ impl TeamAction {
                 events::RuleTarget::Project { project_id }
                 | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
             },
-            Self::Rename { project_id, .. } => Some(project_id),
+            Self::Rename { project_id, .. } | Self::WakeAgent { project_id, .. } => {
+                Some(project_id)
+            }
         }
     }
 }
@@ -641,14 +835,7 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if found.len() == DELEGATIONS_PER_REPLY_MAX {
             break;
         }
-        let line = line
-            .trim()
-            .trim_start_matches(|c: char| {
-                c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
-            })
-            .trim()
-            .trim_end_matches('`')
-            .trim();
+        let line = reply_line(line);
         let Some(head) = line.get(..DELEGATE_MARKER.len()) else {
             continue;
         };
@@ -661,6 +848,63 @@ pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
         if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
             found.push(delegation);
         }
+    }
+    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
+    found
+}
+
+/// Strips the list bullets, quotes and backticks a model puts around a reply line.
+/// Takes the line. Returns its text.
+fn reply_line(line: &str) -> &str {
+    line.trim()
+        .trim_start_matches(|c: char| {
+            c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
+        })
+        .trim()
+        .trim_end_matches('`')
+        .trim()
+}
+
+/// One finished sub-agent a master that is not live asked in its reply to wake (WK-R5): the
+/// name or number it gave and the text for the agent's next task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeLine {
+    pub agent: String,
+    pub text: String,
+}
+
+/// Reads wake lines from a master reply: `WAKE <name or Sub-agent number>: <text>`.
+/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
+/// Returns at most eight wakes, each with a name of up to `WAKE_NAME_BYTES_MAX` bytes and a
+/// task text within bounds.
+pub fn parse_wakes(reply: &str) -> Vec<WakeLine> {
+    let mut found = Vec::new();
+    for line in reply.lines() {
+        if found.len() == DELEGATIONS_PER_REPLY_MAX {
+            break;
+        }
+        let line = reply_line(line);
+        let Some(head) = line.get(..WAKE_MARKER.len()) else {
+            continue;
+        };
+        let rest = &line[WAKE_MARKER.len()..];
+        if !head.eq_ignore_ascii_case(WAKE_MARKER) || !rest.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((agent, text)) = rest.split_once(':') else {
+            continue;
+        };
+        let (agent, text) = (agent.trim(), text.trim().trim_matches('`').trim());
+        if agent.is_empty()
+            || agent.len() > WAKE_NAME_BYTES_MAX
+            || !text_valid(text, TASK_PROMPT_BYTES_MAX)
+        {
+            continue;
+        }
+        found.push(WakeLine {
+            agent: agent.to_owned(),
+            text: text.to_owned(),
+        });
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
     found
@@ -704,7 +948,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 heartbeat_ms INTEGER NOT NULL,
                 stopped_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -726,7 +971,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 started_ms INTEGER,
                 finished_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -751,6 +997,36 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 keep_warm INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_time_limits (
+                project TEXT PRIMARY KEY,
+                turn_secs INTEGER,
+                session_secs INTEGER,
+                idle_secs INTEGER NOT NULL DEFAULT 600
+            );
+            CREATE TABLE IF NOT EXISTS team_nesting (
+                project TEXT PRIMARY KEY,
+                depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+                lands TEXT NOT NULL CHECK(lands IN ('lead','owner'))
+            );
+            CREATE TABLE IF NOT EXISTS team_master_switch (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
+            );
+            CREATE TABLE IF NOT EXISTS team_finished_view (
+                project TEXT PRIMARY KEY,
+                show INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_branches (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('named','detached'))
+            );
+            CREATE TABLE IF NOT EXISTS team_session_switches (
+                session TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh')),
+                created_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
                 until_ms INTEGER NOT NULL
@@ -774,6 +1050,24 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 repository TEXT NOT NULL,
                 worktree TEXT NOT NULL,
                 git_dir TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_wake_requests (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                requested_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_owner_stops (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                stopped_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_conversations (
+                agent INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                connection TEXT NOT NULL,
+                conversation TEXT NOT NULL CHECK(length(conversation) BETWEEN 1 AND 128),
+                record TEXT NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)
             );
             CREATE TABLE IF NOT EXISTS team_owner_prompts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1133,6 +1427,63 @@ pub fn admit_resolve(
     Ok(Ok(()))
 }
 
+/// Wakes a finished sub-agent for its master (DEC-102): the message becomes a task pinned
+/// to that agent, so the runtime starts the same agent again under its own id and name, in
+/// its own worktree, with the message as its first input, and the master hears how it ends.
+/// Only a stopped or failed sub-agent of the project whose worktree is still recorded wakes,
+/// and never one the owner stopped (AW-1): only the owner's Wake or restart starts that one.
+/// Takes the transaction, live access, the setup, the agent, the message and the time.
+/// Returns the task id, or a plain refusal code: `team_agent_not_found`,
+/// `team_agent_running`, `team_agent_no_worktree`, `team_agent_owner_stopped`, or one of
+/// `admit`'s.
+pub fn admit_wake(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    agent: i64,
+    prompt: &str,
+    now: i64,
+) -> Result<Result<i64, &'static str>, EngineError> {
+    let project = &stored.project_id;
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    if owner_stopped(tx, agent)? {
+        return Ok(Err(OWNER_STOPPED));
+    }
+    let harness: String = tx
+        .query_row(
+            "SELECT harness FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let task = match admit(
+        tx,
+        access,
+        stored,
+        Some(&harness),
+        prompt,
+        TaskSource::Master,
+        None,
+        now,
+    )? {
+        Ok(task) => task,
+        Err(code) => return Ok(Err(code)),
+    };
+    tx.execute(
+        "DELETE FROM team_task_pins WHERE project=?1 AND task NOT IN (SELECT id FROM team_tasks WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+        params![task, project.as_str(), agent],
+    )
+    .map_err(error)?;
+    Ok(Ok(task))
+}
+
 /// Hands the tasks a project's conversation master proposed with its `delegate` tool to the
 /// project's team (DEC-093) as the owner's own tasks: each passes `admit` against the team
 /// plan and pool, and the refused ones are listed in one engine note in the Team view, never
@@ -1385,6 +1736,66 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::TimeLimits {
+            turn_secs,
+            session_secs,
+            idle_secs,
+            ..
+        } => {
+            tx.execute(
+                "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(project) DO UPDATE SET turn_secs=excluded.turn_secs,
+                 session_secs=excluded.session_secs, idle_secs=excluded.idle_secs",
+                params![project.as_str(), turn_secs, session_secs, idle_secs.unwrap_or(0)],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::OnHarnessSwitch { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::SubAgentDepth { depth, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET depth=excluded.depth",
+                params![project.as_str(), depth, ChildLanding::default().name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::ChildLanding { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET lands=excluded.lands",
+                params![project.as_str(), DEPTH_DEFAULT, mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::FinishedAgents { show, .. } => {
+            tx.execute(
+                "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET show=excluded.show",
+                params![project.as_str(), show],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::AgentBranches { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_agent_branches(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -1445,7 +1856,102 @@ pub fn execute(
                 Err(code) => rejected(code),
             })
         }
+        TeamAction::WakeAgent { agent, .. } => Ok(match request_wake(tx, project, *agent, now)? {
+            Ok(()) => Outcome::Applied,
+            Err(code) => rejected(code),
+        }),
     }
+}
+
+/// Words why a finished agent's Wake is off, for the button the owner sees. Takes the refusal
+/// code from [`wake_refusal`]. Returns the line.
+fn wake_note(code: &str) -> String {
+    match code {
+        "team_agent_running" => "Already running.".into(),
+        "team_agent_no_worktree" => {
+            "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                .into()
+        }
+        "team_agents_unavailable" => {
+            crate::research::runner::confined_unavailable(std::env::consts::OS)
+                .unwrap_or("Team agents cannot run on this system.")
+                .into()
+        }
+        _ => "That agent is no longer part of this team.".into(),
+    }
+}
+
+/// Tells why a sub-agent cannot be woken now (DEC-102), or none when it can: it must be a
+/// sub-agent of the project that stopped or failed, whose worktree is still recorded, on a
+/// system where team agents run. Takes a connection, the project and the agent. Returns the
+/// refusal code: `team_agent_not_found`, `team_agent_running`, `team_agent_no_worktree` or
+/// `team_agents_unavailable`.
+pub fn wake_refusal(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Option<&'static str>, EngineError> {
+    let found: Option<(String, String, bool)> = connection
+        .query_row(
+            "SELECT a.role,a.status,EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+             FROM team_agents a WHERE a.id=?1 AND a.project=?2",
+            params![agent, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((role, status, kept)) = found else {
+        return Ok(Some("team_agent_not_found"));
+    };
+    Ok(if AgentRole::parse(&role) != Some(AgentRole::Sub) {
+        Some("team_agent_not_found")
+    } else if AgentStatus::parse(&status).is_none_or(AgentStatus::live) {
+        Some("team_agent_running")
+    } else if !kept {
+        Some("team_agent_no_worktree")
+    } else if crate::research::runner::confined_unavailable(std::env::consts::OS).is_some() {
+        Some("team_agents_unavailable")
+    } else {
+        None
+    })
+}
+
+/// The refusal code for a master's wake of a sub-agent the owner stopped (AW-1).
+pub const OWNER_STOPPED: &str = "team_agent_owner_stopped";
+
+/// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
+/// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
+/// whether it was the owner's stop, or a SQLite failure.
+pub fn owner_stopped(connection: &Connection, agent: i64) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_owner_stops WHERE agent=?1)",
+            [agent],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records the owner's Wake of a finished sub-agent (DEC-102), which the team runtime serves
+/// on its next tick through the same wake as the master's: the agent starts again under its
+/// own id, name and worktree, continuing its harness conversation where it can. A second
+/// Wake before the first is served changes nothing. Takes the transaction, project, agent
+/// and the time. Returns a plain refusal code from [`wake_refusal`] when it cannot wake.
+fn request_wake(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Some(code) = wake_refusal(tx, project, agent)? {
+        return Ok(Err(code));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO team_wake_requests(agent,project,requested_ms) VALUES (?1,?2,?3)",
+        params![agent, project.as_str(), now],
+    )
+    .map_err(error)?;
+    Ok(Ok(()))
 }
 
 fn wake(tx: &Transaction<'_>, action: &TeamAction) -> Result<Outcome, EngineError> {
@@ -1547,6 +2053,73 @@ pub struct TeamAgent {
     pub persona: Option<String>,
     #[serde(default)]
     pub handle: Option<String>,
+    #[serde(default)]
+    pub finished: bool,
+    #[serde(default)]
+    pub wakeable: bool,
+    #[serde(default)]
+    pub wake_note: Option<String>,
+    #[serde(default)]
+    pub parent: Option<i64>,
+}
+
+impl TeamAgent {
+    /// Tells whether this agent belongs in the Finished fold-out rather than the agents
+    /// list and team graph (DEC-102): a stopped or failed sub-agent, or an idle one that ran
+    /// a turn since it last started, holding no task and with no question waiting for the
+    /// master. The master, every starting or working agent and an idle agent still waiting
+    /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
+    /// questions the agent has waiting. Returns true for a finished agent.
+    pub fn finished_with(&self, questions: u16) -> bool {
+        self.role == AgentRole::Sub
+            && questions == 0
+            && self.task.is_none()
+            && match self.status {
+                AgentStatus::Idle => self.turns > 0,
+                AgentStatus::Stopped | AgentStatus::Failed => true,
+                AgentStatus::Starting | AgentStatus::Working => false,
+            }
+    }
+}
+
+/// Orders agents as their lead tree (N2): each lead followed by its own workers, depth
+/// first, keeping the given order among siblings; an agent whose lead is not listed starts
+/// a tree of its own. Takes the agents in display order. Returns each agent once with its
+/// depth under the listed leads, 0 for a top agent.
+pub fn lead_tree<'a>(agents: &[&'a TeamAgent]) -> Vec<(&'a TeamAgent, usize)> {
+    let listed: BTreeSet<i64> = agents.iter().map(|agent| agent.id).collect();
+    let mut stack: Vec<(&TeamAgent, usize)> = agents
+        .iter()
+        .rev()
+        .filter(|agent| {
+            agent
+                .parent
+                .is_none_or(|lead| lead == agent.id || !listed.contains(&lead))
+        })
+        .map(|agent| (*agent, 0))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(agents.len());
+    while let Some((agent, depth)) = stack.pop() {
+        if !seen.insert(agent.id) {
+            continue;
+        }
+        ordered.push((agent, depth));
+        stack.extend(
+            agents
+                .iter()
+                .rev()
+                .filter(|worker| worker.parent == Some(agent.id) && worker.id != agent.id)
+                .map(|worker| (*worker, depth + 1)),
+        );
+    }
+    for agent in agents {
+        if seen.insert(agent.id) {
+            ordered.push((agent, 0));
+        }
+    }
+    assert_eq!(ordered.len(), listed.len());
+    ordered
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1608,6 +2181,24 @@ pub struct PlanStep {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    #[serde(default)]
+    pub turn_limit_secs: Option<u32>,
+    #[serde(default)]
+    pub session_limit_secs: Option<u32>,
+    #[serde(default)]
+    pub idle_stop_secs: Option<u32>,
+    #[serde(default)]
+    pub on_harness_switch: SwitchMode,
+    #[serde(default = "depth_default")]
+    pub sub_agent_depth: u8,
+    #[serde(default)]
+    pub child_landing: ChildLanding,
+    #[serde(default)]
+    pub show_finished: bool,
+    #[serde(default)]
+    pub agent_branches: BranchMode,
+    #[serde(default)]
+    pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -1621,6 +2212,12 @@ pub struct TeamStatus {
     pub messages: Vec<TeamMessage>,
     pub plan: Vec<PlanStep>,
     pub events: events::EventsView,
+    #[serde(default)]
+    pub partial: bool,
+}
+
+fn depth_default() -> u8 {
+    DEPTH_DEFAULT
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -1658,10 +2255,14 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         stopped_ms: row.get(13)?,
         persona,
         handle,
+        finished: false,
+        wakeable: false,
+        wake_note: None,
+        parent: row.get(16)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -1719,6 +2320,289 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         .map_err(error)
 }
 
+/// The time limits the owner set for a project's team agents, in seconds: one turn, one
+/// agent process, and how long an idle sub-agent waits for work. None is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeLimits {
+    pub turn: Option<u32>,
+    pub session: Option<u32>,
+    pub idle: Option<u32>,
+}
+
+impl Default for TimeLimits {
+    fn default() -> Self {
+        Self {
+            turn: None,
+            session: None,
+            idle: Some(IDLE_STOP_DEFAULT_SECS),
+        }
+    }
+}
+
+impl TimeLimits {
+    /// The bound on one master or sub-agent turn. Output: the duration, or none for no limit.
+    pub fn turn_time(self) -> Option<std::time::Duration> {
+        self.turn
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+
+    /// The bound on one agent process. Output: the duration, or none for no limit.
+    pub fn session_time(self) -> Option<std::time::Duration> {
+        self.session
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+
+    /// How long an idle sub-agent waits for work. Output: the duration, or none to keep it.
+    pub fn idle_time(self) -> Option<std::time::Duration> {
+        self.idle
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+}
+
+/// Names a time span the way Team settings shows it: whole hours as "1 h", whole minutes as
+/// "30 min", anything else in seconds. Input: the span in seconds. Output: the words.
+pub fn span_words(secs: u64) -> String {
+    if secs >= 3600 && secs.is_multiple_of(3600) {
+        format!("{} h", secs / 3600)
+    } else if secs >= 60 && secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
+    }
+}
+
+/// Reads the time limits the owner set for a project. Takes a connection and the project.
+/// Returns the defaults until the owner sets them (no task or session limit, a 10 minute
+/// idle stop), or `team_time_limits_invalid` for a stored bound outside 1 s to 24 h.
+pub fn time_limits(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<TimeLimits, EngineError> {
+    let stored: Option<(Option<i64>, Option<i64>, i64)> = connection
+        .query_row(
+            "SELECT turn_secs, session_secs, idle_secs FROM team_time_limits WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((turn, session, idle)) = stored else {
+        return Ok(TimeLimits::default());
+    };
+    let bound = |secs: Option<i64>| match secs {
+        None => Ok(None),
+        Some(secs) => u32::try_from(secs)
+            .ok()
+            .filter(|secs| (1..=86_400).contains(secs))
+            .map(Some)
+            .ok_or_else(|| failure("team_time_limits_invalid")),
+    };
+    Ok(TimeLimits {
+        turn: bound(turn)?,
+        session: bound(session)?,
+        idle: bound(Some(idle).filter(|secs| *secs != 0))?,
+    })
+}
+
+/// What the project's live master does with a session's conversation when the master
+/// harness changed since the session's last master ran: the owner's choice, carry over by
+/// default. Takes a connection and the project. Returns the mode.
+pub fn on_harness_switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<SwitchMode, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_master_switch WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(SwitchMode::default()),
+        Some(name) => SwitchMode::named(name).ok_or_else(|| error("team_switch_mode_invalid")),
+    }
+}
+
+/// The project's nested sub-agent settings: the owner's Sub-agent depth and where a lead's
+/// worker lands, `DEPTH_DEFAULT` and `ChildLanding::Lead` until the owner picks others.
+/// Takes a connection and the project. Returns the settings, or a SQLite failure.
+pub fn nesting(connection: &Connection, project: &ProjectId) -> Result<Nesting, EngineError> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT depth,lands FROM team_nesting WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((depth, lands)) = row else {
+        return Ok(Nesting {
+            depth: DEPTH_DEFAULT,
+            lands: ChildLanding::default(),
+        });
+    };
+    let depth = u8::try_from(depth)
+        .ok()
+        .filter(|depth| DEPTH_CHOICES.contains(depth))
+        .ok_or_else(|| error("team_depth_invalid"))?;
+    let lands = ChildLanding::named(&lands).ok_or_else(|| error("team_landing_invalid"))?;
+    Ok(Nesting { depth, lands })
+}
+
+/// How deep a sub-agent sits under the master: 1 for one the master started, one more for
+/// each lead above it, counted up the recorded parents at most `DEPTH_WALK_MAX` steps.
+/// Takes a connection and the agent. Returns its depth, or a SQLite failure.
+pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineError> {
+    let depth: Option<i64> = connection
+        .query_row(
+            "WITH RECURSIVE chain(id,parent,n) AS (
+                 SELECT id,parent,1 FROM team_agents WHERE id=?1
+                 UNION ALL
+                 SELECT a.id,a.parent,chain.n+1 FROM team_agents a JOIN chain ON a.id=chain.parent
+                 WHERE chain.n<?2)
+             SELECT MAX(n) FROM chain",
+            params![agent, DEPTH_WALK_MAX],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let depth = depth.ok_or_else(|| failure("team_agent_not_found"))?;
+    assert!((1..=DEPTH_WALK_MAX).contains(&depth));
+    Ok(u8::try_from(depth).expect("the walk is bounded"))
+}
+
+/// The most parent links `agent_depth` follows, past the deepest setting so a deeper chain
+/// still reads as past every limit.
+const DEPTH_WALK_MAX: i64 = 8;
+const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
+
+/// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
+/// each task and agent records the lead that started it, NULL for the master's own. A
+/// table the engine has not opened yet gets the column from `initialize`. Takes the
+/// upgrade transaction. Returns any SQLite failure.
+pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    for table in ["team_tasks", "team_agents"] {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            continue;
+        }
+        let present: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='parent')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN parent INTEGER"))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Where the project's new sub-agents commit: on their own named branch, the default, or
+/// on a detached HEAD, the owner's other choice. Takes a connection and the project.
+/// Returns the mode.
+pub fn agent_branches(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BranchMode, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_agent_branches WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(BranchMode::default()),
+        Some(name) => BranchMode::named(name).ok_or_else(|| error("team_branch_mode_invalid")),
+    }
+}
+
+/// Tells whether the owner chose to show finished agents (idle, stopped and failed
+/// sub-agents) in the agents list and team graph instead of their Finished fold-out.
+/// Takes a connection and the project.
+/// Returns false, the Hide default, until the owner picks Show.
+pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT show FROM team_finished_view WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(error)
+}
+
+/// The longest stored harness name a session switch row is read with.
+const SWITCH_HARNESS_BYTES_MAX: i64 = 64;
+
+/// Records that a session's master harness switched, replacing the session's earlier switch,
+/// so its conversation shows where the new harness took over. Takes a connection, the
+/// project, the session, the new launch harness and the owner's mode. Returns nothing.
+pub fn record_switch(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    harness: &str,
+    mode: SwitchMode,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_session_switches(session,project,harness,mode,created_ms)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(session) DO UPDATE SET project=excluded.project,
+                 harness=excluded.harness, mode=excluded.mode, created_ms=excluded.created_ms",
+            params![session, project.as_str(), harness, mode.name(), now_ms()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The latest master harness switch of the project's live session, if it ever switched.
+/// Takes a connection and the project. Returns the switch with its note, or None.
+pub fn live_switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<SessionSwitch>, EngineError> {
+    let Some(session) = crate::master_sessions::live_session(connection, project)? else {
+        return Ok(None);
+    };
+    let row: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=?3 THEN harness END,mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session, project.as_str(), SWITCH_HARNESS_BYTES_MAX],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((Some(harness), mode)) = row else {
+        return Ok(None);
+    };
+    let mode = SwitchMode::named(&mode).ok_or_else(|| error("team_switch_mode_invalid"))?;
+    let harness = crate::master_sessions::harness_label(&harness).to_owned();
+    let note = crate::master_sessions::switched_note(&harness, mode);
+    Ok(Some(SessionSwitch {
+        harness,
+        mode,
+        note,
+    }))
+}
+
 /// Tells whether the owner paused the project's whole team.
 /// Takes a connection and the project.
 /// Returns true from a pause until the owner resumes the team.
@@ -1769,6 +2653,173 @@ pub(crate) fn paused_until(
         .optional()
 }
 
+/// The project's team status as the owner reads it: `status`, fitted to one owner reply by
+/// `fit_status`. Takes a connection and the stored setup. Returns the status, partial when
+/// older history had to go, or `team_status_bounds` when even an empty view does not fit.
+pub fn owner_status(
+    connection: &Connection,
+    stored: &StoredSetup,
+) -> Result<TeamStatus, EngineError> {
+    fit_status(status(connection, stored)?, encoded_len::<TeamStatus>)
+}
+
+/// The project's team graph as the owner reads it, built from a status `fit_status` fitted
+/// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
+/// the graph, or `team_status_bounds` when even an empty view does not fit.
+pub fn owner_graph(
+    connection: &Connection,
+    stored: &StoredSetup,
+) -> Result<TeamGraph, EngineError> {
+    let status = fit_status(status(connection, stored)?, |status| {
+        encoded_len(&graph(status))
+    })?;
+    Ok(graph(&status))
+}
+
+/// Fits a status to one owner reply. First every free-form text is cut to one shared cap,
+/// halved until `size` of the status fits `STATUS_REPLY_BYTES_MAX`; a cut text says how many
+/// bytes it left out. When the shortest cap still does not fit, the oldest finished history
+/// goes, then anything oldest first, and the status is marked partial. Takes the status and
+/// the size measure. Returns the status, or `team_status_bounds` when an empty view does not fit.
+fn fit_status(
+    status: TeamStatus,
+    size: impl Fn(&TeamStatus) -> Result<usize, EngineError>,
+) -> Result<TeamStatus, EngineError> {
+    if size(&status)? <= STATUS_REPLY_BYTES_MAX {
+        return Ok(status);
+    }
+    for cap in STATUS_TEXT_CAPS {
+        let mut cut = status.clone();
+        cut_texts(&mut cut, cap);
+        if size(&cut)? <= STATUS_REPLY_BYTES_MAX {
+            assert_eq!(cut.tasks.len(), status.tasks.len());
+            assert_eq!(cut.messages.len(), status.messages.len());
+            return Ok(cut);
+        }
+    }
+    let mut cut = status;
+    cut_texts(&mut cut, STATUS_TEXT_CAPS[STATUS_TEXT_CAPS.len() - 1]);
+    cut.partial = true;
+    for every in [false, true] {
+        while drop_history(&mut cut, every) {
+            if size(&cut)? <= STATUS_REPLY_BYTES_MAX {
+                return Ok(cut);
+            }
+        }
+    }
+    Err(error("team_status_bounds"))
+}
+
+/// Cuts every free-form text of a status to `cap` bytes with `cut_text`: task prompts,
+/// results and problems, messages, agent problems, plan prompts, the live master problem,
+/// events, waiting questions and notifications. Takes the status and the cap.
+fn cut_texts(status: &mut TeamStatus, cap: usize) {
+    let cut = move |text: &mut String| *text = cut_text(text, cap);
+    for task in &mut status.tasks {
+        cut(&mut task.prompt);
+        task.result
+            .iter_mut()
+            .chain(task.problem.iter_mut())
+            .for_each(cut);
+    }
+    status.messages.iter_mut().for_each(|m| cut(&mut m.text));
+    status
+        .agents
+        .iter_mut()
+        .filter_map(|agent| agent.problem.as_mut())
+        .for_each(cut);
+    status
+        .plan
+        .iter_mut()
+        .for_each(|step| cut(&mut step.prompt));
+    status.live_problem.iter_mut().for_each(cut);
+    let events = &mut status.events;
+    events
+        .recent
+        .iter_mut()
+        .for_each(|event| cut(&mut event.text));
+    events
+        .waiting
+        .iter_mut()
+        .for_each(|agent| cut(&mut agent.text));
+    events
+        .notifications
+        .iter_mut()
+        .for_each(|item| cut(&mut item.text));
+}
+
+/// Drops the older half of one list of a status, at least one entry, in this order: events,
+/// seen notifications, finished messages, finished tasks and stopped agents; with `every`
+/// also unseen notifications, waiting messages, live tasks and agents, the plan and the
+/// waiting questions. Takes the status and whether live work may go. Returns whether
+/// anything was dropped.
+fn drop_history(status: &mut TeamStatus, every: bool) -> bool {
+    let waiting = |state: MessageState| matches!(state, MessageState::Pending | MessageState::Sent);
+    let events = &mut status.events;
+    drop_older(&mut events.recent, false, |_| true)
+        || drop_older(&mut events.notifications, true, |item| {
+            every || item.seen_ms.is_some()
+        })
+        || drop_older(&mut status.messages, false, |message| {
+            every || !waiting(message.state)
+        })
+        || drop_older(&mut status.tasks, false, |task| {
+            every || task.status.finished()
+        })
+        || drop_older(&mut status.agents, false, |agent| {
+            every || !agent.status.live()
+        })
+        || (every
+            && (drop_older(&mut status.plan, false, |_| true)
+                || drop_older(&mut events.waiting, false, |_| true)))
+}
+
+/// Drops the older half, at least one, of the entries of `items` that `droppable` picks.
+/// Takes the list, whether it is ordered newest first, and the pick. Returns whether
+/// anything was dropped.
+fn drop_older<T>(items: &mut Vec<T>, newest_first: bool, droppable: impl Fn(&T) -> bool) -> bool {
+    let picked: Vec<usize> = (0..items.len())
+        .filter(|at| droppable(&items[*at]))
+        .collect();
+    let count = picked.len().div_ceil(2);
+    if count == 0 {
+        return false;
+    }
+    let gone = if newest_first {
+        &picked[picked.len() - count..]
+    } else {
+        &picked[..count]
+    };
+    let before = items.len();
+    let mut at = 0;
+    items.retain(|_| {
+        let kept = gone.binary_search(&at).is_err();
+        at += 1;
+        kept
+    });
+    assert_eq!(items.len(), before - count);
+    true
+}
+
+/// Cuts text to `cap` bytes on a character boundary and, when anything was cut, ends it with
+/// a note of how many bytes were left out. Takes the text and the cap. Returns the text,
+/// whole when it fits.
+fn cut_text(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_owned();
+    }
+    let kept = bound_text(text, cap);
+    let left = text.len() - kept.len();
+    assert!(left > 0 && kept.len() <= cap);
+    format!("{kept} [... {left} more bytes]")
+}
+
+/// Measures a value as the JSON an owner reply carries. Takes the value. Returns its length
+/// in bytes.
+fn encoded_len<T: Serialize>(value: &T) -> Result<usize, EngineError> {
+    Ok(serde_json::to_vec(value).map_err(error)?.len())
+}
+
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.
 /// Takes a connection and the stored setup.
 /// Returns bounded lists in creation order.
@@ -1783,7 +2834,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             STATUS_AGENTS_MAX,
         ))
         .map_err(error)?;
-    let agents = statement
+    let mut agents = statement
         .query_map([project.as_str()], agent_row)
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
@@ -1813,7 +2864,9 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let live = |role: AgentRole, harness: &str| {
         agents
             .iter()
-            .filter(|a| a.role == role && a.harness == harness && a.status.live())
+            .filter(|a| {
+                a.role == role && crate::harnesses::same(&a.harness, harness) && a.status.live()
+            })
             .count() as i64
     };
     let plan = &stored.team;
@@ -1856,10 +2909,49 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         None => Vec::new(),
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
+    let events = events::view(connection, project)?;
+    for agent in &mut agents {
+        let questions = events
+            .questions
+            .iter()
+            .find(|item| item.agent == agent.id)
+            .map_or(0, |item| item.count);
+        agent.finished = agent.finished_with(questions);
+    }
+    let waking: BTreeSet<i64> = {
+        let mut statement = connection
+            .prepare("SELECT agent FROM team_wake_requests WHERE project=?1")
+            .map_err(error)?;
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for agent in agents.iter_mut().filter(|agent| agent.finished) {
+        let refusal = wake_refusal(connection, project, agent.id)?;
+        agent.wakeable = refusal.is_none() && !waking.contains(&agent.id);
+        agent.wake_note = if waking.contains(&agent.id) {
+            Some("Waking.".into())
+        } else {
+            refusal.map(wake_note)
+        };
+    }
     let (live_master, live_problem) = master::switch(connection, project)?;
+    let limits = time_limits(connection, project)?;
+    let nested = nesting(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        turn_limit_secs: limits.turn,
+        session_limit_secs: limits.session,
+        idle_stop_secs: limits.idle,
+        on_harness_switch: on_harness_switch(connection, project)?,
+        sub_agent_depth: nested.depth,
+        child_landing: nested.lands,
+        show_finished: show_finished(connection, project)?,
+        agent_branches: agent_branches(connection, project)?,
+        live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
         live_problem,
@@ -1870,7 +2962,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         tasks,
         messages,
         plan: steps,
-        events: events::view(connection, project)?,
+        events,
+        partial: false,
     })
 }
 
