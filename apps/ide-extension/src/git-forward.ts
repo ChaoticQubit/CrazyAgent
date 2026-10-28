@@ -9,6 +9,12 @@ const REBASES = new Set(["true", "yes", "on", "1", "interactive", "i"]);
 const REBASE_MERGES = new Set(["merges", "m"]);
 const FALSE = new Set(["false", "no", "off", "0"]);
 const TRUE = new Set(["true", "yes", "on", "1"]);
+const DETACHED = "You are not currently on a branch.\nCrazyAgent pulls only a branch's upstream: switch to a branch that has one.\n";
+const NO_UPSTREAM =
+  "There is no tracking information for the current branch.\nCrazyAgent pulls only a branch's upstream: set one with git branch --set-upstream-to=<remote>/<branch>.\n";
+
+/** The local step of a pull: git's arguments for it, or why the pull is refused before its fetch. */
+export type PullStep = { argv: string[] } | { refused: string };
 
 /** Where the forwarder prints: the shape of `process.stdout` and `process.stderr`. */
 export interface Printer {
@@ -18,8 +24,8 @@ export interface Printer {
 /**
  * Runs one git network command as git would, through the engine: the engine runs the
  * network step, and of a pull it only fetches, so once that fetch succeeded the merge or
- * rebase of what it fetched runs here, in the IDE sandbox, where the sandbox's write
- * denies apply.
+ * rebase of the branch's upstream runs here, in the IDE sandbox, where the sandbox's write
+ * denies apply. A pull with no upstream to take is refused before anything is fetched.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -30,28 +36,46 @@ export async function forward(
   stdout: Printer,
   stderr: Printer,
 ): Promise<number> {
+  const step = args[0] === "pull" ? await pullStep(args, folder) : undefined;
+  if (step !== undefined && "refused" in step) {
+    stderr.write(step.refused);
+    return 1;
+  }
   const code = await ask(env, args, folder, stdout, stderr);
-  if (args[0] !== "pull" || code !== 0) return code;
-  return local(await pullStep(args, folder), folder, stdout, stderr);
+  if (step === undefined || code !== 0) return code;
+  return local(step.argv, folder, stdout, stderr);
 }
 
 /**
- * The local step of a pull after the engine fetched, as git's own pull chooses it: with
- * `-r`, or the branch's `rebase` or else `pull.rebase` setting on, a rebase onto what was
- * fetched (`merges` keeps merges); otherwise a merge of it, fast-forward as `pull.ff` says
- * and only fast-forward when neither setting is set. `--autostash` is kept.
- * Inputs: git's pull arguments and the folder. Output: git's arguments for the step.
+ * The local step of a pull after the engine fetched, as git's own pull chooses it, taken
+ * only from the current branch's upstream (its remote-tracking ref), never from another
+ * fetched branch: a pull on a detached HEAD, of a branch with no upstream or naming another
+ * remote branch is refused. With `-r`, or the branch's `rebase` or else `pull.rebase`
+ * setting on, a rebase onto the upstream (`merges` keeps merges); otherwise a merge, fast-forward as `pull.ff` says and only fast-forward when
+ * neither setting is set. `--autostash` is kept.
+ * Inputs: git's pull arguments and the folder. Output: the step, or why it is refused.
  */
-export async function pullStep(args: string[], folder: string): Promise<string[]> {
-  const autostash = args.includes("--autostash") ? ["--autostash"] : [];
+export async function pullStep(args: string[], folder: string): Promise<PullStep> {
   const branch = await setting(folder, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  const ofBranch = branch === undefined ? undefined : await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
+  if (branch === undefined) return { refused: DETACHED };
+  const upstream = await setting(folder, ["rev-parse", "--symbolic-full-name", "@{upstream}"]);
+  if (upstream === undefined || !upstream.startsWith("refs/")) return { refused: NO_UPSTREAM };
+  const [remote, ref] = args.slice(1).filter((arg) => !arg.startsWith("-"));
+  if (remote !== undefined) {
+    const own = await setting(folder, ["config", "--get", `branch.${branch}.remote`]);
+    const merge = await setting(folder, ["config", "--get", `branch.${branch}.merge`]);
+    if (remote !== own || (ref !== undefined && ref !== merge && `refs/heads/${ref}` !== merge)) {
+      return { refused: `CrazyAgent pulls only the upstream of '${branch}' (${upstream}).\n` };
+    }
+  }
+  const autostash = args.includes("--autostash") ? ["--autostash"] : [];
+  const ofBranch = await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
   const rebase = (ofBranch ?? (await setting(folder, ["config", "--get", "pull.rebase"])))?.toLowerCase();
   if (args.includes("-r") || (rebase !== undefined && REBASES.has(rebase))) {
-    return ["rebase", ...autostash, "FETCH_HEAD"];
+    return { argv: ["rebase", ...autostash, upstream] };
   }
   if (rebase !== undefined && REBASE_MERGES.has(rebase)) {
-    return ["rebase", "--rebase-merges", ...autostash, "FETCH_HEAD"];
+    return { argv: ["rebase", "--rebase-merges", ...autostash, upstream] };
   }
   const ff = (await setting(folder, ["config", "--get", "pull.ff"]))?.toLowerCase();
   const mode =
@@ -64,7 +88,7 @@ export async function pullStep(args: string[], folder: string): Promise<string[]
           : rebase === undefined
             ? ["--ff-only"]
             : [];
-  return ["merge", ...mode, ...autostash, "FETCH_HEAD"];
+  return { argv: ["merge", ...mode, ...autostash, upstream] };
 }
 
 /**

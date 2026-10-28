@@ -12,22 +12,42 @@ const REBASES = new Set(["true", "yes", "on", "1", "interactive", "i"]);
 const REBASE_MERGES = new Set(["merges", "m"]);
 const FALSE = new Set(["false", "no", "off", "0"]);
 const TRUE = new Set(["true", "yes", "on", "1"]);
+const DETACHED = "You are not currently on a branch.\nCrazyAgent pulls only a branch's upstream: switch to a branch that has one.\n";
+const NO_UPSTREAM = "There is no tracking information for the current branch.\nCrazyAgent pulls only a branch's upstream: set one with git branch --set-upstream-to=<remote>/<branch>.\n";
 async function forward(env, args, folder, stdout, stderr) {
+    const step = args[0] === "pull" ? await pullStep(args, folder) : undefined;
+    if (step !== undefined && "refused" in step) {
+        stderr.write(step.refused);
+        return 1;
+    }
     const code = await ask(env, args, folder, stdout, stderr);
-    if (args[0] !== "pull" || code !== 0)
+    if (step === undefined || code !== 0)
         return code;
-    return local(await pullStep(args, folder), folder, stdout, stderr);
+    return local(step.argv, folder, stdout, stderr);
 }
 async function pullStep(args, folder) {
-    const autostash = args.includes("--autostash") ? ["--autostash"] : [];
     const branch = await setting(folder, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-    const ofBranch = branch === undefined ? undefined : await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
+    if (branch === undefined)
+        return { refused: DETACHED };
+    const upstream = await setting(folder, ["rev-parse", "--symbolic-full-name", "@{upstream}"]);
+    if (upstream === undefined || !upstream.startsWith("refs/"))
+        return { refused: NO_UPSTREAM };
+    const [remote, ref] = args.slice(1).filter((arg) => !arg.startsWith("-"));
+    if (remote !== undefined) {
+        const own = await setting(folder, ["config", "--get", `branch.${branch}.remote`]);
+        const merge = await setting(folder, ["config", "--get", `branch.${branch}.merge`]);
+        if (remote !== own || (ref !== undefined && ref !== merge && `refs/heads/${ref}` !== merge)) {
+            return { refused: `CrazyAgent pulls only the upstream of '${branch}' (${upstream}).\n` };
+        }
+    }
+    const autostash = args.includes("--autostash") ? ["--autostash"] : [];
+    const ofBranch = await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
     const rebase = (ofBranch ?? (await setting(folder, ["config", "--get", "pull.rebase"])))?.toLowerCase();
     if (args.includes("-r") || (rebase !== undefined && REBASES.has(rebase))) {
-        return ["rebase", ...autostash, "FETCH_HEAD"];
+        return { argv: ["rebase", ...autostash, upstream] };
     }
     if (rebase !== undefined && REBASE_MERGES.has(rebase)) {
-        return ["rebase", "--rebase-merges", ...autostash, "FETCH_HEAD"];
+        return { argv: ["rebase", "--rebase-merges", ...autostash, upstream] };
     }
     const ff = (await setting(folder, ["config", "--get", "pull.ff"]))?.toLowerCase();
     const mode = ff === "only"
@@ -39,7 +59,7 @@ async function pullStep(args, folder) {
                 : rebase === undefined
                     ? ["--ff-only"]
                     : [];
-    return ["merge", ...mode, ...autostash, "FETCH_HEAD"];
+    return { argv: ["merge", ...mode, ...autostash, upstream] };
 }
 function setting(folder, args) {
     return new Promise((resolve) => {

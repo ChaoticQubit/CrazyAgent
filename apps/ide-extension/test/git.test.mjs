@@ -86,29 +86,63 @@ function commit(cwd, file, text) {
   return git(cwd, "rev-parse", "HEAD");
 }
 
+/**
+ * Stands in for the engine's side of a pull with real git: each `ide.git` call runs the
+ * fetch the engine runs for it in the project and answers with its exit code, or answers
+ * `failing` without fetching when that is set. Inputs: the server and the project.
+ * Output: the calls it got and the `failing` switch.
+ */
+function fetchingEngine(server, project) {
+  const engine = { calls: [], failing: undefined };
+  server.on("connection", async (connection) => {
+    const args = (await received(connection)).call.args.args;
+    engine.calls.push(args);
+    let code = engine.failing ?? 0;
+    if (engine.failing === undefined) {
+      const rest = args.slice(1).filter((arg) => !arg.startsWith("-") || arg === "--tags" || arg === "--unshallow");
+      const fetch = ["fetch", "-q", ...rest, ...(rest.some((arg) => !arg.startsWith("-")) ? [] : ["origin"])];
+      try {
+        git(project, ...fetch);
+      } catch (error) {
+        code = error.status ?? 128;
+      }
+    }
+    connection.end(encodeFrame({ kind: "ok", data: { code, stdout: "", stderr: "From upstream\n" } }));
+  });
+  return engine;
+}
+
+/**
+ * Makes `upstream` a repository with one commit on `main`, and `project` a repository
+ * whose `main` tracks `origin/main` from it. Inputs: the two folders. Output: none.
+ */
+function tracking(project, upstream) {
+  for (const repository of [project, upstream]) {
+    git(repository, "init", "-q", "-b", "main");
+    git(repository, "config", "user.name", "Owner");
+    git(repository, "config", "user.email", "owner@example.invalid");
+    git(repository, "config", "commit.gpgsign", "false");
+  }
+  commit(upstream, "README.md", "# Seed shop\n");
+  git(project, "remote", "add", "origin", upstream);
+  git(project, "fetch", "-q", "origin");
+  git(project, "reset", "-q", "--hard", "origin/main");
+  git(project, "branch", "-q", "--set-upstream-to=origin/main", "main");
+}
+
 test("a pull merges or rebases in its own folder only what the engine fetched", { timeout: 30_000 }, async () => {
   await withRelay(async (server, env, project) => {
     const upstream = folder();
     try {
-      for (const repository of [project, upstream]) {
-        git(repository, "init", "-q", "-b", "main");
-        git(repository, "config", "user.name", "Owner");
-        git(repository, "config", "user.email", "owner@example.invalid");
-        git(repository, "config", "commit.gpgsign", "false");
-      }
-      commit(upstream, "README.md", "# Seed shop\n");
-      git(project, "pull", "-q", upstream, "main");
-      const pull = async (args, code = 0) => {
-        const called = once(server, "connection");
-        const ran = forward(args, project, { ...env, ...BARE_GIT });
-        const [connection] = await called;
-        assert.deepEqual((await received(connection)).call.args.args, args);
-        connection.end(encodeFrame({ kind: "ok", data: { code, stdout: "", stderr: "From upstream\n" } }));
+      tracking(project, upstream);
+      const engine = fetchingEngine(server, project);
+      const pull = async (args) => {
+        const ran = await forward(args, project, { ...env, ...BARE_GIT });
+        assert.deepEqual(engine.calls.at(-1), args);
         return ran;
       };
 
       const theirs = commit(upstream, "beds.md", "Six beds.\n");
-      git(project, "fetch", "-q", upstream, "main");
       const forwarded = await pull(["pull", "--tags", "origin", "main"]);
       assert.equal(forwarded.code, 0, forwarded.stderr);
       assert.match(forwarded.stderr, /^From upstream\n/);
@@ -116,12 +150,13 @@ test("a pull merges or rebases in its own folder only what the engine fetched", 
 
       const mine = commit(project, "notes.md", "Planting notes.\n");
       const next = commit(upstream, "seeds.md", "Tomatoes.\n");
-      git(project, "fetch", "-q", upstream, "main");
       const diverged = await pull(["pull", "origin", "main"]);
       assert.notEqual(diverged.code, 0);
       assert.equal(git(project, "rev-parse", "HEAD"), mine, "divergent branches are not merged unasked");
 
-      const failed = await pull(["pull", "-r", "origin", "main"], 1);
+      engine.failing = 1;
+      const failed = await pull(["pull", "-r", "origin", "main"]);
+      engine.failing = undefined;
       assert.equal(failed.code, 1);
       assert.equal(git(project, "rev-parse", "HEAD"), mine, "a failed fetch runs no local step");
 
@@ -131,22 +166,84 @@ test("a pull merges or rebases in its own folder only what the engine fetched", 
       assert.equal(git(project, "log", "-1", "--format=%s"), "Write notes.md");
 
       const later = commit(upstream, "paths.md", "Gravel.\n");
-      git(project, "fetch", "-q", upstream, "main");
       git(project, "config", "pull.rebase", "false");
-      const merged = await pull(["pull", "origin", "main"]);
+      const merged = await pull(["pull", "origin"]);
       assert.equal(merged.code, 0, merged.stderr);
       assert.equal(git(project, "rev-parse", "HEAD^2"), later);
 
       const ahead = commit(upstream, "water.md", "Daily.\n");
-      git(project, "fetch", "-q", upstream, "main");
       git(project, "config", "pull.rebase", "true");
-      const configured = await pull(["pull", "origin", "main"]);
+      const configured = await pull(["pull"]);
       assert.equal(configured.code, 0, configured.stderr);
       assert.equal(git(project, "rev-list", "--merges", "--count", `${ahead}..HEAD`), "0");
       assert.equal(git(project, "merge-base", "--is-ancestor", ahead, "HEAD"), "");
     } finally {
       rmSync(upstream, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Runs `check` with a project tracking `origin/main` of an upstream that also has the
+ * branch `aaa-other`, and an engine that fetches for real. Input: the check, given a
+ * pull function and the engine. Output: none.
+ */
+async function withUpstream(check) {
+  await withRelay(async (server, env, project) => {
+    const upstream = folder();
+    try {
+      tracking(project, upstream);
+      git(upstream, "branch", "aaa-other");
+      git(upstream, "switch", "-q", "aaa-other");
+      commit(upstream, "other.md", "Another team's branch.\n");
+      git(upstream, "switch", "-q", "main");
+      const engine = fetchingEngine(server, project);
+      await check((args) => forward(args, project, { ...env, ...BARE_GIT }), project, upstream, engine);
+    } finally {
+      rmSync(upstream, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a pull of a branch with no upstream is refused, not rebased or merged onto another branch", { timeout: 30_000 }, async () => {
+  await withUpstream(async (pull, project, upstream, engine) => {
+    git(project, "switch", "-q", "-c", "topic");
+    const topic = commit(project, "topic.md", "Unpublished work.\n");
+    git(project, "config", "pull.rebase", "true");
+    const rebasing = await pull(["pull"]);
+    assert.equal(git(project, "rev-parse", "HEAD"), topic, "a branch with no upstream is never rebased onto another remote branch");
+    assert.equal(rebasing.code, 1);
+    assert.match(rebasing.stderr, /^There is no tracking information for the current branch\.\n/);
+
+    git(project, "config", "--unset", "pull.rebase");
+    const merging = await pull(["pull"]);
+    assert.equal(merging.code, 1, "a pull with nothing to merge never reports success");
+    assert.equal(git(project, "rev-parse", "HEAD"), topic);
+    assert.match(merging.stderr, /^There is no tracking information for the current branch\.\n/);
+    assert.equal(engine.calls.length, 0, "a refused pull asks the engine for nothing");
+  });
+});
+
+test("a pull on a detached HEAD is refused, not rebased onto a remote branch", { timeout: 30_000 }, async () => {
+  await withUpstream(async (pull, project, upstream, engine) => {
+    const head = commit(project, "notes.md", "Planting notes.\n");
+    git(project, "switch", "-q", "--detach", "HEAD");
+    const detached = await pull(["pull", "-r"]);
+    assert.equal(git(project, "rev-parse", "HEAD"), head, "a detached HEAD is never rebased onto a remote branch");
+    assert.equal(detached.code, 1);
+    assert.match(detached.stderr, /^You are not currently on a branch\.\n/);
+    assert.equal(engine.calls.length, 0);
+  });
+});
+
+test("a pull naming a remote branch other than the upstream is refused", { timeout: 30_000 }, async () => {
+  await withUpstream(async (pull, project, upstream, engine) => {
+    const main = git(project, "rev-parse", "HEAD");
+    const elsewhere = await pull(["pull", "origin", "aaa-other"]);
+    assert.equal(git(project, "rev-parse", "HEAD"), main, "a pull of another remote branch never moves this one");
+    assert.equal(elsewhere.code, 1);
+    assert.match(elsewhere.stderr, /only the upstream of 'main' \(refs\/remotes\/origin\/main\)/);
+    assert.equal(engine.calls.length, 0);
   });
 });
 
