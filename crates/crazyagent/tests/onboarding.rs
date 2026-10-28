@@ -2408,3 +2408,170 @@ async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
     drop(db);
     bench.stop().await;
 }
+
+/// A team agent's own clone recorded in a project in the home holds a home move; once the
+/// agent is removed with its clone the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_agent_clone_in_the_home_holds_a_home_move_until_the_agent_is_removed() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-7");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (7,?1,?2,?3,?4)",
+        rusqlite::params![
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            git_dir.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_worktrees WHERE agent=7", [])
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// An agent the owner confirmed for removal whose files are not gone yet holds a home move
+/// while its record waits; once its removal finished the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_waiting_for_removal_in_the_home_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    assert!(
+        crazyagent::team::cleanup::finished(&db, &bench.root.join("team"), &project, now)
+            .unwrap()
+            .is_empty()
+    );
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-8");
+    fs::create_dir_all(&worktree).unwrap();
+    db.execute(
+        "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms) VALUES (8,?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            worktree.join(".git").to_str().unwrap(),
+            now
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_retiring WHERE agent=8", [])
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A landed change set with a worktree step recorded but not finished holds a home move,
+/// since an engine start finishes that step at the recorded paths; once no step is left
+/// the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_set_with_an_unfinished_step_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let (db, id, head) = agent_change(&bench, &project, "agent-step");
+    let owner_home = tempfile::tempdir().unwrap();
+    fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
+    )
+    .unwrap();
+    let landed = crazyagent::landing::accept(&db, owner_home.path(), &id, &head, None);
+    assert!(
+        matches!(
+            landed,
+            Ok(crazyagent::landing::AcceptOutcome::Landed { .. })
+        ),
+        "{landed:?}"
+    );
+    let step = serde_json::json!({ "step": "reset", "target": head }).to_string();
+    db.execute(
+        "UPDATE landing_change_sets SET intent=?1 WHERE id=?2",
+        rusqlite::params![step, id.as_str()],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute(
+        "UPDATE landing_change_sets SET intent=NULL WHERE id=?1",
+        [id.as_str()],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A team agent's worktree recorded through a link to the home still holds a home move:
+/// the check follows the recorded path to where it is now. Once the record is gone the
+/// move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_worktree_recorded_through_a_link_still_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let home = repo.parent().unwrap().to_path_buf();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("repos");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    let through = link.join(PROJECT);
+    assert!(!through.starts_with(&home) && through.canonicalize().unwrap() == repo);
+    let worktree = through.join("agent-9");
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (9,?1,?2,?3,?4)",
+        rusqlite::params![
+            project.as_str(),
+            through.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            worktree.join(".git").to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_worktrees WHERE agent=9", [])
+        .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
