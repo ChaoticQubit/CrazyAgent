@@ -471,3 +471,20 @@ fn read_only_folders_are_removed_without_following_a_link_out() {
         b"the owner's\n"
     );
 }
+
+/// A master stored under a harness alias ("claude") is the same harness as one stored under
+/// its catalog entry ("claude-code"): only the newest of the two stays for the runtime to
+/// start again, as the runtime's own lookup picks it, and the older one is listed and removed.
+#[test]
+fn an_older_master_under_a_harness_alias_is_listed_and_removed() {
+    let case = Case::new();
+    case.agent(1, "master", "stopped");
+    case.agent(3, "master", "failed");
+    case.db
+        .execute("UPDATE team_agents SET harness='claude' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.remove(&[3]), refused("cleanup_agent_running"));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.known(1) && case.kept(3));
+}
