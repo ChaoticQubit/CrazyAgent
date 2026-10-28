@@ -450,3 +450,629 @@ fn the_ide_server_cannot_read_agent_ide_config() {
     );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
+
+const REAL_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// Runs real git for a test's setup, outside any sandbox and with no owner or system
+/// config, plus the given variables. Inputs: the folder, the variables and the arguments.
+/// Output: whether git exited 0, with what it printed on standard output.
+fn setup_git(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> (bool, String) {
+    let output = crate::spawn_gate::output(
+        Command::new(REAL_GIT)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .envs(env.iter().copied())
+            .args([
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+            ])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "commit.gpgSign=false",
+            ])
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+fn setup(dir: &Path, args: &[&str]) -> String {
+    let (ran, printed) = setup_git(dir, &[], args);
+    assert!(ran, "git {args:?} in {}", dir.display());
+    printed
+}
+
+/// Runs git the way the IDE server's git does: the engine's shim under the installed
+/// profile, in the server's environment ([`crate::ide::env::server_env`], with the
+/// project's git ceiling and configuration), real git first on the path and the server data
+/// folder as home. Inputs: the profile, the shim, the home, the project folder, the folder
+/// git runs in and the arguments. Output: whether git exited 0, with what it printed on
+/// standard error.
+fn ide_git(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    root: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> (bool, String) {
+    let output = ide_git_output(profile, shim, home, root, dir, args);
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// [`ide_git`] with everything git printed. Inputs: as [`ide_git`]. Output: git's output.
+fn ide_git_output(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    root: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    let source = [
+        (
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin"),
+        ),
+        (
+            std::ffi::OsString::from("HOME"),
+            home.as_os_str().to_owned(),
+        ),
+    ];
+    let env = crate::ide::env::server_env(
+        source,
+        &home.join("capability"),
+        &home.join("owner.sock"),
+        &home.join("locked-settings.json"),
+        &crate::ide::git::ceiling(root).unwrap(),
+    );
+    let mut command = super::command(profile, shim);
+    command
+        .args(args)
+        .current_dir(dir)
+        .env_clear()
+        .envs(env)
+        .envs([
+            ("GIT_AUTHOR_NAME", "Owner"),
+            ("GIT_AUTHOR_EMAIL", "owner@example.invalid"),
+            ("GIT_COMMITTER_NAME", "Owner"),
+            ("GIT_COMMITTER_EMAIL", "owner@example.invalid"),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::spawn_gate::output(&mut command).unwrap()
+}
+
+/// Writes an executable script that records that it ran by creating `marker`, then passes
+/// its input through. Inputs: the script path and the marker. Output: none.
+fn planted(script: &Path, marker: &Path) {
+    fs::write(
+        script,
+        format!("#!/bin/sh\n: > '{}'\nexec cat\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// INT-1, IN1-1 and IN1-F1 under the installed IDE profile, through the engine's own git
+/// shim and git configuration. Agent folders under either agents root, as an agent's own
+/// clone, a linked worktree whose admin folder it can write, a `gitdir:` file and a
+/// bare-looking folder, each with a planted clean filter that runs when git works there,
+/// are refused with the hooks switch Off and On, and the IDE cannot read a clone's config.
+/// In the Project section the IDE stages and commits, runs the project's hooks only when
+/// the switch is On, never signs, and still cannot write the project's git config or hooks.
+#[test]
+fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    let marks = home.join("marks");
+    for path in [&mine, &home, &build, &root, &marks, &root.join("tools")] {
+        folder(path);
+    }
+    let ran = |name: &str| marks.join(name).exists();
+
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
+    planted(
+        &root.join(".git").join("hooks").join("pre-commit"),
+        &marks.join("project-hook"),
+    );
+    planted(
+        &root.join("tools").join("sign.sh"),
+        &marks.join("project-sign"),
+    );
+    setup(
+        &root,
+        &[
+            "config",
+            "gpg.program",
+            root.join("tools/sign.sh").to_str().unwrap(),
+        ],
+    );
+    setup(&root, &["config", "extensions.worktreeConfig", "true"]);
+    for key in ["commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated"] {
+        setup(&root, &["config", key, "true"]);
+    }
+
+    let inner = root.join(".crazyagent").join("worktrees");
+    let outer = root.join("worktrees");
+    folder(&inner);
+    folder(&outer);
+    let clone = inner.join("agent-clone");
+    setup(
+        &base,
+        &[
+            "clone",
+            "-q",
+            root.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    let linked = inner.join("agent-linked");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-linked",
+            linked.to_str().unwrap(),
+        ],
+    );
+    let gitdir = outer.join("agent-gitdir");
+    folder(&gitdir);
+    setup(
+        &gitdir,
+        &[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            gitdir.join("meta").to_str().unwrap(),
+        ],
+    );
+    let bare = outer.join("agent-bare");
+    folder(&bare);
+    setup(&bare, &["init", "-q", "--bare"]);
+    setup(&bare, &["config", "core.bare", "false"]);
+    setup(&bare, &["config", "core.worktree", bare.to_str().unwrap()]);
+    let admin = root.join(".git").join("worktrees").join("agent-linked");
+    let agents = [
+        (&clone, clone.join(".git").join("config")),
+        (&linked, admin.join("config.worktree")),
+        (&gitdir, gitdir.join("meta").join("config")),
+        (&bare, bare.join("config")),
+    ];
+    for (agent, config) in &agents {
+        let name = agent.file_name().unwrap().to_str().unwrap();
+        let filter = agent.join("filter.sh");
+        planted(&filter, &marks.join(name));
+        let mut text = fs::read_to_string(config).unwrap_or_default();
+        text.push_str(&format!(
+            "[filter \"evil\"]\n\tclean = {}\n\trequired = true\n",
+            filter.display()
+        ));
+        fs::write(config, text).unwrap();
+        fs::write(agent.join(".gitattributes"), "*.txt filter=evil\n").unwrap();
+        fs::write(agent.join("notes.txt"), "planted\n").unwrap();
+    }
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let refuse_agents = |mode: &str| {
+        for (agent, _) in &agents {
+            let name = agent.file_name().unwrap().to_str().unwrap();
+            for args in [&["status", "--porcelain"][..], &["add", "notes.txt"]] {
+                let (worked, said) = ide_git(&profile, &shim, &home, &root, agent, args);
+                assert!(!worked, "{mode}: git {args:?} worked in {name}: {said}");
+                let reason = if *agent == &bare {
+                    "cannot use bare repository"
+                } else {
+                    "not a git repository"
+                };
+                assert!(said.contains(reason), "{mode}: {name}: {said}");
+            }
+            assert!(!ran(name), "{mode}: {name}'s filter ran");
+        }
+        let (read, printed) = run(
+            &profile,
+            "/bin/cat",
+            &[clone.join(".git/config").as_os_str()],
+        );
+        assert!(
+            !read && printed.is_empty(),
+            "{mode}: the clone's config was read"
+        );
+        assert!(!sh(
+            &profile,
+            r#"printf x >> "$1""#,
+            &root.join(".git/config")
+        ));
+        assert!(!sh(
+            &profile,
+            r#": > "$1""#,
+            &root.join(".git/hooks/pre-commit")
+        ));
+    };
+
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::SHIM_TEXT
+    );
+    let (status, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["status", "--porcelain"],
+    );
+    assert!(
+        status,
+        "the Project section's git works under the profile: {said}"
+    );
+    fs::write(root.join("a.txt"), "off\n").unwrap();
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
+    assert!(staged, "Off: the IDE stages in the Project section: {said}");
+    let (committed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-m", "off"],
+    );
+    assert!(
+        committed,
+        "Off: the IDE commits in the Project section: {said}"
+    );
+    assert!(!ran("project-hook"), "Off: the project's hook never runs");
+    let (tagged, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["tag", "-a", "-m", "off", "off"],
+    );
+    assert!(
+        tagged,
+        "Off: a project that signs every tag still tags: {said}"
+    );
+    assert!(!setup(&root, &["cat-file", "tag", "off"]).contains("BEGIN PGP"));
+    let (signed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
+    );
+    assert!(
+        !signed && said.contains("gpg failed to sign"),
+        "Off: {said}"
+    );
+    assert!(!ran("project-sign"));
+    refuse_agents("Off");
+
+    crate::ide::settings::write(&mine, &home, &data, Some(&root)).unwrap();
+    assert_ne!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::SHIM_TEXT
+    );
+    fs::write(root.join("a.txt"), "on\n").unwrap();
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
+    assert!(staged, "On: {said}");
+    let (committed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-m", "on"],
+    );
+    assert!(committed, "On: {said}");
+    assert!(
+        ran("project-hook"),
+        "On: the project's hook runs in the Project section"
+    );
+    let (signed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
+    );
+    assert!(!signed && said.contains("gpg failed to sign"), "On: {said}");
+    assert!(!ran("project-sign"), "On: the IDE never signs");
+    refuse_agents("On");
+    assert_eq!(setup(&root, &["log", "--format=%s"]), "on\noff\nbase\n");
+    for commit in ["HEAD", "HEAD~1"] {
+        assert!(
+            !setup(&root, &["cat-file", "commit", commit]).contains("gpgsig"),
+            "IDE commits in a project that signs every commit go through unsigned"
+        );
+    }
+
+    assert!(sh(
+        &profile,
+        r#""$1" < /dev/null"#,
+        &root.join("tools/sign.sh")
+    ));
+    assert!(
+        ran("project-sign"),
+        "a program the IDE runs can record that it ran"
+    );
+    for (agent, _) in &agents {
+        let name = agent.file_name().unwrap().to_str().unwrap();
+        assert!(sh(
+            &profile,
+            r#""$1" < /dev/null"#,
+            &agent.join("filter.sh")
+        ));
+        assert!(ran(name), "{name}'s filter can record under the profile");
+        fs::remove_file(marks.join(name)).unwrap();
+        let env: &[(&str, &str)] = if *agent == &bare {
+            &[]
+        } else {
+            &crate::ide::git::CONFIG_ENV
+        };
+        let (added, _) = setup_git(agent, env, &["add", "notes.txt"]);
+        assert!(
+            added && ran(name),
+            "{name}'s planted filter runs where git reaches it"
+        );
+    }
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// IN1-R1 under the installed IDE profile: in an older-layout project, whose agents sit at
+/// `<project>/worktrees`, an agent folder's unreadable `.git` makes git in the Project
+/// section see the agent's files as untracked, so Stage All would commit them past Accept.
+/// Once the IDE start hides the agents root ([`crate::projects_home::exclude_agents`]),
+/// Stage All through the IDE's git stages the owner's files only.
+#[test]
+fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("older");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root, &root.join("worktrees")] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let agent = root.join("worktrees").join("agent-3");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-3",
+            agent.to_str().unwrap(),
+        ],
+    );
+    fs::write(agent.join("work.txt"), "agent\n").unwrap();
+    fs::write(root.join("notes.txt"), "owner\n").unwrap();
+    assert_eq!(
+        crate::projects_home::state_folder(&root),
+        root,
+        "an older-layout project"
+    );
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+
+    let before = ide_git_output(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["add", "-A", "--dry-run"],
+    );
+    let listed = String::from_utf8_lossy(&before.stdout).into_owned();
+    assert!(
+        listed.contains("worktrees/agent-3/work.txt"),
+        "without the exclude, Stage All takes the agent's file: {listed}"
+    );
+
+    assert!(crate::projects_home::exclude_agents(&root).unwrap());
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "-A"]);
+    assert!(staged, "{said}");
+    assert_eq!(
+        setup(&root, &["diff", "--cached", "--name-only"]),
+        "notes.txt\n"
+    );
+    let (committed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-m", "owner"],
+    );
+    assert!(committed, "{said}");
+    assert_eq!(
+        setup(&root, &["show", "--name-only", "--format=", "HEAD"]),
+        "notes.txt\n"
+    );
+    assert_eq!(setup(&agent, &["status", "--porcelain"]), "?? work.txt\n");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// IN1-FN1 under the installed IDE profile: the IDE cannot read an agent worktree's `.git`,
+/// so git in the Project section sees the worktree as missing and a prune would drop its
+/// registration. Through the IDE's git, `worktree prune` and `worktree remove` are refused
+/// and a gc keeps the registration, while a dry-run prune by real git under the same
+/// profile lists the worktree for removal.
+#[test]
+fn ide_git_never_prunes_an_agent_worktree() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let agent = root.join(".crazyagent").join("worktrees").join("agent-4");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-4",
+            agent.to_str().unwrap(),
+        ],
+    );
+    let admin = root.join(".git").join("worktrees").join("agent-4");
+    let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(admin.join("index"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - year)
+        .unwrap();
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let said = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let registered = || admin.join("gitdir").is_file() && agent.join(".git").is_file();
+
+    let dry = ide_git_output(
+        &profile,
+        Path::new(REAL_GIT),
+        &home,
+        &root,
+        &root,
+        &["worktree", "prune", "-n", "-v", "--expire=3.months.ago"],
+    );
+    assert!(
+        said(&dry).contains("agent-4"),
+        "the IDE sees the agent worktree as missing: {}",
+        said(&dry)
+    );
+    for args in [
+        &["worktree", "prune"][..],
+        &["worktree", "prune", "-v", "--expire=now"],
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            "--force",
+            agent.to_str().unwrap(),
+        ],
+    ] {
+        let refused = ide_git_output(&profile, &shim, &home, &root, &root, args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            said(&refused).contains("the IDE does not run git worktree"),
+            "{}",
+            said(&refused)
+        );
+        assert!(registered(), "{args:?}");
+    }
+    let collected = ide_git_output(&profile, &shim, &home, &root, &root, &["gc", "-q"]);
+    assert!(collected.status.success(), "{}", said(&collected));
+    assert!(registered(), "a gc in the IDE keeps the agent worktree");
+    assert_eq!(setup(&agent, &["status", "--porcelain"]), "");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}

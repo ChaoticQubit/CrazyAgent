@@ -276,6 +276,7 @@ impl ProjectPage {
                     policy: AgentPolicy {
                         access,
                         toolchains: Vec::new(),
+                        ide_git_hooks: false,
                     },
                 },
                 generation,

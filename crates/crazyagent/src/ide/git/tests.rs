@@ -114,3 +114,421 @@ fn the_ide_git_settings_turn_off_nested_repository_and_submodule_detection() {
             .all(|(name, _)| name.starts_with("GIT_CONFIG_"))
     );
 }
+
+/// Writes an executable script that records that it ran by creating `marker`, then passes
+/// its input through. Inputs: the script path and the marker. Output: none.
+fn planted(script: &Path, marker: &Path) {
+    std::fs::write(
+        script,
+        format!("#!/bin/sh\n: > '{}'\nexec cat\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    ok(&repo, &["init", "-q"]);
+    ok(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let marks = base.join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let hooks = repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    for name in ["pre-commit", "post-index-change"] {
+        planted(&hooks.join(name), &marks.join(name));
+    }
+    planted(&base.join("fsmonitor.sh"), &marks.join("fsmonitor"));
+    planted(&base.join("sign.sh"), &marks.join("sign"));
+    ok(
+        &repo,
+        &[
+            "config",
+            "core.fsmonitor",
+            base.join("fsmonitor.sh").to_str().unwrap(),
+        ],
+    );
+    ok(
+        &repo,
+        &[
+            "config",
+            "gpg.program",
+            base.join("sign.sh").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(repo.join("notes.txt"), "first\n").unwrap();
+    let ran = |name: &str| marks.join(name).exists();
+
+    let added = git(&repo, &CONFIG_ENV, &["add", "notes.txt"]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let committed = git(&repo, &CONFIG_ENV, &["commit", "-q", "-m", "guarded"]);
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let signed = git(
+        &repo,
+        &CONFIG_ENV,
+        &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
+    );
+    assert!(!signed.status.success());
+    for name in ["pre-commit", "post-index-change", "fsmonitor", "sign"] {
+        assert!(!ran(name), "{name} ran under the IDE's git configuration");
+    }
+
+    std::fs::write(repo.join("notes.txt"), "second\n").unwrap();
+    assert!(git(&repo, &[], &["status", "--porcelain"]).status.success());
+    assert!(git(&repo, &[], &["add", "notes.txt"]).status.success());
+    assert!(
+        git(&repo, &[], &["commit", "-q", "-m", "open"])
+            .status
+            .success()
+    );
+    assert!(
+        !git(
+            &repo,
+            &[],
+            &["commit", "-q", "-S", "--allow-empty", "-m", "signed"]
+        )
+        .status
+        .success()
+    );
+    for name in ["pre-commit", "post-index-change", "fsmonitor", "sign"] {
+        assert!(ran(name), "without it, git runs the planted {name}");
+    }
+
+    let bare = base.join("agent");
+    std::fs::create_dir(&bare).unwrap();
+    ok(&bare, &["init", "-q", "--bare"]);
+    ok(&bare, &["config", "core.bare", "false"]);
+    ok(&bare, &["config", "core.worktree", bare.to_str().unwrap()]);
+    planted(
+        &base.join("bare-fsmonitor.sh"),
+        &marks.join("bare-fsmonitor"),
+    );
+    ok(
+        &bare,
+        &[
+            "config",
+            "core.fsmonitor",
+            base.join("bare-fsmonitor.sh").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(bare.join("notes.txt"), "planted\n").unwrap();
+    let guarded = git(&bare, &CONFIG_ENV, &["status", "--porcelain"]);
+    assert!(!guarded.status.success());
+    assert!(
+        String::from_utf8_lossy(&guarded.stderr).contains("cannot use bare repository"),
+        "{}",
+        String::from_utf8_lossy(&guarded.stderr)
+    );
+    assert!(!ran("bare-fsmonitor"));
+    assert!(git(&bare, &[], &["status", "--porcelain"]).status.success());
+    assert!(
+        ran("bare-fsmonitor"),
+        "without it, git uses the bare-looking folder and runs its fsmonitor"
+    );
+}
+
+#[test]
+fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
+    assert_eq!(shim_text(None).unwrap(), SHIM_TEXT);
+    for refused in ["relative/project", "/project/it's", "/project/line\nbreak"] {
+        assert!(shim_text(Some(Path::new(refused))).is_err(), "{refused:?}");
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let agent = project
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-1");
+    std::fs::create_dir_all(&agent).unwrap();
+    ok(&project, &["init", "-q"]);
+    let on = base.join("on");
+    let off = base.join("off");
+    for (shim, text) in [
+        (&on, shim_text(Some(&project)).unwrap()),
+        (&off, shim_text(None).unwrap()),
+    ] {
+        assert!(text.starts_with("#!/bin/sh\n") && text.ends_with("exec git \"$@\"\n"));
+        std::fs::write(shim, text).unwrap();
+        std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let hooks_path = |shim: &Path, dir: &Path| {
+        let output = crate::spawn_gate::output(
+            Command::new(shim)
+                .current_dir(dir)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .args(["config", "--get", "core.hooksPath"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let unset = (Some(1), String::new(), String::new());
+    let forced = (Some(0), "/dev/null\n".to_owned(), String::new());
+    assert_eq!(
+        hooks_path(&on, &project),
+        unset,
+        "git ran and found the key unset"
+    );
+    assert_eq!(hooks_path(&on, &agent), forced);
+    assert_eq!(hooks_path(&on, &project.join(".git")), forced);
+    assert_eq!(hooks_path(&off, &project), forced);
+}
+
+/// INT1-1: a git that cannot read an agent folder's `.git` treats it as missing and walks
+/// up to the project's repository. With the project's ceiling, git in an agent folder of
+/// either agents root finds no repository, while the project folder and its other folders
+/// keep theirs; a folder holding a `:` or a relative one is refused.
+#[test]
+fn the_ceiling_stops_git_at_the_agents_roots_and_keeps_the_project() {
+    assert!(ceiling(Path::new("relative/project")).is_err());
+    assert!(ceiling(Path::new("/projects/a:b")).is_err());
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let inner = project
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-1");
+    let outer = project.join("worktrees").join("agent-2");
+    let own = project.join("src");
+    for folder in [&inner, &outer, &own] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    ok(&project, &["init", "-q"]);
+    let value = ceiling(&project).unwrap();
+    assert_eq!(
+        value,
+        std::ffi::OsString::from(format!(
+            "{}:{}",
+            project.join(".crazyagent/worktrees").display(),
+            project.join("worktrees").display()
+        ))
+    );
+    let top = |dir: &Path, bounded: bool| {
+        let env: Vec<(&str, &str)> = if bounded {
+            vec![(CEILING_VARIABLE, value.to_str().unwrap())]
+        } else {
+            Vec::new()
+        };
+        git(dir, &env, &["rev-parse", "--show-toplevel"])
+    };
+    for agent in [&inner, &outer] {
+        let open = top(agent, false);
+        assert!(open.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&open.stdout).trim(),
+            project.to_str().unwrap(),
+            "without it, git in an agent folder acts on the project"
+        );
+        let bounded = top(agent, true);
+        assert!(!bounded.status.success());
+        assert!(
+            String::from_utf8_lossy(&bounded.stderr).contains("not a git repository"),
+            "{}",
+            String::from_utf8_lossy(&bounded.stderr)
+        );
+    }
+    for dir in [&project, &own] {
+        let bounded = top(dir, true);
+        assert!(bounded.status.success(), "{}", dir.display());
+        assert_eq!(
+            String::from_utf8_lossy(&bounded.stdout).trim(),
+            project.to_str().unwrap()
+        );
+    }
+}
+
+/// Makes a file look a year old. Input: the file. Output: none.
+fn age(path: &Path) {
+    let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - year)
+        .unwrap();
+}
+
+/// IN1-FN1: the IDE cannot read an agent worktree's `.git`, so its git sees the worktree as
+/// missing. Through the shim and the IDE's git configuration, `worktree prune` and
+/// `worktree remove` are refused and a gc keeps the worktree's registration, while git
+/// without them prunes it.
+#[test]
+fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    std::fs::create_dir(&project).unwrap();
+    ok(&project, &["init", "-q"]);
+    ok(&project, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let agents = project.join(".crazyagent").join("worktrees");
+    let (gone, kept) = (agents.join("agent-4"), agents.join("agent-5"));
+    for (agent, branch) in [(&gone, "agent-4"), (&kept, "agent-5")] {
+        ok(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                agent.to_str().unwrap(),
+            ],
+        );
+    }
+    let admin = project.join(".git").join("worktrees");
+    std::fs::remove_file(gone.join(".git")).unwrap();
+    age(&admin.join("agent-4").join("index"));
+    let shim = base.join("git");
+    std::fs::write(&shim, SHIM_TEXT).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ide = |args: &[&str]| {
+        crate::spawn_gate::output(
+            Command::new(&shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let said = |output: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let dry = git(
+        &project,
+        &[],
+        &["worktree", "prune", "-n", "-v", "--expire=3.months.ago"],
+    );
+    assert!(said(&dry).contains("agent-4"), "{}", said(&dry));
+    for args in [
+        &["worktree", "prune"][..],
+        &["worktree", "prune", "-v", "--expire=now"],
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            "--force",
+            kept.to_str().unwrap(),
+        ],
+    ] {
+        let refused = ide(args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            said(&refused).contains("the IDE does not run git worktree"),
+            "{}",
+            said(&refused)
+        );
+    }
+    assert!(kept.join(".git").is_file());
+    let listed = ide(&["worktree", "list"]);
+    assert!(listed.status.success(), "{}", said(&listed));
+    assert_eq!(
+        String::from_utf8_lossy(&ide(&["config", "--get", "gc.worktreePruneExpire"]).stdout),
+        "never\n"
+    );
+    let collected = ide(&["gc", "-q"]);
+    assert!(collected.status.success(), "{}", said(&collected));
+    assert!(admin.join("agent-4").join("gitdir").is_file());
+    assert!(admin.join("agent-5").join("gitdir").is_file());
+
+    let open = git(&project, &[], &["gc", "-q"]);
+    assert!(open.status.success(), "{}", said(&open));
+    assert!(
+        !admin.join("agent-4").exists(),
+        "without it, gc prunes the worktree it sees as missing"
+    );
+    assert!(admin.join("agent-5").join("gitdir").is_file());
+}
+
+/// INT1-3: in a project that signs every commit and tag, git under the IDE's configuration
+/// still commits and tags, unsigned and without running the signing program, as the hooks
+/// setting's line says; git without it tries to sign and fails.
+#[test]
+fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    ok(&repo, &["init", "-q"]);
+    let marker = base.join("signed");
+    planted(&base.join("sign.sh"), &marker);
+    ok(
+        &repo,
+        &[
+            "config",
+            "gpg.program",
+            base.join("sign.sh").to_str().unwrap(),
+        ],
+    );
+    for key in ["commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated"] {
+        ok(&repo, &["config", key, "true"]);
+    }
+
+    let committed = git(
+        &repo,
+        &CONFIG_ENV,
+        &["commit", "-q", "--allow-empty", "-m", "ide"],
+    );
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let tagged = git(&repo, &CONFIG_ENV, &["tag", "-a", "-m", "ide", "ide"]);
+    assert!(
+        tagged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tagged.stderr)
+    );
+    assert!(!ok(&repo, &["cat-file", "commit", "HEAD"]).contains("gpgsig"));
+    assert!(!ok(&repo, &["cat-file", "tag", "ide"]).contains("BEGIN PGP"));
+    assert!(!marker.exists(), "the IDE never runs the signing program");
+
+    let open = git(&repo, &[], &["commit", "-q", "--allow-empty", "-m", "open"]);
+    assert!(!open.status.success());
+    assert!(
+        String::from_utf8_lossy(&open.stderr).contains("gpg failed to sign"),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    assert!(
+        marker.exists(),
+        "without it, git signs with the project's program"
+    );
+}

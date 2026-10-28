@@ -2170,6 +2170,7 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
             })
             .collect(),
         toolchains: Vec::new(),
+        ide_git_hooks: false,
         version,
     }
 }
@@ -2209,6 +2210,7 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
         policy: AgentPolicy {
             access: AgentAccess::Sandboxed,
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     };
     assert_eq!(

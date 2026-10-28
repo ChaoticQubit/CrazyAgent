@@ -11,16 +11,24 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
     "Lowering the level stops agents running above it; they restart at the new level.";
 
+/// The IDE hooks switch's name, the same in Desktop.
+pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
+
+/// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
+pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+
 const TEXT_WIDTH: usize = 56;
 
-/// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
-/// and one switch per toolchain family. Row 0 is the level, each later row one toolchain of
-/// the view. Busy while the engine saves; a refusal keeps the choices with the reason.
+/// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level,
+/// one switch per toolchain family and the IDE hooks switch. Row 0 is the level, each next
+/// row one toolchain of the view, and the last row the IDE hooks switch. Busy while the
+/// engine saves; a refusal keeps the choices with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
     pub access: AgentAccess,
     pub allowed: Vec<bool>,
+    pub ide_git_hooks: bool,
     pub cursor: usize,
     pub confirm_full: bool,
     pub busy: bool,
@@ -42,6 +50,7 @@ impl AccessEdit {
         Self {
             access: view.access,
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
+            ide_git_hooks: view.ide_git_hooks,
             view: view.clone(),
             cursor: 0,
             confirm_full: false,
@@ -55,7 +64,7 @@ impl AccessEdit {
     /// Output: what the screen does next.
     pub fn key(&mut self, key: KeyEvent) -> AccessKey {
         assert_eq!(self.allowed.len(), self.view.toolchains.len());
-        assert!(self.cursor <= self.allowed.len());
+        assert!(self.cursor <= self.hooks_row());
         if self.busy {
             return match key.code {
                 KeyCode::Esc => AccessKey::Close,
@@ -78,7 +87,7 @@ impl AccessEdit {
         match key.code {
             KeyCode::Esc => return AccessKey::Close,
             KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.allowed.len()),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.hooks_row()),
             KeyCode::Left => self.change(false),
             KeyCode::Right | KeyCode::Char(' ') => self.change(true),
             KeyCode::Enter if self.access == AgentAccess::Full => {
@@ -90,9 +99,9 @@ impl AccessEdit {
         AccessKey::Handled
     }
 
-    /// The policy the box would save: the chosen level and a choice for each toolchain
-    /// whose switch differs from the project's own use, so the others keep following the
-    /// project.
+    /// The policy the box would save: the chosen level, a choice for each toolchain whose
+    /// switch differs from the project's own use, so the others keep following the project,
+    /// and the IDE hooks switch.
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -108,14 +117,15 @@ impl AccessEdit {
         let policy = AgentPolicy {
             access: self.access,
             toolchains,
+            ide_git_hooks: self.ide_git_hooks,
         };
         assert!(policy.validate().is_ok());
         policy
     }
 
     /// The box's lines: what the setting does, the level row, what lowering the level does
-    /// to running agents, the toolchain rows, the warning or the refusal, and the save line.
-    /// Input: the look. Output: the rows.
+    /// to running agents, the toolchain rows, the IDE hooks row with its line, the warning or
+    /// the refusal, and the save line. Input: the look. Output: the rows.
     pub fn body(&self, look: &Look) -> Vec<Row> {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
@@ -190,6 +200,25 @@ impl AccessEdit {
             );
         }
         body.push(Row::default());
+        body.push(Row::of("IDE git", look.accent));
+        let hooks = self.hooks_row();
+        body.push(Row::of(mark(hooks), look.accent).push(
+            format!(
+                "{} {IDE_GIT_HOOKS}",
+                if self.ide_git_hooks { "[x]" } else { "[ ]" }
+            ),
+            if self.cursor == hooks {
+                look.selection
+            } else {
+                look.fg
+            },
+        ));
+        body.extend(
+            wrap_words(IDE_GIT_HOOKS_LINE, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("  {line}"), look.muted)),
+        );
+        body.push(Row::default());
         if self.confirm_full {
             body.extend(
                 wrap_words(&format!("Full access: {FULL_ACCESS_WARNING}"), TEXT_WIDTH)
@@ -215,10 +244,18 @@ impl AccessEdit {
         body
     }
 
+    fn hooks_row(&self) -> usize {
+        self.allowed.len() + 1
+    }
+
     fn change(&mut self, forward: bool) {
         self.error = None;
         if self.cursor == 0 {
             self.access = next_level(self.access, forward);
+            return;
+        }
+        if self.cursor == self.hooks_row() {
+            self.ide_git_hooks = !self.ide_git_hooks;
             return;
         }
         let row = self.cursor - 1;

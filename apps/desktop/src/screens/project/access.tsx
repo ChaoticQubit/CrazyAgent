@@ -11,6 +11,12 @@ export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: the
 /** What a lower saved level does to agents already running: the engine stops each one that started above it. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level.";
 
+/** The IDE hooks switch's name, the same in the TUI. */
+export const IDE_GIT_HOOKS = "IDE git runs the project's hooks";
+
+/** What the IDE hooks switch does and never does, the same in the TUI. */
+export const IDE_GIT_HOOKS_LINE = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
+
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [
   { access: "sandboxed", label: "Sandboxed", help: "Edits only its own worktree and makes no git commits. Your keys and other folders stay out of reach." },
@@ -23,14 +29,16 @@ export function accessLabel(access: AgentAccess): string {
   return ACCESS_LEVELS.find((level) => level.access === access)?.label ?? access;
 }
 
-/** The policy Save sends: the level and a choice only for each toolchain whose switch differs
- * from the project's own use, so the others keep following the project.
- * Inputs: the engine's view, the chosen level and one switch per view toolchain. Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, allowed: boolean[]): AgentPolicy {
+/** The policy Save sends: the level, a choice only for each toolchain whose switch differs
+ * from the project's own use, so the others keep following the project, and the IDE hooks switch.
+ * Inputs: the engine's view, the chosen level, one switch per view toolchain and the IDE hooks
+ * switch. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, allowed: boolean[], ideGitHooks: boolean): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   return {
     access,
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
+    ide_git_hooks: ideGitHooks,
   };
 }
 
@@ -94,5 +102,19 @@ export function ToolchainSwitches({ prefix, view, allowed, onChange }: {
       <Switch id={`${prefix}-toolchain-${row.toolchain}`} label={row.label} hideLabel checked={allowed[index]}
         onChecked={(on) => onChange(allowed.map((value, at) => at === index ? on : value))} />
     </div>)}</div>
+  </fieldset>;
+}
+
+/** The IDE hooks switch with what it does and never does. Inputs: the id prefix, the switch and
+ * the change handler. Output: the fieldset. */
+export function IdeGitHooksSwitch({ prefix, checked, onChange }: {
+  prefix: string; checked: boolean; onChange: (checked: boolean) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>IDE git</legend>
+    <div className="pj-switch-list"><div className="pj-switch-item">
+      <span><strong>{IDE_GIT_HOOKS}</strong><span className="pj-secondary">{IDE_GIT_HOOKS_LINE}</span></span>
+      <Switch id={`${prefix}-ide-git-hooks`} label={IDE_GIT_HOOKS} hideLabel checked={checked} onChecked={onChange} />
+    </div></div>
   </fieldset>;
 }

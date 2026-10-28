@@ -92,12 +92,16 @@ pub struct ToolchainChoice {
 }
 
 /// One project's agent policy as the owner saved it: the access level and the toolchain
-/// choices the owner made. It applies to the master, sub-agents and research jobs alike.
+/// choices the owner made, which apply to the master, sub-agents and research jobs alike,
+/// and whether git in the IDE runs the project's own hooks in the Project section (Off
+/// unless the owner turned it on; a policy saved before the setting existed reads Off).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
     pub access: AgentAccess,
     pub toolchains: Vec<ToolchainChoice>,
+    #[serde(default)]
+    pub ide_git_hooks: bool,
 }
 
 impl AgentPolicy {
@@ -132,9 +136,9 @@ impl AgentPolicy {
     }
 
     /// What a client shows: the level, every level with its availability, each toolchain
-    /// family the owner has installed, the project uses or the owner chose, and the policy's
-    /// version, which a save names. Inputs: the project folder, the owner's tool homes and
-    /// the version. Output: the view.
+    /// family the owner has installed, the project uses or the owner chose, the IDE hooks
+    /// choice and the policy's version, which a save names. Inputs: the project folder, the
+    /// owner's tool homes and the version. Output: the view.
     pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
@@ -161,6 +165,7 @@ impl AgentPolicy {
                 .collect(),
             toolchains,
             version,
+            ide_git_hooks: self.ide_git_hooks,
         }
     }
 
@@ -180,6 +185,7 @@ pub struct PolicyView {
     pub levels: Vec<LevelView>,
     pub toolchains: Vec<ToolchainView>,
     pub version: u64,
+    pub ide_git_hooks: bool,
 }
 
 /// One access level with the reason it cannot run here, if any.
@@ -305,13 +311,31 @@ mod tests {
                 toolchain: Toolchain::Python,
                 allowed: false,
             }],
+            ide_git_hooks: true,
         };
         save(&connection, "p", &policy).unwrap();
         assert_eq!(load(&connection, "p").unwrap(), policy);
+        let view = policy.view(
+            Path::new("/nonexistent"),
+            &ToolHomes::at(Path::new("/nonexistent")),
+            0,
+        );
+        assert!(view.ide_git_hooks);
+        connection
+            .execute(
+                "UPDATE project_agent_policy SET body=?1 WHERE project='p'",
+                [r#"{"access":"full","toolchains":[]}"#],
+            )
+            .unwrap();
+        let old = load(&connection, "p").unwrap();
+        assert_eq!(old.access, AgentAccess::Full);
+        assert!(!old.ide_git_hooks);
+        assert!(!AgentPolicy::default().ide_git_hooks);
         assert_eq!(load(&connection, "other").unwrap(), AgentPolicy::default());
         for body in [
             r#"{"access":"root","toolchains":[]}"#.to_owned(),
             r#"{"access":"full","toolchains":[],"extra":1}"#.to_owned(),
+            r#"{"access":"full","toolchains":[],"ide_git_hooks":"yes"}"#.to_owned(),
             r#"{"access":"full","toolchains":[{"toolchain":"node","allowed":true},{"toolchain":"node","allowed":false}]}"#.to_owned(),
             format!(r#"{{"access":"full","toolchains":[],"pad":"{}"}}"#, "x".repeat(BODY_BYTES_MAX)),
         ] {

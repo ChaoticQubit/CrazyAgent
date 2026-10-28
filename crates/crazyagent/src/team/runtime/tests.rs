@@ -338,6 +338,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
             &crate::sandbox::policy::AgentPolicy {
                 access,
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
         )
         .unwrap();
@@ -5536,6 +5537,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         &crate::sandbox::policy::AgentPolicy {
             access,
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -5686,6 +5688,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::OwnBranch,
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();
@@ -5738,6 +5741,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             toolchains: Vec::new(),
+            ide_git_hooks: false,
         },
     )
     .unwrap();

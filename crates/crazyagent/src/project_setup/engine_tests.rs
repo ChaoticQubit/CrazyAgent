@@ -1722,6 +1722,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             toolchain: Toolchain::Rust,
             allowed: !rust.allowed,
         }],
+        ide_git_hooks: true,
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), fresh.version, policy.clone(), 2)
@@ -1730,6 +1731,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::OwnBranch);
+    assert!(view.ide_git_hooks);
     assert_eq!(view.version, 1);
     let stale = owner
         .set_project_agent_policy(
@@ -1738,6 +1740,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             AgentPolicy {
                 access: AgentAccess::Sandboxed,
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
             7,
         )
@@ -1777,6 +1780,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 allowed: false,
             },
         ],
+        ide_git_hooks: false,
     };
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
     let action = SetupAction::SetAgentPolicy {
@@ -1797,6 +1801,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     let full = AgentPolicy {
         access: AgentAccess::Full,
         toolchains: Vec::new(),
+        ide_git_hooks: false,
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), view.version, full, 3)
@@ -1805,6 +1810,10 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::Full);
+    assert!(
+        !view.ide_git_hooks,
+        "a save with the switch off turns it off"
+    );
     assert_eq!(
         view.toolchains
             .iter()
@@ -1868,6 +1877,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             AgentPolicy {
                 access: AgentAccess::Full,
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
             6,
         )
@@ -1890,6 +1900,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
             AgentPolicy {
                 access: AgentAccess::OwnBranch,
                 toolchains: Vec::new(),
+                ide_git_hooks: false,
             },
             7,
         )

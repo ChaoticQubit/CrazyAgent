@@ -135,6 +135,17 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
     crate::sandbox::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
 }
 
+/// Whether git in the project's IDE runs the project's own hooks in its Project section, as
+/// the owner saved it in the project's agent policy; Off when none is saved. Inputs: the
+/// engine root and the project. Output: the switch, or `ide_workspace_unavailable` for a
+/// policy that cannot be read, so a tampered one never turns hooks on.
+pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineError> {
+    let db = open(root)?;
+    crate::sandbox::policy::load(&db, project.as_str())
+        .map(|policy| policy.ide_git_hooks)
+        .map_err(unavailable)
+}
+
 /// Reads the project's stored folder. Inputs: the database and project. Output: the
 /// absolute folder, or `ide_project_unknown` or `ide_project_folder_invalid`.
 fn project_folder(db: &Connection, project: &ProjectId) -> Result<PathBuf, EngineError> {
