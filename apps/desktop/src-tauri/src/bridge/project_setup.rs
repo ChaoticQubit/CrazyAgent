@@ -1,5 +1,6 @@
 use super::{
-    BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure, native_project_id,
+    BridgeError, BridgeQueue, IntentReceipt, NativeBridge, bounded, caused, failure,
+    native_project_id,
 };
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
@@ -548,5 +549,14 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(ResearchLog { lines })
+    }
+}
+
+impl BridgeQueue {
+    /// Lists a set-up project's files for the console's `@` completion through the window's
+    /// bridge queue. Takes the project id and the query. Returns at most 200 paths in git's
+    /// order, or `busy` when the bridge stays taken past the queue's wait.
+    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
+        self.read().await?.project_files(id, query).await
     }
 }
