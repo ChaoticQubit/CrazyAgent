@@ -2223,6 +2223,14 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
     assert_eq!(second.agents[0].id, first.agents[0].id);
     assert_ne!(second.agents[0].status, AgentStatus::Stopped);
     assert_eq!(second.agents[0].worktree, first.agents[0].worktree);
+    let restarted: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_events WHERE agent=?1 AND kind='progress' AND text LIKE 'The owner restarted it in its own worktree.%'",
+            [first.agents[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(restarted, 1, "the master is told the owner restarted it");
     assert_eq!(
         agents
             .list(Some(&project), 0, crate::agents::LIST_MAX)

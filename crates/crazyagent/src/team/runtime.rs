@@ -983,7 +983,7 @@ impl TeamRuntime {
             Ok(account) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
-                        self.owner_woke(&project, id, resumed)?;
+                        self.owner_woke(&project, id, resumed, again.is_some())?;
                         Ok(id)
                     }
                     Err(reason) => Err(reason),
@@ -1003,14 +1003,15 @@ impl TeamRuntime {
 
     /// After the owner's Wake or restart starts a sub-agent again with no task (WK-R4): when
     /// its harness conversation could not continue, keeps its last result for its next task's
-    /// prompt, as a master's wake gives it at once, and tells the master the owner woke it.
-    /// Takes the project, the agent and whether its conversation continues. Returns any
-    /// SQLite failure.
+    /// prompt, as a master's wake gives it at once, and tells the master the owner woke or
+    /// restarted it. Takes the project, the agent, whether its conversation continues and
+    /// whether it was a restart. Returns any SQLite failure.
     fn owner_woke(
         &mut self,
         project: &ProjectId,
         id: i64,
         resumed: bool,
+        restarted: bool,
     ) -> Result<(), EngineError> {
         let handoff = if resumed {
             None
@@ -1026,7 +1027,11 @@ impl TeamRuntime {
             id,
             None,
             super::events::EventKind::Progress,
-            OWNER_WOKE,
+            if restarted {
+                OWNER_RESTARTED
+            } else {
+                OWNER_WOKE
+            },
             now_ms(),
         )?;
         Ok(())
@@ -4438,6 +4443,7 @@ fn per_turn(
 const PROCESS_CLOSED: &str = "The agent process closed";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
