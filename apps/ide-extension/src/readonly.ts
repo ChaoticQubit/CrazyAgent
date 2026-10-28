@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
 import type { Feature } from "./extension.js";
+import { unconfirmed } from "./scm-model.js";
 import { EDIT_ANYWAY, agentOf, editAnywayQuestion, insideFolder } from "./worktree.js";
 
 /** The command behind the "Edit anyway" button on a read-only agent file. */
@@ -40,7 +41,7 @@ async function editAnyway(engine: Engine): Promise<void> {
   if (choice !== EDIT_ANYWAY) return;
   const reply = await engine.request<{ path: string; told: boolean }>("ide.owner_edit", { agent, path: file });
   if (reply.kind !== "ok") {
-    await vscode.window.showErrorMessage(`The file stays read-only (${reply.code}).`);
+    await vscode.window.showErrorMessage(unconfirmed(reply.code) ?? `The file stays read-only (${reply.code}).`);
     return;
   }
   await vscode.commands.executeCommand("workbench.action.files.setActiveEditorWriteableInSession");

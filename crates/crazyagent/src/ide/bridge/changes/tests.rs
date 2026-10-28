@@ -79,7 +79,35 @@ impl Case {
         base: &[(&str, &str)],
         edits: &[(&str, Option<&str>)],
     ) -> Self {
-        Self::made(None, agent, base, edits)
+        let base: Vec<(&str, &[u8])> = base
+            .iter()
+            .map(|(path, text)| (*path, text.as_bytes()))
+            .collect();
+        let edits: Vec<(&str, Option<&[u8]>)> = edits
+            .iter()
+            .map(|(path, text)| (*path, text.map(str::as_bytes)))
+            .collect();
+        Self::made(None, agent, &base, &edits)
+    }
+
+    /// The case with more files the agent changed: each path with its bytes at the base
+    /// and the bytes the agent wrote. Input: the files. Output: the case.
+    fn with_bytes(files: &[(&str, &[u8], &[u8])]) -> Self {
+        let base: Vec<(&str, &[u8])> = files.iter().map(|(path, base, _)| (*path, *base)).collect();
+        let edits: Vec<(&str, Option<&[u8]>)> = files
+            .iter()
+            .map(|(path, _, agent)| (*path, Some(*agent)))
+            .collect();
+        Self::made(
+            None,
+            ChangeAgent {
+                kind: AgentKind::Sub,
+                id: "7".into(),
+                label: "Ada (@builder) \u{b7} Codex".into(),
+            },
+            &base,
+            &edits,
+        )
     }
 
     /// The case with its change set made by `agent` in the store of an engine root, or
@@ -89,8 +117,8 @@ impl Case {
     fn made(
         engine: Option<&Path>,
         agent: ChangeAgent,
-        base: &[(&str, &str)],
-        edits: &[(&str, Option<&str>)],
+        base: &[(&str, &[u8])],
+        edits: &[(&str, Option<&[u8]>)],
     ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -434,6 +462,117 @@ fn agent_ide_settings_are_read_from_the_change_set_head_by_the_engine_only() {
 }
 
 #[test]
+fn the_head_side_of_a_diff_is_the_recorded_head_while_the_agent_works_on() {
+    let case = Case::new();
+    let set = case.only(NOW);
+    std::fs::write(case.worktree.join("README"), "dos\n").unwrap();
+    std::fs::remove_file(case.worktree.join("NOTES")).unwrap();
+    std::fs::write(case.worktree.join("OLD"), "back again\n").unwrap();
+    let whole = |text: &str| BasePage {
+        text: text.into(),
+        next: None,
+    };
+    assert_eq!(
+        head_blob(&case.db, &case.project, &set.id, "README", 0).unwrap(),
+        whole("uno\ntwo\nthree\n")
+    );
+    assert_eq!(
+        head_blob(&case.db, &case.project, &set.id, "NOTES", 0).unwrap(),
+        whole("added by the agent\n")
+    );
+    assert_eq!(
+        head_blob(&case.db, &case.project, &set.id, "README", 1)
+            .unwrap_err()
+            .0,
+        "changes_not_found"
+    );
+    for outside in ["OLD", "Cargo.toml", "../repo/README", ".git/config", ""] {
+        assert_eq!(
+            head_blob(&case.db, &case.project, &set.id, outside, 0)
+                .unwrap_err()
+                .0,
+            "changes_not_found",
+            "{outside}"
+        );
+    }
+    let other = ProjectId::new("project-2").unwrap();
+    assert_eq!(
+        head_blob(&case.db, &other, &set.id, "README", 0)
+            .unwrap_err()
+            .0,
+        "changes_not_found"
+    );
+}
+
+#[test]
+fn ide_accept_waits_while_the_agent_worktree_holds_more_than_the_reviewed_head() {
+    let case = Case::new();
+    let set = case.only(NOW);
+    let start = case.owner_head();
+    let landing = || {
+        accept(
+            &case.db,
+            &case.home,
+            &case.project,
+            &set.id,
+            &set.head,
+            "Land it",
+        )
+    };
+    std::fs::write(case.worktree.join("README"), "dos\n").unwrap();
+    assert_eq!(landing().unwrap_err().0, "changes_agent_busy");
+    std::fs::write(case.worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
+    std::fs::write(case.worktree.join("SCRATCH"), "the next turn\n").unwrap();
+    assert_eq!(landing().unwrap_err().0, "changes_agent_busy");
+    assert_eq!(case.owner_head(), start);
+    assert_eq!(case.only(NOW).state, ChangeState::Pending);
+    std::fs::remove_file(case.worktree.join("SCRATCH")).unwrap();
+    let landed = landing().unwrap();
+    assert!(matches!(landed, AcceptOutcome::Landed { .. }), "{landed:?}");
+    assert_ne!(case.owner_head(), start);
+}
+
+#[test]
+fn a_legacy_encoded_text_file_opens_on_both_sides_of_its_diff() {
+    let case = Case::with_bytes(&[("LATIN", &b"caf\xe9\n"[..], &b"caf\xe9s cr\xe8me\n"[..])]);
+    let set = case.only(NOW);
+    let latin = set.files.iter().find(|file| file.path == "LATIN").unwrap();
+    assert_eq!(
+        (latin.status, latin.kind),
+        (FileStatus::Modified, FileKind::Text)
+    );
+    assert_eq!(
+        base_blob(&case.db, &case.project, &set.id, "LATIN", 0)
+            .unwrap()
+            .text,
+        "caf\u{fffd}\n"
+    );
+    assert_eq!(
+        head_blob(&case.db, &case.project, &set.id, "LATIN", 0)
+            .unwrap()
+            .text,
+        "caf\u{fffd}s cr\u{fffd}me\n"
+    );
+}
+
+#[test]
+fn a_file_text_and_the_file_list_are_read_from_git_once_for_every_page() {
+    let case = Case::new();
+    let set = case.only(NOW);
+    let base = base_blob(&case.db, &case.project, &set.id, "README", 0).unwrap();
+    let head = head_blob(&case.db, &case.project, &set.id, "README", 0).unwrap();
+    let (git, moved) = (case.repo.join(".git"), case.repo.join("git-moved"));
+    std::fs::rename(&git, &moved).unwrap();
+    let base_again = base_blob(&case.db, &case.project, &set.id, "README", 0);
+    let head_again = head_blob(&case.db, &case.project, &set.id, "README", 0);
+    let past = head_blob(&case.db, &case.project, &set.id, "README", 1);
+    std::fs::rename(&moved, &git).unwrap();
+    assert_eq!(base_again.unwrap(), base);
+    assert_eq!(head_again.unwrap(), head);
+    assert_eq!(past.unwrap_err().0, "changes_not_found");
+}
+
+#[test]
 fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     let case = Case::new();
     let set = case.only(NOW);
@@ -443,6 +582,7 @@ fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     let refusals = [
         change_diff(&case.db, &other, &set.id, 0).map(|_| ()),
         base_blob(&case.db, &other, &set.id, "README", 0).map(|_| ()),
+        head_blob(&case.db, &other, &set.id, "README", 0).map(|_| ()),
         accept(&case.db, &case.home, &other, &set.id, &set.head, "Land it").map(|_| ()),
         discard(&case.db, &other, &set.id, &set.head, NOW).map(|_| ()),
         restore(&case.db, &other, &set.id, NOW),

@@ -21,8 +21,27 @@ test("a pending change set is one Source Control group named for its agent and t
   assert.equal(group.id, `crazyagent.${ID}.open`);
   assert.deepEqual([group.accept, group.discard, group.restore], [true, true, false]);
   assert.deepEqual(group.resources, [{
-    path: "README.md", file: "/work/agents/builder/README.md", base: `/${ID}/README.md`, config: null, open: "diff", letter: "M", tooltip: "Modified", strikeThrough: false,
+    path: "README.md", file: "/work/agents/builder/README.md", base: `/${ID}/README.md`, config: null, head: `/${ID}/README.md`, open: "diff",
+    letter: "M", tooltip: "Modified", strikeThrough: false,
   }]);
+});
+
+test("a text diff's agent side is the text at the recorded head, never the agent's worktree file", () => {
+  const files = [file(), file({ path: "old.txt", status: "deleted" }), file({ path: "logo.png", kind: "binary" })];
+  const [group] = model.scmGroups([set({ files })], NOW);
+  const shown = Object.fromEntries(group.resources.map((resource) => [resource.path, resource]));
+  assert.equal(model.HEAD_SCHEME, "crazyagent-head");
+  assert.notEqual(model.HEAD_SCHEME, model.BASE_SCHEME);
+  assert.equal(shown["README.md"].head, `/${ID}/README.md`);
+  assert.notEqual(shown["README.md"].head, shown["README.md"].file);
+  assert.deepEqual(model.parseBasePath(shown["README.md"].head), { id: ID, path: "README.md" });
+  assert.equal(shown["old.txt"].head, null);
+  assert.equal(shown["logo.png"].head, null);
+  const scm = readFileSync(new URL("../src/scm.ts", import.meta.url), "utf8");
+  assert.match(scm, /const right = resource\.config === null \? head : /);
+  assert.match(scm, /arguments: \[base, right, /);
+  const content = readFileSync(new URL("../src/base-content.ts", import.meta.url), "utf8");
+  assert.match(content, /\[HEAD_SCHEME, "ide\.head_blob"\]/);
 });
 
 test("each file opens VS Code's diff from its base text, a deleted one shows its base, and other kinds open as files", () => {

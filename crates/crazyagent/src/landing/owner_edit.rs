@@ -104,6 +104,47 @@ pub(super) fn settle(
     Ok(())
 }
 
+/// Forgets the owner edits settled on a change set once no review can show them again:
+/// it was accepted, or discarded and pruned past its restore window. Inputs: the store and
+/// the change set. Output: Ok once forgotten.
+#[cfg(unix)]
+pub(super) fn forget(db: &Connection, change_set: &super::ChangeSetId) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    db.execute(
+        "DELETE FROM landing_owner_edits WHERE change_set=?1",
+        [change_set.as_str()],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Forgets every owner edit of a worktree, waiting or settled, once the worktree is
+/// removed. Inputs: the store and the worktree. Output: Ok once forgotten.
+#[cfg(unix)]
+pub(super) fn forget_worktree(db: &Connection, worktree: &Path) -> Result<(), EngineError> {
+    let worktree = worktree.to_str().ok_or_else(invalid)?;
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    db.execute(
+        "DELETE FROM landing_owner_edits WHERE worktree=?1",
+        [worktree],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Logs a failed cleanup of owner edits by its plain code. The step it followed already
+/// took effect, so its outcome stands and only the rows wait for a later cleanup. Inputs:
+/// the step and the failure. Output: none.
+#[cfg(unix)]
+pub(super) fn logged(step: &str, failed: Result<(), EngineError>) {
+    if let Err(problem) = failed {
+        eprintln!(
+            "landing_owner_edits_{step}_failed cause={}",
+            crate::protocol::plain_code(&problem.0)
+        );
+    }
+}
+
 /// Marks `OwnerEdited` on the files of a diff page that the owner edited before a turn
 /// end settled the edit on this change set, by path or, for a rename, old path. Inputs:
 /// the store, the worktree, the change set and the files of the page. Output: Ok once

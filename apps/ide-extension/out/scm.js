@@ -194,10 +194,11 @@ function registerChanges(context, engine) {
 function resourceState(set, resource) {
     const file = vscode.Uri.file(resource.file);
     const base = resource.base === null ? null : vscode.Uri.from({ scheme: scm_model_js_1.BASE_SCHEME, path: resource.base, query: set.head });
-    const right = resource.config === null ? file : vscode.Uri.from({ scheme: scm_model_js_1.CONFIG_SCHEME, path: resource.config, query: set.head });
+    const head = resource.head === null ? null : vscode.Uri.from({ scheme: scm_model_js_1.HEAD_SCHEME, path: resource.head, query: set.head });
+    const right = resource.config === null ? head : vscode.Uri.from({ scheme: scm_model_js_1.CONFIG_SCHEME, path: resource.config, query: set.head });
     const name = (0, scm_model_js_1.plainLine)(resource.path);
     let command;
-    if (resource.open === "diff" && base !== null) {
+    if (resource.open === "diff" && base !== null && right !== null) {
         command = { command: "vscode.diff", title: "Open changes", arguments: [base, right, `${name} (${(0, scm_model_js_1.plainLine)(set.agent)})`] };
     }
     else if (resource.open === "base" && base !== null) {

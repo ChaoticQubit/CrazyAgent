@@ -234,8 +234,9 @@ fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result
     Ok(())
 }
 
-/// Marks a change set landed as `landed`, drops its pending ref and points the agent's
-/// worktree at the landed commit when the worktree holds nothing newer than the set.
+/// Marks a change set landed as `landed`, drops its pending ref, forgets the owner edits
+/// settled on it and points the agent's worktree at the landed commit when the worktree
+/// holds nothing newer than the set.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
@@ -249,6 +250,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
         &pending_ref(&record.id),
         None,
     )?;
+    super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)
 }

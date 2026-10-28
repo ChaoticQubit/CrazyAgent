@@ -62,12 +62,17 @@ function registerComments(context, engine) {
         if (Date.now() - loaded > FRESH_MS)
             await load();
     };
+    const targetOf = (uri) => {
+        if (uri.scheme === scm_model_js_1.HEAD_SCHEME)
+            return (0, scm_model_js_1.headCommentTarget)(sets, uri.path);
+        return uri.scheme === "file" ? (0, scm_model_js_1.commentTarget)(sets, uri.fsPath) : null;
+    };
     controller.commentingRangeProvider = {
         provideCommentingRanges: async (document) => {
-            if (document.uri.scheme !== "file")
+            if (document.uri.scheme !== "file" && document.uri.scheme !== scm_model_js_1.HEAD_SCHEME)
                 return [];
             await fresh();
-            if ((0, scm_model_js_1.commentTarget)(sets, document.uri.fsPath) === null)
+            if (targetOf(document.uri) === null)
                 return [];
             return [new vscode.Range(0, 0, Math.max(document.lineCount - 1, 0), 0)];
         },
@@ -75,7 +80,7 @@ function registerComments(context, engine) {
     const send = async (reply) => {
         const { thread, text } = reply;
         await fresh();
-        const target = (0, scm_model_js_1.commentTarget)(sets, thread.uri.fsPath);
+        const target = targetOf(thread.uri);
         if (target === null) {
             void vscode.window.showErrorMessage((0, scm_model_js_1.refusal)("changes_not_found"));
             return;

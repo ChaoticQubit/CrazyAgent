@@ -68,8 +68,8 @@ pub(super) fn blocker(
 
 /// Removes an agent worktree with git, never forcing it, while holding the repository so
 /// no landing step runs on it meanwhile, after checking `blocker` again under that hold,
-/// then forgets its base. Inputs: the store, the three paths and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// then forgets its base and its owner edits. Inputs: the store, the three paths and the
+/// time now. Output: Ok once removed, or the plain code that kept it.
 pub(super) fn remove(
     db: &Connection,
     repository: &Path,
@@ -98,5 +98,6 @@ pub(super) fn remove(
     }
     db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
         .map_err(unavailable)?;
+    super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
     Ok(Ok(()))
 }

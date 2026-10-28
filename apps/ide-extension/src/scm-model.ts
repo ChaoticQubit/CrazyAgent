@@ -39,6 +39,7 @@ export interface ScmResource {
   file: string;
   base: string | null;
   config: string | null;
+  head: string | null;
   open: Opens;
   letter: string;
   tooltip: string;
@@ -66,6 +67,10 @@ export const CONFIG_SCHEME = "crazyagent-config";
 
 /** The mark the engine puts on a file the IDE reads as its settings. */
 export const IDE_CONFIG = "ide_config";
+
+/** The scheme of a diff's agent side: the file's text at the head the change set recorded,
+ * which Accept lands, served by the engine and never the agent's live worktree. */
+export const HEAD_SCHEME = "crazyagent-head";
 
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
@@ -123,6 +128,21 @@ const REFUSALS: Record<string, string> = {
 /** The Changes codes the IDE has its own sentence for, the same words as the desktop. */
 export const REFUSAL_CODES = Object.keys(REFUSALS);
 
+const UNCONFIRMED: Record<string, string> = {
+  ide_comment_outcome_unknown: "CrazyAgent couldn't confirm the agent got this comment. Check the agent's terminal before you send it again.",
+  ide_owner_edit_outcome_unknown: "CrazyAgent couldn't confirm the file was opened for your edit. The agent may already have been told. Check before you try again.",
+  ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
+  ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
+  ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+};
+
+/** The sentence for an IDE write the engine could not confirm in time: it may already have
+ * taken effect, so the owner checks before trying again. Input: the engine code. Output:
+ * the sentence, or undefined for any other code. */
+export function unconfirmed(code: string): string | undefined {
+  return Object.hasOwn(UNCONFIRMED, code) ? UNCONFIRMED[code] : undefined;
+}
+
 /** Shows engine or agent text as one plain line: control and direction-changing characters
  * become a replacement mark. Input: the text. Output: the line. */
 export function plainLine(text: string): string {
@@ -144,14 +164,15 @@ export function acceptedNote(outcome: AcceptOutcome): string {
   return `These files also changed on your branch: ${shown}${more}. Ask the agent to update, or discard.`;
 }
 
-/** The path of a base-side or IDE settings document: the change set and the file. Inputs:
- * the set id and the file's path in the change set. Output: the URI path. */
+/** The path of a base-side, head-side or IDE settings document: the change set and the
+ * file. Inputs: the set id and the file's path in the change set. Output: the URI path. */
 export function basePath(id: string, path: string): string {
   return `/${id}/${path}`;
 }
 
-/** Reads a base-side or IDE settings document path back, refusing anything but a change
- * set id and a plain relative path. Input: the URI path. Output: the set and file, or null. */
+/** Reads a base-side, head-side or IDE settings document path back, refusing anything but
+ * a change set id and a plain relative path. Input: the URI path. Output: the set and file,
+ * or null. */
 export function parseBasePath(text: string): { id: string; path: string } | null {
   const match = /^\/([^/]+)\/(.+)$/s.exec(text);
   if (match === null || !SET_ID.test(match[1])) return null;
@@ -192,6 +213,7 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
     file: `${set.worktree.replace(/\/+$/, "")}/${file.path}`,
     base: open === "diff" || open === "base" ? basePath(set.id, file.path) : null,
     config: open === "diff" && file.marks.includes(IDE_CONFIG) ? basePath(set.id, file.path) : null,
+    head: open === "diff" ? basePath(set.id, file.path) : null,
     open,
     letter: LETTERS[file.status],
     tooltip: tooltip(file),
@@ -272,8 +294,18 @@ export function commentTarget(sets: IdeChangeSet[], fsPath: string): { id: strin
   return null;
 }
 
+/** The change set file a head-side document shows, so a comment on the agent side of a diff
+ * goes to that set's agent on the same terms as one on the worktree file. Inputs: the
+ * listed sets and the document's URI path. Output: the set, path and agent, or null. */
+export function headCommentTarget(sets: IdeChangeSet[], uriPath: string): { id: string; path: string; agent: string } | null {
+  const shown = parseBasePath(uriPath);
+  const set = shown === null ? undefined : sets.find((listed) => listed.id === shown.id);
+  if (shown === null || set === undefined) return null;
+  return commentTarget([set], `${set.worktree.replace(/\/+$/, "")}/${shown.path}`);
+}
+
 /** One plain sentence for a refused comment: the desktop's words for the team codes, the
  * Changes words otherwise. Input: the engine code. Output: the sentence. */
 export function commentRefusal(code: string): string {
-  return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : refusal(code);
+  return Object.hasOwn(COMMENT_REFUSALS, code) ? COMMENT_REFUSALS[code] : (unconfirmed(code) ?? refusal(code));
 }

@@ -40,6 +40,7 @@ const PAGES_MAX = 512;
 const SIDES = [
     [scm_model_js_1.BASE_SCHEME, "ide.base_blob"],
     [scm_model_js_1.CONFIG_SCHEME, "ide.config_blob"],
+    [scm_model_js_1.HEAD_SCHEME, "ide.head_blob"],
 ];
 function registerBaseContent(context, engine) {
     for (const [scheme, call] of SIDES) {

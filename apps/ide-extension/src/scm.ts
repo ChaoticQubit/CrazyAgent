@@ -4,6 +4,7 @@ import {
   type AcceptOutcome,
   BASE_SCHEME,
   CONFIG_SCHEME,
+  HEAD_SCHEME,
   type IdeChangeSet,
   type ScmGroup,
   type ScmResource,
@@ -29,7 +30,8 @@ interface Row {
 }
 
 /** Shows each change set of this project as a Source Control group named for its agent,
- * whose files open VS Code's own diff from the base text to the agent's worktree. Accept,
+ * whose files open VS Code's own diff from the base text to the text at the head the set
+ * recorded, which is what Accept lands. Accept,
  * Discard and Restore ask the engine, which lands or refuses; the IDE never merges by
  * itself. The list follows the engine's change event and a slow poll. Inputs: the
  * extension context and the engine client. Output: none; all is disposed with the extension. */
@@ -180,17 +182,19 @@ export function registerChanges(context: vscode.ExtensionContext, engine: Engine
 }
 
 /** One file of a change set as a Source Control row: its status icon and tooltip, struck
- * through when deleted, opening the diff, the base text or the file. The base address
- * carries the head, so a set that moved on opens fresh base text. An IDE settings file's
- * agent side is the engine's read-only copy at the head, never the worktree file. Inputs:
- * the set and the file's row. Output: the row. */
+ * through when deleted, opening the diff from the base text to the recorded head's text,
+ * the base text or the file. Both addresses carry the head, so a set that moved on opens
+ * fresh text. An IDE settings file's agent side is the engine's read-only copy at the head
+ * read as settings, never the worktree file. Inputs: the set and the file's row. Output:
+ * the row. */
 function resourceState(set: IdeChangeSet, resource: ScmResource): vscode.SourceControlResourceState {
   const file = vscode.Uri.file(resource.file);
   const base = resource.base === null ? null : vscode.Uri.from({ scheme: BASE_SCHEME, path: resource.base, query: set.head });
-  const right = resource.config === null ? file : vscode.Uri.from({ scheme: CONFIG_SCHEME, path: resource.config, query: set.head });
+  const head = resource.head === null ? null : vscode.Uri.from({ scheme: HEAD_SCHEME, path: resource.head, query: set.head });
+  const right = resource.config === null ? head : vscode.Uri.from({ scheme: CONFIG_SCHEME, path: resource.config, query: set.head });
   const name = plainLine(resource.path);
   let command: vscode.Command | undefined;
-  if (resource.open === "diff" && base !== null) {
+  if (resource.open === "diff" && base !== null && right !== null) {
     command = { command: "vscode.diff", title: "Open changes", arguments: [base, right, `${name} (${plainLine(set.agent)})`] };
   } else if (resource.open === "base" && base !== null) {
     command = { command: "vscode.open", title: "Open the file before the agent's changes", arguments: [base] };

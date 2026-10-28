@@ -1,19 +1,20 @@
 import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
-import { BASE_SCHEME, type BasePage, CONFIG_SCHEME, parseBasePath, refusal } from "./scm-model.js";
+import { BASE_SCHEME, type BasePage, CONFIG_SCHEME, HEAD_SCHEME, parseBasePath, refusal } from "./scm-model.js";
 
 const PAGES_MAX = 512;
 const SIDES = [
   [BASE_SCHEME, "ide.base_blob"],
   [CONFIG_SCHEME, "ide.config_blob"],
+  [HEAD_SCHEME, "ide.head_blob"],
 ] as const;
 
-/** Serves both engine-read sides of a change set's diff, read page by page from the engine,
+/** Serves the engine-read sides of a change set's diff, read page by page from the engine,
  * which answers only for this IDE's project and only for text files of that change set:
- * the base side, a file's text before the agent touched it, and an agent IDE settings
- * file as the set's head has it, which the IDE server itself cannot read. The documents are
- * read-only. Inputs: the extension context and the engine client. Output: none; the
- * providers are disposed with the extension. */
+ * the base side, a file's text before the agent touched it, the head side, its text at the
+ * head the set recorded, and an agent IDE settings file as the set's head has it, which the
+ * IDE server itself cannot read. The documents are read-only. Inputs: the extension context
+ * and the engine client. Output: none; the providers are disposed with the extension. */
 export function registerBaseContent(context: vscode.ExtensionContext, engine: Engine): void {
   for (const [scheme, call] of SIDES) {
     context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider(scheme, provider(engine, call)));

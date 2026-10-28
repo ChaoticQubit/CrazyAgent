@@ -9,12 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Output, Stdio};
 
 fn git_run(dir: &Path, args: &[&str]) -> Output {
+    owner_git_run(dir, Path::new("/dev/null"), args)
+}
+
+fn owner_git_run(dir: &Path, global: &Path, args: &[&str]) -> Output {
     crazyagent::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", global)
             .env("GIT_TERMINAL_PROMPT", "0")
             .arg("-C")
             .arg(dir)
@@ -244,6 +248,114 @@ async fn push_from_the_project_folder_is_unaffected() {
         git(&project.repo, &["rev-parse", "main"])
     );
     assert!(!git_run(&worktree, &["fetch", "origin"]).status.success());
+    assert_eq!(leases(&engine).await.remove(0).state, LeaseState::Ready);
+    engine.close().await.unwrap();
+}
+
+/// Reads the Git metadata folder a linked worktree's `.git` file points to.
+fn metadata_of(worktree: &Path) -> PathBuf {
+    let pointer = std::fs::read_to_string(worktree.join(".git")).unwrap();
+    PathBuf::from(pointer.strip_prefix("gitdir: ").unwrap().trim_end())
+}
+
+#[tokio::test]
+async fn agent_worktrees_made_before_the_lock_are_locked_once_at_start_and_the_owners_are_not() {
+    let project = project();
+    let (engine, lease) = agent_worktree(&project).await;
+    engine.close().await.unwrap();
+    std::fs::remove_file(metadata_of(&lease).join("config.worktree")).unwrap();
+    let agents = crazyagent::projects_home::state_folder(&project.repo).join("worktrees");
+    std::fs::create_dir_all(&agents).unwrap();
+    let team = agents.join("agent-7");
+    let owner = project.root.join("owner-feature");
+    for worktree in [&team, &owner] {
+        git(
+            &project.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+    }
+    std::fs::write(
+        metadata_of(&team).join("config.worktree"),
+        &REMOTE_LOCK[..REMOTE_LOCK.len() / 2],
+    )
+    .unwrap();
+    assert!(git_run(&lease, &["fetch", "origin"]).status.success());
+    let connection = rusqlite::Connection::open(project.root.join("db")).unwrap();
+    assert_eq!(
+        crazyagent::worktrees::lock_existing(&connection).unwrap(),
+        2
+    );
+    for worktree in [&lease, &team] {
+        assert_eq!(
+            std::fs::read(metadata_of(worktree).join("config.worktree")).unwrap(),
+            REMOTE_LOCK
+        );
+        let output = git_run(worktree, &["push", "origin", "HEAD:refs/heads/agent-work"]);
+        assert!(!output.status.success(), "{worktree:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(REMOTE_REFUSAL),
+            "{output:?}"
+        );
+    }
+    assert!(!metadata_of(&owner).join("config.worktree").exists());
+    git(
+        &owner,
+        &["push", "-q", "origin", "HEAD:refs/heads/owner-feature"],
+    );
+    assert_eq!(
+        git(&project.remote, &["for-each-ref", "--format=%(refname)"]).trim(),
+        "refs/heads/owner-feature"
+    );
+    assert_eq!(
+        crazyagent::worktrees::lock_existing(&connection).unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn an_owner_rewrite_with_a_transport_allow_cannot_carry_an_agent_worktree_remote() {
+    let project = project();
+    let (engine, worktree) = agent_worktree(&project).await;
+    let global = project.root.join("owner.gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[url \"{}/\"]\n\tinsteadOf = https://example.invalid/\n[protocol \"file\"]\n\tallow = always\n",
+            project.root.display()
+        ),
+    )
+    .unwrap();
+    let rewritten = "https://example.invalid/remote.git";
+    let control = owner_git_run(&project.repo, &global, &["ls-remote", rewritten]);
+    assert!(control.status.success(), "{control:?}");
+    let attempts: [&[&str]; 3] = [
+        &["push", rewritten, "HEAD:refs/heads/agent-work"],
+        &["fetch", rewritten],
+        &["ls-remote", rewritten],
+    ];
+    for args in attempts {
+        let output = owner_git_run(&worktree, &global, args);
+        let printed = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "{args:?} worked in the agent worktree"
+        );
+        assert!(
+            printed.contains("transport 'file' not allowed"),
+            "{args:?}: {printed}"
+        );
+    }
+    assert_eq!(
+        git(&project.remote, &["for-each-ref", "--format=%(refname)"]),
+        ""
+    );
     assert_eq!(leases(&engine).await.remove(0).state, LeaseState::Ready);
     engine.close().await.unwrap();
 }

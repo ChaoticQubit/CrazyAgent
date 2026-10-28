@@ -15,8 +15,8 @@ const LIST_BYTES_MAX: usize = 48 * 1024;
 const BASE_PAGE_BYTES: usize = 24 * 1024;
 
 /// One change set as the IDE's Source Control shows it: one group named
-/// "<agent>: <title>" whose files open VS Code's diff between the base text and the agent
-/// worktree. `head` is what Accept and Discard send back, so a set that moved on since the
+/// "<agent>: <title>" whose files open VS Code's diff between the base text and the text
+/// at the recorded head, which Accept lands. `head` is what Accept and Discard send back, so a set that moved on since the
 /// list is refused as stale. `message` is the commit message Accept proposes. `problem`
 /// is the plain code when the files could not be read or did not fit the reply; the group
 /// then shows that instead. `waiting` marks an Updating set already merged and waiting
@@ -37,8 +37,8 @@ pub(crate) struct IdeChangeSet {
     pub(crate) problem: Option<String>,
 }
 
-/// One page of a file's base text, at most `BASE_PAGE_BYTES` once escaped for JSON, so
-/// every page fits one engine frame. `next` is the following page while there is more.
+/// One page of a file's base or head text, at most `BASE_PAGE_BYTES` once escaped for
+/// JSON, so every page fits one engine frame. `next` is the following page while there is more.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct BasePage {
     pub(crate) text: String,
@@ -63,6 +63,9 @@ pub(crate) async fn answer(
             }
             IdeCall::ConfigBlob { id, path, page } => {
                 json(config_blob(&db, &project, &id, &path, page)?)
+            }
+            IdeCall::HeadBlob { id, path, page } => {
+                json(head_blob(&db, &project, &id, &path, page)?)
             }
             IdeCall::Accept { id, head, message } => {
                 let home = std::env::var_os("HOME")
@@ -245,6 +248,22 @@ pub(crate) fn config_blob(
     page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
 }
 
+/// Answers `ide.head_blob`: one page of the text one text file of a change set of the
+/// IDE's project has at the set's recorded head, the right side of its diff, so the owner
+/// reviews what Accept lands rather than the agent worktree. Inputs: the store, the
+/// project, the change set, the path and the page. Output: the page, or `changes_not_found`
+/// for a deleted file or past the end.
+pub(crate) fn head_blob(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ChangeSetId,
+    path: &str,
+    page: u16,
+) -> Result<BasePage, EngineError> {
+    let text = landing::ide::head_text(db, project, id, path)?;
+    page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
+}
+
 /// The bytes serde_json writes for one character inside a JSON string.
 fn escaped_len(character: char) -> usize {
     match character {
@@ -294,10 +313,12 @@ fn page_of(text: &str, page: u16) -> Option<BasePage> {
 }
 
 /// Answers `ide.accept`: lands a change set of the IDE's project through the engine as one
-/// commit under the owner's git identity; the IDE never merges by itself. Inputs: the
-/// store, the owner's home, the project, the set, the head the owner reviewed and the
-/// owner's message. Output: the commit, or the conflicting files; a head that is no
-/// commit id is `changes_stale`.
+/// commit under the owner's git identity; the IDE never merges by itself. While the agent
+/// worktree holds anything but the recorded head it is `changes_agent_busy`, so the owner
+/// accepts only once the agent stopped changing what the diff shows. Inputs: the store,
+/// the owner's home, the project, the set, the head the owner reviewed and the owner's
+/// message. Output: the commit, or the conflicting files; a head that is no commit id is
+/// `changes_stale`.
 pub(crate) fn accept(
     db: &Connection,
     owner_home: &Path,
@@ -309,7 +330,7 @@ pub(crate) fn accept(
     if !commit_id(expected_head) {
         return Err(failure("changes_stale"));
     }
-    landing::ide::locate(db, project, id)?;
+    landing::ide::agent_idle(db, project, id)?;
     landing::accept(db, owner_home, id, expected_head, Some(message))
 }
 

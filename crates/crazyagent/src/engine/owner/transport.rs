@@ -1283,6 +1283,18 @@ impl OwnerServer {
             }
         };
         authority.ide_servers.sweep_left().await;
+        if let Ok(root) = changes::engine_root(&authority) {
+            let swept = tokio::task::spawn_blocking(move || {
+                crate::landing::open(&root).and_then(|db| crate::worktrees::lock_existing(&db))
+            })
+            .await;
+            if let Ok(Err(problem)) = swept {
+                eprintln!(
+                    "worktree_lock_sweep_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+        }
         let server = Self {
             listener,
             engine: engine.clone(),
