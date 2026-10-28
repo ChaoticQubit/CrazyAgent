@@ -16,6 +16,7 @@ const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
 const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
 const LAYOUT_FOLDERS_MAX: usize = 64;
+const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
 const SUBJECT_CHARS_MAX: usize = 72;
 const PROPOSED_BYTES_MAX: usize = 1024;
@@ -762,8 +763,9 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
 /// Refuses a change set past the bounds `check_bounds` applies to a worktree, whatever
 /// put the change in git: too many changed paths, a path too deep, too long or not
 /// UTF-8, too many bytes in the changed files, a file added since `fresh` that the
-/// owner's ignore rules exclude, which `add -A` never takes, or a folder the change makes
-/// into a layout git would open as a bare repository (`repository_layout`, SM-R1).
+/// owner's ignore rules exclude, which `add -A` never takes, a folder the change makes
+/// into a layout git would open as a bare repository (`repository_layout`, SM-R1), or a
+/// link pointing outside the tree or into the agents' folder (`check_links`, SR1-2).
 /// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
 /// newest part starts from and the bounds. Output: Ok within the bounds.
 fn check_change(
@@ -787,7 +789,7 @@ fn check_change(
         return Err(failure("changes_too_large"));
     }
     let mut fields = output.stdout.split(|byte| *byte == 0);
-    let (mut blobs, mut added) = (Vec::new(), Vec::new());
+    let (mut blobs, mut added, mut links) = (Vec::new(), Vec::new(), Vec::new());
     let mut folders: BTreeSet<String> = BTreeSet::new();
     let mut paths: usize = 0;
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
@@ -817,12 +819,17 @@ fn check_change(
         }
         if status != "D" {
             layout_folders(&mut folders, path);
+            if mode == "120000" {
+                links.push((path, id));
+            }
         }
     }
     assert!(paths <= bounds.files && blobs.len() <= paths && added.len() <= paths);
     if repository_layout(repo, to, &folders)? {
         return Err(failure("changes_bare_repository"));
     }
+    assert!(links.len() <= blobs.len());
+    check_links(repo, checkout, &links)?;
     if blob_bytes(repo, &blobs)? > bounds.bytes {
         return Err(failure("changes_too_large"));
     }
@@ -954,6 +961,103 @@ fn repository_layout(
         }
     }
     Ok(false)
+}
+
+/// Refuses an added or changed link whose target is absolute or which, resolved by name
+/// from its own folder, leaves the tree or enters the agents' worktrees folder (SR1-2): an
+/// owner following it reaches a folder no landing check reads, such as a bare-repository
+/// layout in an ignored folder of an agent's worktree. One batched `cat-file` reads every
+/// target; one past `PATH_BYTES_MAX` is refused. Inputs: the repository, the owner's
+/// checkout and each changed link's path and blob id. Output: Ok, else
+/// `changes_link_outside` or `changes_git_failed`.
+fn check_links(repo: &Repo, checkout: &Path, links: &[(&str, &str)]) -> Result<(), EngineError> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let agents = agents_root(checkout);
+    let input: String = links.iter().map(|(_, id)| format!("{id}\n")).collect();
+    let limit = links
+        .len()
+        .saturating_mul(PATH_BYTES_MAX + LINK_HEADER_BYTES_MAX);
+    let output = repo.exec(&["cat-file", "--batch"], Some(input.as_bytes()), &[], limit)?;
+    if output.overflow {
+        return Err(failure("changes_link_outside"));
+    }
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    let broken = || failure("changes_git_failed");
+    let mut rest: &[u8] = &output.stdout;
+    for (path, id) in links {
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(broken)?;
+        let header = std::str::from_utf8(&rest[..end]).map_err(|_| broken())?;
+        let size = match header.split(' ').collect::<Vec<_>>()[..] {
+            [oid, "blob", size] if oid == *id => size.parse::<usize>().map_err(|_| broken())?,
+            _ => return Err(broken()),
+        };
+        if size > PATH_BYTES_MAX {
+            return Err(failure("changes_link_outside"));
+        }
+        let target = rest.get(end + 1..end + 1 + size).ok_or_else(broken)?;
+        rest = rest.get(end + 2 + size..).ok_or_else(broken)?;
+        if !link_inside(path, target, &agents) {
+            return Err(failure("changes_link_outside"));
+        }
+    }
+    if !rest.is_empty() {
+        return Err(broken());
+    }
+    Ok(())
+}
+
+/// The agents' worktrees folder as path parts from the owner's checkout, lowercased:
+/// `.crazyagent/worktrees`, or `worktrees` for a project made before the projects home.
+/// Input: the checkout. Output: the parts.
+fn agents_root(checkout: &Path) -> Vec<String> {
+    let folder = crate::projects_home::state_folder(checkout).join("worktrees");
+    let parts: Vec<String> = folder
+        .strip_prefix(checkout)
+        .expect("the state folder sits in the checkout")
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+    assert!(!parts.is_empty() && parts.len() <= 2);
+    parts
+}
+
+/// Tells whether a link at `path` with `target` stays in the tree and out of the agents'
+/// folder, resolving `.` and `..` by name from the link's folder; an absolute, empty or
+/// non-UTF-8 target does not. Inputs: the link's path, its target and the agents' folder
+/// parts. Output: true when it stays inside.
+fn link_inside(path: &str, target: &[u8], agents: &[String]) -> bool {
+    let Ok(target) = std::str::from_utf8(target) else {
+        return false;
+    };
+    if target.is_empty() || target.starts_with('/') {
+        return false;
+    }
+    let mut at: Vec<&str> = path.split('/').collect();
+    at.pop();
+    for part in target.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if at.pop().is_none() {
+                    return false;
+                }
+            }
+            name => at.push(name),
+        }
+    }
+    let entered = at.len() >= agents.len()
+        && at
+            .iter()
+            .zip(agents)
+            .all(|(part, agent)| part.eq_ignore_ascii_case(agent));
+    !entered
 }
 
 /// Sums the sizes of blobs as git stores them. Inputs: the repository and the blob ids.

@@ -459,6 +459,64 @@ fn accepting_two_change_sets_that_each_hold_half_a_bare_layout_refuses_the_secon
 }
 
 #[test]
+fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder_is_refused() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    for target in [
+        "/private/tmp",
+        "../../outside",
+        "../docs/../../outside",
+        "../.crazyagent/worktrees/agent-3/target/bare",
+        "../.CrazyAgent/Worktrees/agent-3",
+        "./../.crazyagent/worktrees",
+    ] {
+        let case = Case::new();
+        std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+        let link = case.workspace.worktree.join("docs/link");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_link_outside",
+            "{target}"
+        );
+    }
+
+    let case = Case::own_branch();
+    std::os::unix::fs::symlink("/private/tmp", case.workspace.worktree.join("tmp-link")).unwrap();
+    case.agent_commit("Link tmp");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_link_outside",
+        "an Own branch agent's commit"
+    );
+
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    let worktree = case.workspace.worktree.clone();
+    std::fs::create_dir_all(worktree.join("docs")).unwrap();
+    std::fs::create_dir_all(worktree.join("a/b")).unwrap();
+    for (link, target) in [
+        ("docs/readme", "../README"),
+        ("docs/here", "."),
+        ("a/b/docs", "../../docs"),
+        ("docs/context", "../.crazyagent/context"),
+        ("docs/worktrees", "../worktrees"),
+    ] {
+        std::os::unix::fs::symlink(target, worktree.join(link)).unwrap();
+    }
+    assert!(
+        record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .is_some(),
+        "links that stay in the project and out of the agents' folder land"
+    );
+}
+
+#[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();
     let base = case.tip();
