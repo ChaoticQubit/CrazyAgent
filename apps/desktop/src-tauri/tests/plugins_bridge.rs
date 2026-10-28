@@ -71,6 +71,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     std::fs::write(found.join(".env"), "TOKEN=dummy-value").unwrap();
     let imported = bridge
         .import_skill(found.display().to_string(), None)
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(imported.skill.name, "style");
@@ -79,6 +80,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(
         bridge
             .import_skill(found.display().to_string(), None)
+            .map_err(code)?
             .await
             .unwrap_err()
             .code,
@@ -101,6 +103,7 @@ async fn flow(root: &Path) -> Result<(), String> {
             spec.clone(),
             vec![("FIXTURE_TOKEN".into(), "dummy-value".into())],
         )
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(server.status_label, "Waiting for approval");
