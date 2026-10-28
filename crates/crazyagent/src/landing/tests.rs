@@ -1070,7 +1070,7 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     write(&sub.join("inner.txt"), "changed\n");
     write(&sub.join("untracked.txt"), "new\n");
 
-    let agent = git::Repo::open(&case.workspace.git_dir, Some(&worktree)).unwrap();
+    let agent = git::Repo::open(&case.repo, &case.workspace.git_dir, Some(&worktree)).unwrap();
     assert!(
         flow::holds_only(&agent, &head).unwrap(),
         "a dirty submodule made the worktree look unfinished"
@@ -3204,4 +3204,26 @@ fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project()
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/crazyagent"), "");
+}
+
+/// Engine git never opens an agent's own clone, whose config is the agent's: the engine
+/// refuses it as an agent worktree, and `Repo::open` stops on any git folder that is neither
+/// the owner checkout's nor a linked worktree's in its `.git/worktrees` (CC-N1).
+#[test]
+#[should_panic(expected = "engine git opens only the owner checkout's git folder")]
+fn engine_git_never_opens_an_agent_s_own_clone() {
+    let case = Case::own_branch();
+    let opened = flow::open_agent(
+        &case.db,
+        AgentKind::Sub,
+        &case.repo,
+        &case.workspace.worktree,
+        &case.workspace.git_dir,
+    );
+    assert!(matches!(&opened, Err(refused) if refused.0 == "changes_workspace_invalid"));
+    let _ = git::Repo::open(
+        &case.repo,
+        &case.workspace.git_dir,
+        Some(&case.workspace.worktree),
+    );
 }

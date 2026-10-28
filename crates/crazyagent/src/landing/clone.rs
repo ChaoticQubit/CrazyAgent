@@ -51,7 +51,7 @@ pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError>
     {
         return Err(invalid());
     }
-    let shared = Repo::open(&repository.join(".git"), None)?;
+    let shared = Repo::open(repository, &repository.join(".git"), None)?;
     let head = shared
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;

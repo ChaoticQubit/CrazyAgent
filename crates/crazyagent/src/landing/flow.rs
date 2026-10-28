@@ -125,15 +125,15 @@ pub(super) fn in_clone(record: &Record) -> bool {
 /// which hashes each object again from its bytes, and refuses unless every listed id is
 /// in that index. Git reads a loose object as stored without checking it, so this is the
 /// check before the engine writes from objects a confined agent could have planted. The
-/// pack is never installed. Inputs: the owner repository's git folder and the commits.
+/// pack is never installed. Inputs: the owner checkout root and the commits.
 /// Output: Ok, else `changes_workspace_invalid` for an object whose bytes do not match.
 pub(super) fn verify_objects(
-    git_dir: &Path,
+    repository: &Path,
     wanted: &[&str],
     trusted: &[&str],
 ) -> Result<(), EngineError> {
     assert!(!wanted.is_empty());
-    let shared = Repo::open(git_dir, None)?;
+    let shared = shared(repository)?;
     let mut args = vec!["rev-list", "--objects", "--no-object-names"];
     args.extend(wanted);
     args.push("--not");
@@ -147,7 +147,7 @@ pub(super) fn verify_objects(
     if ids.is_empty() {
         return Ok(());
     }
-    let folder = git_dir.join(format!(
+    let folder = repository.join(".git").join(format!(
         "crazyagent-verify-{}",
         &crate::engine::owner::random_id()?[..24]
     ));
@@ -424,7 +424,7 @@ pub(super) fn set_engine_ref(
 
 /// Opens the owner repository's shared git folder for object and ref work.
 pub(super) fn shared(record_repository: &Path) -> Result<Repo, EngineError> {
-    Repo::open(&record_repository.join(".git"), None)
+    Repo::open(record_repository, &record_repository.join(".git"), None)
 }
 
 /// The HEAD an agent worktree must hold for the engine to read or move it: a detached
@@ -605,7 +605,7 @@ pub(super) fn open_agent(
             .ok_or_else(invalid)?,
     };
     Ok(Agent {
-        repo: Repo::open(git_dir, Some(worktree))?,
+        repo: Repo::open(repository, git_dir, Some(worktree))?,
         repository: repository.to_path_buf(),
         git_dir: git_dir.to_path_buf(),
         pointer,
@@ -882,7 +882,7 @@ fn ignores_any(checkout: &Path, paths: &[&str]) -> Result<bool, EngineError> {
     if paths.is_empty() {
         return Ok(false);
     }
-    let owner = Repo::open(&checkout.join(".git"), Some(checkout))?;
+    let owner = Repo::open(checkout, &checkout.join(".git"), Some(checkout))?;
     let input: String = paths.iter().map(|path| format!("./{path}\0")).collect();
     let output = owner.exec(
         &["check-ignore", "-z", "--stdin", "--no-index"],

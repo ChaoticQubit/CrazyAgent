@@ -113,8 +113,24 @@ impl Case {
                 "HEAD",
             ],
         );
-        crate::landing::record_worktree_start(&self.db, &self.repo, &worktree, &self.git_dir(id))
-            .unwrap();
+        self.rows(id, role, status, &self.git_dir(id));
+    }
+
+    /// Adds one Own branch team agent as the runtime does: its own clone under the
+    /// project's state folder with its start recorded, its folders and its rows.
+    /// Inputs: the id and its status.
+    fn clone_agent(&self, id: i64, status: &str) {
+        let worktree = self.worktree(id);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        crate::landing::add_agent_clone(&self.repo, &worktree).unwrap();
+        self.rows(id, "sub", status, &crate::agent_git::git_dir(&worktree));
+    }
+
+    /// Records an agent whose worktree exists: its start, its agent folder and sandbox
+    /// profile, and its team rows. Inputs: the id, its role, its status and git folder.
+    fn rows(&self, id: i64, role: &str, status: &str, git_dir: &Path) {
+        let worktree = self.worktree(id);
+        crate::landing::record_worktree_start(&self.db, &self.repo, &worktree, git_dir).unwrap();
         write(
             &self.folder(id).join("home/projects/x/session.jsonl"),
             b"{}\n",
@@ -137,7 +153,7 @@ impl Case {
                     self.project.as_str(),
                     self.repo.to_str().unwrap(),
                     worktree.to_str().unwrap(),
-                    self.git_dir(id).to_str().unwrap()
+                    git_dir.to_str().unwrap()
                 ],
             )
             .unwrap();
@@ -145,6 +161,58 @@ impl Case {
 
     fn in_agent(&self, id: i64, args: &[&str]) -> String {
         git_in(&self.home, &self.worktree(id), args)
+    }
+
+    /// Commits a new file in an agent's worktree as the agent does. Inputs: the agent and
+    /// the file name.
+    fn agent_commit(&self, id: i64, name: &str) {
+        write(&self.worktree(id).join(name), name.as_bytes());
+        self.in_agent(id, &["add", "-A"]);
+        self.in_agent(
+            id,
+            &[
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                name,
+            ],
+        );
+    }
+
+    fn recorded_git_dir(&self, id: i64) -> PathBuf {
+        self.db
+            .query_row(
+                "SELECT git_dir FROM team_worktrees WHERE agent=?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .into()
+    }
+
+    /// Lands an agent's change set the way the owner's Accept does. Input: the set.
+    fn accept(&self, id: &crate::landing::ChangeSetId) {
+        let head = self.head_of(id);
+        let outcome = crate::landing::accept(&self.db, &self.home, id, &head, None).unwrap();
+        assert!(matches!(
+            outcome,
+            crate::landing::AcceptOutcome::Landed { .. }
+        ));
+    }
+
+    fn base_known(&self, id: i64) -> bool {
+        self.db
+            .query_row(
+                "SELECT COUNT(*) FROM landing_bases WHERE worktree=?1",
+                [self.worktree(id).to_str().unwrap()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            == 1
     }
 
     /// Ends a turn in an agent's worktree the way the runtime does, opening or adding to
@@ -159,7 +227,7 @@ impl Case {
             },
             repository: self.repo.clone(),
             worktree: self.worktree(id),
-            git_dir: self.git_dir(id),
+            git_dir: self.recorded_git_dir(id),
         };
         let turn = TurnEnd {
             outcome: TurnOutcome::Succeeded,
@@ -582,4 +650,156 @@ fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out
     );
     assert!(case.retiring().is_empty());
     assert!(case.listed().is_empty());
+}
+
+/// A finished Own branch agent whose commits all landed, or that made none, is listed and
+/// removed: the engine decides through its own fetch of the clone's branch, runs no git
+/// in the clone and deletes the clone folder, its base record and its folders
+/// (CLONE-CLEAN-1).
+#[test]
+fn a_finished_clone_agent_with_everything_landed_is_removed_without_git_in_its_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    case.agent_commit(1, "feature.txt");
+    let landed = case.turn_end(1);
+    case.accept(&landed);
+    case.clone_agent(2, "failed");
+    let marker = case.home.join("fsmonitor-ran");
+    let hook = case.home.join("fsmonitor.sh");
+    write(
+        &hook,
+        format!("#!/bin/sh\necho ran >> '{}'\nexit 1\n", marker.display()).as_bytes(),
+    );
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for id in [1, 2] {
+        case.in_agent(id, &["config", "core.fsmonitor", hook.to_str().unwrap()]);
+    }
+    let mut listed = case.listed();
+    listed.sort_unstable();
+    assert_eq!(listed, [1, 2]);
+    assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+    for id in [1, 2] {
+        assert!(!case.worktree(id).exists(), "agent {id}'s clone is gone");
+        assert!(!case.folder(id).exists() && !case.profile(id).exists());
+        assert!(!case.known(id) && !case.base_known(id));
+    }
+    assert!(!marker.exists(), "git ran in an agent's clone");
+    assert_eq!(
+        git_in(
+            &case.home,
+            &case.repo,
+            &["for-each-ref", "refs/crazyagent/incoming"]
+        ),
+        ""
+    );
+    assert_eq!(
+        git_in(&case.home, &case.repo, &["show", "main:feature.txt"]),
+        "feature.txt"
+    );
+    assert!(case.retiring().is_empty());
+    assert!(case.listed().is_empty());
+}
+
+/// A finished Own branch agent with commits that never landed keeps its clone with the
+/// same plain reason as a linked worktree, both before any turn end and after a landed
+/// set, and one with a set waiting keeps it for that set (CLONE-CLEAN-1).
+#[test]
+fn a_finished_clone_agent_with_unlanded_commits_is_kept_with_the_plain_reason() {
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    case.agent_commit(1, "never-ended.txt");
+    case.clone_agent(2, "stopped");
+    case.agent_commit(2, "landed.txt");
+    let landed = case.turn_end(2);
+    case.accept(&landed);
+    case.agent_commit(2, "after.txt");
+    case.clone_agent(3, "stopped");
+    case.agent_commit(3, "pending.txt");
+    case.turn_end(3);
+    assert!(case.listed().is_empty());
+    for (id, code) in [
+        (1, "cleanup_commits_unlanded"),
+        (2, "cleanup_commits_unlanded"),
+        (3, "cleanup_changes_open"),
+    ] {
+        assert_eq!(case.remove(&[id]), refused(code), "agent {id}");
+        assert!(
+            case.kept(id) && case.base_known(id),
+            "agent {id} keeps its clone"
+        );
+    }
+    assert!(case.retiring().is_empty());
+    assert_eq!(
+        case.in_agent(1, &["log", "-1", "--format=%s"]),
+        "never-ended.txt\n"
+    );
+}
+
+/// A removal batch with one clone that holds unlanded commits keeps every agent and hands
+/// back every claim, so the others are removed on their own straight after (RV-DS-61
+/// rule, CLONE-CLEAN-1).
+#[test]
+fn a_batch_with_one_unlanded_clone_keeps_it_and_leaves_the_others_removable() {
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    case.clone_agent(2, "stopped");
+    case.agent_commit(2, "unlanded.txt");
+    case.agent(3, "sub", "stopped");
+    assert_eq!(case.remove(&[1, 2, 3]), refused("cleanup_commits_unlanded"));
+    for id in [1, 2, 3] {
+        assert!(case.kept(id), "agent {id} is kept with the batch");
+    }
+    assert!(case.retiring().is_empty());
+    let mut listed = case.listed();
+    listed.sort_unstable();
+    assert_eq!(listed, [1, 3]);
+    assert_eq!(case.remove(&[1, 3]), removed(&[1, 3]));
+    assert!(case.kept(2));
+    assert!(!case.worktree(1).exists() && !case.worktree(3).exists());
+}
+
+/// A finished Own branch agent whose clone holds an uncommitted edit or a new untracked
+/// file keeps it with the linked layout's reason, read with the owner repository's git and
+/// a private index, never the clone's own git folder, while a clean landed clone with only
+/// ignored files is removed and no private index is left behind (Q-W-LAND-20).
+#[test]
+fn a_finished_clone_agent_with_uncommitted_or_untracked_files_is_kept_as_dirty() {
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    write(
+        &case.worktree(1).join("README"),
+        b"edited, never committed\n",
+    );
+    case.clone_agent(2, "stopped");
+    write(&case.worktree(2).join("notes.txt"), b"never added\n");
+    case.clone_agent(3, "stopped");
+    case.agent_commit(3, "landed.txt");
+    let landed = case.turn_end(3);
+    case.accept(&landed);
+    write(&case.worktree(3).join("target/build.bin"), &[7; 1024]);
+    for id in [1, 2] {
+        assert_eq!(
+            case.remove(&[id]),
+            refused("cleanup_worktree_dirty"),
+            "agent {id}"
+        );
+        assert!(case.kept(id) && case.base_known(id), "agent {id}");
+    }
+    assert_eq!(case.in_agent(1, &["status", "--porcelain"]), " M README\n");
+    assert_eq!(
+        case.in_agent(2, &["status", "--porcelain"]),
+        "?? notes.txt\n"
+    );
+    let mut listed = case.listed();
+    listed.sort_unstable();
+    assert_eq!(listed, [3]);
+    assert_eq!(case.remove(&[3]), removed(&[3]));
+    assert!(!case.worktree(3).exists() && !case.base_known(3));
+    let left: Vec<_> = std::fs::read_dir(case.repo.join(".git"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().starts_with("crazyagent-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
