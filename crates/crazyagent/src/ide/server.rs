@@ -276,6 +276,7 @@ impl Servers {
             .map_err(|_| failure("ide_state_unavailable"))
             .and_then(|output| {
                 command(
+                    project,
                     &build,
                     &folder,
                     root,
@@ -702,8 +703,10 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// folder as the working directory (the profile lets it read no folder above), stdout and
 /// stderr into the redacting `output` pipe, and its own process group. The git shim lets
 /// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
-/// at `root`'s agents root; a `root` holding a `:` is refused.
+/// at `root`'s agents root, and at its older one while the engine records an agent of
+/// `project` there ([`super::workspace::older_agents`]); a `root` holding a `:` is refused.
 fn command(
+    project: &ProjectId,
     build: &Path,
     folder: &Path,
     root: &Path,
@@ -721,7 +724,8 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
-    let ceiling = super::git::ceiling(root)?;
+    let older_agents = super::workspace::older_agents(data, project, root)?;
+    let ceiling = super::git::ceiling(root, older_agents)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));

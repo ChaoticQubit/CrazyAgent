@@ -304,8 +304,8 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
 /// them; a folder holding a `:` or a relative one is refused.
 #[test]
 fn the_ceiling_stops_git_at_the_layouts_agents_root_and_keeps_the_project() {
-    assert!(ceiling(Path::new("relative/project")).is_err());
-    assert!(ceiling(Path::new("/projects/a:b")).is_err());
+    assert!(ceiling(Path::new("relative/project"), false).is_err());
+    assert!(ceiling(Path::new("/projects/a:b"), true).is_err());
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let newer = base.join("newer");
@@ -324,7 +324,7 @@ fn the_ceiling_stops_git_at_the_layouts_agents_root_and_keeps_the_project() {
             std::fs::create_dir_all(folder).unwrap();
         }
         ok(project, &["init", "-q"]);
-        let value = ceiling(project).unwrap();
+        let value = ceiling(project, false).unwrap();
         assert_eq!(&value, agents.as_os_str());
         let top = |dir: &Path, bounded: bool| {
             let env: Vec<(&str, &str)> = if bounded {
@@ -357,6 +357,69 @@ fn the_ceiling_stops_git_at_the_layouts_agents_root_and_keeps_the_project() {
             );
         }
     }
+}
+
+/// INT1-R3-1: an older-layout project that gains a `.crazyagent` folder while the engine
+/// still records an agent in `<project>/worktrees` keeps that root in the ceiling after the
+/// layout's own, so git in the agent's folder, whose `.git` the IDE cannot read, still finds
+/// no repository. Without such a record the ceiling is the layout's root alone, and an
+/// older-layout project names its one root once.
+#[test]
+fn the_ceiling_keeps_the_older_agents_root_while_the_engine_records_agents_there() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("gained");
+    let newer = project.join(".crazyagent").join("worktrees");
+    let older = project.join("worktrees");
+    let agent = older.join("agent-3");
+    for folder in [&newer, &agent] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    ok(&project, &["init", "-q"]);
+    assert_eq!(ceiling(&project, false).unwrap(), newer.as_os_str());
+    let both = ceiling(&project, true).unwrap();
+    assert_eq!(
+        both.to_str().unwrap(),
+        format!("{}:{}", newer.display(), older.display())
+    );
+    let top = |value: &std::ffi::OsStr| {
+        git(
+            &agent,
+            &[(CEILING_VARIABLE, value.to_str().unwrap())],
+            &["rev-parse", "--show-toplevel"],
+        )
+    };
+    let reached = top(&ceiling(&project, false).unwrap());
+    assert!(reached.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&reached.stdout).trim(),
+        project.to_str().unwrap(),
+        "the layout's root alone lets git in the older agent's folder act on the project"
+    );
+    let bounded = top(&both);
+    assert!(!bounded.status.success());
+    assert!(
+        String::from_utf8_lossy(&bounded.stderr).contains("not a git repository"),
+        "{}",
+        String::from_utf8_lossy(&bounded.stderr)
+    );
+    let own = git(
+        &project,
+        &[(CEILING_VARIABLE, both.to_str().unwrap())],
+        &["rev-parse", "--show-toplevel"],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&own.stdout).trim(),
+        project.to_str().unwrap(),
+        "the project folder keeps its repository"
+    );
+
+    let plain = base.join("plain");
+    std::fs::create_dir_all(plain.join("worktrees")).unwrap();
+    assert_eq!(
+        ceiling(&plain, true).unwrap(),
+        plain.join("worktrees").as_os_str()
+    );
 }
 
 /// Makes a file look a year old. Input: the file. Output: none.
