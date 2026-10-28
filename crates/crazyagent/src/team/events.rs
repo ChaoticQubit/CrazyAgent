@@ -891,8 +891,9 @@ pub fn questions(
 const SUB_AGENT_PREFIX: &str = "Sub-agent ";
 
 /// Finds the project's live sub-agent a master names: its persona or `@handle` as the names
-/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`.
-/// Takes the connection, the project and the name.
+/// module resolves them, or by id as `Sub-agent 7`, `<harness>-7`, `team-7` or `7`. A name
+/// in a numbered form is read only as that number, so a handle stored in that form never
+/// takes it (RV-DS-62). Takes the connection, the project and the name.
 /// Returns the team agent id, or none for an unknown name, another project's agent or a master.
 pub fn resolve(
     connection: &Connection,
@@ -956,10 +957,25 @@ pub fn send_to_agent(
     agent: &str,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    let found = resolve(connection, project, agent)?;
+    send_to(connection, host, found, text)
+}
+
+/// Types a master's message or answer into the sub-agent [`resolve`] found, as
+/// [`send_to_agent`] does, so a caller that already resolved the name passes its id rather
+/// than a name to read again. Takes the connection, the terminal host, the agent or None
+/// when no agent was found, and the text. Returns the agent id, or the same plain refusal
+/// codes.
+pub fn send_to(
+    connection: &Connection,
+    host: &dyn Host,
+    found: Option<i64>,
+    text: &str,
+) -> Result<Result<i64, &'static str>, EngineError> {
     if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
         return Ok(Err("team_message_invalid"));
     }
-    let Some(id) = resolve(connection, project, agent)? else {
+    let Some(id) = found else {
         return Ok(Err("team_agent_not_found"));
     };
     let status: String = connection
@@ -1395,13 +1411,13 @@ const CLOSE_BRACKETS: [char; 16] = [
 
 const QUOTE: &str = "> ";
 
-/// Writes text a sub-agent wrote as the master reads it on lines of its own: brackets made
-/// plain, and every line opened with `> `, so no line of it can start as the owner, the
-/// engine or any other speaker however it is written. A line that already opens with `> `
-/// is kept, so quoting twice changes nothing. Task results and problems and the master's
+/// Writes text a sub-agent wrote as the master reads it on lines of its own: made plain by
+/// `plain_agent_text`, and every line opened with `> `, so no line of it can start as the
+/// owner, the engine or any other speaker however it is written. A line that already opens
+/// with `> ` is kept, so quoting twice changes nothing. Task results and problems and the master's
 /// history reach the master through it. Takes the text. Returns it.
 pub(super) fn agent_text(text: &str) -> String {
-    let plain = plain_brackets(text);
+    let plain = plain_agent_text(text);
     let mut quoted = String::with_capacity(plain.len() + QUOTE.len());
     for line in plain.split_inclusive(line_break) {
         if !line.starts_with(QUOTE) {
@@ -1418,10 +1434,10 @@ pub(super) fn agent_text(text: &str) -> String {
 }
 
 /// Writes text a sub-agent wrote as part of one engine line, such as an event or the
-/// question an agent waits on: brackets made plain and every line break made a space, so it
-/// never starts a line of its own. Takes the text. Returns one line.
+/// question an agent waits on: made plain by `plain_agent_text` and every line break made a
+/// space, so it never starts a line of its own. Takes the text. Returns one line.
 fn agent_line(text: &str) -> String {
-    let line: String = plain_brackets(text)
+    let line: String = plain_agent_text(text)
         .chars()
         .map(|c| if line_break(c) { ' ' } else { c })
         .collect();
@@ -1436,11 +1452,14 @@ fn line_break(c: char) -> bool {
     )
 }
 
-/// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
-/// and tortoise shell ones among them, into parentheses, so agent text can never show a
-/// `[owner]` or `[team]` tag to the master. Takes the text. Returns it with them replaced.
-fn plain_brackets(text: &str) -> String {
+/// Makes agent text plain for the master: square brackets and the brackets that look like
+/// them, fullwidth, white, lenticular and tortoise shell ones among them, become parentheses,
+/// so agent text can never show a `[owner]` or `[team]` tag, and control characters other
+/// than line feed and tab are dropped, so one escape or carriage return never makes the
+/// master refuse a whole message. Takes the text. Returns it.
+fn plain_agent_text(text: &str) -> String {
     text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
                 '('
