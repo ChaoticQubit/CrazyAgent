@@ -1943,6 +1943,16 @@ impl TeamRuntime {
                     }
                 }
             }
+            (Some(session), None)
+                if crate::master_sessions::fresh_after_switch(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                )? =>
+            {
+                ResumePlan::New
+            }
             (Some(session), None) => crate::master_sessions::resume_harness(
                 &self.connection,
                 project,
