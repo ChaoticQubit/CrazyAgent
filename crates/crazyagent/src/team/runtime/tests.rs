@@ -4141,7 +4141,12 @@ fn a_held_message_waits_for_its_resume_and_a_retried_resume_that_fails_again_let
     let message = interrupted_message(&fixture, master);
     let key = format!("team-message/{message}");
     let project = fixture.setup.project_id.clone();
-    let runs = |f: &Fixture| crate::recovery::list(&f.base, &project).unwrap();
+    let runs = |f: &Fixture| {
+        let listed = crate::recovery::list(&f.base, &project).unwrap();
+        let mut runs = [listed.waiting, listed.settled].concat();
+        runs.sort_by_key(|run| run.id);
+        runs
+    };
     let held = |f: &Fixture| {
         crate::recovery::holds(&f.connection, crate::recovery::HeldItem::Message(message)).unwrap()
     };

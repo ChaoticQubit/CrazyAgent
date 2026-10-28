@@ -1,4 +1,4 @@
-use super::{Interrupted, LastTurn, RunState, list, scan};
+use super::{Interrupted, LastTurn, Listed, RunState, list, scan};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
@@ -27,6 +27,16 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
+}
+
+/// The listing of runs that all still wait. Input: the waiting runs, oldest first.
+/// Output: the listing with nothing more waiting and nothing settled.
+fn waiting(found: &[Interrupted]) -> Listed {
+    Listed {
+        waiting: found.to_vec(),
+        more: 0,
+        settled: Vec::new(),
+    }
 }
 
 fn now() -> i64 {
@@ -292,7 +302,10 @@ fn agent_running_at_stop_without_a_live_pane_is_recorded_interrupted() {
             reason: None,
         }
     );
-    assert_eq!(list(&fixture.base, &fixture.project()).unwrap(), found);
+    assert_eq!(
+        list(&fixture.base, &fixture.project()).unwrap(),
+        waiting(&found)
+    );
     assert_eq!(fixture.status(sub), "stopped");
     assert!(host.alive().unwrap().is_empty(), "nothing was started");
     team.shutdown().unwrap();
@@ -320,7 +333,10 @@ fn an_adoptable_live_pane_keeps_the_run_of_the_task_its_agent_had() {
     assert_eq!(found[0].agent, sub);
     assert_eq!(found[0].last_turn.task, Some(task));
     assert_eq!(found[0].state, RunState::Interrupted);
-    assert_eq!(list(&fixture.base, &fixture.project()).unwrap(), found);
+    assert_eq!(
+        list(&fixture.base, &fixture.project()).unwrap(),
+        waiting(&found)
+    );
     assert_eq!(fixture.runs(), 1);
     assert_ne!(fixture.status(sub), "stopped", "its pane runs on");
     team.shutdown().unwrap();
@@ -374,7 +390,7 @@ fn paused_team_agents_are_recorded_and_stay_paused() {
         )
         .unwrap();
     assert_eq!(agents, 1, "no agent was added");
-    assert_eq!(list(&fixture.base, &project).unwrap(), found);
+    assert_eq!(list(&fixture.base, &project).unwrap(), waiting(&found));
     team.shutdown().unwrap();
 }
 
