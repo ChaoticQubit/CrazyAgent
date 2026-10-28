@@ -66,12 +66,13 @@ pub const CEILING_VARIABLE: &str = "GIT_CEILING_DIRECTORIES";
 /// The [`CEILING_VARIABLE`] value for one project: the agents root its layout uses
 /// (INT1-R2-1), `<root>/.crazyagent/worktrees` when the project keeps its state in
 /// `.crazyagent` and `<root>/worktrees` otherwise, as [`crate::projects_home::state_folder`]
-/// decides for the agents' exclude line. When the engine still records an agent of the
-/// project in `<root>/worktrees` after the project gained a `.crazyagent` folder, that older
-/// root follows the layout's (INT1-R3-1). Git never searches from a listed root upwards; the
-/// project folder and the owner's own folders, a `.crazyagent` project's top-level
-/// `worktrees` among them while no agent is recorded there, keep their repository. Inputs:
-/// the canonical project folder and whether the engine records an agent in its older
+/// decides for the agents' exclude line. When an engine-made worktree of the project, a
+/// team agent's or a research job's, is still in `<root>/worktrees` after the project gained
+/// a `.crazyagent` folder, that older root follows the layout's (INT1-R3-1, INT1R3-L1). Git
+/// never searches from a listed root upwards; the project folder and the owner's own
+/// folders, a `.crazyagent` project's top-level `worktrees` among them while no engine-made
+/// worktree is there, keep their repository. Inputs:
+/// the canonical project folder and whether an engine-made worktree is in its older
 /// agents root ([`super::workspace::older_agents`]). Output: the value, or
 /// `ide_project_folder_invalid` for a folder that is not absolute or holds a `:`, which git
 /// reads as a list separator.

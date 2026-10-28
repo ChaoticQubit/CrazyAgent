@@ -14,6 +14,10 @@ pub const AGENTS_LISTED_MAX: usize = 256;
 /// The generated workspace file inside the project's IDE folder.
 pub const FILE: &str = "crazyagent.code-workspace";
 
+/// The most entries of a project's older agents root read for research worktrees; a root
+/// holding more counts as holding one, so the git stop is kept rather than guessed away.
+pub(crate) const OLDER_ENTRIES_MAX: usize = 4096;
+
 const TEMPORARY: &str = "crazyagent.code-workspace.tmp";
 const PROJECTS_FOLLOWED_MAX: i64 = 64;
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS ide_workspaces (
@@ -146,18 +150,20 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
         .map_err(unavailable)
 }
 
-/// Whether the engine records an agent worktree of the project inside the older agents root
-/// `<folder>/worktrees`, where agents made before the project gained a `.crazyagent` folder
-/// stay until they are cleaned up (INT1-R3-1). Every recorded worktree counts, live or kept.
-/// Inputs: the engine root, the project and its canonical folder. Output: the answer, or
+/// Whether an engine-made worktree of the project is inside the older agents root
+/// `<folder>/worktrees`, where agents and research jobs that ran before the project gained a
+/// `.crazyagent` folder stay: a team worktree the engine records there, live or kept
+/// (INT1-R3-1), or a research job's worktree ([`older_research`], INT1R3-L1). Inputs: the
+/// engine root, the project and its canonical folder. Output: the answer, or
 /// `ide_project_folder_invalid` for a folder that is not absolute text, or
-/// `ide_workspace_unavailable` when the records cannot be read.
+/// `ide_workspace_unavailable` when the records or the folder cannot be read.
 pub fn older_agents(root: &Path, project: &ProjectId, folder: &Path) -> Result<bool, EngineError> {
     if !folder.is_absolute() {
         return Err(failure("ide_project_folder_invalid"));
     }
-    let mut prefix = folder
-        .join("worktrees")
+    let older = folder.join("worktrees");
+    let mut prefix = older
+        .clone()
         .into_os_string()
         .into_string()
         .map_err(|_| failure("ide_project_folder_invalid"))?;
@@ -165,13 +171,65 @@ pub fn older_agents(root: &Path, project: &ProjectId, folder: &Path) -> Result<b
     assert!(prefix.starts_with('/') && prefix.ends_with("/worktrees/"));
     let db = open(root)?;
     crate::team::initialize(&db).map_err(unavailable)?;
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM team_worktrees
-                       WHERE project=?1 AND substr(worktree,1,length(?2))=?2)",
-        params![project.as_str(), prefix],
-        |row| row.get(0),
-    )
-    .map_err(unavailable)
+    let team: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_worktrees
+                           WHERE project=?1 AND substr(worktree,1,length(?2))=?2)",
+            params![project.as_str(), prefix],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    Ok(team || older_research(&db, project, &older)?)
+}
+
+/// Whether a research job of the project left a worktree in the older agents root: a real
+/// folder there whose name starts `research-<kind>-<job id>-`, as the research runner names
+/// each launch's worktree, for a job the engine records for this project. Research
+/// worktrees have no team record and stay after their job. Inputs: the database, the project
+/// and `<folder>/worktrees`. Output: the answer, true for a root of more than
+/// [`OLDER_ENTRIES_MAX`] entries, or `ide_workspace_unavailable` when it cannot be read.
+fn older_research(db: &Connection, project: &ProjectId, older: &Path) -> Result<bool, EngineError> {
+    let recorded: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='research_jobs')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !recorded {
+        return Ok(false);
+    }
+    let entries = match std::fs::symlink_metadata(older) {
+        Ok(metadata) if metadata.is_dir() => std::fs::read_dir(older).map_err(unavailable)?,
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(unavailable(error)),
+    };
+    let mut job = db
+        .prepare(
+            "SELECT EXISTS(SELECT 1 FROM research_jobs WHERE project=?1
+                AND substr(?2,1,length('research-'||kind||'-'||id||'-'))='research-'||kind||'-'||id||'-')",
+        )
+        .map_err(unavailable)?;
+    for (read, entry) in entries.enumerate() {
+        if read == OLDER_ENTRIES_MAX {
+            return Ok(true);
+        }
+        let entry = entry.map_err(unavailable)?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !name.starts_with("research-") || !entry.file_type().map_err(unavailable)?.is_dir() {
+            continue;
+        }
+        let made: bool = job
+            .query_row(params![project.as_str(), name], |row| row.get(0))
+            .map_err(unavailable)?;
+        if made {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Reads the project's stored folder. Inputs: the database and project. Output: the

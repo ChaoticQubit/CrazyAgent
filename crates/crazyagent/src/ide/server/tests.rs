@@ -1115,6 +1115,84 @@ fn the_server_ceiling_keeps_the_older_agents_root_while_the_engine_records_an_ag
     );
 }
 
+/// INT1R3-L1: a research job's worktree is not a team record, yet it stays in the older
+/// agents root after its job. The ceiling keeps that root while a folder there carries the
+/// name the research runner gives a launch of one of the project's own jobs; another
+/// project's job, the owner's own folder of a like name, a link and the new layout's
+/// research folders count for nothing.
+#[test]
+fn the_server_ceiling_keeps_the_older_root_while_a_research_worktree_stays_there() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("gained");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let older = root.join("worktrees");
+    let layout = root.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&older).unwrap();
+    fs::create_dir_all(&layout).unwrap();
+    let jobs = crate::research::jobs::ResearchJobs::open(&data.path().join("engine.db")).unwrap();
+    let elsewhere = jobs.enqueue("elsewhere", "market", "codex", false).unwrap();
+    let mine = jobs
+        .enqueue(project.as_str(), "market", "codex", false)
+        .unwrap();
+    let layout_only = crate::ide::git::ceiling(&root, false).unwrap();
+    assert_eq!(layout_only, layout.clone().into_os_string());
+
+    fs::create_dir(older.join(format!("research-market-{elsewhere}-1"))).unwrap();
+    fs::create_dir(layout.join(format!("research-market-{mine}-1"))).unwrap();
+    fs::create_dir(older.join("research-notes")).unwrap();
+    fs::create_dir(older.join(format!("research-other-{mine}-1"))).unwrap();
+    std::os::unix::fs::symlink(
+        layout.join(format!("research-market-{mine}-1")),
+        older.join(format!("research-market-{mine}-2")),
+    )
+    .unwrap();
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        layout_only,
+        "no folder in the older root is a research worktree of this project's jobs"
+    );
+
+    fs::create_dir(older.join(format!("research-market-{mine}-1-2"))).unwrap();
+    let both = command_ceiling(&servers, &project, &root);
+    assert_eq!(both, crate::ide::git::ceiling(&root, true).unwrap());
+    assert_eq!(
+        both.to_str().unwrap(),
+        format!("{}:{}", layout.display(), older.display()),
+        "a later launch's worktree of the project's job keeps the older root"
+    );
+}
+
+/// A project's older agents root with more entries than the engine reads for research
+/// worktrees keeps the git stop rather than guessing it away.
+#[test]
+fn an_older_agents_root_too_large_to_read_keeps_the_git_stop() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("crowded");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let older = root.join("worktrees");
+    fs::create_dir_all(root.join(".crazyagent").join("worktrees")).unwrap();
+    fs::create_dir_all(&older).unwrap();
+    crate::research::jobs::ResearchJobs::open(&data.path().join("engine.db")).unwrap();
+    for index in 0..crate::ide::workspace::OLDER_ENTRIES_MAX {
+        fs::create_dir(older.join(format!("owner-{index}"))).unwrap();
+    }
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, false).unwrap(),
+        "a root at the limit is read in full"
+    );
+    fs::create_dir(older.join("owner-last")).unwrap();
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, true).unwrap(),
+        "one entry past the limit keeps the older root"
+    );
+}
+
 #[test]
 fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let checkout = scratch();
