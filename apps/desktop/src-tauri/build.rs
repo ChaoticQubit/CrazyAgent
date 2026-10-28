@@ -47,6 +47,7 @@ fn main() {
         "desktop_remove_project",
         "desktop_cancel_research",
         "desktop_retry_research",
+        "desktop_plan_roadmap",
         "desktop_research_log",
         "desktop_projects_home",
         "desktop_set_projects_home",

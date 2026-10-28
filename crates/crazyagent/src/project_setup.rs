@@ -407,14 +407,14 @@ pub struct StoredSetup {
     pub revision: u64,
 }
 
-/// The revision a project setup is recorded at; only the owner's
-/// `UpdateProjectSetup` raises it.
+/// The revision a project setup is recorded at; the owner's `UpdateProjectSetup` raises it,
+/// and so does Plan roadmap now when it turns planning on.
 pub(crate) const FIRST_REVISION: u64 = 1;
 
 impl StoredSetup {
-    /// Whether the owner saved this setup after it was recorded: only
-    /// `UpdateProjectSetup` raises the revision past [`FIRST_REVISION`], so
-    /// an onboarding whose setup was saved is finished.
+    /// Whether the owner saved this setup after it was recorded: only owner
+    /// changes raise the revision past [`FIRST_REVISION`], and Plan roadmap now
+    /// refuses an unconfirmed onboarding, so an onboarding whose setup was saved is finished.
     pub fn saved(&self) -> bool {
         self.revision > FIRST_REVISION
     }
@@ -733,6 +733,9 @@ pub enum SetupAction {
         project_id: ProjectId,
         job: i64,
     },
+    PlanRoadmap {
+        project_id: ProjectId,
+    },
     SetReadPaths {
         project_id: ProjectId,
         version: u64,
@@ -803,7 +806,7 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1801,6 +1804,7 @@ pub(crate) fn execute(
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
+        SetupAction::PlanRoadmap { project_id } => plan_roadmap(tx, config, project_id),
         SetupAction::SaveToMemory {
             project_id,
             research,
@@ -2188,6 +2192,72 @@ fn retry_research(
     if changed != 1 {
         return Ok(rejected("research_job_not_retryable"));
     }
+    Ok(Outcome::Applied)
+}
+
+/// Queues the project's roadmap planning job for Plan roadmap now: its finished or stopped job
+/// runs again, so a project keeps one planning row, or a first one is added. Turning the toggle
+/// on raises the setup revision, so an edit drafted before it is refused as stale instead of
+/// cancelling the job. A found or cloned project plans from its setup review until confirmed.
+/// Takes the transaction, configuration and project. Returns Applied, `project_setup_missing`,
+/// `setup_unconfirmed`, or `planning_busy` while the planning job waits or runs.
+fn plan_roadmap(
+    tx: &Transaction<'_>,
+    config: &EffectiveConfig,
+    project_id: &ProjectId,
+) -> Result<Outcome, EngineError> {
+    let Some(mut stored) = load_setup(tx, project_id)? else {
+        return Ok(rejected("project_setup_missing"));
+    };
+    let onboarding: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM onboarding WHERE project=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if onboarding && !stored.saved() {
+        return Ok(rejected("setup_unconfirmed"));
+    }
+    let kind = ResearchKind::RoadmapPlanning;
+    let jobs = load_jobs(tx, "project", &project_id.as_str())?;
+    let waiting = effective(ResearchStatus::Queued, project_has_pool(config, project_id));
+    match jobs.iter().rev().find(|job| job.kind == kind) {
+        Some(job)
+            if matches!(
+                job.status,
+                ResearchStatus::Queued | ResearchStatus::NeedsPool | ResearchStatus::Running
+            ) =>
+        {
+            return Ok(rejected("planning_busy"));
+        }
+        Some(job) => {
+            let changed = tx
+                .execute(
+                    "UPDATE research_jobs SET status=?2, attempts=0, claimer=NULL, error=NULL,
+                    cancel_requested=0, output_bytes=0, started_ms=NULL, heartbeat_ms=NULL,
+                    finished_ms=NULL WHERE id=?1 AND status IN ('done','failed','cancelled')",
+                    params![job.id, waiting.stored()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
+        }
+        None => {
+            let harnesses = stored.team.research_harnesses();
+            assert!(!harnesses.is_empty());
+            insert_job(tx, project_id, kind, harnesses[0], waiting, now_ms())?;
+        }
+    }
+    if !stored.research.contains(&kind) {
+        let before = stored.revision;
+        stored.research.push(kind);
+        stored.revision = before
+            .checked_add(1)
+            .ok_or_else(|| failure("project_setup_revision_limit"))?;
+        save_setup(tx, &stored)?;
+        assert!(stored.revision > before);
+    }
+    assert!(stored.research.contains(&kind));
     Ok(Outcome::Applied)
 }
 

@@ -331,6 +331,7 @@ pub(in crate::tui) struct Wizard {
     pub documents: Vec<Document>,
     pub document_cursor: usize,
     pub research: Vec<ResearchKind>,
+    pub roadmap: bool,
     pub work_cursor: usize,
     pub pools: Vec<PoolChoice>,
     pub pool: Option<CredentialRef>,
@@ -375,6 +376,7 @@ impl Wizard {
             documents: Vec::new(),
             document_cursor: 0,
             research: Vec::new(),
+            roadmap: true,
             work_cursor: 0,
             pools,
             pool,
@@ -860,7 +862,11 @@ impl Wizard {
                 .into_iter()
                 .filter(|platform| self.platforms.contains(platform))
                 .collect(),
-            research: self.research_sorted(),
+            research: self
+                .research_sorted()
+                .into_iter()
+                .chain(self.roadmap.then_some(ResearchKind::RoadmapPlanning))
+                .collect(),
             pool: self.pool.clone(),
             team: self.team.clone(),
             documents: self.documents.iter().map(|d| d.path.clone()).collect(),
@@ -1431,10 +1437,13 @@ impl Wizard {
     }
 
     fn work_key(&mut self, key: KeyEvent) -> Reply {
-        let last = ResearchKind::ALL.len() - 1;
+        let last = ResearchKind::ALL.len();
         match key.code {
             KeyCode::Up => self.work_cursor = self.work_cursor.saturating_sub(1),
             KeyCode::Down => self.work_cursor = (self.work_cursor + 1).min(last),
+            KeyCode::Char(' ') | KeyCode::Enter if self.work_cursor == last => {
+                self.roadmap = !self.roadmap;
+            }
             KeyCode::Char(' ') | KeyCode::Enter => {
                 let kind = ResearchKind::ALL[self.work_cursor];
                 if let Some(at) = self.research.iter().position(|k| *k == kind) {
@@ -1585,7 +1594,7 @@ impl Wizard {
         assert!(self.focus < self.controls().len());
         assert!(self.tech.len() <= TECH_ENTRIES_MAX);
         assert!(self.platform_cursor < PLATFORM_ORDER.len());
-        assert!(self.work_cursor < ResearchKind::ALL.len());
+        assert!(self.work_cursor <= ResearchKind::ALL.len());
         assert!(self.documents.is_empty() || self.document_cursor < self.documents.len());
         assert!(
             self.pool

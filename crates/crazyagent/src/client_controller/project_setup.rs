@@ -313,6 +313,20 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Queues the project's roadmap and release process planning job now.
+    /// Takes the project id and the client generation.
+    /// Returns the actual owner response; `planning_busy` while a planning job of the
+    /// project is queued or running.
+    pub async fn plan_roadmap(
+        &mut self,
+        project_id: ProjectId,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.research_jobs(project_id.clone()).await?;
+        self.begin_mutation(OwnerMutation::PlanRoadmap { project_id }, generation)?;
+        self.send_pending().await
+    }
+
     /// Reads the last plain lines of one research job's agent output, with secrets hidden.
     /// Takes the project id and the job id.
     /// Returns at most RESEARCH_LOG_LINES_MAX lines, oldest first.

@@ -215,6 +215,9 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         job: i64,
     },
+    PlanRoadmap {
+        project_id: ProjectId,
+    },
     ModelAccess {
         expected_config_id: ConfigId,
         expected_source_hash: String,
@@ -438,6 +441,13 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::RetryResearch {
                     project_id: project_id.clone(),
                     job: *job,
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::PlanRoadmap { project_id } => {
+                let action = crate::project_setup::SetupAction::PlanRoadmap {
+                    project_id: project_id.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }

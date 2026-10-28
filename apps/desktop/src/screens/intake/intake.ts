@@ -6,7 +6,7 @@ import type {
 import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
-import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
+import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
 import { localClock } from "../project/research";
 
@@ -215,15 +215,18 @@ export function missingLabels(missing: string[]): string[] {
 
 /** Starts the review form from the mapping agent's draft, keeping the saved pool and team. A
  * missing or blank proposed name falls back to the saved name, since the reply comes from another
- * process. Inputs: the onboarding view and the saved setup. Output: the form draft. */
+ * process. Roadmap planning starts on until the setup is first saved, then shows the saved choice.
+ * Inputs: the onboarding view and the saved setup. Output: the form draft. */
 export function onboardingDraft(view: OnboardingView, stored: StoredSetup): ProjectDraft {
+  const saved = draftOf(stored);
   return {
-    ...draftOf(stored),
+    ...saved,
     name: (view.name ?? "").trim() || stored.name,
     about: view.draft.about,
     stack: [...view.draft.tech_stack],
     platforms: [...view.draft.platforms],
-    research: [...view.draft.research],
+    research: researchChoices(view.draft.research).research,
+    roadmap: view.finished ? saved.roadmap : true,
   };
 }
 

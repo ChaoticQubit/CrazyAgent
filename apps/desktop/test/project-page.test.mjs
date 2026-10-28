@@ -724,6 +724,8 @@ test("Project Settings sends the engine's team fields only, never the tools choi
     about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
     team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
   });
+  assert.deepEqual(settings.setupOf({ ...stored, research: ["market_research", "roadmap_planning"] }, team).research, ["market_research", "roadmap_planning"],
+    "saving the team keeps the stored roadmap choice");
 });
 
 test("the master ticket is used only for the project that was opened", () => {

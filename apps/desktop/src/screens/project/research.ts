@@ -1,6 +1,6 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
-import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
+import type { ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
@@ -266,11 +266,29 @@ export function waitingLine(jobs: ResearchJob[]): string {
   return `Research is waiting: ${reason}${/[.!?]$/.test(reason) ? "" : "."}`;
 }
 
+/** The job kind of the roadmap and release process planning job, which shares the research queue. */
+export const PLANNING_KIND = "roadmap_planning";
+
+/** Keeps the research jobs of a project's job list, leaving out its planning jobs.
+ * Input: the jobs. Output: the research jobs in the same order. */
+export function researchJobs(jobs: ResearchJob[]): (ResearchJob & { kind: ResearchKind })[] {
+  return jobs.filter((job): job is ResearchJob & { kind: ResearchKind } => job.kind !== PLANNING_KIND);
+}
+
+/** Picks the newest planning job of a project's job list. Input: the jobs. Output: the job with
+ * the highest id, or null when the project never planned a roadmap. */
+export function planningJob(jobs: ResearchJob[]): ResearchJob | null {
+  let newest: ResearchJob | null = null;
+  for (const job of jobs) if (job.kind === PLANNING_KIND && (newest === null || job.id > newest.id)) newest = job;
+  return newest;
+}
+
 /** Builds the Recent activity list from real job times.
  * Inputs: the jobs, the project name and when it was created. Output: every event, newest first. */
 export function activity(jobs: ResearchJob[], project: string, created: number | null): { at: number; text: string }[] {
   const events: { at: number; text: string }[] = [];
-  if (created !== null) events.push({ at: created, text: `You created ${project} with ${jobs.length} research ${jobs.length === 1 ? "task" : "tasks"}` });
+  const research = researchJobs(jobs).length;
+  if (created !== null) events.push({ at: created, text: `You created ${project} with ${research} research ${research === 1 ? "task" : "tasks"}` });
   for (const job of jobs) {
     if (job.started_ms !== null) events.push({ at: job.started_ms, text: `${job.kind_label} started` });
     if (job.finished_ms === null) continue;

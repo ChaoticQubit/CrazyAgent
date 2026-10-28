@@ -723,6 +723,20 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .retry_research(&id, job, generation) .await }.await;
             routed(result)
         }
+        "desktop_plan_roadmap" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                generation: u64,
+            }
+            let Args { id, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.plan_roadmap(&id, generation).await }.await;
+            routed(result)
+        }
         "desktop_research_log" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

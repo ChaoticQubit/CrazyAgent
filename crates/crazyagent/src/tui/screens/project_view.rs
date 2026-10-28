@@ -4,6 +4,7 @@ use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
+use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS, Speaker,
     Tab, Transcript, memory_source, research_kind,
@@ -369,6 +370,25 @@ pub(in crate::tui) fn project_screen(
             ("Esc", "Keep running"),
         ];
     }
+    if screen.confirm_plan.is_some() {
+        let mut body = vec![Row::of("Replace the roadmap?", look.fg)];
+        body.extend(
+            wrap_words(
+                "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.",
+                50,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+        body.push(Row::default());
+        body.push(
+            Row::of("[ Replace ]", look.fg)
+                .push("   ", Style::new())
+                .push("[> Keep ]", look.selection),
+        );
+        rows = modal(&rows, width, 56, "Plan roadmap", body, 5, look);
+        help = vec![("y", "Replace"), ("n", "Keep"), ("Esc", "Keep")];
+    }
     if let Some(cursor) = screen.pool_picker {
         let mut body = vec![
             Row::of(
@@ -544,19 +564,30 @@ fn title(screen: &ProjectScreen, content: usize, look: &Look) -> Row {
     spread(content, name, path)
 }
 
+/// Draws the roadmap planning line under the Work rows once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    let jobs = screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap", look.fg).pad(24))
+            .cat(planning_value(&planning(jobs), look)),
+    )
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
-    let Some(setup) = &screen.setup else {
+    if screen.setup.is_none() {
         return vec![Row::of("Loading...", look.muted)];
-    };
-    if setup.research.is_empty() {
+    }
+    let kinds = screen.work_kinds();
+    if kinds.is_empty() {
         return vec![Row::of(
             "  No research was picked for this project.",
             look.muted,
         )];
     }
     let suggested = screen.suggested().len();
-    setup
-        .research
+    kinds
         .iter()
         .enumerate()
         .map(|(index, kind)| {
@@ -760,6 +791,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         left.extend(needs_you(screen, look));
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
+        left.extend(roadmap_row(screen, look));
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -833,6 +865,7 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
     lines.extend(needs_you(screen, look));
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
+    lines.extend(roadmap_row(screen, look));
     lines.push(Row::default());
     lines.push(
         Row::of("Team", look.heading)
@@ -1950,6 +1983,13 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             "Process",
             Row::of("Instructions for this project's agents", look.fg)
                 .push("   i Edit", look.muted),
+        ),
+        entry(
+            "Roadmap",
+            match &screen.jobs {
+                Some(jobs) => planning_value(&planning(jobs), look),
+                None => Row::of("Loading...", look.muted),
+            },
         ),
         Row::default(),
     ];

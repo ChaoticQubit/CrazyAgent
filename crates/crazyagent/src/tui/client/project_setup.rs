@@ -185,6 +185,9 @@ impl NativeOwner {
                     SetupAction::RetryResearch { project_id, job } => {
                         controller.retry_research(project_id, job, generation).await
                     }
+                    SetupAction::PlanRoadmap { project_id } => {
+                        controller.plan_roadmap(project_id, generation).await
+                    }
                     SetupAction::SetReadPaths {
                         project_id,
                         version,

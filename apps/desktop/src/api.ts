@@ -315,6 +315,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_remove: "removing the project",
   research_cancel: "cancelling the research",
   research_retry: "retrying the research",
+  plan_roadmap: "planning the roadmap",
 };
 
 /** Names a kept change in plain words. Input: the change. Output: a lower-case phrase, the

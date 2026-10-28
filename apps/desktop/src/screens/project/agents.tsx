@@ -127,7 +127,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
       const status = agentStatus(row);
       const actions = researchActions(job);
       return <li className="pj-agent-row" key={job.id}>
-        <strong className="pj-kind"><Icon name={RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
+        <strong className="pj-kind"><Icon name={job.kind === "roadmap_planning" ? "list-checks" : RESEARCH_ICONS[job.kind]} size={16} />{displayText(row.title)}</strong>
         <span className="pj-secondary pj-small">{harnessName(harnesses, job.harness)}</span>
         <span><Badge word={status.word} tone={status.tone} /> <span className="pj-small pj-secondary">{displayText(row.progress)}</span></span>
         <span className="pj-small pj-muted">{row.elapsed}</span>
