@@ -959,7 +959,7 @@ impl TeamView {
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
-        let mut lines = vec![self.summary(content, look)];
+        let mut lines = self.summary(content, look);
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
@@ -1094,13 +1094,14 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    /// The Team row: the agent counts and alerts in full, then the team settings that fit
-    /// in order (Keep warm, Task, Session, Idle stop, On harness switch); a setting past the
-    /// width is left out whole, never the counts. Inputs: the content width and the look.
-    /// Output: one row.
-    fn summary(&self, content: usize, look: &Look) -> Row {
+    /// The Team rows: the agent counts and alerts, then every team setting in order (Keep
+    /// warm, Task, Session, Idle stop, On harness switch), each whole. A setting that does
+    /// not fit on the row starts the next one, right-aligned under the first. Counts wider
+    /// than the content are cut with an ellipsis like any row. Inputs: the content width and
+    /// the look. Output: one row, or more when the settings wrap.
+    fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
         let Some(status) = &self.status else {
-            return Row::of("Team", look.accent).pad(content);
+            return vec![Row::of("Team", look.accent).pad(content)];
         };
         let count = |wanted: &[AgentStatus]| {
             status
@@ -1161,19 +1162,27 @@ impl TeamView {
                 switch_words(status.on_harness_switch).to_owned(),
             ),
         ];
+        let mut rows = Vec::new();
         let mut right = Row::default();
         for item in settings {
-            let gap = if right.width() == 0 { 0 } else { 2 };
-            if left.width() + 2 + right.width() + gap + item.width() > content {
-                break;
+            let used = match (left.width(), right.width()) {
+                (0, 0) => 0,
+                (0, taken) | (taken, 0) => taken + 2,
+                (lead, taken) => lead + 2 + taken + 2,
+            };
+            if used > 0 && used + item.width() > content {
+                rows.push(spread(content, left, right));
+                left = Row::default();
+                right = Row::default();
             }
-            right = if gap == 0 {
+            right = if right.width() == 0 {
                 item
             } else {
                 right.push("  ", look.muted).cat(item)
             };
         }
-        spread(content, left, right)
+        rows.push(spread(content, left, right));
+        rows
     }
 
     fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
