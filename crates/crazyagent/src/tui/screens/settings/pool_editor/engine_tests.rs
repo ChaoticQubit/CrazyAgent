@@ -348,3 +348,79 @@ async fn a_new_pool_saved_again_after_a_lost_reply_is_saved_once() {
         Some("Pool saved.")
     );
 }
+
+/// The owner changes the form after a save whose reply was lost and saves again. The
+/// engine already holds the first try, so the editor reads it back and names the changes
+/// it is missing instead of saying the pool was saved; the next Enter saves them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_retry_after_a_lost_reply_is_saved_only_when_the_pool_matches() {
+    let engine = Engine::start().await;
+    let project = engine.root.path().join("project.toml");
+    let mut connection = engine.connect();
+    let mut ctx = ctx();
+    let pools = open(&Place::Settings(SettingsSection::Pools), &mut ctx);
+    let mut shell = Shell::with(ctx, pools);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('a'));
+    pump(&mut shell, &mut connection).await;
+    for character in "Build team".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Tab);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Tab);
+    shell.key(Key::Enter);
+    let Some(Request::EditPool { change }) = shell.ctx.next_request() else {
+        panic!("Save sends the new pool");
+    };
+    let generation = shell.ctx.next_generation();
+    connection
+        .shell(ShellRequest::EditPool { change, generation })
+        .unwrap();
+    let deadline = Instant::now() + SETTLE_TIME;
+    while connection.poll_owner().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the engine answered the save");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    shell.arrive(crate::tui::seam::Arrival::PoolEdited(Err(
+        "pool_outcome_unknown".into(),
+    )));
+
+    shell.key(Key::Char('p'));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    assert!(
+        sent.contains(&"pools"),
+        "the pools are read again: {sent:?}"
+    );
+    let saved = saved_pools(&engine.global(), &project);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        saved[0].provider_quota_policy,
+        ProviderQuotaPolicy::BoundedAttempt,
+        "the engine holds the first try"
+    );
+    let message = shell.ctx.message().expect("the editor says what happened");
+    assert_eq!(
+        (message.lead.as_str(), message.rest.as_str()),
+        (
+            "Your first try saved this pool without your later changes.",
+            "Not saved yet: quota policy. Press Enter to save them."
+        )
+    );
+    assert!(render(&mut shell).contains("Edit pool"));
+
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    let saved = saved_pools(&engine.global(), &project);
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].provider_quota_policy, ProviderQuotaPolicy::Strict);
+    assert_eq!(
+        shell.ctx.message().map(|m| m.lead.as_str()),
+        Some("Pool saved.")
+    );
+}

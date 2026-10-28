@@ -20,6 +20,7 @@ const FILTER_CHARS_MAX: usize = 100;
 const FIELD_WIDTH_MAX: usize = 64;
 const WIDTHS: [usize; 3] = [30, 17, 22];
 const ROWS_MIN: usize = 3;
+const LANDED_EARLIER: &str = "Your first try saved this pool without your later changes.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -50,6 +51,7 @@ pub struct PoolEditor {
     start: (String, BTreeSet<CredentialRef>, ProviderQuotaPolicy),
     create_id: Option<CredentialRef>,
     creates_sent: u32,
+    checking: bool,
 }
 
 impl PoolEditor {
@@ -90,6 +92,7 @@ impl PoolEditor {
             start,
             create_id: None,
             creates_sent: 0,
+            checking: false,
         }
     }
 
@@ -256,6 +259,52 @@ impl PoolEditor {
         ctx.request(Request::EditPool { change });
     }
 
+    /// Compares the pool an earlier try saved without its reply with the form, once the
+    /// pools are read again: the same pool counts as saved; otherwise the editor now edits
+    /// that pool, names what it is missing and keeps the form for Enter to save it.
+    /// Takes the context. Returns Back when saved, else Handled.
+    fn check_landed(&mut self, ctx: &mut Ctx) -> Flow {
+        let stored = self.id.as_ref().and_then(|id| {
+            ctx.store
+                .pools
+                .ready()
+                .and_then(|pools| pools.iter().find(|pool| &pool.id == id))
+        });
+        let Some(stored) = stored else {
+            ctx.say(Message::error(
+                "Could not read the pool your first try saved.",
+                "Press Enter to save the form again.",
+            ));
+            return Flow::Handled;
+        };
+        let members: BTreeSet<CredentialRef> = stored
+            .members
+            .iter()
+            .map(|member| member.id.clone())
+            .collect();
+        let missing: Vec<&str> = [
+            (stored.name != self.name.value().trim(), "name"),
+            (members != self.members, "accounts"),
+            (stored.provider_quota_policy != self.quota, "quota policy"),
+        ]
+        .into_iter()
+        .filter_map(|(differs, part)| differs.then_some(part))
+        .collect();
+        self.start = (stored.name.clone(), members, stored.provider_quota_policy);
+        if missing.is_empty() {
+            ctx.say(Message::success("Pool saved.", ""));
+            return Flow::Back;
+        }
+        ctx.say(Message::warning(
+            LANDED_EARLIER,
+            &format!(
+                "Not saved yet: {}. Press Enter to save them.",
+                missing.join(", ")
+            ),
+        ));
+        Flow::Handled
+    }
+
     fn step_focus(&mut self, forward: bool) {
         let order = [Focus::Name, Focus::Table, Focus::Save, Focus::Cancel];
         let current = if self.focus == Focus::Filter {
@@ -402,8 +451,8 @@ impl PoolEditor {
     }
 }
 
-/// Says the pool was saved, rereads the pools and leaves the editor. A new pool whose
-/// earlier try landed without its reply counts too. Takes the context. Returns Back.
+/// Says the pool was saved, rereads the pools and leaves the editor.
+/// Takes the context. Returns Back.
 fn saved(ctx: &mut Ctx) -> Flow {
     ctx.say(Message::success("Pool saved.", ""));
     ctx.request(Request::Pools);
@@ -424,7 +473,7 @@ impl Screen for PoolEditor {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if self.saving {
+        if self.saving || self.checking {
             return Flow::Handled;
         }
         match (self.focus, key) {
@@ -515,7 +564,12 @@ impl Screen for PoolEditor {
                     self.creates_sent > 1 && matches!(result, Err(code) if code == "pool_exists");
                 match result {
                     Ok(()) => saved(ctx),
-                    Err(_) if landed => saved(ctx),
+                    Err(_) if landed => {
+                        self.id = self.create_id.take();
+                        self.checking = true;
+                        ctx.request(Request::Pools);
+                        Flow::Handled
+                    }
                     Err(code) if code == "pool_name_bounds" => {
                         self.name.error = plain_problem(code).map(Into::into);
                         self.focus = Focus::Name;
@@ -532,6 +586,10 @@ impl Screen for PoolEditor {
                         Flow::Handled
                     }
                 }
+            }
+            Arrival::Pools(_) if self.checking => {
+                self.checking = false;
+                self.check_landed(ctx)
             }
             _ => Flow::Handled,
         }
@@ -648,7 +706,7 @@ impl Screen for PoolEditor {
     }
 
     fn busy(&self, ctx: &Ctx) -> bool {
-        self.saving || matches!(ctx.store.accounts, Load::Idle | Load::Loading)
+        self.saving || self.checking || matches!(ctx.store.accounts, Load::Idle | Load::Loading)
     }
 
     fn draft(&self) -> bool {
