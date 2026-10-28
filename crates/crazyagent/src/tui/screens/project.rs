@@ -265,7 +265,7 @@ pub(in crate::tui) struct MemoryEdit {
 
 /// The whole text of a suggested memory, shown before the owner saves it.
 /// Holds the memory, its stored text and the first line on screen.
-/// y saves once the last line is on screen; e edits, n dismisses, Esc goes back.
+/// y saves and e edits once the last line is on screen; n dismisses, Esc goes back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct MemoryReview {
     pub entry: RequestId,
@@ -1537,22 +1537,18 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         };
         match code {
-            KeyCode::Char('y') => {
-                self.review = Some(MemoryReview {
-                    entry,
-                    version,
-                    text,
-                    scroll: 0,
-                });
-                ProjectReply::Handled
-            }
             KeyCode::Char('n') => ProjectReply::Review {
                 entry,
                 version,
                 decision: ReviewDecision::Reject,
             },
             _ => {
-                self.edit_memory(entry, version, &text);
+                self.review = Some(MemoryReview {
+                    entry,
+                    version,
+                    text,
+                    scroll: 0,
+                });
                 ProjectReply::Handled
             }
         }
@@ -1607,7 +1603,7 @@ impl ProjectScreen {
                     decision: ReviewDecision::Reject,
                 };
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if review.at_end() => {
                 if let Some(review) = self.review.take() {
                     self.edit_memory(review.entry, review.version, &review.text);
                 }

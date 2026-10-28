@@ -139,7 +139,7 @@ pub(in crate::tui) fn project_screen(
         } else {
             Row::of(
                 format!(
-                    "Lines {}-{end} of {}. Read to the end to save it.",
+                    "Lines {}-{end} of {}. Read to the end to save or edit it.",
                     review.scroll + 1,
                     lines.len()
                 ),
@@ -155,12 +155,7 @@ pub(in crate::tui) fn project_screen(
                 ("Esc", "Back"),
             ]
         } else {
-            vec![
-                ("Down", "Read on"),
-                ("e", "Edit first"),
-                ("n", "Dismiss"),
-                ("Esc", "Back"),
-            ]
+            vec![("Down", "Read on"), ("n", "Dismiss"), ("Esc", "Back")]
         };
         return Screen {
             rows,
