@@ -1213,3 +1213,49 @@ fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete
         "the long record left out holds only the rest of its skipped line, so the reading is complete"
     );
 }
+
+/// CUT-L1: one scan reads at most `READ_BYTES_MAX` bytes of the tails of the records it left
+/// out; a home whose left-out tails pass that bound reads as partial rather than complete.
+#[test]
+fn a_home_whose_left_out_tails_pass_one_read_reads_as_partial() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    for name in ["a", "b"] {
+        let record = folder.join(format!("{name}.jsonl"));
+        append(&record, &claude_assistant(name, 1, 1, 0, 0, "end_turn"));
+        append(&record, &"x".repeat(READ_BYTES_MAX / 2 + 1));
+        pause();
+    }
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        ((read.input, read.output), partial(&db)),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    pause();
+    for name in ["n1", "n2"] {
+        append(
+            &folder.join(format!("{name}.jsonl")),
+            &claude_assistant(name, 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let grown = scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
+    assert_eq!(
+        ((grown.input, grown.output), partial(&db)),
+        ((2, 2), Some(1)),
+        "left-out tails past one read in all are not read through, so the reading stays partial"
+    );
+}

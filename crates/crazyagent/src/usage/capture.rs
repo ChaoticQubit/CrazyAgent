@@ -433,10 +433,10 @@ fn changed_at(metadata: &std::fs::Metadata) -> std::time::SystemTime {
 
 /// Keeps whether the last scan of a home left usage uncounted, so the usage page can say its
 /// reading is partial: the walk stopped at a bound, or a record it left out is [`uncounted`]
-/// (MSL2B-R3-1). A cut scan stores the home with the time, keeping the `FILES_PER_SCAN_MAX`
-/// most recently cut homes; a whole scan removes it. Inputs: the store, the home, its
-/// attribution, the records left out, whether the walk stopped and the time. Output: done, or
-/// `usage_unavailable`.
+/// (MSL2B-R3-1), reading at most `READ_BYTES_MAX` bytes of their tails in all (CUT-L1). A cut
+/// scan stores the home with the time, keeping the `FILES_PER_SCAN_MAX` most recently cut
+/// homes; a whole scan removes it. Inputs: the store, the home, its attribution, the records
+/// left out, whether the walk stopped and the time. Output: done, or `usage_unavailable`.
 fn mark_cut(
     db: &Connection,
     home: &Path,
@@ -447,11 +447,12 @@ fn mark_cut(
 ) -> Result<(), EngineError> {
     let key = home.to_string_lossy();
     let mut cut = stopped;
+    let mut budget = READ_BYTES_MAX as u64;
     for record in left {
         if cut {
             break;
         }
-        cut = uncounted(db, record)?;
+        cut = uncounted(db, record, &mut budget)?;
     }
     if !cut {
         let stored: bool = db
@@ -487,15 +488,44 @@ fn mark_cut(
 }
 
 /// Whether a record the walk left out holds lines no scan counted: it is not empty and its
-/// stored progress is missing, belongs to another file or stops short of its length, as for
-/// a line still being written. Inputs: the store and the record. Output: the answer, or
-/// `usage_unavailable`.
-fn uncounted(db: &Connection, record: &LeftOut) -> Result<bool, EngineError> {
+/// stored progress is missing or belongs to another file, or the bytes past its stored
+/// offset hold a line a scan would count (CUT-L1). Inputs: the store, the record and the
+/// tail bytes this scan may still read. Output: the answer, or `usage_unavailable`.
+fn uncounted(db: &Connection, record: &LeftOut, budget: &mut u64) -> Result<bool, EngineError> {
     if record.length == 0 {
         return Ok(false);
     }
     let progress = stored_progress(db, &record.path.to_string_lossy())?;
-    Ok(progress.identity != record.identity || progress.offset < record.length)
+    if progress.identity != record.identity {
+        return Ok(true);
+    }
+    Ok(progress.offset < record.length && countable_line(record, &progress, budget))
+}
+
+/// Whether the bytes of a left-out record from its stored offset to the length the walk saw
+/// end a line a scan would count. A last line still being written or torn by a stopped agent
+/// ends none, and the first ending closes the rest of a line the reads are skipping. Spends
+/// the tail on `budget`; a tail past it, or a record replaced or unreadable since the walk,
+/// answers true. Inputs: the record, its progress and the budget. Output: the answer.
+fn countable_line(record: &LeftOut, progress: &Progress, budget: &mut u64) -> bool {
+    let tail = record.length - progress.offset;
+    if tail > *budget {
+        return true;
+    }
+    *budget -= tail;
+    let Some((mut file, identity, _)) = open_record(&record.path) else {
+        return true;
+    };
+    let mut bytes = Vec::new();
+    if identity != record.identity
+        || file.seek(SeekFrom::Start(progress.offset)).is_err()
+        || file.take(tail).read_to_end(&mut bytes).is_err()
+        || bytes.len() as u64 != tail
+    {
+        return true;
+    }
+    let endings = bytes.iter().filter(|byte| **byte == b'\n').count();
+    endings > usize::from(progress.skipping)
 }
 
 #[cfg(unix)]
