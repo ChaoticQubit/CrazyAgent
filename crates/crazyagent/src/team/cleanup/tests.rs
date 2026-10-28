@@ -803,3 +803,77 @@ fn a_finished_clone_agent_with_uncommitted_or_untracked_files_is_kept_as_dirty()
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+/// A finished Own branch agent whose clone holds a ref besides its branch keeps it, read as
+/// data from the clone's git folder with no git run and no link followed: a stash, a side
+/// branch with a commit, a tag, a detached HEAD or a reftable store keep it as
+/// `cleanup_refs_unlanded` and a ref that is a link as `cleanup_worktree_unreadable`, while
+/// a clone whose branch git packed is removed without following a link out of it (CC-1).
+#[test]
+fn a_finished_clone_agent_with_refs_only_its_clone_holds_is_kept_with_the_plain_reason() {
+    let case = Case::new();
+    let git_dir = |id| crate::agent_git::git_dir(&case.worktree(id));
+    for id in 1..=7 {
+        case.clone_agent(id, "stopped");
+    }
+    write(
+        &case.worktree(1).join("README"),
+        b"stashed, never committed\n",
+    );
+    case.in_agent(
+        1,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "stash",
+            "-q",
+        ],
+    );
+    let branch = crate::agent_git::branch(&case.worktree(2)).unwrap();
+    case.in_agent(2, &["checkout", "-q", "-b", "side"]);
+    case.agent_commit(2, "side.txt");
+    case.in_agent(2, &["checkout", "-q", &branch]);
+    case.in_agent(3, &["tag", "v1"]);
+    case.in_agent(4, &["checkout", "-q", "--detach"]);
+    std::fs::create_dir(git_dir(5).join("reftable")).unwrap();
+    let outside_ref = case.home.join("outside-ref");
+    write(
+        &outside_ref,
+        case.in_agent(6, &["rev-parse", "HEAD"]).as_bytes(),
+    );
+    std::os::unix::fs::symlink(&outside_ref, git_dir(6).join("refs/heads/linked")).unwrap();
+    let packed = crate::agent_git::branch(&case.worktree(7)).unwrap();
+    case.in_agent(7, &["pack-refs", "--all"]);
+    assert!(!git_dir(7).join("refs/heads").join(&packed).exists());
+    assert!(
+        std::fs::read_to_string(git_dir(7).join("packed-refs"))
+            .unwrap()
+            .contains(&format!(" refs/heads/{packed}\n"))
+    );
+    let outside = case.home.join("outside/kept.txt");
+    write(&outside, b"not the agent's\n");
+    std::os::unix::fs::symlink(outside.parent().unwrap(), git_dir(7).join("outside")).unwrap();
+    let listed = case.listed();
+    let got: Vec<Removal> = (1..=7).map(|id| case.remove(&[id])).collect();
+    let mut expected = vec![refused("cleanup_refs_unlanded"); 5];
+    expected.extend([refused("cleanup_worktree_unreadable"), removed(&[7])]);
+    assert_eq!(got, expected);
+    assert_eq!(listed, [7]);
+    for id in 1..=6 {
+        assert!(
+            case.kept(id) && case.base_known(id),
+            "agent {id} keeps its clone"
+        );
+    }
+    assert_eq!(case.in_agent(1, &["stash", "list"]).lines().count(), 1);
+    assert_eq!(
+        case.in_agent(2, &["log", "-1", "--format=%s", "side"]),
+        "side.txt\n"
+    );
+    assert!(!case.worktree(7).exists() && !case.base_known(7));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"not the agent's\n");
+    assert!(outside_ref.is_file());
+    assert!(case.retiring().is_empty());
+}

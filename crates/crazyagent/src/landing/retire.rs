@@ -82,9 +82,12 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
 /// worktree's next change set would open above, uncommitted or untracked files, or a
 /// worktree git cannot read, such as one a stale lock holds, which keeps only this agent.
 /// An agent's own clone is never opened: its branch, read by the engine's fetch, must be
-/// the commit its next change set would open above, else `cleanup_commits_unlanded`, and
-/// its files must hold just that commit (`clone_holds_only`), else `cleanup_worktree_dirty`.
-/// Inputs: the store, the three paths and the time now. Output: None when it can go.
+/// the commit its next change set would open above, else `cleanup_commits_unlanded`, it
+/// must hold no other ref, such as a stash, branch or tag (`clone::other_refs`), else
+/// `cleanup_refs_unlanded`, or `cleanup_worktree_unreadable` for ref data it cannot read,
+/// and its files must hold just that commit (`clone_holds_only`), else
+/// `cleanup_worktree_dirty`. Inputs: the store, the three paths and the time now.
+/// Output: None when it can go.
 pub(super) fn blocker(
     db: &Connection,
     repository: &Path,
@@ -136,6 +139,11 @@ fn check(
         };
         if store::base_of(db, text)?.as_deref() != Some(tip.as_str()) {
             return Ok(Some("cleanup_commits_unlanded"));
+        }
+        match clone::other_refs(worktree) {
+            Ok(other) if other.is_empty() => {}
+            Ok(_) => return Ok(Some("cleanup_refs_unlanded")),
+            Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
         }
         return match clone_holds_only(repository, worktree, &tip) {
             Err(refused) if refused.0 == "changes_git_failed" => {
