@@ -97,6 +97,20 @@ test("the fold-out shows the count, each agent's result and a Wake button with t
   assert.equal(none, "");
 });
 
+test("a saved team choice stays shown until the engine reports it, and a refused one shows the status again", () => {
+  const held = { choice: "show", from: "hide" };
+  const kept = controls.afterSave(held, "");
+  assert.deepEqual(kept, held, "an applied save keeps the choice while the reload is on its way");
+  assert.equal(controls.shownChoice(kept, "hide"), "show", "the control does not flip back before the status moves");
+  assert.equal(controls.shownChoice(kept, "show"), "show");
+  assert.equal(controls.shownChoice(kept, "other"), "other", "once the status moves, it shows the status");
+  assert.equal(controls.afterSave(held, "Not ready yet: choosing where finished agents show isn't in this build."), null, "a refused save shows the status again");
+  assert.equal(controls.shownChoice(null, "hide"), "hide");
+  const limits = { choice: { turn: 600, session: null, idle: null }, from: { turn: null, session: null, idle: null } };
+  const same = (a, b) => a.turn === b.turn && a.session === b.session && a.idle === b.idle;
+  assert.deepEqual(controls.shownChoice(controls.afterSave(limits, ""), { turn: null, session: null, idle: null }, same), limits.choice);
+});
+
 test("the team controls offer Finished agents Hide and Show with Hide the default", () => {
   const render = (show_finished) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "p", status: teamStatus(show_finished), reload() {} }));
   const checked = (html) => html.match(/role="radiogroup" aria-label="Finished agents">(.*?)<\/div>/)[1].match(/aria-checked="true"[^>]*>([A-Za-z]+)</)[1];

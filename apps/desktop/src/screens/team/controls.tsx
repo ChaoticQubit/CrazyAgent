@@ -91,16 +91,19 @@ export interface Held<T> {
   from: T;
 }
 
-/** What a team control keeps after a save. Inputs: the held choice and the save's note, empty
- * when the engine applied it. Output: the choice to keep, or null to show the status. */
-export function afterSave<T>(_held: Held<T>, _note: string): Held<T> | null {
-  return null;
+/** What a team control keeps after a save: the choice once the engine applied it, so the
+ * control never flips back to the old value while the reload is on its way, and nothing after
+ * a refused or unconfirmed save, so the status shows again. Inputs: the held choice and the
+ * save's note, empty when the engine applied it. Output: the choice to keep, or null. */
+export function afterSave<T>(held: Held<T>, note: string): Held<T> | null {
+  return note === "" ? held : null;
 }
 
-/** The value a team control shows: the held choice, otherwise the status value. Inputs: the
- * held choice or null, the status value and how two values compare. Output: the value. */
-export function shownChoice<T>(held: Held<T> | null, current: T, _same: (a: T, b: T) => boolean = Object.is): T {
-  return held === null ? current : held.choice;
+/** The value a team control shows: the held choice while the status still holds the value it
+ * replaced, otherwise the status, once a reload or another window moved it. Inputs: the held
+ * choice or null, the status value and how two values compare. Output: the value. */
+export function shownChoice<T>(held: Held<T> | null, current: T, same: (a: T, b: T) => boolean = Object.is): T {
+  return held !== null && same(held.from, current) ? held.choice : current;
 }
 
 type Limits = { turn: number | null; session: number | null; idle: number | null };
