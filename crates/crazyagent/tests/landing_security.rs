@@ -405,7 +405,7 @@ fn crafted_tree_entries_are_marked_in_the_diff() {
     let fx = Fixture::new();
     let db = fx.store();
     let (worktree, git_dir) = fx.worktree("agent-1");
-    std::os::unix::fs::symlink("/etc/passwd", worktree.join("link")).unwrap();
+    std::os::unix::fs::symlink("tracked.txt", worktree.join("link")).unwrap();
     let script = worktree.join("run.sh");
     std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
