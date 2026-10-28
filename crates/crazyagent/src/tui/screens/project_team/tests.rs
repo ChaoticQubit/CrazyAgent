@@ -297,6 +297,46 @@ fn the_team_draws_agents_and_tasks_at_120_and_80_columns() {
 }
 
 #[test]
+fn every_team_setting_shows_at_80_columns_on_whole_rows_after_the_counts() {
+    use crate::team::events::WaitingAgent;
+    let settings = [
+        "Keep warm  Off",
+        "Task  Off",
+        "Session  Off",
+        "Idle stop  Off",
+        "On harness switch  Carry over",
+    ];
+    let mut alerted = team();
+    alerted.events.waiting = vec![WaitingAgent {
+        agent: 2,
+        text: "Do you want to proceed?".into(),
+    }];
+    alerted.events.paused = true;
+    let mut busy = TeamView::new(project());
+    let query = busy.next_query(NOW).unwrap();
+    busy.apply(&query, Ok(SetupView::Team(Box::new(alerted))));
+    for (view, counts) in [
+        (loaded(), "Team  1 working  1 waiting"),
+        (
+            busy,
+            "Team  1 working  1 waiting  1 waiting for an answer  auto-wake paused",
+        ),
+    ] {
+        let rows = frame(&view, 80, 24);
+        assert!(find(&rows, "Team").contains(counts), "{}", rows.join("\n"));
+        for setting in settings {
+            assert_eq!(
+                rows.iter().filter(|row| row.contains(setting)).count(),
+                1,
+                "{setting:?} shows once, whole:\n{}",
+                rows.join("\n")
+            );
+        }
+        assert!(rows.iter().all(|row| row.chars().count() <= 80));
+    }
+}
+
+#[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
     let graph = crate::team::graph(&team());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
