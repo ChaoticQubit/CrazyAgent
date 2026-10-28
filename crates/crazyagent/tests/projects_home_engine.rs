@@ -827,3 +827,94 @@ async fn a_set_up_project_past_the_256th_keeps_its_folder_and_its_place_in_the_l
     assert_eq!(missing.path, folder.to_str().unwrap());
     engine.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_folder_holding_a_repository_a_project_declares_is_neither_deleted_nor_moved() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let library = home.join("shared").join("lib");
+    let linked = home.join("linked");
+    let tool = place.join("outside").join("tool");
+    for folder in [&library, &linked, &tool] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    std::os::unix::fs::symlink(&linked, place.join("pointer")).unwrap();
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    let app = ProjectId::new("app").unwrap();
+    let folder = home.join("app");
+    owner.generation += 1;
+    let setup = ProjectSetup {
+        about: "Ships the app.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Website],
+        research: vec![ResearchKind::MarketResearch],
+        pool: None,
+        team: None,
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: "App".into(),
+        repositories: vec![
+            folder.to_str().unwrap().into(),
+            library.to_str().unwrap().into(),
+        ],
+    };
+    match owner
+        .controller
+        .setup_project(app.clone(), spec, setup, owner.generation)
+        .await
+        .unwrap()
+    {
+        OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
+        other => panic!("{other:?}"),
+    }
+    ready_at(&mut owner, &app, &folder).await;
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::CreateProject {
+                project_id: ProjectId::new("tool").unwrap(),
+                spec: ProjectSpec {
+                    name: "Tool".into(),
+                    repositories: vec![
+                        place.join("pointer").to_str().unwrap().into(),
+                        tool.to_str().unwrap().into(),
+                    ],
+                },
+            })
+            .await,
+        OwnerResult::Applied
+    );
+
+    let trash = |folder: &Path| OwnerMutation::DeleteProjectFolder {
+        path: folder.to_str().unwrap().into(),
+    };
+    let shared = owner.apply(trash(&home.join("shared"))).await;
+    let through_link = owner.apply(trash(&linked)).await;
+    let moved = owner
+        .apply(add(&place.join("outside"), AddMode::Move))
+        .await;
+    assert_eq!(
+        (shared, through_link, moved),
+        (
+            rejected("home_trash_still_set_up"),
+            rejected("home_trash_still_set_up"),
+            rejected("home_move_project")
+        ),
+        "a folder holding a declared repository stays where its master works"
+    );
+    assert!(library.is_dir() && linked.is_dir() && tool.is_dir());
+    engine.stop().await;
+}

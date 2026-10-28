@@ -599,3 +599,10 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
         "the orphaned secret file is reclaimed"
     );
 }
+
+#[test]
+#[should_panic(expected = "assertion failed")]
+fn a_dot_folder_part_never_reaches_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let _ = store_folder(root.path(), &["skills", "project", "."]);
+}
