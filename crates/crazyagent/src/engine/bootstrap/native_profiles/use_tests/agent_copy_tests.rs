@@ -601,4 +601,30 @@ fn an_agent_gets_no_claude_copy_for_any_org_scope() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_for_a_malformed_or_inference_less_scope_set() {
+    for scopes in [
+        json!([]),
+        json!(["user:profile"]),
+        json!(["user:inference", 123]),
+        json!([" org:create_api_key ", "user:inference"]),
+    ] {
+        let mut case = UseCase::with_harness("claude-code");
+        let expires = (now() + 8 * 3600) * 1000;
+        let home = case.home();
+        let mut record = claude_record(expires);
+        record["claudeAiOauth"]["scopes"] = scopes.clone();
+        let (_keychain, _service) = claude_keychain(&home, &record);
+        let agent = agent_home(&case);
+        let guard = execution(&mut case);
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_scope_too_wide",
+            "{scopes}"
+        );
+        assert!(entries(&agent).is_empty(), "{scopes}");
+    }
+}
+
+#[cfg(target_os = "macos")]
 mod renewal_tests;
