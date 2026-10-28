@@ -165,6 +165,9 @@ fn entry(page: &mut String, question: &Question) {
             page.push_str("\nWaiting for your answer in that agent's terminal.\n");
         }
         (QuestionStatus::Pending, _) => page.push_str("\nWaiting for your answer.\n"),
+        (QuestionStatus::Dismissed, _) if terminal => {
+            page.push_str("\nClosed without an answer.\n");
+        }
         (QuestionStatus::Dismissed, _) => page.push_str("\nDismissed by the owner.\n"),
         (QuestionStatus::AnsweredInTerminal, _) => {
             page.push_str("\nAnswered by the owner in that agent's terminal.\n");

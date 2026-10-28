@@ -547,19 +547,37 @@ pub fn record_from_session(
     finish(db, tx, project, settled)
 }
 
-/// Marks a box asked in an agent's terminal as answered there, once its screen watch saw
-/// it leave after owner input; nothing is delivered, since the harness has the answer.
-/// Inputs: the engine connection and the question id. Output: Settled, Stale when it was
-/// already settled, or `questions_not_found` or `questions_not_terminal`.
-pub fn terminal_settled(db: &Connection, id: u64) -> Result<Settlement, EngineError> {
+/// Settles a box asked in an agent's terminal once its screen watch saw it leave: answered
+/// there by the owner when the owner typed into that terminal since it was asked, otherwise
+/// dismissed with that agent as the writer, since no owner answer is known. Nothing is
+/// delivered, since the harness has whatever answer it got. Inputs: the engine connection,
+/// the question id and when the owner last typed into the asker's terminal, if ever.
+/// Output: Settled, Stale, or `questions_not_found` or `questions_not_terminal`.
+pub fn terminal_settled(
+    db: &Connection,
+    id: u64,
+    owner_key_ms: Option<i64>,
+) -> Result<Settlement, EngineError> {
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
-    if !is_terminal(&question.asker) {
+    let Some(agent) = question
+        .asker
+        .strip_prefix("terminal:")
+        .and_then(|agent| agent.parse::<i64>().ok())
+        .and_then(|agent| AgentId::team(agent).ok())
+    else {
         return Err(failure("questions_not_terminal"));
-    }
+    };
     let project = question.project.clone();
     let version = question.version;
-    let settled = settle(&tx, question, How::Terminal, &owner(), version)?;
+    let owner_answered = owner_key_ms
+        .and_then(|at| u64::try_from(at).ok())
+        .is_some_and(|at| at >= question.created_ms);
+    let settled = if owner_answered {
+        settle(&tx, question, How::Terminal, &owner(), version)?
+    } else {
+        settle(&tx, question, How::Dismiss, &Writer::Agent(agent), version)?
+    };
     finish(db, tx, &project, settled)
 }
 
