@@ -38,6 +38,8 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_too_large: "This agent's instructions file is larger than CrazyAgent writes, so it isn't shown.",
   agent_instructions_invalid: "This agent's instructions file has characters CrazyAgent doesn't write, so it isn't shown.",
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
+  instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
+  instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
 };
 
 /** The refusal codes of the process protocol that have their own sentence. */
@@ -170,14 +172,96 @@ export function skillHref(id: string): string {
   return formatRoute({ name: "settings", tab: "plugins", skill: id });
 }
 
+/** One instruction file an agent's harness reported loading: its file name and where it was.
+ * For Codex the place is the folder whose AGENTS.md chain it loaded. */
+export interface LoadedFile {
+  name: string;
+  path: string;
+}
+
+/** Which instruction files the engine hands a project's agents. */
+export type InstructionChoice = "project" | "project_and_user" | "none";
+
+/** One project's agent settings: the instruction files its agents get and whether headless
+ * Claude runs keep their transcript. */
+export interface InstructionSettings {
+  files: InstructionChoice;
+  transcripts: boolean;
+}
+
+/** The settings of a project the owner never changed. */
+export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { files: "project", transcripts: true };
+
+/** Every instruction files option in the order the page lists them, with what it hands agents. */
+export const INSTRUCTION_CHOICES: readonly { value: InstructionChoice; label: string; note: string }[] = [
+  { value: "project", label: "Project files", note: "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets." },
+  { value: "project_and_user", label: "Project and user files", note: "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md." },
+  { value: "none", label: "None", note: "Agents get no instruction files, only the project's Process instructions." },
+];
+
+/** Reads one project's agent settings. Input: the project id. Output: the settings, the
+ * defaults when the owner never changed them. */
+export function loadInstructionSettings(projectId: string): Promise<Result<InstructionSettings>> {
+  return call<InstructionSettings>("desktop_instruction_settings", { projectId });
+}
+
+/** Stores one project's agent settings whole; agents launched after this follow them.
+ * Inputs: the project id and the settings. Output: the settings as stored. */
+export function saveInstructionSettings(projectId: string, settings: InstructionSettings): Promise<Result<InstructionSettings>> {
+  return call<InstructionSettings>("desktop_save_instruction_settings", { projectId, settings });
+}
+
+/** What became of one instruction file at a launch, as the engine recorded it. */
+export type InstructionState = "given" | "same" | "too_large" | "unsafe" | "invalid" | "unreadable";
+
+/** The engine's record of one instruction file at an agent's last launch. */
+export interface InstructionRecord {
+  name: string;
+  bytes: number;
+  state: InstructionState;
+}
+
+const FILE_STATES: Record<InstructionState, string> = {
+  given: "given",
+  same: "left out: the same text as a file above",
+  too_large: "left out: larger than CrazyAgent gives",
+  unsafe: "left out: a link or not a plain file",
+  invalid: "left out: not plain text",
+  unreadable: "left out: couldn't be read",
+};
+
+/** What became of one instruction file, in the owner's words. Input: the recorded state.
+ * Output: the words. */
+export function fileStateWords(state: InstructionState): string {
+  return FILE_STATES[state];
+}
+
 /** What one team agent received at its last launch, read back from its private home: its
- * harness, whether it has launched, the instruction file text and the installed skill names. */
+ * harness, whether it has launched, the instruction file text, the installed skill names and
+ * the engine's record of each instruction file it found; then what its harness reported in
+ * its own session records: how many were read, the instruction files it loaded and the
+ * skills it invoked. */
 export interface AgentInstructions {
   agent: number;
   harness: string;
   launched: boolean;
   text: string;
   skills: string[];
+  sessions: number;
+  loaded: LoadedFile[];
+  skills_used: string[];
+  files: InstructionRecord[];
+}
+
+/** The one-line summary of what an agent's harness reported: "Instructions: CLAUDE.md,
+ * AGENTS.md - Skills used: tdd", each file name once. Input: the view. Output: the line,
+ * saying "not reported yet" before the harness wrote a session record. */
+export function reportedLine(value: Pick<AgentInstructions, "sessions" | "loaded" | "skills_used">): string {
+  if (value.sessions === 0) return "Instructions: not reported yet - Skills used: not reported yet";
+  const names = [...new Set(value.loaded.map((file) => file.name))];
+  const files = names.length > 0 ? names.join(", ") : "none loaded by its harness";
+  const used = value.skills_used.length > 0 ? value.skills_used.join(", ") : "none";
+  return `Instructions: ${files} - Skills used: ${used}`;
 }
 
 const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;

@@ -9,6 +9,7 @@ fn database() -> (tempfile::TempDir, Connection) {
     let connection = Connection::open(root.path().join("engine.db")).unwrap();
     super::super::initialize_schema(&connection).unwrap();
     plugins::initialize(&connection).unwrap();
+    super::super::trash::initialize(&connection).unwrap();
     initialize(&connection).unwrap();
     (root, connection)
 }
@@ -843,4 +844,133 @@ fn a_pack_skill_named_like_its_entry_is_still_replaced_by_a_new_pin() {
     assert_eq!(after.len(), 1);
     assert_ne!(after[0].id, before[0].id);
     assert!(PathBuf::from(&after[0].folder).join("NOTES.md").is_file());
+}
+
+#[test]
+fn a_new_pin_keeps_the_owner_switches_secrets_and_an_entry_left_off() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let third = tempfile::tempdir().unwrap();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('app', '{}')", [])
+        .unwrap();
+    let app = crate::protocol::ProjectId::new("app").unwrap();
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@1",
+        vec![skill(first.path(), "alpha")],
+        Some(("context-mode".into(), spec())),
+    )
+    .unwrap();
+    let server = servers(&mut connection, root)[0].id.clone();
+    let reference = plugins::new_secret_reference().unwrap();
+    plugins::store_secret(root, &reference, b"dummy-owner-value".to_vec()).unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AttachSecret {
+            id: server.clone(),
+            name: "API_TOKEN".into(),
+            reference: reference.clone(),
+        },
+    )
+    .unwrap();
+    let alpha = skills(&mut connection, root).remove(0);
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Switch {
+            project: app.clone(),
+            id: alpha.id,
+            on: false,
+            version: alpha.version,
+        },
+    )
+    .unwrap();
+    let off = SetupAction::Set {
+        id: "superpowers".into(),
+        on: false,
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
+
+    let newer = ServerSpec::Stdio {
+        command: "/usr/bin/true".into(),
+        args: vec!["--stdio".into(), "--newer".into()],
+    };
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@2",
+        vec![skill(second.path(), "alpha")],
+        Some(("context-mode".into(), newer.clone())),
+    )
+    .unwrap();
+    execute(&mut connection, root, Command::Sweep).unwrap();
+
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "superpowers"), PackState::Off);
+    let after = skills(&mut connection, root);
+    assert_eq!(after.len(), 1);
+    assert!(!after[0].enabled);
+    let plugins::ResultValue::Skills(here, _) = plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::Skills {
+            project: Some(app),
+            offset: 0,
+        },
+    )
+    .unwrap() else {
+        panic!("skill list required");
+    };
+    assert_eq!(here[0].on_here, Some(false));
+    let listed = servers(&mut connection, root);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, server);
+    assert_eq!(listed[0].spec, newer);
+    assert!(!listed[0].enabled);
+    assert_eq!(
+        listed[0].secrets,
+        vec![crate::plugins::SecretView {
+            name: "API_TOKEN".into(),
+            saved: true,
+        }]
+    );
+    assert!(
+        root.join(plugins::STORE)
+            .join(plugins::SECRETS)
+            .join(&reference)
+            .is_file()
+    );
+
+    let on = SetupAction::Set {
+        id: "superpowers".into(),
+        on: true,
+        version: status_of(&mut connection, root).version,
+    };
+    assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
+    assert_ne!(
+        servers(&mut connection, root)[0].status_label,
+        "Approved",
+        "a changed server the owner had switched off waits for approval"
+    );
+    install(
+        &mut connection,
+        root,
+        "superpowers",
+        "https://example.invalid/pack@3",
+        vec![skill(third.path(), "alpha")],
+        Some(("context-mode".into(), spec())),
+    )
+    .unwrap();
+    let listed = servers(&mut connection, root);
+    assert_eq!(listed[0].id, server);
+    assert_eq!(listed[0].status_label, "Approved");
+    assert!(skills(&mut connection, root)[0].enabled);
 }

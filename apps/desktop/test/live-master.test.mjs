@@ -107,7 +107,7 @@ test("Earlier conversation opens the old engine-driven conversation read-only in
   assert.equal(seen.back.conversation, false);
 });
 
-test("the live master header offers Stop live master and says the master starts when the tab opens", async () => {
+test("the live master console head offers Stop live master, says the master starts when the tab opens and shows it live", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountView("running")');
     const running = await evaluate("Fixture.shown()");
@@ -116,7 +116,8 @@ test("the live master header offers Stop live master and says the master starts 
   });
   assert.ok(seen.running.buttons.includes("Stop live master"), seen.running.buttons.join(", "));
   assert.ok(!seen.running.buttons.includes("Start live master"), seen.running.buttons.join(", "));
-  assert.match(seen.running.text, /Live master starts when you open this tab\./);
+  assert.equal(seen.running.titles["Stop live master"], "Live master starts when you open this tab.");
+  assert.equal(seen.running.state, "Live");
   assert.equal(seen.stopped, true);
   assert.deepEqual(seen.switched, [false]);
 });
@@ -243,7 +244,7 @@ test("a live master area left before the switch reply changes nothing on the nex
   assert.doesNotMatch(source, /data\.notify\(`Couldn't stop the live master\./, "no toast without the project's name");
 });
 
-test("the terminal hands Shift+Enter to the key override before xterm reads it", () => {
+test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*const override = keyOverride\(event\);/);
+  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*if \(copyKey\(event, terminal\.hasSelection\(\), mac\)\) \{(?:(?!keyOverride)[\s\S])*?return false;\s*\}\s*const override = keyOverride\(event\);/);
 });

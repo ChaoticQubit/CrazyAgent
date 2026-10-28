@@ -4,6 +4,7 @@ use crate::project_setup::{
 };
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -197,6 +198,46 @@ fn open_folder(path: &Path) -> Option<Folder> {
 #[cfg(windows)]
 fn open_folder(path: &Path) -> Option<Folder> {
     real_dir(path).then(|| path.to_path_buf())
+}
+
+/// Opens the layout's `setup` folder beneath the layout opened once, so neither is ever
+/// reached through a link, making `setup` first with `create`. Takes the layout path and
+/// whether to create. Returns the folder or the I/O failure.
+#[cfg(unix)]
+fn setup_folder(layout: &Path, create: bool) -> std::io::Result<Folder> {
+    use rustix::fs::{Mode, OFlags};
+    let layout =
+        open_folder(layout).ok_or_else(|| std::io::Error::other("not a real directory"))?;
+    if create {
+        match rustix::fs::mkdirat(&layout, LAYOUT_SETUP, Mode::from_raw_mode(0o777)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    Ok(rustix::fs::openat(
+        &layout,
+        LAYOUT_SETUP,
+        flags,
+        Mode::empty(),
+    )?)
+}
+
+/// Checks the layout and its `setup` folder are real folders, making `setup` first with
+/// `create`. Takes the layout path and whether to create. Returns the folder or the failure.
+#[cfg(windows)]
+fn setup_folder(layout: &Path, create: bool) -> std::io::Result<Folder> {
+    let layout =
+        open_folder(layout).ok_or_else(|| std::io::Error::other("not a real directory"))?;
+    let setup = layout.join(LAYOUT_SETUP);
+    if create {
+        match std::fs::DirBuilder::new().create(&setup) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    open_folder(&setup).ok_or_else(|| std::io::Error::other("not a real directory"))
 }
 
 /// Opens the file `name` in `folder` for reading without following a link or
@@ -665,11 +706,20 @@ pub(crate) fn merge(
     merged
 }
 
-/// The draft an earlier onboarding saved in `layout`/setup/draft.json, when
-/// it is a readable, valid draft; `None` otherwise, so onboarding starts
-/// fresh without touching the file.
+/// The seal of a draft the engine saved: the SHA-256 of its JSON, so a later onboarding
+/// takes a draft file as its own only when it holds a draft this engine saved for the
+/// folder. Takes the draft. Returns the lowercase hex digest, or None when it cannot be
+/// serialized.
+pub(crate) fn seal(drafted: &Drafted) -> Option<String> {
+    let bytes = serde_json::to_vec(drafted).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// The draft saved in `layout`/setup/draft.json, when it is a readable, valid draft;
+/// `None` otherwise, so onboarding starts fresh without touching the file. Whether this
+/// engine saved it is the caller's check against its seal.
 pub(crate) fn reused(layout: &Path) -> Option<Drafted> {
-    let setup = open_folder(&layout.join(LAYOUT_SETUP))?;
+    let setup = setup_folder(layout, false).ok()?;
     let text = file_text(open_in(&setup, DRAFT_FILE)?, DRAFT_BYTES_MAX)?;
     let drafted: Drafted = serde_json::from_str(&text).ok()?;
     (clean_entry(&drafted.name, NAME_BYTES_MAX).as_deref() == Some(drafted.name.as_str())
@@ -677,31 +727,61 @@ pub(crate) fn reused(layout: &Path) -> Option<Drafted> {
     .then_some(drafted)
 }
 
-/// Writes `bytes` to `directory`/`name` through a fresh world-readable partial
-/// file and a rename, all beneath the directory opened once without following a
-/// link, so a directory swapped for a link afterwards is never written through.
-/// Takes the real directory, the file name and the bytes. Returns any I/O failure.
+/// Writes `bytes` to a fresh world-readable partial file for `name` beneath `folder`,
+/// never through a link, replacing a partial an earlier run left. Takes the open folder,
+/// the file name and the bytes. Returns the partial file's name or the I/O failure.
 #[cfg(unix)]
-fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+fn write_partial(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<String> {
     use rustix::fs::{AtFlags, Mode, OFlags};
-    let folder =
-        open_folder(directory).ok_or_else(|| std::io::Error::other("not a real directory"))?;
     let partial = format!(".{name}.partial");
-    let _ = rustix::fs::unlinkat(&folder, partial.as_str(), AtFlags::empty());
+    let _ = rustix::fs::unlinkat(folder, partial.as_str(), AtFlags::empty());
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let created = rustix::fs::openat(&folder, partial.as_str(), flags, Mode::from_raw_mode(0o644))?;
+    let created = rustix::fs::openat(folder, partial.as_str(), flags, Mode::from_raw_mode(0o644))?;
     let mut file = std::fs::File::from(created);
     file.write_all(bytes)?;
     file.sync_all()?;
-    rustix::fs::renameat(&folder, partial.as_str(), &folder, name)?;
+    Ok(partial)
+}
+
+/// Writes `bytes` to `folder`/`name` through a fresh world-readable partial
+/// file and a rename, all beneath the folder opened once without following a
+/// link, so a folder swapped for a link afterwards is never written through.
+/// Takes the open folder, the file name and the bytes. Returns any I/O failure.
+#[cfg(unix)]
+fn replace_file(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let partial = write_partial(folder, name, bytes)?;
+    rustix::fs::renameat(folder, partial.as_str(), folder, name)?;
     Ok(())
+}
+
+/// Writes `bytes` as a new `folder`/`name` through a fresh partial file and a rename that
+/// never replaces an entry, so a file made there meanwhile is kept. Takes the open
+/// folder, the file name and the bytes. Returns whether it wrote, or the I/O failure.
+#[cfg(unix)]
+fn write_new(folder: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<bool> {
+    use rustix::fs::{AtFlags, RenameFlags};
+    let partial = write_partial(folder, name, bytes)?;
+    match rustix::fs::renameat_with(
+        folder,
+        partial.as_str(),
+        folder,
+        name,
+        RenameFlags::NOREPLACE,
+    ) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::EXIST) => {
+            rustix::fs::unlinkat(folder, partial.as_str(), AtFlags::empty())?;
+            Ok(false)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Writes `bytes` to `directory`/`name` through a fresh partial file and a
 /// rename, never through a link. Takes the real directory, the file name and
 /// the bytes. Returns any I/O failure.
 #[cfg(windows)]
-fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+fn replace_file(directory: &Folder, name: &str, bytes: &[u8]) -> std::io::Result<()> {
     if !real_dir(directory) {
         return Err(std::io::Error::other("not a real directory"));
     }
@@ -714,18 +794,13 @@ fn replace_file(directory: &Path, name: &str, bytes: &[u8]) -> std::io::Result<(
 }
 
 /// Saves the draft as `layout`/setup/draft.json, creating `setup/` if the
-/// layout has none, and leaves a file that already holds the same bytes
-/// untouched so a recheck does not wake the owner's file watchers. Returns
-/// any I/O failure.
+/// layout has none, never through a link in either folder, and leaves a file
+/// that already holds the same bytes untouched so a recheck does not wake the
+/// owner's file watchers. Returns any I/O failure.
 pub(crate) fn save(layout: &Path, drafted: &Drafted) -> std::io::Result<()> {
-    let setup = layout.join(LAYOUT_SETUP);
-    match std::fs::DirBuilder::new().create(&setup) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error),
-    }
+    let setup = setup_folder(layout, true)?;
     let bytes = serde_json::to_vec_pretty(drafted).map_err(std::io::Error::other)?;
-    if open_folder(&setup).is_some_and(|folder| holds(&folder, DRAFT_FILE, &bytes)) {
+    if holds(&setup, DRAFT_FILE, &bytes) {
         return Ok(());
     }
     replace_file(&setup, DRAFT_FILE, &bytes)
@@ -752,26 +827,36 @@ fn holds(folder: &Folder, name: &str, bytes: &[u8]) -> bool {
 }
 
 /// The overview in `layout`/overview.md, bounded to 64 KiB and never read
-/// through a link, or `None` while there is none.
+/// through a link, or `None` while there is none. This is the one rule for an
+/// overview: a regular file with text in it.
 pub(crate) fn overview(layout: &Path) -> Option<String> {
     let layout = open_folder(layout)?;
     file_text(open_in(&layout, OVERVIEW_FILE)?, OVERVIEW_BYTES_MAX as u64)
 }
 
-/// Writes the agent's overview as `layout`/overview.md unless one already
-/// exists there, which is kept as the owner or an earlier run left it.
-/// Takes the layout folder and the overview text. Returns whether it wrote.
+/// Whether something that is not an overview sits at `layout`/overview.md: an empty file,
+/// a link, a folder or another special file, which the engine neither reads nor replaces.
+/// Takes the layout folder. Returns the answer.
+pub(crate) fn overview_blocked(layout: &Path) -> bool {
+    std::fs::symlink_metadata(layout.join(OVERVIEW_FILE)).is_ok() && overview(layout).is_none()
+}
+
+/// Writes the agent's overview as `layout`/overview.md while nothing is there, never
+/// replacing an entry: an overview kept from before stays as the owner or an earlier run
+/// left it, and a file made meanwhile wins. Takes the layout folder and the overview text.
+/// Returns whether it wrote.
 #[cfg(unix)]
 pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<bool> {
-    if std::fs::symlink_metadata(layout.join(OVERVIEW_FILE)).is_ok() || overview.trim().is_empty() {
+    let body = overview.trim();
+    if body.is_empty() {
         return Ok(false);
     }
-    let body = overview.trim();
     let text = if body.starts_with('#') {
         format!("{body}\n")
     } else {
         format!("# Project overview\n\n{body}\n")
     };
-    replace_file(layout, OVERVIEW_FILE, text.as_bytes())?;
-    Ok(true)
+    let layout =
+        open_folder(layout).ok_or_else(|| std::io::Error::other("not a real directory"))?;
+    write_new(&layout, OVERVIEW_FILE, text.as_bytes())
 }

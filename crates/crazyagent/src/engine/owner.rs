@@ -27,7 +27,8 @@ pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{
-    AgentInstructions, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
+    AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES, ProcessSaved,
+    ProcessText, SavedText,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
@@ -162,6 +163,10 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         version: u64,
         paths: Vec<String>,
+    },
+    SetProjectAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::AgentPolicy,
     },
     Team {
         action: crate::team::TeamAction,
@@ -341,6 +346,14 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     version: *version,
                     paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectAgentPolicy { project_id, policy } => {
+                let action = crate::project_setup::SetupAction::SetAgentPolicy {
+                    project_id: project_id.clone(),
+                    policy: policy.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -620,6 +633,9 @@ pub enum OwnerRead {
     ProjectReadPaths {
         project_id: ProjectId,
     },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -735,6 +751,7 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ProjectReadPaths { .. }
+            | Self::ProjectAgentPolicy { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -1091,6 +1108,10 @@ pub enum OwnerData {
         project_id: ProjectId,
         paths: Vec<String>,
         version: u64,
+    },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,

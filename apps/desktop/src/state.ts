@@ -24,6 +24,8 @@ import { creationMatches, parseProjectSpec, reduceProjectDraft } from "./screens
 import type { CreationSubmission, ProjectCreationDraft } from "./screens/projects";
 import { nativeAuthFailureCode, reduceNativeAuth, nativeClaudeInputAllowed, validateClaudeAuthCode } from "./native-auth";
 import type { NativeAuthCommand, NativeAuthState } from "./native-auth";
+import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
+import type { InputChoice } from "./screens/team/terminal-io";
 type PanelAction = NativeAuthCommand | "confirm_logout" | "back" | "refresh";
 
 export interface Draft {
@@ -968,6 +970,26 @@ export type ThemeChoice = "system" | "light" | "dark";
 export type ProjectRow = ProjectPage["items"][number];
 
 const THEME_KEY = "crazyagent.theme";
+const MASTER_INPUT_KEY = "crazyagent.master-input";
+
+/** Reads where the owner types to a live master, as kept in this app (not in the engine).
+ * Output: the choice; the default when storage is unavailable or holds something else. */
+export function readMasterInput(): InputChoice {
+  try {
+    return inputChoice(window.localStorage.getItem(MASTER_INPUT_KEY));
+  } catch {
+    return INPUT_DEFAULT;
+  }
+}
+
+/** Remembers where the owner types to a live master. Input: the choice. Output: none. */
+export function saveMasterInput(choice: InputChoice): void {
+  try {
+    window.localStorage.setItem(MASTER_INPUT_KEY, choice);
+  } catch {
+    return;
+  }
+}
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).
  * Output: system, light or dark; system when storage is unavailable. */

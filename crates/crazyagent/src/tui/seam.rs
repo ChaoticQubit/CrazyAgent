@@ -10,7 +10,9 @@ use crate::team::TeamGraph;
 use crate::terminal::{AgentId, TerminalFrame};
 
 /// A pool change asked for in Settings, Pools or a Project. The engine side
-/// builds the exact pool records, keeping an existing pool's projects and roles.
+/// builds the exact pool records, keeping an existing pool's projects and roles;
+/// an update carries the form as the editor opened it, so only what the owner
+/// changed is applied onto the pool as it is when saved.
 /// Input: built by the pool list, the pool editor and the Project screen.
 /// Output: one model access edit; `Assign` gives the project exactly the chosen
 /// pool, or none, and `Remove` also takes the pool off every project using it.
@@ -26,6 +28,9 @@ pub enum PoolChange {
         name: String,
         members: Vec<CredentialRef>,
         quota: ProviderQuotaPolicy,
+        opened_name: String,
+        opened_members: Vec<CredentialRef>,
+        opened_quota: ProviderQuotaPolicy,
     },
     Remove {
         id: CredentialRef,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent_git::Layout;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::runtime::{TeamLimits, TeamRuntime};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
@@ -75,7 +76,7 @@ impl Case {
 
     fn record(&self, id: i64) {
         let [repository, worktree, git_dir] =
-            super::super::agent_git_dir(&self.repo, &self.worktree(id)).unwrap();
+            super::super::agent_git_dir(&self.repo, &self.worktree(id), Layout::Linked).unwrap();
         self.team
             .execute(
                 "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",

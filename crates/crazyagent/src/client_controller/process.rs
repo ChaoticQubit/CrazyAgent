@@ -75,6 +75,27 @@ impl OwnerController {
         self.process_client()?.default_process().await
     }
 
+    /// Reads one project's agent instruction settings. Input: the project.
+    /// Output: the settings, the defaults when the owner never changed them.
+    pub async fn instruction_settings(
+        &self,
+        project: ProjectId,
+    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        self.process_client()?.instruction_settings(project).await
+    }
+
+    /// Stores one project's agent instruction settings whole. Inputs: the project and the
+    /// settings. Output: the settings as stored.
+    pub async fn save_instruction_settings(
+        &self,
+        project: ProjectId,
+        settings: crate::engine::owner::InstructionSettings,
+    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        self.process_client()?
+            .save_instruction_settings(project, settings)
+            .await
+    }
+
     /// Reads what one team agent received at its last launch. Inputs: the project and the
     /// agent id, or none for the project's newest master. Output: the read-only view.
     pub async fn agent_instructions(

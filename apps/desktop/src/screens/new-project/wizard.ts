@@ -1,5 +1,5 @@
 import type { HarnessEntry, PoolSummary } from "../../api";
-import type { HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
+import type { AgentAccess, HarnessSlot, JobKind, Platform, PoolChoice, ProjectSetup, ProjectSpec, ResearchKind, StoredSetup, TeamPlan } from "../../api-projects";
 import type { AccountPool, ModelConnection } from "../../engine-client";
 
 export type StepId = "basics" | "documents" | "work" | "pool" | "team";
@@ -23,6 +23,9 @@ export const STACK_MAX = 32;
 export const HARNESS_AGENTS_MAX = 15;
 export const TEAM_AGENTS_MAX = 64;
 export const SUB_HARNESSES_MAX = 8;
+
+/** The agent access level New Project preselects (DEC-102). Projects saved before the setting stay Sandboxed. */
+export const NEW_PROJECT_ACCESS: AgentAccess = "own_branch";
 
 export const RESEARCH_COPY: Record<ResearchKind, string> = {
   market_research: "Who needs this, how big the market is, and how people pay today.",
@@ -62,6 +65,7 @@ export interface ProjectDraft {
   pool: string | null;
   poolChosen: boolean;
   team: TeamDraft | null;
+  access?: AgentAccess;
 }
 
 /** One agent row being edited; `tools_wanted` keeps the owner's choice while the harness forces
@@ -78,6 +82,7 @@ export function emptyDraft(): ProjectDraft {
   return {
     name: "", about: "", stack: [], platforms: [], otherPlatform: "", documents: [],
     research: ["market_research", "competitor_research", "design_research"], roadmap: true, pool: null, poolChosen: false, team: null,
+    access: NEW_PROJECT_ACCESS,
   };
 }
 
@@ -225,8 +230,11 @@ export function agentTotalText(team: TeamPlan): string {
   return team.sub_harnesses.length ? `This team has ${count} ${noun}.` : `This team has up to ${count} ${noun}.`;
 }
 
-function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | undefined {
-  return harnesses?.find((harness) => harness.id === id);
+/** Finds a harness's catalog entry by its id or by one of its aliases, such as "claude" for
+ * Claude Code, so a plan that stored an alias reads as that one harness.
+ * Inputs: the catalog or null and the stored name. Output: the entry, or undefined. */
+export function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | undefined {
+  return harnesses?.find((harness) => harness.id === id || harness.aliases.includes(id));
 }
 
 const choosable = (harness: HarnessEntry | undefined) => harness !== undefined && harness.status.kind !== "not_installed";

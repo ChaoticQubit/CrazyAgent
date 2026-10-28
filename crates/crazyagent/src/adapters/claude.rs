@@ -757,8 +757,9 @@ fn validate_shape(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), 
 
 /// Parses one stream line, refusing duplicate object keys and counting each JSON value
 /// before it is built, so a line of more than `NODES_MAX` values is refused before it is
-/// kept. Input: the line. Output: its value, invalid JSON, or capacity past the bound.
-fn parse_line(line: &[u8]) -> Result<Value, ProtocolError> {
+/// kept. The Codex adapter and the launch readers parse their lines with it too.
+/// Input: the line. Output: its value, invalid JSON, or capacity past the bound.
+pub(crate) fn parse_line(line: &[u8]) -> Result<Value, ProtocolError> {
     let nodes = Cell::new(0);
     let mut deserializer = serde_json::Deserializer::from_slice(line);
     let parsed = StrictSeed { nodes: &nodes }

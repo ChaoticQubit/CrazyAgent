@@ -22,7 +22,9 @@ impl OwnerController {
         }
     }
 
-    /// Sends one owner scheduling change, such as a pool strategy or an account's rank.
+    /// Sends one owner scheduling change, such as a pool strategy or an account's rank. Its
+    /// freshness read is the small owner profile, never the whole schedule, so a schedule
+    /// larger than one reply can still be changed and shrunk.
     /// Takes the change, the schedule version the screen showed and the client generation.
     /// Returns the actual owner response; a refused change carries a plain code,
     /// `stale_revision` once the schedule changed elsewhere.
@@ -33,7 +35,7 @@ impl OwnerController {
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         change.validate()?;
-        self.account_schedule().await?;
+        self.owner_profile().await?;
         self.begin_mutation(
             OwnerMutation::AccountSchedule { change, version },
             generation,

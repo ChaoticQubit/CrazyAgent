@@ -1,4 +1,5 @@
 use super::{SandboxError, canonical, owner_home};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
@@ -78,27 +79,98 @@ pub struct Toolchains {
     files: Vec<PathBuf>,
 }
 
+/// One toolchain family whose version managers live in the owner's home: Rust (rustup and
+/// cargo), Node (nvm, Volta, fnm) and Python (pyenv, uv). Toolchains installed system-wide,
+/// such as Homebrew's, are system roots every agent reads anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Toolchain {
+    Rust,
+    Node,
+    Python,
+}
+
+impl Toolchain {
+    /// Every toolchain family, in display order.
+    pub const ALL: [Self; 3] = [Self::Rust, Self::Node, Self::Python];
+
+    /// The name shown to the owner.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Node => "Node.js",
+            Self::Python => "Python",
+        }
+    }
+
+    /// Tells whether a project uses this toolchain: one of its marker files (`Cargo.toml`
+    /// or `rust-toolchain*`, `package.json`, `pyproject.toml`) sits at the project root.
+    /// Input: the project folder. Output: true when used.
+    pub fn used_by(self, project: &Path) -> bool {
+        let markers = match self {
+            Self::Rust => RUST_MARKERS,
+            Self::Node => NODE_MARKERS,
+            Self::Python => PYTHON_MARKERS,
+        };
+        markers.iter().any(|name| project.join(name).is_file())
+    }
+
+    /// Tells whether the owner has this toolchain in their home: one of its version-manager
+    /// folders exists. Input: the tool homes. Output: true when installed.
+    pub fn installed(self, homes: &ToolHomes) -> bool {
+        self.grants(homes).0.iter().any(|root| root.is_dir())
+    }
+
+    fn grants(self, homes: &ToolHomes) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        match self {
+            Self::Rust => {
+                let mut roots = vec![homes.rustup.join("toolchains"), homes.cargo.join("bin")];
+                roots.extend(CARGO_SHARED.iter().map(|name| homes.cargo.join(name)));
+                (roots, vec![homes.rustup.join("settings.toml")])
+            }
+            Self::Node => (
+                NODE_HOMES
+                    .iter()
+                    .map(|path| below(&homes.home, path))
+                    .collect(),
+                Vec::new(),
+            ),
+            Self::Python => (
+                PYTHON_HOMES
+                    .iter()
+                    .map(|path| below(&homes.home, path))
+                    .collect(),
+                Vec::new(),
+            ),
+        }
+    }
+}
+
 impl Toolchains {
-    /// Detects the toolchains a project uses from the marker files at its root: Rust from
-    /// `Cargo.toml` or `rust-toolchain*` grants rustup's toolchains and settings and cargo's
-    /// proxies, registry and git checkouts; Node from `package.json` grants nvm, Volta and
-    /// fnm; Python from `pyproject.toml` grants pyenv and uv's Pythons. Homebrew is already
-    /// a system root. Inputs: the project folder and tool homes. Output: the grants found.
+    /// Detects the toolchains a project uses from the marker files at its root (see
+    /// [`Toolchain::used_by`]) and grants them as [`Toolchains::grant`] does. Inputs: the
+    /// project folder and tool homes. Output: the grants found.
     pub fn detect(project: &Path, homes: &ToolHomes) -> Self {
-        let uses = |markers: &[&str]| markers.iter().any(|name| project.join(name).is_file());
+        let used: Vec<Toolchain> = Toolchain::ALL
+            .into_iter()
+            .filter(|toolchain| toolchain.used_by(project))
+            .collect();
+        Self::grant(homes, &used)
+    }
+
+    /// Grants the chosen toolchains read-only: Rust grants rustup's toolchains and settings
+    /// and cargo's proxies, registry and git checkouts; Node grants nvm, Volta and fnm;
+    /// Python grants pyenv and uv's Pythons. Homebrew is already a system root. Inputs: the
+    /// tool homes and the chosen toolchains. Output: the existing grants.
+    pub fn grant(homes: &ToolHomes, chosen: &[Toolchain]) -> Self {
         let mut roots = Vec::new();
         let mut files = Vec::new();
-        if uses(RUST_MARKERS) {
-            roots.push(homes.rustup.join("toolchains"));
-            roots.push(homes.cargo.join("bin"));
-            roots.extend(CARGO_SHARED.iter().map(|name| homes.cargo.join(name)));
-            files.push(homes.rustup.join("settings.toml"));
-        }
-        if uses(NODE_MARKERS) {
-            roots.extend(NODE_HOMES.iter().map(|path| below(&homes.home, path)));
-        }
-        if uses(PYTHON_MARKERS) {
-            roots.extend(PYTHON_HOMES.iter().map(|path| below(&homes.home, path)));
+        for toolchain in Toolchain::ALL {
+            if chosen.contains(&toolchain) {
+                let (more_roots, more_files) = toolchain.grants(homes);
+                roots.extend(more_roots);
+                files.extend(more_files);
+            }
         }
         let holds_home = |root: &PathBuf| {
             [&homes.home, &homes.rustup, &homes.cargo]

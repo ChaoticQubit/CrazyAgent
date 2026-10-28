@@ -273,7 +273,10 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
-    SkillDetail(Result<crate::skills::SkillDetail, String>),
+    SkillDetail(
+        Option<ProjectId>,
+        Result<crate::skills::SkillDetail, String>,
+    ),
     ImportScan(Result<crate::skills::import::ImportList, String>),
     Imported(Result<ImportOutcomes, String>),
     PluginChanged(Result<Option<ServerView>, String>),
@@ -307,7 +310,9 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
-            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
+            SettingsJob::SkillDetail { project, .. } => {
+                Self::SkillDetail(project.clone(), Err(problem))
+            }
             SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
             SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
@@ -456,13 +461,17 @@ impl NativeOwner {
                 self.plugins(Some(project), lost).await,
             ),
             SettingsJob::SkillDetail { id, project } => {
-                SettingsEvent::SkillDetail(match self.settings_controller() {
-                    Ok(controller) => controller
-                        .skill_detail(id, project)
-                        .await
-                        .map_err(|error| problem(&error, lost)),
-                    Err(error) => Err(error),
-                })
+                let asked = project.clone();
+                SettingsEvent::SkillDetail(
+                    asked,
+                    match self.settings_controller() {
+                        Ok(controller) => controller
+                            .skill_detail(id, project)
+                            .await
+                            .map_err(|error| problem(&error, lost)),
+                        Err(error) => Err(error),
+                    },
+                )
             }
             SettingsJob::ImportScan => {
                 SettingsEvent::ImportScan(match self.settings_controller() {
@@ -1679,13 +1688,13 @@ mod tests {
             })
             .await
         {
-            SettingsEvent::SkillDetail(Ok(detail)) => {
+            SettingsEvent::SkillDetail(None, Ok(detail)) => {
                 assert_eq!(detail.skill.id, skills[0].id);
                 assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
                 let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
                 assert_eq!(files, vec!["SKILL.md"]);
             }
-            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            SettingsEvent::SkillDetail(_, Err(code)) => panic!("skill detail failed: {code}"),
             _ => panic!("a skill detail reply required"),
         }
 

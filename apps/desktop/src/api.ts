@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, PendingIntent } from "./engine-client";
+import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -121,6 +121,9 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
+  agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
+  agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -293,6 +296,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
@@ -1001,6 +1005,26 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how long one task turn and one agent session of the team may run, and how long a
+ * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
+ * seconds. Output: the engine receipt, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+}
+
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
+ * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running

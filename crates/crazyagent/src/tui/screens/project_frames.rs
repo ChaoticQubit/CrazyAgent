@@ -82,6 +82,10 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_read_paths(project)
                 .await
                 .map(SetupView::ReadPaths),
+            SetupQuery::AgentPolicy { project } => controller
+                .project_agent_policy(project)
+                .await
+                .map(SetupView::AgentPolicy),
             other => panic!("unexpected read {other:?}"),
         };
         screen.apply(&query, result.map_err(|error| error.0));

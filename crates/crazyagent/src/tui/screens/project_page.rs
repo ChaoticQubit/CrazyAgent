@@ -17,6 +17,7 @@ use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
 use crate::tui::client::editor;
 use crate::tui::client::ide::RevealQuery;
@@ -200,6 +201,7 @@ pub(in crate::tui) struct ProjectPage {
     sent: Vec<SetupQuery>,
     assigning: Option<(Option<CredentialRef>, Option<String>)>,
     recording: Option<u64>,
+    created_access: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
@@ -227,6 +229,7 @@ impl ProjectPage {
             sent: Vec::new(),
             assigning: None,
             recording: None,
+            created_access: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
@@ -242,6 +245,28 @@ impl ProjectPage {
         page.screen.transcript = page.transcript();
         page.redraw(ctx);
         page
+    }
+
+    /// Saves the agent access level the owner picked in New project, right after the project
+    /// was made; until it lands the project stays Sandboxed, and a refusal says so.
+    /// Takes the picked level and the context. Returns nothing; the reply arrives later.
+    pub(in crate::tui) fn save_created_access(&mut self, access: AgentAccess, ctx: &mut Ctx) {
+        assert_ne!(access, AgentAccess::Sandboxed);
+        let generation = ctx.next_generation();
+        self.created_access = Some(generation);
+        self.send(
+            SetupQuery::Change {
+                action: SetupAction::SetAgentPolicy {
+                    project_id: self.screen.project.clone(),
+                    policy: AgentPolicy {
+                        access,
+                        toolchains: Vec::new(),
+                    },
+                },
+                generation,
+            },
+            ctx,
+        );
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
@@ -572,6 +597,21 @@ impl ProjectPage {
                 ctx.say(Message::warning(
                     "The pool is changed, but the project details still name the old one.",
                     "Pick the pool again to save it.",
+                ));
+            }
+            return;
+        }
+        if self.created_access == Some(*generation) {
+            self.created_access = None;
+            if !applied {
+                let why = match &event.result {
+                    Err(code) => plain_problem(code),
+                    Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
+                    Ok(_) => plain_problem("change_outcome_unknown"),
+                };
+                ctx.say(Message::warning(
+                    "The project is made, but its agents stay Sandboxed.",
+                    &format!("{why} Choose Agent access again on the Settings tab with c."),
                 ));
             }
             return;
@@ -1056,6 +1096,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
+            || self.screen.access.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
@@ -1236,6 +1277,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
             || self.screen.folders.is_some()
+            || self.screen.access.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
 
@@ -1246,6 +1288,8 @@ impl Screen for ProjectPage {
             "Your project changes will be lost."
         } else if self.screen.folders.is_some() {
             "Your read-only folders will not be saved."
+        } else if self.screen.access.is_some() {
+            "Your agent access changes will not be saved."
         } else {
             "Your unsent message will be lost."
         }

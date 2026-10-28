@@ -51,6 +51,14 @@ const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
+/// The plain reason a mapping step fails with when `.crazyagent/overview.md` is there but
+/// is not a file with text, so the engine neither reads it nor writes over it.
+pub const OVERVIEW_BLOCKED: &str =
+    "The overview could not be written: .crazyagent/overview.md is empty or not a plain file";
+/// The plain reason a step fails with when its stored onboarding state cannot be read, so
+/// it is not claimed again and again.
+const ROW_UNREADABLE: &str =
+    "The saved onboarding state could not be read; remove the project and add it again";
 #[cfg(unix)]
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
@@ -243,7 +251,8 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
-/// and counts the attempt. Returns `None` when nothing waits.
+/// and counts the attempt; a row whose pool or draft cannot be read fails with
+/// [`ROW_UNREADABLE`] instead. Returns `None` when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -281,6 +290,24 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         return Ok(None);
     };
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
+    let read = CredentialRef::new(pool)
+        .ok()
+        .zip(serde_json::from_str::<Drafted>(&drafted).ok());
+    let Some((pool, drafted)) = read else {
+        let changed = tx
+            .execute(
+                &format!(
+                    "UPDATE onboarding SET {0}_state='failed',{0}_reason=?2,updated_ms=?3
+                     WHERE project=?1 AND claimer IS NULL",
+                    kind.prefix()
+                ),
+                params![project, ROW_UNREADABLE, now],
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(changed, 1);
+        tx.commit().map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
     let changed = tx
         .execute(
             &format!(
@@ -297,8 +324,8 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     Ok(Some(Claimed {
         project,
         repo: PathBuf::from(repo),
-        pool: CredentialRef::new(pool).map_err(|problem| problem.0)?,
-        drafted: serde_json::from_str(&drafted).map_err(|error| error.to_string())?,
+        pool,
+        drafted,
         created_ms,
         runs: runs + 1,
         kind,
@@ -516,6 +543,10 @@ fn mapping_step(
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
+    let _ = super::seal_draft(database, &claimed.repo, &base);
+    if draft::overview_blocked(&layout) {
+        return (Step::failed(OVERVIEW_BLOCKED), base);
+    }
     let harnesses: Vec<ResearchHarness> = MAPPING_HARNESSES
         .into_iter()
         .filter(|harness| work.runner.can_run(*harness))
@@ -552,7 +583,11 @@ fn mapping_step(
     };
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
+        Ok(ReadOnlyEnding::Answered(text)) => {
+            let (step, kept) = answered(&layout, &base, &text, &found, &stack);
+            let _ = super::seal_draft(database, &claimed.repo, &kept);
+            (step, kept)
+        }
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
@@ -569,11 +604,11 @@ fn mapping_step(
 }
 
 /// Finishes a mapping step from the agent's answer: merges its fields into the gaps of
-/// `base`, saves the draft and writes `overview.md` when none exists yet. An answer with
-/// no overview text, while no overview is kept from before, fails the step with
-/// [`MAPPING_NO_OVERVIEW`] and still keeps the merged draft. Takes the `.crazyagent`
-/// folder, the draft so far, the answer text and the facts the manifests gave.
-/// Returns the step's ending and the draft to keep.
+/// `base`, saves the draft and writes `overview.md` when nothing is there yet. With no
+/// overview kept, the step fails with [`OVERVIEW_BLOCKED`] while something else sits at
+/// `overview.md`, else with [`MAPPING_NO_OVERVIEW`], and still keeps the merged draft.
+/// Takes the `.crazyagent` folder, the draft so far, the answer text and the facts the
+/// manifests gave. Returns the step's ending and the draft to keep.
 #[cfg(unix)]
 pub(crate) fn answered(
     layout: &Path,
@@ -591,7 +626,12 @@ pub(crate) fn answered(
         return (Step::failed(DRAFT_UNSAVED), base.clone());
     }
     if !wrote && draft::overview(layout).is_none() {
-        return (Step::failed(MAPPING_NO_OVERVIEW), merged);
+        let reason = if draft::overview_blocked(layout) {
+            OVERVIEW_BLOCKED
+        } else {
+            MAPPING_NO_OVERVIEW
+        };
+        return (Step::failed(reason), merged);
     }
     (Step::Done, merged)
 }

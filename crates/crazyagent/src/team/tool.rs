@@ -44,6 +44,7 @@ pub const MEMORIES_TOOL: &str = "memories";
 pub const REMEMBER_TOOL: &str = "remember";
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
+pub const WAKE_TOOL: &str = "wake";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -92,11 +93,12 @@ const _: () = assert!(
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
-/// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
-/// `escalate` raises an app notification for a decision only the owner makes, `memories`
-/// reads the project's memories with their versions, `remember` suggests one or changes
-/// a suggestion at the version it names, `ask` logs a question for the owner, and
-/// `record_answer` records the owner's chat message that answered one.
+/// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
+/// and `changes` read the team and its pending change sets, `escalate` raises an app
+/// notification for a decision only the owner makes, `memories` reads the project's
+/// memories with their versions, `remember` suggests one or changes a suggestion at the
+/// version it names, `ask` logs a question for the owner, and `record_answer` records the
+/// owner's chat message that answered one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -110,6 +112,10 @@ pub enum Call {
         text: String,
     },
     Answer {
+        agent: String,
+        text: String,
+    },
+    Wake {
         agent: String,
         text: String,
     },
@@ -300,6 +306,11 @@ fn live_tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"agent": agent, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
         },
         {
+            "name": WAKE_TOOL,
+            "description": "Wake a finished sub-agent by its name: it starts again under the same name in its own worktree, continuing its own conversation where its harness can, and gets your text as its next task.",
+            "inputSchema": {"type": "object", "properties": {"agent": {"type": "string", "description": "The finished sub-agent: its persona name, its @role handle or its number."}, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
+        },
+        {
             "name": STATUS_TOOL,
             "description": "Read the team: each sub-agent, its job and state, and the tasks waiting or running.",
             "inputSchema": none,
@@ -444,6 +455,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             .map(|(agent, text)| Call::Message { agent, text }),
         ANSWER_TOOL => typed(argument("agent"), argument("text"))
             .map(|(agent, text)| Call::Answer { agent, text }),
+        WAKE_TOOL => typed(argument("agent"), argument("text"))
+            .map(|(agent, text)| Call::Wake { agent, text }),
         STATUS_TOOL => Ok(Call::Status),
         CHANGES_TOOL => Ok(Call::Changes),
         ESCALATE_TOOL => match argument("text") {
@@ -572,6 +585,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         ),
         Call::Message { agent, text } => (MESSAGE_TOOL, json!({"agent": agent, "text": text})),
         Call::Answer { agent, text } => (ANSWER_TOOL, json!({"agent": agent, "text": text})),
+        Call::Wake { agent, text } => (WAKE_TOOL, json!({"agent": agent, "text": text})),
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),

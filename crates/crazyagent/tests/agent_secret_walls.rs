@@ -555,6 +555,13 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
+    expected.insert(
+        "TMPPREFIX".to_owned(),
+        crazyagent::sandbox::shell_tmp_prefix(&case.tmp)
+            .to_str()
+            .unwrap()
+            .to_owned(),
+    );
     assert_eq!(seen, expected);
     assert!(
         seen.iter()

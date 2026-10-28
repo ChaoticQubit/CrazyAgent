@@ -133,6 +133,7 @@ impl Agent {
             model: None,
             tools: false,
             sandbox_profile: Some(self.base.join("agent.sb")),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -982,11 +983,14 @@ mod live {
             model: plan.model.clone(),
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
+            access: plan.access,
+            layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,
             pane: Some((host.clone(), AgentId::team(AGENT).unwrap())),
             live: false,
             resume,
+            continues: plan.continues,
         }
     }
 
@@ -1010,7 +1014,13 @@ mod live {
         let project = ProjectId::new(PROJECT).unwrap();
         let context = agent
             .runtime
-            .context(&project, AGENT, AgentRole::Sub, true)
+            .context(
+                &project,
+                AGENT,
+                AgentRole::Sub,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
             .unwrap();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -1020,7 +1030,9 @@ mod live {
                 Some(Box::new(Grant {
                     profile: signed_in.acquire(launch),
                     context,
+                    access: crate::sandbox::policy::AgentAccess::Sandboxed,
                 })),
+                Some(TURN_TIME),
             ))
             .unwrap();
         drop(orders);
@@ -1028,9 +1040,7 @@ mod live {
         let thread = std::thread::spawn(move || {
             let cancel = AtomicBool::new(false);
             let interrupt = AtomicBool::new(false);
-            per_turn(
-                &plan, &home, &ordered, &reports, &cancel, &interrupt, TURN_TIME,
-            )
+            per_turn(&plan, &home, &ordered, &reports, &cancel, &interrupt)
         });
         (reported, thread)
     }

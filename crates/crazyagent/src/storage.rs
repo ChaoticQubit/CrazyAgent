@@ -938,6 +938,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
+    crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
@@ -2414,6 +2415,18 @@ fn owner_read(
                 .collect(),
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
+        OwnerRead::ProjectAgentPolicy { project_id } => {
+            let setup = crate::project_setup::load_setup(&tx, project_id)?
+                .ok_or_else(|| error("invalid_project"))?;
+            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+                .map_err(|_| error("agent_policy_unreadable"))?;
+            OwnerData::ProjectAgentPolicy {
+                project_id: project_id.clone(),
+                policy: crate::sandbox::policy::load(&tx, project_id.as_str())
+                    .map_err(error)?
+                    .view(&setup.project_folder(), &homes),
+            }
+        }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?

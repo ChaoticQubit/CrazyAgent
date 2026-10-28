@@ -12,6 +12,7 @@ use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
@@ -797,6 +798,13 @@ impl ResearchRunner {
         } else {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
+        let policy = jobs
+            .agent_policy(&project)
+            .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
+        if let Some(reason) = policy.access.unavailable() {
+            return Err(RunError::Invalid(reason.into()));
+        }
+        let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
@@ -815,7 +823,7 @@ impl ResearchRunner {
             .read_paths(&project)
             .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::detect(&root, &homes))?
+            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
         for folder in read_folders(executable, &context, job.tools)? {
@@ -845,7 +853,8 @@ impl ResearchRunner {
                 account: binding,
                 model,
                 tools: job.tools,
-                sandbox_profile: Some(profile.clone()),
+                sandbox_profile: (!unconfined).then(|| profile.clone()),
+                unconfined,
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
@@ -888,7 +897,11 @@ impl ResearchRunner {
             }
         };
         launch.current_dir(&worktree);
-        let mut command = sandbox.wrap(&profile, &launch)?;
+        let mut command = if unconfined {
+            sandbox.wrap_unconfined(&launch)?
+        } else {
+            sandbox.wrap(&profile, &launch)?
+        };
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

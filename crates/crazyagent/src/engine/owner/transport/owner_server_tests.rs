@@ -13,6 +13,10 @@ struct Fixture {
 
 impl Fixture {
     async fn start() -> Self {
+        Self::start_with("").await
+    }
+
+    async fn start_with(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-own-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -21,7 +25,7 @@ impl Fixture {
         let global = root.path().join("global.toml");
         std::fs::write(
             &global,
-            format!("version = 1\ntimeout_ms = {OWNER_WAIT_MS}\n"),
+            format!("version = 1\ntimeout_ms = {OWNER_WAIT_MS}\n{settings}"),
         )
         .unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -245,5 +249,68 @@ async fn a_panicking_owner_request_is_answered_and_the_server_keeps_serving() {
         "{after:?}"
     );
     assert!(!client.github_status().await.unwrap().signed_in);
+    fixture.stop().await;
+}
+
+const CONFIG_ONLY_ACCOUNT: &str = r#"
+[model_access]
+accounts = ["claude-account"]
+[[model_access.connections]]
+id = "claude-connection"
+provider = "anthropic"
+harness = "claude-code"
+protocol = "native"
+account_ref = "claude-account"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile" }
+"#;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
+    let fixture = Fixture::start_with(CONFIG_ONLY_ACCOUNT).await;
+    let client = fixture.client().await;
+    let closed = crate::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let added = client
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::Local,
+                method: crate::accounts::SignInMethod::Url,
+                name: "Lab box".into(),
+                url: Some(format!("http://127.0.0.1:{closed}/v1")),
+                model: Some("lab-model".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    let first = client.list_accounts(None, 1).await.unwrap();
+    assert_eq!(
+        first
+            .accounts
+            .iter()
+            .map(|account| account.id.as_str())
+            .collect::<Vec<_>>(),
+        ["claude-connection"]
+    );
+    let next = first
+        .next
+        .expect("the added account follows the config-only page");
+    let second = client.list_accounts(Some(next), 1).await.unwrap();
+    assert_eq!(
+        second
+            .accounts
+            .iter()
+            .map(|account| account.id.clone())
+            .collect::<Vec<_>>(),
+        [added.id]
+    );
+    assert_eq!(second.next, None);
     fixture.stop().await;
 }
