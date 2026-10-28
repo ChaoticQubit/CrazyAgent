@@ -271,6 +271,52 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
     drop(held);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let work = base.join("work");
+    fs::create_dir(&work).unwrap();
+    let state = base.join("state");
+    fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+    let profile = base.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+    };
+    let held = context().install("codex", &home, false).unwrap();
+    let key_path = home.join(".crazyagent-key");
+    fs::write(&key_path, b"running-agent-relay-token").unwrap();
+    let request = LaunchRequest {
+        harness: "codex".into(),
+        executable: std::path::PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: Some(Secret::new("crazyagent-local".to_owned()).unwrap()),
+        },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile),
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let refused = Session::start_durable(request, None, &state);
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("launch_home_busy")
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), b"running-agent-relay-token");
+    drop(held);
+}
+
 #[test]
 fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();

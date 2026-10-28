@@ -1137,7 +1137,10 @@ impl Session {
                 let (command, installed) = command_with_context(&request, context)?;
                 (command, Some(installed))
             }
-            None => (command(&request)?, None),
+            None => {
+                let installed = crate::launch_context::lock_only(request.account.home())?;
+                (command(&request)?, Some(installed))
+            }
         };
         drop(context);
         let io = DurableIo::create(state)?;

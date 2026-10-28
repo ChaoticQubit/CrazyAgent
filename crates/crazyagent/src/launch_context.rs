@@ -751,6 +751,21 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     Ok(file)
 }
 
+/// Takes a context-less launch's hold on an agent home: the same per-home lock a full
+/// install takes, installing no files. The guard keeps a second launch out of the home
+/// while this one runs, so writing the launch key never lands on a home an agent already
+/// runs on. Input: the agent's home. Output: the lock guard, or `launch_home_busy`.
+pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
+    crate::harnesses::launch::validate_home(home)?;
+    let lock = lock(home)?;
+    Ok(Installed {
+        arguments: Vec::new(),
+        removals: Vec::new(),
+        copies: None,
+        _lock: lock,
+    })
+}
+
 /// Removes the Codex skill copies at `<home>/skills/crazyagent` without resolving `skills`
 /// by path, because the agent may have replaced that folder with a link: the copies are
 /// moved up into the verified home through descriptors and removed there. A `skills` that
