@@ -1089,3 +1089,41 @@ fn a_read_after_the_settings_changed_ends_a_sign_in_only_once_it_stopped() {
     assert_code(case.read(&unknown), "native_auth_operation_missing");
     assert_eq!(case.snapshot(), before);
 }
+
+#[test]
+fn a_sign_in_goes_on_after_another_account_changed_but_not_after_its_own() {
+    let mut other = HostCase::new();
+    let (fact, _work) = fresh_work(
+        other
+            .begin(other.start("scoped-other", "connection-a"))
+            .unwrap(),
+    );
+    std::fs::write(
+        &other.global,
+        CATALOG.replace(r#"id = "model-z""#, r#"id = "model-z2""#),
+    )
+    .unwrap();
+    other.config = other.sources.config().unwrap();
+    assert_ne!(other.config.id, fact.binding.config_id);
+    let published = other
+        .publish(&fact, NativeAuthHostUpdate::Unavailable)
+        .unwrap();
+    assert_eq!(published.phase, NativeAuthPhase::Unavailable);
+    assert_eq!(other.read(&fact).unwrap().fact, published);
+
+    let mut own = HostCase::new();
+    let (fact, _work) = fresh_work(own.begin(own.start("scoped-own", "connection-a")).unwrap());
+    std::fs::write(
+        &own.global,
+        CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#),
+    )
+    .unwrap();
+    own.config = own.sources.config().unwrap();
+    let before = own.snapshot();
+    assert_code(
+        own.publish(&fact, NativeAuthHostUpdate::Unavailable),
+        "native_profile_source_conflict",
+    );
+    assert_code(own.read(&fact), "native_profile_source_conflict");
+    assert_eq!(own.snapshot(), before);
+}

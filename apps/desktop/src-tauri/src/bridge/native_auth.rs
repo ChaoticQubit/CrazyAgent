@@ -101,8 +101,8 @@ impl NativeBridge {
     }
 
     pub async fn read_native_auth(&mut self, ticket: &str) -> Result<NativeAuthView, BridgeError> {
-        let (scope, _) = self.native_auth_selection(ticket)?;
-        let operation_id = self.auth_operation(&scope)?;
+        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthQuery {
             request_id: self.auth_request_id()?,
             scope,
@@ -116,8 +116,8 @@ impl NativeBridge {
         &mut self,
         ticket: &str,
     ) -> Result<NativeAuthView, BridgeError> {
-        let (scope, _) = self.native_auth_selection(ticket)?;
-        let operation_id = self.auth_operation(&scope)?;
+        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthCancel {
             request_id: self.auth_request_id()?,
             scope,
@@ -298,7 +298,14 @@ impl NativeBridge {
         assert!(operation.unresolved);
     }
 
-    fn auth_operation(&mut self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
+    /// Finds the retained sign-in for a page's request and the scope to send for it: the one it
+    /// started with, which still holds while only other accounts changed. Inputs: the page's
+    /// current scope and connection. Output: the operation id and that scope, or the refusal.
+    fn auth_operation(
+        &mut self,
+        scope: &NativeAuthScope,
+        connection: &ModelConnection,
+    ) -> Result<(RequestId, NativeAuthScope), BridgeError> {
         let operation = self
             .native_auth
             .as_mut()
@@ -311,11 +318,11 @@ impl NativeBridge {
         if original.connection != scope.connection {
             return Err(failure("native_auth_operation_scope_conflict"));
         }
-        if original != scope {
+        if original != scope && &operation.connection != connection {
             operation.uncertain = true;
             return Err(failure("native_profile_source_conflict"));
         }
-        Ok(operation.original.id().clone())
+        Ok((operation.original.id().clone(), original.clone()))
     }
 
     fn auth_request_id(&mut self) -> Result<RequestId, BridgeError> {
