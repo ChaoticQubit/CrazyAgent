@@ -108,6 +108,7 @@ export function logoutNativeAuth(ticket: string): Promise<NativeAuthView> {
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 export interface BaselineRow {

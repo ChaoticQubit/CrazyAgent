@@ -102,6 +102,7 @@
     "allow-desktop-start-native-auth",
     "allow-desktop-read-native-auth",
     "allow-desktop-cancel-native-auth",
+    "allow-desktop-clear-native-auth",
     "allow-desktop-logout-native-auth",
     "allow-desktop-submit-claude-auth-code",
     "allow-desktop-model-access-page",

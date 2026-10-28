@@ -97,6 +97,28 @@ pub enum ModelAccessEdit {
 }
 
 impl ModelAccessEdit {
+    /// Tells whether this edit changes the account of a connection. Pool and project
+    /// assignments leave the account and its profile as they are. Input: the connection.
+    /// Output: true when the edit names its account, its id, or a connection on the same
+    /// account.
+    pub fn touches(&self, connection: &ModelConnection) -> bool {
+        match self {
+            Self::AddAccount { account_ref } | Self::RemoveAccount { account_ref } => {
+                account_ref == &connection.account_ref
+            }
+            Self::CreateConnection { connection: other }
+            | Self::ReplaceConnection { connection: other }
+            | Self::AddConnectedAccount { connection: other } => same_account(connection, other),
+            Self::RemoveConnection { id } | Self::RemoveConnectedAccount { id } => {
+                id == &connection.id
+            }
+            Self::CreatePool { .. }
+            | Self::ReplacePool { .. }
+            | Self::RemovePool { .. }
+            | Self::AssignProjectPool { .. } => false,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         if serde_json::to_vec(self)
             .map_err(|_| ConfigError("model_access_encoding".into()))?
@@ -107,6 +129,20 @@ impl ModelAccessEdit {
         }
         Ok(())
     }
+}
+
+/// Tells whether two connections share an account: the same connection, the same account
+/// reference, or the same native profile. Inputs: the two connections.
+pub fn same_account(left: &ModelConnection, right: &ModelConnection) -> bool {
+    left.id == right.id
+        || left.account_ref == right.account_ref
+        || matches!(
+            (&left.auth, &right.auth),
+            (
+                ModelAuthentication::NativeManaged { profile_ref: held },
+                ModelAuthentication::NativeManaged { profile_ref: named },
+            ) if held == named
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

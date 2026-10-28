@@ -108,6 +108,7 @@ fn caused(code: &'static str, engine: &str) -> BridgeError {
 pub struct ConnectionStatus {
     pub connected: bool,
     pub pending: bool,
+    pub stuck_sign_in: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -387,6 +388,9 @@ impl NativeBridge {
                     .controller
                     .as_ref()
                     .is_some_and(|c| c.pending().is_some()),
+            stuck_sign_in: self
+                .stuck_auth()
+                .map(|connection| connection.id.as_str().to_owned()),
         }
     }
 
@@ -521,7 +525,7 @@ impl NativeBridge {
     }
 
     fn prepare(&mut self, ticket: &str, revoke: bool) -> Result<(), BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -918,7 +922,7 @@ impl NativeBridge {
         spec: ProjectSpec,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -1081,7 +1085,7 @@ impl NativeBridge {
         generation: u64,
         brief: bool,
     ) -> Result<(), BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
