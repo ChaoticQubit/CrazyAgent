@@ -480,7 +480,7 @@ fn v_names_the_listed_text_file_whose_diff_is_at_the_top_for_the_editor() {
         "the list leaves v to the host"
     );
     let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
-    assert!(!help.contains(&("v", "$EDITOR")));
+    assert!(!help.contains(&("v", "Edit your copy")));
     assert!(view.key(key(KeyCode::Enter), NOW));
     assert!(view.key(key(KeyCode::Char('v')), NOW));
     assert_eq!(view.take_edit(), None, "no diff text has arrived yet");
@@ -526,7 +526,7 @@ fn v_names_the_listed_text_file_whose_diff_is_at_the_top_for_the_editor() {
     };
     reply(&mut view, Ok(ChangesView::Diff(page)));
     let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
-    assert!(help.contains(&("v", "$EDITOR")), "{help:?}");
+    assert!(help.contains(&("v", "Edit your copy")), "{help:?}");
 
     let mut shown = Vec::new();
     for top in 0..20 {

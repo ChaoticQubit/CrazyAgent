@@ -201,9 +201,6 @@ pub(in crate::tui) fn size(bytes: usize) -> String {
     }
 }
 
-/// The character the editor draws for one text character: a tab as a space, and a
-/// control, escape or zero-width character as `?`, so stored text never reaches the
-/// terminal as a command. Input: the character. Output: a printable character.
 /// Splits untrusted text into printable lines that fit beside a one-cell gutter, keeping
 /// blank lines. Inputs: the text and the width in cells. Output: the lines.
 fn quoted(text: &str, width: usize) -> Vec<String> {
@@ -220,6 +217,9 @@ fn quoted(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// The character the editor draws for one text character: a tab as a space, and a
+/// control, escape or zero-width character as `?`, so stored text never reaches the
+/// terminal as a command. Input: the character. Output: a printable character.
 fn shown(character: char) -> char {
     match character {
         '\t' => ' ',

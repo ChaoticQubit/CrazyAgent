@@ -1731,7 +1731,7 @@ fn context(
                 ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
-                ("v", "$EDITOR"),
+                ("v", "Edit file"),
             ]
         } else {
             vec![
@@ -1739,7 +1739,7 @@ fn context(
                 ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
-                ("v", "$EDITOR"),
+                ("v", "Edit file"),
             ]
         };
         return (preview_rows(screen, content, room, look), None, help);
@@ -1750,7 +1750,7 @@ fn context(
         ("o", "Open in app"),
         ("d", "Delete"),
         ("m", "Save to memory"),
-        ("v", "$EDITOR"),
+        ("v", "Edit file"),
         TABS,
         ("Esc", "Home"),
     ];
