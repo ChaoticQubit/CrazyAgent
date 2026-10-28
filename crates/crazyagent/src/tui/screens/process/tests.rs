@@ -229,6 +229,7 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
         shell.ctx.try_request(Request::EditPool {
             change: crate::tui::seam::PoolChange::Remove {
                 id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
             },
         })
     } {

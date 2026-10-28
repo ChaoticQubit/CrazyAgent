@@ -356,7 +356,19 @@ fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdi
             pool.members = merged;
             ModelAccessEdit::ReplacePool { pool }
         }
-        PoolChange::Remove { id } => ModelAccessEdit::RemovePool { id },
+        PoolChange::Remove {
+            id,
+            opened_projects,
+        } => {
+            let pool = pools
+                .iter()
+                .find(|pool| pool.id == id)
+                .ok_or_else(|| "pool_not_found".to_string())?;
+            if pool.projects.len() != opened_projects {
+                return Err("pool_users_changed".into());
+            }
+            ModelAccessEdit::RemovePool { id }
+        }
         PoolChange::Assign { pool, project } => ModelAccessEdit::AssignProjectPool {
             project: CredentialRef::new(project.as_str())
                 .map_err(|_| "project_ref_invalid".to_string())?,
@@ -743,6 +755,43 @@ pools = [
     }
 
     #[tokio::test]
+    async fn a_pool_delete_confirmed_before_a_project_took_the_pool_is_refused() {
+        let (mut live, _) = Live::start().await;
+        let project = live.create_project("late-user").await;
+        assert_eq!(
+            live.edit(PoolChange::Assign {
+                pool: Some(reference("pool-b")),
+                project: project.clone(),
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(
+            live.edit(PoolChange::Remove {
+                id: reference("pool-b"),
+                opened_projects: 0,
+            })
+            .await,
+            Err("pool_users_changed".into()),
+            "the confirmation showed no project, so the delete is refused"
+        );
+        assert_eq!(
+            live.scopes().await,
+            vec![scope("pool-a", &[]), scope("pool-b", &["late-user"])]
+        );
+        assert_eq!(
+            live.edit(PoolChange::Remove {
+                id: reference("pool-b"),
+                opened_projects: 1,
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(live.scopes().await, vec![scope("pool-a", &[])]);
+        live.close().await;
+    }
+
+    #[tokio::test]
     async fn assigning_a_pool_moves_the_project_and_engine_refusals_are_reported() {
         let (mut live, _) = Live::start().await;
         let project = live.create_project("assign-demo").await;
@@ -802,6 +851,7 @@ pools = [
         assert_eq!(
             live.edit(PoolChange::Remove {
                 id: reference("pool-b"),
+                opened_projects: 1,
             })
             .await,
             Ok(())
