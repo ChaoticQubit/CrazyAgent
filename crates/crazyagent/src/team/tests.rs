@@ -2850,3 +2850,44 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     let graph = owner_graph(&connection, &setup).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
+
+/// An agent whose row names its harness by an alias ("claude") counts as live for the plan
+/// row that names the catalog entry ("claude-code"), as the runtime revives such a master.
+#[test]
+fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
+    let (_directory, connection) = database();
+    let mut setup = stored(
+        "alias-live",
+        vec![HarnessSlot {
+            harness: "claude-code".into(),
+            agents: 2,
+            tools: false,
+        }],
+    );
+    setup.team.master = "claude-code".into();
+    for (role, harness) in [
+        ("master", "claude"),
+        ("sub", "claude"),
+        ("sub", "claude-code"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('alias-live',?1,?2,0,'working',1,1)",
+                params![role, harness],
+            )
+            .unwrap();
+    }
+    let team = status(&connection, &setup).unwrap();
+    let live: Vec<_> = team
+        .harnesses
+        .iter()
+        .map(|row| (row.role, row.harness.as_str(), row.live))
+        .collect();
+    assert_eq!(
+        live,
+        [
+            (AgentRole::Master, "claude-code", 1),
+            (AgentRole::Sub, "claude-code", 2)
+        ]
+    );
+}
