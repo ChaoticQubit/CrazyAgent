@@ -398,10 +398,7 @@ impl OwnedChild {
     }
 
     fn complete(&self) -> bool {
-        (self.group_absent || self.abandoned)
-            && self.stdout_eof
-            && self.stderr_eof
-            && !self.accounting_failed
+        (self.group_absent || self.abandoned) && self.stdout_eof && self.stderr_eof
     }
 
     /// Settles custody that ended before completion: kills the harness group until the
@@ -433,7 +430,11 @@ impl OwnedChild {
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
             state.complete = true;
-            state.cleanup_error = self.abandoned.then_some("codex_host_cleanup_uncertain");
+            state.cleanup_error = if self.accounting_failed {
+                Some("codex_host_pipe_accounting")
+            } else {
+                self.abandoned.then_some("codex_host_cleanup_uncertain")
+            };
         }
     }
 }
