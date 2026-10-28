@@ -40,6 +40,7 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod team_messages;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 

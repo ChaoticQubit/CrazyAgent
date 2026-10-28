@@ -654,6 +654,11 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    TeamMessages {
+        project: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -670,6 +675,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
 }
 

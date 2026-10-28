@@ -1516,3 +1516,301 @@ fn a_shortened_team_view_says_older_history_is_hidden() {
     view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
     assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
 }
+
+fn messages_reply(agent: i64) -> SetupView {
+    use crate::team::agent_messages::{
+        AgentMessage, AgentMessages, EntryKind, MessageSettings, Source, Speaker,
+    };
+    let entry = |id: i64, ago: i64, from: Speaker, kind: EntryKind, source: Source, text: &str| {
+        AgentMessage {
+            at_ms: NOW - ago * MINUTE,
+            source,
+            id,
+            from,
+            kind,
+            text: Some(text.into()),
+            task: Some(11),
+            state: None,
+            result: None,
+            result_more: false,
+        }
+    };
+    SetupView::TeamMessages(Box::new(AgentMessages {
+        project_id: project(),
+        agent,
+        entries: vec![
+            entry(
+                4,
+                2,
+                Speaker::Agent,
+                EntryKind::Question,
+                Source::Event,
+                "Which chart library?",
+            ),
+            entry(
+                11,
+                6,
+                Speaker::Master,
+                EntryKind::Task,
+                Source::Task,
+                "Build the charts component",
+            ),
+        ],
+        older: false,
+        settings: MessageSettings::default(),
+    }))
+}
+
+#[test]
+fn m_opens_the_focused_sub_agents_messages_and_esc_returns_at_120_and_80_columns() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("m", "Messages")));
+    assert!(view.help().contains(&("o", "Messages settings")));
+    view.key(press(KeyCode::Down));
+    let label = view.agents()[1].label.clone();
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    let query = view.next_query(NOW + 1).unwrap();
+    assert_eq!(
+        query,
+        SetupQuery::TeamMessages {
+            project: project(),
+            agent: 2,
+            before: None,
+        }
+    );
+    assert_eq!(view.next_query(NOW + 2), None, "one page read at a time");
+    view.apply(&query, Ok(messages_reply(2)));
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        find(&rows, &format!("Messages: {label}"));
+        assert!(
+            find(&rows, "Master > task: Build the charts component")
+                .contains(&format!("  {}  Master", clock(NOW - 6 * MINUTE, 0)))
+        );
+        assert!(
+            find(&rows, "Agent < question: Which chart library?")
+                .contains(&format!("> {}  Agent", clock(NOW - 2 * MINUTE, 0)))
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Tasks  3")),
+            "the list takes the place of the team lists\n{}",
+            rows.join("\n")
+        );
+    }
+    assert_eq!(view.help(), [("\u{2191}\u{2193}", "Move"), ("Esc", "Back")]);
+    assert_eq!(
+        view.key(press(KeyCode::Char('x'))),
+        TeamReply::Handled,
+        "keys stay in the open list"
+    );
+    assert!(view.confirm.is_none());
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.messages.is_none());
+    find(&frame(&view, 120, 36), "Tasks  3");
+}
+
+#[test]
+fn m_on_the_master_says_where_its_conversation_is_and_on_a_task_asks_for_an_agent() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert!(view.messages.is_none());
+    assert_eq!(view.notice, Some(Notice::plain(MASTER_ELSEWHERE)));
+    find(&frame(&view, 120, 36), MASTER_ELSEWHERE);
+    view.key(press(KeyCode::Tab));
+    view.key(press(KeyCode::Char('m')));
+    assert!(view.messages.is_none());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Pick an agent in the agents list to read its messages."
+        ))
+    );
+    assert_eq!(view.next_query(NOW + 1), None, "a refused m reads nothing");
+}
+
+fn message_change(view: &mut TeamView, key: KeyCode, settings: MessageSettings, done: &str) {
+    let TeamReply::Change(action) = view.key(press(key)) else {
+        panic!("a Messages settings change expected: {:?}", view.notice);
+    };
+    assert_eq!(
+        action,
+        TeamAction::MessageSettings {
+            project_id: project(),
+            settings,
+        }
+    );
+    assert_eq!(view.key(press(KeyCode::Char(' '))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        )),
+        "one change at a time"
+    );
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 1,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(view.notice, Some(Notice::plain(done)));
+}
+
+#[test]
+fn o_opens_messages_settings_and_every_choice_of_every_setting_is_one_change() {
+    let mut waiting = TeamView::new(project());
+    assert_eq!(waiting.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    assert!(waiting.message_row.is_none());
+    assert_eq!(
+        waiting.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(
+            find(&rows, "Messages settings").contains("For every sub-agent's Messages list here")
+        );
+        for (label, value) in [
+            ("Keep the master's messages to agents", "On"),
+            ("Messages kept per project", "2000"),
+            ("Progress events", "Shown"),
+            ("Task results", "First line, Enter shows all"),
+            ("Your own tasks and prompts", "Shown"),
+            ("Entries per page", "50"),
+        ] {
+            assert!(
+                find(&rows, label).contains(&format!("{label:<40}{value}")),
+                "{label} shows {value}\n{}",
+                rows.join("\n")
+            );
+        }
+        assert!(find(&rows, "Keep the master's messages").contains("> Keep"));
+    }
+    assert_eq!(
+        view.help(),
+        [
+            ("\u{2191}\u{2193}", "Move"),
+            ("Space", "Next choice"),
+            ("\u{2190}\u{2192}", "Choice"),
+            ("Esc", "Close"),
+        ]
+    );
+    let base = MessageSettings::default();
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        MessageSettings {
+            keep_master_messages: false,
+            ..base
+        },
+        "Keep the master's messages to agents: Off.",
+    );
+    view.key(press(KeyCode::Down));
+    for (key, kept) in [(KeyCode::Right, 5000), (KeyCode::Left, 500)] {
+        message_change(
+            &mut view,
+            key,
+            MessageSettings {
+                kept_per_project: kept,
+                ..base
+            },
+            &format!("Messages kept per project: {kept}."),
+        );
+    }
+    view.key(press(KeyCode::Down));
+    message_change(
+        &mut view,
+        KeyCode::Enter,
+        MessageSettings {
+            progress_shown: false,
+            ..base
+        },
+        "Progress events: Hidden.",
+    );
+    view.key(press(KeyCode::Down));
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        MessageSettings {
+            results: ResultsShown::Full,
+            ..base
+        },
+        "Task results: Full text.",
+    );
+    view.key(press(KeyCode::Down));
+    message_change(
+        &mut view,
+        KeyCode::Right,
+        MessageSettings {
+            owner_items_shown: false,
+            ..base
+        },
+        "Your own tasks and prompts: Hidden.",
+    );
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    for (key, size) in [(KeyCode::Right, 100), (KeyCode::Left, 25)] {
+        message_change(
+            &mut view,
+            key,
+            MessageSettings {
+                page_size: size,
+                ..base
+            },
+            &format!("Entries per page: {size}."),
+        );
+    }
+
+    let mut saved = team();
+    saved.message_settings = MessageSettings {
+        keep_master_messages: false,
+        kept_per_project: 5000,
+        progress_shown: false,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        page_size: 100,
+    };
+    let query = view.next_query(NOW + REFRESH_MS).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(saved.clone()))));
+    let rows = frame(&view, 80, 24);
+    for (label, value) in [
+        ("Keep the master's messages to agents", "Off"),
+        ("Messages kept per project", "5000"),
+        ("Progress events", "Hidden"),
+        ("Task results", "Full text"),
+        ("Your own tasks and prompts", "Hidden"),
+        ("Entries per page", "100"),
+    ] {
+        assert!(find(&rows, label).contains(&format!("{label:<40}{value}")));
+    }
+    message_change(
+        &mut view,
+        KeyCode::Right,
+        MessageSettings {
+            page_size: 25,
+            ..saved.message_settings
+        },
+        "Entries per page: 25.",
+    );
+    view.key(press(KeyCode::Up));
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        MessageSettings {
+            owner_items_shown: true,
+            ..saved.message_settings
+        },
+        "Your own tasks and prompts: Shown.",
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.message_row.is_none());
+    assert!(
+        !frame(&view, 120, 36)
+            .iter()
+            .any(|row| row.contains("Messages settings"))
+    );
+}
