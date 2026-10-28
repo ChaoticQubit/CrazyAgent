@@ -332,7 +332,8 @@ impl Bench {
 
     /// Adds a global Graphify skill from a folder outside the projects folder,
     /// the way an owner who has the skill already would. The pack then reads it
-    /// installed.
+    /// installed. An unknown outcome is reconciled the way a client does, any other
+    /// error fails at once.
     async fn graphify_skill(&self) {
         let folder = self.skills.path().canonicalize().unwrap().join("graphify");
         fs::create_dir_all(&folder).unwrap();
@@ -341,10 +342,37 @@ impl Bench {
             "---\nname: graphify\ndescription: Reads the project's code graph.\n---\n",
         )
         .unwrap();
-        self.owner
+        match self
+            .owner
             .add_skill(Scope::Global, folder.to_str().unwrap().into())
             .await
-            .unwrap();
+        {
+            Ok(_) => {}
+            Err(error) if error.0 == "plugins_outcome_unknown" => self.graphify_listed().await,
+            Err(error) => panic!("adding the graphify skill failed: {error:?}"),
+        }
+    }
+
+    /// Waits, at most 30 s, until the global skill list holds graphify. On a loaded machine
+    /// the engine stops waiting for storage and answers plugins_outcome_unknown while the
+    /// add still runs there, so the client reads the list and never sends the add again.
+    /// A list read with the same unknown outcome is read again; any other error fails.
+    async fn graphify_listed(&self) {
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            let read = self.owner.plugin_skills(None).await;
+            match &read {
+                Ok(skills) if skills.iter().any(|skill| skill.name == "graphify") => return,
+                Ok(_) => {}
+                Err(error) if error.0 == "plugins_outcome_unknown" => {}
+                Err(error) => panic!("reading the global skills failed: {error:?}"),
+            }
+            assert!(
+                Instant::now() < until,
+                "graphify was never listed after an unknown add outcome: {read:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Starts an in-process engine with nothing of the Graphify pack entry
