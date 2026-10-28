@@ -715,6 +715,13 @@ pub(crate) fn seal(drafted: &Drafted) -> Option<String> {
     Some(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// The seal of an overview the engine wrote: the SHA-256 of its text as [`overview`] reads
+/// it back, so the onboarding view shows an overview as the mapping agent's only while the
+/// folder holds that text. Takes the text. Returns the lowercase hex digest.
+pub(crate) fn overview_seal(overview: &str) -> String {
+    format!("{:x}", Sha256::digest(overview.as_bytes()))
+}
+
 /// The draft saved in `layout`/setup/draft.json, when it is a readable, valid draft;
 /// `None` otherwise, so onboarding starts fresh without touching the file. Whether this
 /// engine saved it is the caller's check against its seal.
@@ -844,19 +851,20 @@ pub(crate) fn overview_blocked(layout: &Path) -> bool {
 /// Writes the agent's overview as `layout`/overview.md while nothing is there, never
 /// replacing an entry: an overview kept from before stays as the owner or an earlier run
 /// left it, and a file made meanwhile wins. Takes the layout folder and the overview text.
-/// Returns whether it wrote.
+/// Returns the overview as [`overview`] reads it back when it wrote, else `None`.
 #[cfg(unix)]
-pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<bool> {
+pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<Option<String>> {
     let body = overview.trim();
     if body.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let text = if body.starts_with('#') {
         format!("{body}\n")
     } else {
         format!("# Project overview\n\n{body}\n")
     };
+    let text = clip(&text, OVERVIEW_BYTES_MAX);
     let layout =
         open_folder(layout).ok_or_else(|| std::io::Error::other("not a real directory"))?;
-    write_new(&layout, OVERVIEW_FILE, text.as_bytes())
+    Ok(write_new(&layout, OVERVIEW_FILE, text.as_bytes())?.then(|| text.trim().to_owned()))
 }

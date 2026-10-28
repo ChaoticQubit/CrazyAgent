@@ -584,8 +584,11 @@ fn mapping_step(
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]
         Ok(ReadOnlyEnding::Answered(text)) => {
-            let (step, kept) = answered(&layout, &base, &text, &found, &stack);
+            let (step, kept, wrote) = answered(&layout, &base, &text, &found, &stack);
             let _ = super::seal_draft(database, &claimed.repo, &kept);
+            if let Some(overview) = wrote {
+                let _ = super::seal_overview(database, &claimed.repo, &overview);
+            }
             (step, kept)
         }
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
@@ -608,7 +611,7 @@ fn mapping_step(
 /// overview kept, the step fails with [`OVERVIEW_BLOCKED`] while something else sits at
 /// `overview.md`, else with [`MAPPING_NO_OVERVIEW`], and still keeps the merged draft.
 /// Takes the `.crazyagent` folder, the draft so far, the answer text and the facts the
-/// manifests gave. Returns the step's ending and the draft to keep.
+/// manifests gave. Returns the step's ending, the draft to keep and the overview it wrote.
 #[cfg(unix)]
 pub(crate) fn answered(
     layout: &Path,
@@ -616,24 +619,24 @@ pub(crate) fn answered(
     text: &str,
     found: &MappingFacts,
     stack: &[String],
-) -> (Step, Drafted) {
+) -> (Step, Drafted, Option<String>) {
     let answer = draft::parse_answer(text);
     let merged = draft::merge(base, &answer, found, stack);
     let Ok(wrote) = draft::write_overview(layout, &answer.overview) else {
-        return (Step::failed(DRAFT_UNSAVED), base.clone());
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), None);
     };
     if draft::save(layout, &merged).is_err() {
-        return (Step::failed(DRAFT_UNSAVED), base.clone());
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), wrote);
     }
-    if !wrote && draft::overview(layout).is_none() {
+    if wrote.is_none() && draft::overview(layout).is_none() {
         let reason = if draft::overview_blocked(layout) {
             OVERVIEW_BLOCKED
         } else {
             MAPPING_NO_OVERVIEW
         };
-        return (Step::failed(reason), merged);
+        return (Step::failed(reason), merged, None);
     }
-    (Step::Done, merged)
+    (Step::Done, merged, wrote)
 }
 
 /// The graphify executable this machine has, looked up again on each call:

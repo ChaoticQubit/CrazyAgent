@@ -53,11 +53,10 @@ pub struct MappingFacts {
     pub entry_points: Vec<String>,
 }
 
-/// The onboarding of one found or cloned project as clients read it: the
-/// graph and mapping steps, the proposed name, the pre-filled setup the owner
-/// confirms with `UpdateProjectSetup`, the extra facts, `missing`, the draft
-/// fields the owner must still fill such as `about` or `platforms`, the
-/// mapping agent's `.crazyagent/overview.md` once it exists, and `finished`
+/// The onboarding of one found or cloned project as clients read it: the graph and mapping
+/// steps, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
+/// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
+/// engine wrote as `overview` or one it did not write as `folder_overview`, and `finished`
 /// once the owner saved the setup, when name and draft are the saved ones.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +69,7 @@ pub struct OnboardingView {
     pub facts: MappingFacts,
     pub missing: Vec<String>,
     pub overview: Option<String>,
+    pub folder_overview: Option<String>,
     pub finished: bool,
 }
 
@@ -194,6 +194,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 updated_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS onboarding_saved_drafts (
+                repo TEXT PRIMARY KEY,
+                seal TEXT NOT NULL CHECK(length(seal)=64)
+            );
+            CREATE TABLE IF NOT EXISTS onboarding_saved_overviews (
                 repo TEXT PRIMARY KEY,
                 seal TEXT NOT NULL CHECK(length(seal)=64)
             );",
@@ -324,6 +328,26 @@ fn engine_draft(
     };
     Ok(draft::reused(layout)
         .filter(|drafted| draft::seal(drafted).as_deref() == Some(sealed.as_str())))
+}
+
+/// Records the seal of the overview the engine wrote in `repo`'s `.crazyagent/overview.md`,
+/// so the onboarding view shows that text as the mapping agent's. The row outlives the
+/// project like the draft's. Takes the connection, the folder and the overview as it reads
+/// back. Returns any storage failure.
+pub(crate) fn seal_overview(
+    connection: &Connection,
+    repo: &Path,
+    overview: &str,
+) -> rusqlite::Result<()> {
+    let Some(repo) = repo.to_str() else {
+        return Ok(());
+    };
+    connection.execute(
+        "INSERT INTO onboarding_saved_overviews(repo,seal) VALUES (?1,?2)
+         ON CONFLICT(repo) DO UPDATE SET seal=excluded.seal",
+        params![repo, draft::overview_seal(overview)],
+    )?;
+    Ok(())
 }
 
 fn real_dir(path: &Path) -> bool {
@@ -518,11 +542,11 @@ fn restart(
     Ok(())
 }
 
-/// The onboarding of `project_id`: both steps, the draft, its proposed name,
-/// the extra facts, the fields still missing and the overview, read bounded
-/// and never through a link. Once the owner saved the setup it is finished,
-/// and the name, draft and missing fields come from the saved setup. Returns
-/// `None` for a project that was not onboarded.
+/// The onboarding of `project_id`: both steps, the draft, its proposed name, the extra
+/// facts, the fields still missing and the overview, read bounded and never through a link,
+/// as the mapping agent's only while it holds the text this engine sealed on writing it.
+/// Once the owner saved the setup, name, draft and missing fields come from the saved
+/// setup. Returns `None` for a project that was not onboarded.
 pub(crate) fn status(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -556,6 +580,17 @@ pub(crate) fn status(
         drafted.name = stored.name;
     }
     let missing = drafted.missing();
+    let found = draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY));
+    let sealed: Option<String> = tx
+        .query_row(
+            "SELECT seal FROM onboarding_saved_overviews WHERE repo=?1",
+            [repo.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let wrote = sealed.is_some() && found.as_deref().map(draft::overview_seal) == sealed;
+    let (overview, folder_overview) = if wrote { (found, None) } else { (None, found) };
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
         graph: Step::from_columns(&graph, graph_reason)?,
@@ -564,7 +599,8 @@ pub(crate) fn status(
         draft: drafted.draft,
         facts: drafted.facts,
         missing,
-        overview: draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY)),
+        overview,
+        folder_overview,
         finished,
     }))
 }

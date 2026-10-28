@@ -933,6 +933,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
+        folder_overview: None,
         finished: false,
     };
     let mut draft = draft;
