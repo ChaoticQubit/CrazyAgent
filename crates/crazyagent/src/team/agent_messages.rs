@@ -740,3 +740,6 @@ fn fit(page: AgentMessages) -> Result<AgentMessages, EngineError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scale_tests;
