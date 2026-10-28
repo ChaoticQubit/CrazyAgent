@@ -233,13 +233,19 @@ export interface AgentInstructions {
   files: InstructionRecord[];
 }
 
+const CLAUDE_GIVEN = "none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt";
+const CLAUDE_NO_RECORD = "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off.";
+
 /** The one-line summary of what an agent's harness reported: "Instructions: CLAUDE.md,
- * AGENTS.md - Skills used: tdd", each file name once. Input: the view. Output: the line,
- * saying "not reported yet" before the harness wrote a session record. */
-export function reportedLine(value: Pick<AgentInstructions, "sessions" | "loaded" | "skills_used">): string {
-  if (value.sessions === 0) return "Instructions: not reported yet - Skills used: not reported yet";
+ * AGENTS.md - Skills used: tdd", each file name once. Claude loads no instruction file
+ * itself, since CrazyAgent gives it the instructions in its launch prompt, and a headless
+ * Claude run writes no session record while its project keeps no transcripts, so the line
+ * says so. Input: the view. Output: the line, "not reported yet" before a session record. */
+export function reportedLine(value: Pick<AgentInstructions, "harness" | "sessions" | "loaded" | "skills_used">): string {
+  const claude = value.harness === "claude-code";
+  if (value.sessions === 0) return `Instructions: not reported yet - Skills used: not reported yet${claude ? `. ${CLAUDE_NO_RECORD}` : ""}`;
   const names = [...new Set(value.loaded.map((file) => file.name))];
-  const files = names.length > 0 ? names.join(", ") : "none loaded by its harness";
+  const files = names.length > 0 ? names.join(", ") : claude ? CLAUDE_GIVEN : "none loaded by its harness";
   const used = value.skills_used.length > 0 ? value.skills_used.join(", ") : "none";
   return `Instructions: ${files} - Skills used: ${used}`;
 }
