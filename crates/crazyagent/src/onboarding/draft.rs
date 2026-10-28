@@ -180,7 +180,10 @@ fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(unix)]
 type Folder = rustix::fd::OwnedFd;
 
-/// A real folder checked by path where no folder-relative open exists here.
+/// A real folder checked by path, since std has no folder-relative open on Windows. Each
+/// later open goes by path again, so a local process that swaps a folder for a junction
+/// between the check and the open is not caught: a known Windows gap until a handle-based
+/// open that never follows a reparse point replaces it.
 #[cfg(windows)]
 type Folder = std::path::PathBuf;
 
@@ -193,8 +196,9 @@ fn open_folder(path: &Path) -> Option<Folder> {
     rustix::fs::open(path, flags, Mode::empty()).ok()
 }
 
-/// Checks that `path` is a real folder, not a link to one. Takes the path.
-/// Returns the folder path or `None`.
+/// Checks that `path` is a real folder, not a link to one, at the time of the check only:
+/// the known Windows gap described on [`Folder`]. Takes the path. Returns the folder path
+/// or `None`.
 #[cfg(windows)]
 fn open_folder(path: &Path) -> Option<Folder> {
     real_dir(path).then(|| path.to_path_buf())
@@ -251,8 +255,9 @@ fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
         .map(std::fs::File::from)
 }
 
-/// Opens the file `name` in `folder` as the reparse point itself. Takes the
-/// folder and the file name. Returns the file or `None`.
+/// Opens the file `name` in `folder` as the reparse point itself, reaching the folder by
+/// path again: the known Windows gap described on [`Folder`]. Takes the folder and the
+/// file name. Returns the file or `None`.
 #[cfg(windows)]
 fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
     open_text(&folder.join(name)).ok()
