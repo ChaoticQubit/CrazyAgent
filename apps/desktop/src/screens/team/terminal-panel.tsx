@@ -192,6 +192,19 @@ export function connectInput(terminal: Terminal, run: (job: () => Promise<boolea
   };
 }
 
+/** Tells whether the owner reads above the live screen, so Jump to latest shows only then:
+ * once at the start, so a reopened view never keeps the last view's flag, and on every scroll,
+ * which xterm also reports when an app switches to or from its full screen.
+ * Inputs: the terminal and the setter for that flag. Output: the subscription. */
+export function followScroll(terminal: Terminal, set: (behind: boolean) => void): IDisposable {
+  const report = () => {
+    const buffer = terminal.buffer.active;
+    set(buffer.viewportY < buffer.baseY);
+  };
+  report();
+  return terminal.onScroll(report);
+}
+
 /** One agent's live terminal beside the graph: the screen at attach, live output, and every
  * key typed straight into the agent's real terminal, sized to the panel, with a way back to
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
@@ -293,10 +306,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         terminal.focus();
         return true;
       };
-      const scrolled = terminal.onScroll(() => {
-        const buffer = terminal.buffer.active;
-        setBehind(buffer.viewportY < buffer.baseY);
-      });
+      const scrolled = followScroll(terminal, setBehind);
       latest.current = () => {
         terminal.scrollToBottom();
         terminal.focus();
