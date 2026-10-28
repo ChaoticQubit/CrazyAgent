@@ -101,10 +101,11 @@ fn unknown() -> EngineError {
     failure("ide_tab_outcome_unknown")
 }
 
-/// The platform's name when the engine's IDE server does not run on it, the same rule the
-/// server register applies when it opens one. Output: the name, or none on macOS.
+/// The platform's name when the engine's IDE server does not run on it, the rule the server
+/// register applies when it opens one and the IDE build fetch applies before it downloads.
+/// Output: the name, or none where the IDE is qualified.
 fn unqualified() -> Option<String> {
-    (!cfg!(target_os = "macos")).then(|| std::env::consts::OS.to_owned())
+    (!fetch::qualified()).then(|| std::env::consts::OS.to_owned())
 }
 
 impl OwnerClient {
