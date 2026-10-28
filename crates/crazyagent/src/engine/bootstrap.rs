@@ -108,6 +108,40 @@ struct Locator {
     engine_version: String,
 }
 
+impl Locator {
+    /// Moves the identities this locator recorded onto the volume's current device, as
+    /// [`rebase`] does for one record. Input: the anchor's current device. Output: none.
+    #[cfg(unix)]
+    fn rebase(&mut self, device: u64) {
+        rebase(
+            &mut [
+                &mut self.database,
+                &mut self.generation_identity,
+                &mut self.owner_socket,
+                &mut self.ordinary_socket,
+            ],
+            device,
+        );
+    }
+}
+
+/// Moves recorded identities onto the volume's current device when they all name one
+/// device, as a record of objects on one volume does. A reboot can renumber a volume's
+/// device while every inode stays; the strict checks after this still need the same inode
+/// on the current device. A record naming several devices is kept as it is.
+/// Inputs: the recorded identities and the current device. Output: none.
+#[cfg(unix)]
+fn rebase(recorded: &mut [&mut Identity], device: u64) {
+    let Some(first) = recorded.first().map(|identity| identity.device) else {
+        return;
+    };
+    if recorded.iter().all(|identity| identity.device == first) {
+        for identity in recorded.iter_mut() {
+            identity.device = device;
+        }
+    }
+}
+
 #[cfg(unix)]
 const ENGINE_VERSION_BYTES_MAX: usize = 64;
 
@@ -706,15 +740,7 @@ impl EngineService {
         check_path_length(&anchor.path.join("o00000000/owner.sock"))?;
         let previous = PinnedLocator::read(&anchor)?;
         let engine = Arc::new(Engine::open(&anchor.path.join("engine.db"), config.clone()).await?);
-        Self::start_engine(
-            anchor,
-            engine,
-            ordinary,
-            config,
-            previous.as_ref(),
-            shutdown,
-        )
-        .await
+        Self::start_engine(anchor, engine, ordinary, config, previous, shutdown).await
     }
 
     pub async fn start_with_settings_sources(
@@ -737,7 +763,7 @@ impl EngineService {
             Arc::new(engine),
             ordinary,
             &config,
-            previous.as_ref(),
+            previous,
             shutdown,
         )
         .await
@@ -748,7 +774,7 @@ impl EngineService {
         engine: Arc<Engine>,
         ordinary: &str,
         config: &EffectiveConfig,
-        previous: Option<&PinnedLocator>,
+        previous: Option<PinnedLocator>,
         shutdown: &watch::Receiver<bool>,
     ) -> Result<Self, EngineError> {
         let mut service = Self {
@@ -789,7 +815,7 @@ impl EngineService {
         &mut self,
         _ordinary: &str,
         _config: &EffectiveConfig,
-        _previous: Option<&PinnedLocator>,
+        _previous: Option<PinnedLocator>,
         _shutdown: &watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
         Err(fail("owner_anchor_unavailable"))
@@ -800,7 +826,7 @@ impl EngineService {
         &mut self,
         ordinary: &str,
         config: &EffectiveConfig,
-        previous: Option<&PinnedLocator>,
+        previous: Option<PinnedLocator>,
         shutdown: &watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
         cancelled(shutdown)?;
@@ -818,7 +844,7 @@ impl EngineService {
         self.tasks.spawn(owner.run(stopped));
         cancelled(shutdown)?;
         let previous = self.trusted_previous(previous, database, &stamp.db_instance)?;
-        self.retire_socket(ordinary, previous).await?;
+        self.retire_socket(ordinary, previous.as_ref()).await?;
         let server = Server::bind(
             &self.anchor.path.join(ordinary),
             self.engine.clone(),
@@ -871,7 +897,7 @@ impl EngineService {
             ordinary_socket,
             engine_version: crate::version::VERSION.into(),
         };
-        self.publish(value, previous)?;
+        self.publish(value, previous.as_ref())?;
         self.sweep_generations();
         cancelled(shutdown)?;
         Ok(())
@@ -910,24 +936,23 @@ impl EngineService {
         }
     }
 
-    /// Keeps the locator an earlier run left while it still names this database and its
-    /// owner generation. Start holds the engine lock, so no earlier engine on this database
-    /// is alive: a locator whose pinned database, instance, generation or owner socket no
-    /// longer match, as when a reboot gives the volume another device number, is stale and
-    /// is set aside. A locator replaced since start read it is still refused.
-    /// Inputs: the locator read at start, the database identity and instance.
-    /// Output: the trusted locator or none, or the refusal.
+    /// Keeps the locator an earlier run left while, read on the volume's current device (a
+    /// reboot can renumber it), it still names this database and owner generation. Start
+    /// holds the engine lock, so any other locator is stale and set aside; one replaced since
+    /// start read it is still refused. Inputs: the locator read at start, the database
+    /// identity and instance. Output: the trusted locator or none, or the refusal.
     #[cfg(unix)]
-    fn trusted_previous<'a>(
+    fn trusted_previous(
         &self,
-        previous: Option<&'a PinnedLocator>,
+        previous: Option<PinnedLocator>,
         database: Identity,
         db_instance: &str,
-    ) -> Result<Option<&'a PinnedLocator>, EngineError> {
-        let Some(old) = previous else {
+    ) -> Result<Option<PinnedLocator>, EngineError> {
+        let Some(mut old) = previous else {
             return Ok(None);
         };
         old.verify(&self.anchor)?;
+        old.value.rebase(self.anchor.identity.device);
         let cause = if old.value.database != database || old.value.db_instance != db_instance {
             "owner_locator_database_mismatch".to_owned()
         } else {
