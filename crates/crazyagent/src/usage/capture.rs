@@ -468,7 +468,8 @@ fn stored_progress(db: &Connection, key: &str) -> Result<Progress, EngineError> 
 
 /// Counts what every session record in one agent home gained since the last scan and adds
 /// it to the run's attribution in the hour of `now_ms`; Codex limit windows the records
-/// carry update the account's limits. Every record is read before the store's write lock
+/// carry update the account's limits, from the most recently changed record that has one.
+/// Every record is read before the store's write lock
 /// is taken, and a record whose stored progress moved meanwhile is left to the scan that
 /// moved it, so no file read holds the lock and no line counts twice.
 /// Inputs: the store, the home, its format, the attribution and the time.
@@ -510,7 +511,7 @@ pub fn scan_home(
         .map_err(storage)?;
         add_tokens(&tx, hour_ms, attribution, &session, growth)?;
         added = added.plus(growth);
-        limits = observed.or(limits);
+        limits = limits.or(observed);
     }
     if let (Some(observation), Some(account)) = (limits, &attribution.account) {
         record_observation(&tx, account, &observation, LimitSource::Transcript, now_ms)?;

@@ -888,3 +888,50 @@ fn a_run_past_its_day_is_forgotten_with_its_records_once_its_home_is_gone() {
         "a kept home registered again never counts its records twice"
     );
 }
+
+/// One scan that sees limit windows in two Codex records keeps the reading of the most
+/// recently changed one, not that of the older record read after it.
+#[test]
+fn one_scan_keeps_the_limits_of_the_most_recently_changed_codex_record() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let window = |used: f64| {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {"type": "token_count", "info": null, "rate_limits": {
+                    "primary": {"used_percent": used, "window_minutes": 300, "resets_in_seconds": 600}
+                }}
+            })
+        )
+    };
+    let older = home
+        .path()
+        .join("sessions/2026/10/26/rollout-2026-10-26T03-00-00-old.jsonl");
+    let newer = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-new.jsonl");
+    append(&older, &window(90.0));
+    append(&newer, &window(10.0));
+    for (path, secs) in [(&older, 1_793_000_000), (&newer, 1_793_000_600)] {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+            .unwrap();
+    }
+    let mut who = attribution(RunKind::Research, None);
+    who.account = Some(CredentialRef::new("codex-a").unwrap());
+    who.harness = "codex".into();
+    scan_home(&db, home.path(), Format::Codex, &who, NOW).unwrap();
+    let stored = super::super::limits(&db, who.account.as_ref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.five_hour.map(|window| window.used_percent),
+        Some(10.0),
+        "the newer record's reading is kept"
+    );
+}
