@@ -53,12 +53,20 @@ pub struct TerminalSession {
     _relay: Option<Relay>,
 }
 
-/// An account's key file, removed when the agent session holding it ends.
-pub(super) struct KeyFile(pub(super) PathBuf);
+/// An account's key file and the exact bytes this launch wrote into it. The file is removed
+/// when the agent session holding it ends, and only while it still holds those bytes, so a
+/// refused or torn-down launch never deletes a key file another launch has since written for
+/// a different, still-running agent on the same account home.
+pub(super) struct KeyFile {
+    path: PathBuf,
+    content: Vec<u8>,
+}
 
 impl Drop for KeyFile {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if std::fs::read(&self.path).is_ok_and(|current| current == self.content) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -80,7 +88,9 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
         .key()
         .map(|key| {
             assert!(is_placeholder(key.reveal()));
-            interactive::write_key(request.account.home(), key).map(KeyFile)
+            let content = key.reveal().as_bytes().to_vec();
+            interactive::write_key(request.account.home(), key)
+                .map(|path| KeyFile { path, content })
         })
         .transpose()
 }
@@ -169,7 +179,7 @@ impl TerminalSession {
             installed.as_ref(),
             &Run {
                 session_id: &session_id,
-                key_file: key.as_ref().map(|key| key.0.as_path()),
+                key_file: key.as_ref().map(|key| key.path.as_path()),
                 resume: resume.is_some(),
             },
         )?;
@@ -225,7 +235,7 @@ impl TerminalSession {
                 &command.cwd,
                 since,
                 pane.pid,
-                key.as_ref().map(|key| key.0.as_path()),
+                key.as_ref().map(|key| key.path.as_path()),
             )
             .map(|record| PaneRecord { resumed, ..record }),
             _key: key,

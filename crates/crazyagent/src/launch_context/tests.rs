@@ -223,6 +223,54 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
+/// RV-DS-74: a second keyed launch on an account home whose agent is already running is
+/// refused at the home lock before it writes the key file, so the running agent's relay key
+/// file survives. The lock is taken by `command_with_context` ahead of `write_key_file`; the
+/// refusal must leave the earlier key file exactly as it was.
+#[cfg(unix)]
+#[test]
+fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let work = base.join("work");
+    fs::create_dir(&work).unwrap();
+    let profile = base.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+    };
+    let held = context().install("codex", &home, false).unwrap();
+    let key_path = home.join(".crazyagent-key");
+    fs::write(&key_path, b"running-agent-relay-token").unwrap();
+    let request = LaunchRequest {
+        harness: "codex".into(),
+        executable: std::path::PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: Some(Secret::new("crazyagent-local".to_owned()).unwrap()),
+        },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile),
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let refused = Session::start_with_context(request, context());
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("launch_home_busy")
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), b"running-agent-relay-token");
+    drop(held);
+}
+
 #[test]
 fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
