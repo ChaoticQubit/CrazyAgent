@@ -14,10 +14,10 @@ async function wheel(send, evaluate, at, deltaY, goal) {
   let seen = await evaluate("Fixture.view()");
   for (let turn = 0; turn < TURNS && seen.viewportY !== goal; turn += 1) {
     await send("Input.dispatchMouseEvent", { type: "mouseWheel", x: at.x, y: at.y, deltaX: 0, deltaY });
-    await evaluate("Fixture.frames()");
     seen = await evaluate("Fixture.view()");
   }
-  return seen;
+  await evaluate("Fixture.frames()");
+  return evaluate("Fixture.view()");
 }
 
 async function scrolled(output) {
