@@ -9,7 +9,7 @@ use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 const GIT: &str = "/usr/bin/git";
@@ -67,6 +67,18 @@ const DRAIN_TIME: Duration = Duration::from_secs(2);
 const REMOTES_MAX: usize = 64;
 const DEPTH_DIGITS_MAX: usize = 9;
 const POLL: Duration = Duration::from_millis(20);
+/// The most `ide.git` calls one owner server runs at once, across its projects, and for
+/// one project: each holds an IDE connection for up to its bound, so a hung remote cannot
+/// take the connections every other IDE call needs.
+pub(super) const GIT_CALLS_MAX: usize = 3;
+pub(super) const PROJECT_GIT_CALLS_MAX: usize = 2;
+const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+
+const _: () = assert!(PROJECT_GIT_CALLS_MAX <= GIT_CALLS_MAX);
+const _: () = assert!(
+    super::terminal::TERMINALS_MAX + super::SUBSCRIBERS_MAX + GIT_CALLS_MAX
+        < super::CONNECTIONS_MAX
+);
 
 /// The git network commands the IDE may ask the engine to run for its project folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,28 +132,81 @@ struct Ran {
     cut: bool,
 }
 
+/// The projects of the `ide.git` calls one owner server runs now, one entry per call.
+#[derive(Default)]
+pub(super) struct GitCalls {
+    running: Vec<ProjectId>,
+}
+
+/// One running `ide.git` call's place in [`GitCalls`], given back when dropped, which is
+/// when its git process ended or was killed.
+pub(super) struct GitPlace {
+    calls: Arc<Mutex<GitCalls>>,
+    project: ProjectId,
+}
+
+impl Drop for GitPlace {
+    fn drop(&mut self) {
+        if let Ok(mut calls) = self.calls.lock()
+            && let Some(at) = calls
+                .running
+                .iter()
+                .position(|known| *known == self.project)
+        {
+            calls.running.swap_remove(at);
+        }
+    }
+}
+
+/// Takes a place for one `ide.git` call of a project: at most `PROJECT_GIT_CALLS_MAX` for
+/// one project and `GIT_CALLS_MAX` in all. Inputs: the registry and the project. Output:
+/// the place, or `ide_git_busy`, or `ide_unavailable` for a poisoned registry.
+pub(super) fn place(
+    calls: &Arc<Mutex<GitCalls>>,
+    project: &ProjectId,
+) -> Result<GitPlace, EngineError> {
+    let mut held = calls.lock().map_err(|_| failure("ide_unavailable"))?;
+    let of_project = held
+        .running
+        .iter()
+        .filter(|known| *known == project)
+        .count();
+    if held.running.len() >= GIT_CALLS_MAX || of_project >= PROJECT_GIT_CALLS_MAX {
+        return Err(failure("ide_git_busy"));
+    }
+    held.running.push(project.clone());
+    assert!(held.running.len() <= GIT_CALLS_MAX);
+    Ok(GitPlace {
+        calls: Arc::clone(calls),
+        project: project.clone(),
+    })
+}
+
 /// Answers one `ide.git` call (DEC-098 addendum 13): the IDE's push, pull, fetch or
 /// ls-remote for the project folder, checked by [`plan`] and [`checked_folder`], then run by
-/// [`run`] outside the IDE sandbox with the owner's credentials, on a blocking thread.
-/// Inputs: the engine root, the project, git's arguments and the folder the IDE's git ran
-/// in. Output: the [`GitOutcome`] as JSON, or a plain refusal.
+/// [`run`] outside the IDE sandbox with the owner's credentials, on a blocking thread that
+/// holds the call's place until git ends. Of a pull only the fetch runs here; the IDE
+/// merges or rebases what it fetched in its sandbox. git finds its helpers only on the
+/// [`owner_path`] outside the project folder and the engine data root.
+/// Inputs: the engine root, the project, git's arguments, the folder the IDE's git ran in
+/// and the call's place. Output: the [`GitOutcome`] as JSON, or a plain refusal.
 pub(super) async fn answer(
     root: PathBuf,
     project: ProjectId,
     args: Vec<String>,
     folder: String,
+    place: GitPlace,
 ) -> Result<serde_json::Value, EngineError> {
     tokio::task::spawn_blocking(move || {
+        let _held = place;
         let plan = plan(&args)?;
         let project_folder = crate::ide::workspace::folder(&root, &project)?;
         let folder = checked_folder(Path::new(&folder), &project_folder)?;
-        let outcome = run(
-            &folder,
-            &owner_env(std::env::vars_os()),
-            &plan,
-            &args,
-            GIT_TIME,
-        )?;
+        let env = owner_env(
+            std::env::vars_os(),
+            &[project_folder.as_path(), root.as_path()],
+        );
+        let outcome = run(&folder, &env, &plan, &args, GIT_TIME)?;
         serde_json::to_value(outcome).map_err(|_| failure("ide_git_outcome_unknown"))
     })
     .await
@@ -305,11 +370,13 @@ pub(super) fn checked_folder(asked: &Path, project: &Path) -> Result<PathBuf, En
 
 /// The environment the engine's git runs with for the owner: from the engine's own
 /// variables only the home, path, user, owner key agent socket, temp and XDG config folders,
-/// then no prompt or askpass of any kind, only the https, http, ssh and git transports, and
-/// English messages, which VS Code's git reads. Input: the engine's variables. Output: the
+/// the path kept to [`owner_path`], then no prompt or askpass of any kind, only the https,
+/// http, ssh and git transports, and English messages, which VS Code's git reads. Inputs:
+/// the engine's variables and the folders the IDE or an agent may write. Output: the
 /// pairs, each name once.
 pub(super) fn owner_env(
     source: impl IntoIterator<Item = (OsString, OsString)>,
+    denied: &[&Path],
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     for (name, value) in source {
@@ -317,6 +384,11 @@ pub(super) fn owner_env(
             .iter()
             .any(|kept| name.as_os_str() == OsStr::new(kept));
         if passed && !env.iter().any(|(known, _)| *known == name) {
+            let value = if name == "PATH" {
+                owner_path(&value, denied)
+            } else {
+                value
+            };
             env.push((name, value));
         }
     }
@@ -329,15 +401,42 @@ pub(super) fn owner_env(
     env
 }
 
+/// The folders of a PATH git may run `ssh`, a credential helper or `gpg` from outside the
+/// IDE sandbox: absolute and existing, given by their real path so no link can be swapped
+/// later, and outside every denied folder and the system temp folders, where the IDE or an
+/// agent could plant a program. Inputs: the PATH value and the denied folders. Output: the
+/// kept folders joined as a PATH.
+pub(super) fn owner_path(value: &OsStr, denied: &[&Path]) -> OsString {
+    let denied: Vec<PathBuf> = denied
+        .iter()
+        .copied()
+        .chain(TEMP_FOLDERS.iter().map(Path::new))
+        .map(|folder| crate::sandbox::canonical(folder).unwrap_or_else(|_| folder.to_path_buf()))
+        .collect();
+    let kept: Vec<PathBuf> = std::env::split_paths(value)
+        .filter(|entry| entry.is_absolute())
+        .filter_map(|entry| crate::sandbox::canonical(&entry).ok())
+        .filter(|real| {
+            real.is_dir()
+                && real.to_str().is_some_and(|text| !text.contains(':'))
+                && !denied.iter().any(|folder| real.starts_with(folder))
+        })
+        .collect();
+    let joined = std::env::join_paths(&kept).unwrap_or_default();
+    assert!(kept.is_empty() || !joined.is_empty());
+    joined
+}
+
 /// Runs one checked IDE git command in the project folder outside the IDE sandbox, after
 /// three checks against the configuration git will use: every file it reads lies outside
 /// the project folder or is the folder's own `.git/config` or `.git/config.worktree`, which
 /// the IDE sandbox cannot write; every remote reached is configured there with a URL; and
 /// every URL it fetches from or pushes to, `insteadOf` applied, uses https, http, ssh or
-/// git. git runs with [`HARDENING`] (no hooks, fsmonitor, pager, askpass, submodules,
-/// replace objects or automatic maintenance), the [`owner_env`] environment and its own
-/// process group, which is killed at `limit`. Inputs: the canonical project folder, the
-/// environment, the plan, git's arguments and the time limit. Output: the outcome, or
+/// git. git runs the [`engine_args`], so a pull only fetches, with [`HARDENING`] (no hooks,
+/// fsmonitor, pager, askpass, submodules, replace objects or automatic maintenance), the
+/// [`owner_env`] environment and its own process group, which is killed at `limit`.
+/// Inputs: the canonical project folder, the environment, the plan, git's arguments and
+/// the time limit. Output: the outcome, or
 /// `ide_git_config_refused`, `ide_git_remote_unknown`, `ide_git_transport_refused`,
 /// `ide_git_unavailable` or `ide_git_outcome_unknown`.
 pub(super) fn run(
@@ -362,14 +461,19 @@ pub(super) fn run(
     if known.len() > REMOTES_MAX {
         return Err(failure("ide_git_config_refused"));
     }
+    let default = match plan.target {
+        Target::Default => {
+            let branch = branch(folder, env)?;
+            Some(default_remote(plan.verb, branch.as_deref(), &entries))
+        }
+        Target::Named(_) | Target::All => None,
+    };
     let reached: Vec<String> = match &plan.target {
         Target::Named(name) => vec![name.clone()],
         Target::All => known.iter().map(|name| (*name).to_owned()).collect(),
-        Target::Default => {
-            let branch = branch(folder, env)?;
-            vec![default_remote(plan.verb, branch.as_deref(), &entries)]
-        }
+        Target::Default => default.iter().cloned().collect(),
     };
+    assert!(!reached.is_empty() || plan.target == Target::All);
     for remote in &reached {
         if !known.contains(&remote.as_str()) {
             return Err(failure("ide_git_remote_unknown"));
@@ -379,7 +483,8 @@ pub(super) fn run(
             return Err(failure("ide_git_transport_refused"));
         }
     }
-    let ran = ran(git(folder, env, args), OUTPUT_BYTES_MAX, limit)?;
+    let argv = engine_args(plan, args, default.as_deref());
+    let ran = ran(git(folder, env, &argv), OUTPUT_BYTES_MAX, limit)?;
     let code = ran
         .status
         .ok_or_else(|| failure("ide_git_outcome_unknown"))?;
@@ -388,6 +493,38 @@ pub(super) fn run(
         stdout: text(&ran.stdout, OUTPUT_BYTES_MAX),
         stderr: text(&ran.stderr, OUTPUT_BYTES_MAX),
     })
+}
+
+/// The arguments the engine's git runs for one checked command. A pull runs only its
+/// network step, a fetch of the same remote and branch keeping `--tags` and
+/// `--unshallow`, since its merge or rebase writes the working tree and so runs in the IDE
+/// sandbox. A command that names no remote names the one checked, so git cannot pick
+/// another. Inputs: the plan, the IDE's arguments and the checked default remote, present
+/// exactly for `Target::Default`. Output: git's arguments after the hardening.
+pub(super) fn engine_args(plan: &Plan, args: &[String], default: Option<&str>) -> Vec<String> {
+    assert_eq!(default.is_some(), plan.target == Target::Default);
+    assert!(
+        args.first()
+            .is_some_and(|first| first == verb_word(plan.verb))
+    );
+    let rest = &args[1..];
+    let verb = match plan.verb {
+        Verb::Pull => Verb::Fetch,
+        verb => verb,
+    };
+    let mut argv = vec![verb_word(verb).to_owned()];
+    argv.extend(
+        rest.iter()
+            .filter(|arg| {
+                plan.verb != Verb::Pull
+                    || !arg.starts_with('-')
+                    || matches!(arg.as_str(), "--tags" | "--unshallow")
+            })
+            .cloned(),
+    );
+    argv.extend(default.map(str::to_owned));
+    assert!(argv.len() <= args.len() + 1);
+    argv
 }
 
 /// The first argument of a verb. Input: the verb. Output: its word.

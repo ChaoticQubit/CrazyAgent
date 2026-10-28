@@ -1,12 +1,100 @@
+import { execFile, spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
 import { GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
 
 const ANSWER_GRACE_MS = 5_000;
+const SETTING_BYTES_MAX = 4096;
+const REBASES = new Set(["true", "yes", "on", "1", "interactive", "i"]);
+const REBASE_MERGES = new Set(["merges", "m"]);
+const FALSE = new Set(["false", "no", "off", "0"]);
+const TRUE = new Set(["true", "yes", "on", "1"]);
 
 /** Where the forwarder prints: the shape of `process.stdout` and `process.stderr`. */
 export interface Printer {
   write(text: string): unknown;
+}
+
+/**
+ * Runs one git network command as git would, through the engine: the engine runs the
+ * network step, and of a pull it only fetches, so once that fetch succeeded the merge or
+ * rebase of what it fetched runs here, in the IDE sandbox, where the sandbox's write
+ * denies apply.
+ * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
+ * the two streams. Output: the exit code.
+ */
+export async function forward(
+  env: Record<string, string | undefined>,
+  args: string[],
+  folder: string,
+  stdout: Printer,
+  stderr: Printer,
+): Promise<number> {
+  const code = await ask(env, args, folder, stdout, stderr);
+  if (args[0] !== "pull" || code !== 0) return code;
+  return local(await pullStep(args, folder), folder, stdout, stderr);
+}
+
+/**
+ * The local step of a pull after the engine fetched, as git's own pull chooses it: with
+ * `-r`, or the branch's `rebase` or else `pull.rebase` setting on, a rebase onto what was
+ * fetched (`merges` keeps merges); otherwise a merge of it, fast-forward as `pull.ff` says
+ * and only fast-forward when neither setting is set. `--autostash` is kept.
+ * Inputs: git's pull arguments and the folder. Output: git's arguments for the step.
+ */
+export async function pullStep(args: string[], folder: string): Promise<string[]> {
+  const autostash = args.includes("--autostash") ? ["--autostash"] : [];
+  const branch = await setting(folder, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  const ofBranch = branch === undefined ? undefined : await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
+  const rebase = (ofBranch ?? (await setting(folder, ["config", "--get", "pull.rebase"])))?.toLowerCase();
+  if (args.includes("-r") || (rebase !== undefined && REBASES.has(rebase))) {
+    return ["rebase", ...autostash, "FETCH_HEAD"];
+  }
+  if (rebase !== undefined && REBASE_MERGES.has(rebase)) {
+    return ["rebase", "--rebase-merges", ...autostash, "FETCH_HEAD"];
+  }
+  const ff = (await setting(folder, ["config", "--get", "pull.ff"]))?.toLowerCase();
+  const mode =
+    ff === "only"
+      ? ["--ff-only"]
+      : ff !== undefined && FALSE.has(ff)
+        ? ["--no-ff"]
+        : ff !== undefined && TRUE.has(ff)
+          ? ["--ff"]
+          : rebase === undefined
+            ? ["--ff-only"]
+            : [];
+  return ["merge", ...mode, ...autostash, "FETCH_HEAD"];
+}
+
+/**
+ * Reads one line git prints for the folder, such as a setting. Inputs: the folder and
+ * git's arguments. Output: the trimmed line, or undefined when git exits non-zero.
+ */
+function setting(folder: string, args: string[]): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd: folder, maxBuffer: SETTING_BYTES_MAX }, (error, stdout) => {
+      resolve(error ? undefined : stdout.trim());
+    });
+  });
+}
+
+/**
+ * Runs git in the folder inside the IDE sandbox, printing on the same streams. Inputs:
+ * git's arguments, the folder and the two streams. Output: git's exit code, or 128 with a
+ * `fatal:` line when it cannot start or was ended by a signal.
+ */
+function local(args: string[], folder: string, stdout: Printer, stderr: Printer): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, { cwd: folder, stdio: ["ignore", "pipe", "pipe"] });
+    child.stdout.setEncoding("utf8").on("data", (text: string) => stdout.write(text));
+    child.stderr.setEncoding("utf8").on("data", (text: string) => stderr.write(text));
+    child.on("error", () => {
+      stderr.write("fatal: git did not start for the local step of this pull\n");
+      resolve(128);
+    });
+    child.on("close", (code) => resolve(code ?? 128));
+  });
 }
 
 /**
@@ -17,7 +105,7 @@ export interface Printer {
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
-export function forward(
+function ask(
   env: Record<string, string | undefined>,
   args: string[],
   folder: string,

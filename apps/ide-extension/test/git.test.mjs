@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,13 +68,85 @@ test("a push goes to the engine as ide.git and prints the engine's answer as git
     const stderr = "To git://127.0.0.1/remote.git\n ! [rejected]        main -> main (fetch first)\n";
     connection.end(encodeFrame({ kind: "ok", data: { code: 1, stdout: "", stderr } }));
     assert.deepEqual(await ran, { code: 1, stdout: "", stderr });
+  });
+});
 
-    const pulled = once(server, "connection");
-    const pulling = forward(["pull", "--tags", "origin", "main"], project, env);
-    const [again] = await pulled;
-    assert.deepEqual((await received(again)).call.args.args, ["pull", "--tags", "origin", "main"]);
-    again.end(encodeFrame({ kind: "ok", data: { code: 0, stdout: "Already up to date.\n", stderr: "" } }));
-    assert.deepEqual(await pulling, { code: 0, stdout: "Already up to date.\n", stderr: "" });
+const BARE_GIT = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+
+/** Runs git for the test's own setup with no owner configuration. Output: its trimmed output. */
+function git(cwd, ...args) {
+  return execFileSync("git", args, { cwd, env: { PATH: process.env.PATH, ...BARE_GIT } }).toString().trim();
+}
+
+/** Commits one file in a repository. Inputs: the folder, file and text. Output: the commit. */
+function commit(cwd, file, text) {
+  writeFileSync(join(cwd, file), text);
+  git(cwd, "add", file);
+  git(cwd, "commit", "-q", "-m", `Write ${file}`);
+  return git(cwd, "rev-parse", "HEAD");
+}
+
+test("a pull merges or rebases in its own folder only what the engine fetched", { timeout: 30_000 }, async () => {
+  await withRelay(async (server, env, project) => {
+    const upstream = folder();
+    try {
+      for (const repository of [project, upstream]) {
+        git(repository, "init", "-q", "-b", "main");
+        git(repository, "config", "user.name", "Owner");
+        git(repository, "config", "user.email", "owner@example.invalid");
+        git(repository, "config", "commit.gpgsign", "false");
+      }
+      commit(upstream, "README.md", "# Seed shop\n");
+      git(project, "pull", "-q", upstream, "main");
+      const pull = async (args, code = 0) => {
+        const called = once(server, "connection");
+        const ran = forward(args, project, { ...env, ...BARE_GIT });
+        const [connection] = await called;
+        assert.deepEqual((await received(connection)).call.args.args, args);
+        connection.end(encodeFrame({ kind: "ok", data: { code, stdout: "", stderr: "From upstream\n" } }));
+        return ran;
+      };
+
+      const theirs = commit(upstream, "beds.md", "Six beds.\n");
+      git(project, "fetch", "-q", upstream, "main");
+      const forwarded = await pull(["pull", "--tags", "origin", "main"]);
+      assert.equal(forwarded.code, 0, forwarded.stderr);
+      assert.match(forwarded.stderr, /^From upstream\n/);
+      assert.equal(git(project, "rev-parse", "HEAD"), theirs);
+
+      const mine = commit(project, "notes.md", "Planting notes.\n");
+      const next = commit(upstream, "seeds.md", "Tomatoes.\n");
+      git(project, "fetch", "-q", upstream, "main");
+      const diverged = await pull(["pull", "origin", "main"]);
+      assert.notEqual(diverged.code, 0);
+      assert.equal(git(project, "rev-parse", "HEAD"), mine, "divergent branches are not merged unasked");
+
+      const failed = await pull(["pull", "-r", "origin", "main"], 1);
+      assert.equal(failed.code, 1);
+      assert.equal(git(project, "rev-parse", "HEAD"), mine, "a failed fetch runs no local step");
+
+      const rebased = await pull(["pull", "--autostash", "-r", "origin", "main"]);
+      assert.equal(rebased.code, 0, rebased.stderr);
+      assert.equal(git(project, "rev-parse", "HEAD~1"), next);
+      assert.equal(git(project, "log", "-1", "--format=%s"), "Write notes.md");
+
+      const later = commit(upstream, "paths.md", "Gravel.\n");
+      git(project, "fetch", "-q", upstream, "main");
+      git(project, "config", "pull.rebase", "false");
+      const merged = await pull(["pull", "origin", "main"]);
+      assert.equal(merged.code, 0, merged.stderr);
+      assert.equal(git(project, "rev-parse", "HEAD^2"), later);
+
+      const ahead = commit(upstream, "water.md", "Daily.\n");
+      git(project, "fetch", "-q", upstream, "main");
+      git(project, "config", "pull.rebase", "true");
+      const configured = await pull(["pull", "origin", "main"]);
+      assert.equal(configured.code, 0, configured.stderr);
+      assert.equal(git(project, "rev-list", "--merges", "--count", `${ahead}..HEAD`), "0");
+      assert.equal(git(project, "merge-base", "--is-ancestor", ahead, "HEAD"), "");
+    } finally {
+      rmSync(upstream, { recursive: true, force: true });
+    }
   });
 });
 

@@ -434,13 +434,16 @@ pub(crate) struct IdeHost<'a> {
 /// `GRANTS_MAX` in all. Each holds its token, its file, whether the extension took its
 /// session yet and the sender of its project's events; dropping a grant kills its token
 /// and ends its subscriptions. The reveals the TUI sent wait here for their IDE to
-/// acknowledge them, and beside them run the Sandboxed IDE terminals of the owner server.
+/// acknowledge them, and beside them run the Sandboxed IDE terminals and the `ide.git`
+/// calls of the owner server.
 #[derive(Default)]
 pub(crate) struct Grants {
     live: Mutex<Vec<Grant>>,
     reveals: reveal::Reveals,
     #[cfg(unix)]
     terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
+    #[cfg(unix)]
+    git_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
 }
 
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
@@ -1061,9 +1064,10 @@ async fn change_call(
 }
 
 /// Runs one git network command of the IDE in the project folder outside the IDE sandbox
-/// ([`remote_git::answer`]); where the engine has no IDE sandbox it is unavailable.
+/// ([`remote_git::answer`]) once it has a place among the running ones
+/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable.
 /// Inputs: the owner runtime, the project, git's arguments and the folder git ran in.
-/// Output: the reply data.
+/// Output: the reply data, or `ide_git_busy` when the places are taken.
 async fn git_call(
     runtime: &OwnerRuntimeHandle,
     project: &ProjectId,
@@ -1072,7 +1076,9 @@ async fn git_call(
 ) -> Result<serde_json::Value, EngineError> {
     #[cfg(unix)]
     {
-        remote_git::answer(runtime.ide()?.root, project.clone(), args, folder).await
+        let root = runtime.ide()?.root;
+        let place = remote_git::place(&runtime.ide_grants().git_calls, project)?;
+        remote_git::answer(root, project.clone(), args, folder, place).await
     }
     #[cfg(not(unix))]
     {
