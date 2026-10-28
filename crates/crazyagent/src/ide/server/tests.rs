@@ -1016,6 +1016,105 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     servers.stop_all().await;
 }
 
+/// The git ceiling one built server command hands the IDE server. Inputs: the register,
+/// the project and its folder. Output: the value.
+fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsString {
+    let folder = servers.prepare(project).unwrap();
+    let (token_path, _) = token::issue(&folder).unwrap();
+    let info = ServerInfo {
+        url: "http://127.0.0.1:47943/".to_owned(),
+        port: 47_943,
+        server_port: 47_941,
+        token_path,
+        capability_path: folder.join(CAPABILITY),
+        workspace: folder.join(WORKSPACE),
+    };
+    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let command = command(
+        project,
+        &cached_build(),
+        &folder,
+        root,
+        &info,
+        &servers.socket,
+        writer,
+        false,
+    )
+    .unwrap();
+    let ceiling = command
+        .get_envs()
+        .find(|(name, _)| *name == crate::ide::git::CEILING_VARIABLE)
+        .and_then(|(_, value)| value)
+        .expect("the server's environment holds the git ceiling");
+    ceiling.to_owned()
+}
+
+/// INT1-R3-1: the server's git ceiling follows the engine's records. A project that gained
+/// a `.crazyagent` folder gets the new layout's agents root alone while the engine records
+/// no agent of it in `<project>/worktrees`, another project's record there counting for
+/// nothing; once the engine records one of its agents there, the older root is added.
+#[test]
+fn the_server_ceiling_keeps_the_older_agents_root_while_the_engine_records_an_agent_there() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("gained");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    fs::create_dir_all(root.join(".crazyagent").join("worktrees")).unwrap();
+    let db = crate::landing::open(data.path()).unwrap();
+    crate::team::initialize(&db).unwrap();
+    let record = |owner: &str, worktree: &Path| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'stopped',1,1)",
+            [owner],
+        )
+        .unwrap();
+        let agent = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                agent,
+                owner,
+                root.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                root.join(".git")
+                    .join("worktrees")
+                    .join("agent")
+                    .to_str()
+                    .unwrap()
+            ],
+        )
+        .unwrap();
+    };
+    record("elsewhere", &root.join("worktrees").join("agent-1"));
+    record(
+        project.as_str(),
+        &root.join(".crazyagent").join("worktrees").join("agent-2"),
+    );
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, false).unwrap()
+    );
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        root.join(".crazyagent").join("worktrees").into_os_string()
+    );
+
+    record(project.as_str(), &root.join("worktrees").join("agent-3"));
+    let both = command_ceiling(&servers, &project, &root);
+    assert_eq!(both, crate::ide::git::ceiling(&root, true).unwrap());
+    assert_eq!(
+        both.to_str().unwrap(),
+        format!(
+            "{}:{}",
+            root.join(".crazyagent").join("worktrees").display(),
+            root.join("worktrees").display()
+        )
+    );
+}
+
 #[test]
 fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let checkout = scratch();
@@ -1036,6 +1135,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
     let command = command(
+        &project,
         &build,
         &folder,
         checkout.path(),
@@ -1100,7 +1200,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         std::ffi::OsStr::new(env::CAPABILITY_VARIABLE),
         Some(info.capability_path.as_os_str())
     )));
-    let ceiling = crate::ide::git::ceiling(checkout.path()).unwrap();
+    let ceiling = crate::ide::git::ceiling(checkout.path(), false).unwrap();
     assert!(envs.contains(&(
         std::ffi::OsStr::new(crate::ide::git::CEILING_VARIABLE),
         Some(ceiling.as_os_str())

@@ -527,6 +527,21 @@ fn ide_git_output(
     dir: &Path,
     args: &[&str],
 ) -> std::process::Output {
+    ide_git_recorded(profile, shim, home, root, false, dir, args)
+}
+
+/// [`ide_git_output`] with the ceiling the engine builds when it records an agent in the
+/// project's older agents root or not ([`crate::ide::git::ceiling`]). Inputs: as
+/// [`ide_git`], with that answer. Output: git's output.
+fn ide_git_recorded(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    root: &Path,
+    older_agents: bool,
+    dir: &Path,
+    args: &[&str],
+) -> std::process::Output {
     let source = [
         (
             std::ffi::OsString::from("PATH"),
@@ -542,7 +557,7 @@ fn ide_git_output(
         &home.join("capability"),
         &home.join("owner.sock"),
         &home.join("locked-settings.json"),
-        &crate::ide::git::ceiling(root).unwrap(),
+        &crate::ide::git::ceiling(root, older_agents).unwrap(),
     );
     let mut command = super::command(profile, shim);
     command
@@ -997,6 +1012,99 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     assert!(
         !inside && said.contains("not a git repository"),
         "the older layout's agents root stops the IDE's git: {said}"
+    );
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// INT1-R3-1 under the installed IDE profile: an older-layout project keeps an agent's
+/// linked worktree at `<project>/worktrees/agent-3` and then gains a `.crazyagent` folder by
+/// hand. The profile still hides the agent's `.git`, so with the new layout's root alone git
+/// in the agent's folder walks up and acts on the project; with the older root the engine
+/// adds while it records the agent there, the IDE's git finds no repository, and the
+/// Project section keeps its own.
+#[test]
+fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("older");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root, &root.join("worktrees")] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let agent = root.join("worktrees").join("agent-3");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-3",
+            agent.to_str().unwrap(),
+        ],
+    );
+    folder(&root.join(".crazyagent"));
+    assert_eq!(
+        crate::projects_home::state_folder(&root),
+        root.join(".crazyagent"),
+        "the project now reads as the newer layout"
+    );
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let top = |older_agents: bool, dir: &Path| {
+        ide_git_recorded(
+            &profile,
+            &shim,
+            &home,
+            &root,
+            older_agents,
+            dir,
+            &["rev-parse", "--show-toplevel"],
+        )
+    };
+
+    let reached = top(false, &agent);
+    assert!(reached.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&reached.stdout).trim(),
+        root.to_str().unwrap(),
+        "with the new layout's root alone the IDE's git in the agent's folder acts on the project"
+    );
+    let stopped = top(true, &agent);
+    let said = String::from_utf8_lossy(&stopped.stderr);
+    assert!(
+        !stopped.status.success() && said.contains("not a git repository"),
+        "the older root stops the IDE's git in the agent's folder: {said}"
+    );
+    let own = top(true, &root);
+    assert!(own.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&own.stdout).trim(),
+        root.to_str().unwrap()
     );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }

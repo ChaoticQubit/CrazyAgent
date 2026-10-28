@@ -146,6 +146,34 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
         .map_err(unavailable)
 }
 
+/// Whether the engine records an agent worktree of the project inside the older agents root
+/// `<folder>/worktrees`, where agents made before the project gained a `.crazyagent` folder
+/// stay until they are cleaned up (INT1-R3-1). Every recorded worktree counts, live or kept.
+/// Inputs: the engine root, the project and its canonical folder. Output: the answer, or
+/// `ide_project_folder_invalid` for a folder that is not absolute text, or
+/// `ide_workspace_unavailable` when the records cannot be read.
+pub fn older_agents(root: &Path, project: &ProjectId, folder: &Path) -> Result<bool, EngineError> {
+    if !folder.is_absolute() {
+        return Err(failure("ide_project_folder_invalid"));
+    }
+    let mut prefix = folder
+        .join("worktrees")
+        .into_os_string()
+        .into_string()
+        .map_err(|_| failure("ide_project_folder_invalid"))?;
+    prefix.push('/');
+    assert!(prefix.starts_with('/') && prefix.ends_with("/worktrees/"));
+    let db = open(root)?;
+    crate::team::initialize(&db).map_err(unavailable)?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_worktrees
+                       WHERE project=?1 AND substr(worktree,1,length(?2))=?2)",
+        params![project.as_str(), prefix],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Reads the project's stored folder. Inputs: the database and project. Output: the
 /// absolute folder, or `ide_project_unknown` or `ide_project_folder_invalid`.
 fn project_folder(db: &Connection, project: &ProjectId) -> Result<PathBuf, EngineError> {

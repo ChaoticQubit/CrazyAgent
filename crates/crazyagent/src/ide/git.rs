@@ -66,20 +66,34 @@ pub const CEILING_VARIABLE: &str = "GIT_CEILING_DIRECTORIES";
 /// The [`CEILING_VARIABLE`] value for one project: the agents root its layout uses
 /// (INT1-R2-1), `<root>/.crazyagent/worktrees` when the project keeps its state in
 /// `.crazyagent` and `<root>/worktrees` otherwise, as [`crate::projects_home::state_folder`]
-/// decides for the agents' exclude line. Git never searches from it upwards; the project
-/// folder and the owner's own folders, a `.crazyagent` project's top-level `worktrees` among
-/// them, keep their repository. Input: the canonical project folder. Output: the value, or
+/// decides for the agents' exclude line. When the engine still records an agent of the
+/// project in `<root>/worktrees` after the project gained a `.crazyagent` folder, that older
+/// root follows the layout's (INT1-R3-1). Git never searches from a listed root upwards; the
+/// project folder and the owner's own folders, a `.crazyagent` project's top-level
+/// `worktrees` among them while no agent is recorded there, keep their repository. Inputs:
+/// the canonical project folder and whether the engine records an agent in its older
+/// agents root ([`super::workspace::older_agents`]). Output: the value, or
 /// `ide_project_folder_invalid` for a folder that is not absolute or holds a `:`, which git
 /// reads as a list separator.
-pub fn ceiling(root: &Path) -> Result<OsString, EngineError> {
+pub fn ceiling(root: &Path, older_agents: bool) -> Result<OsString, EngineError> {
     if !root.is_absolute() || root.as_os_str().as_encoded_bytes().contains(&b':') {
         return Err(failure("ide_project_folder_invalid"));
     }
-    let value = crate::projects_home::state_folder(root)
-        .join("worktrees")
-        .into_os_string();
-    assert!(Path::new(&value).starts_with(root));
-    assert!(!value.as_encoded_bytes().contains(&b':'));
+    let layout = crate::projects_home::state_folder(root).join("worktrees");
+    let older = root.join("worktrees");
+    let both = older_agents && older != layout;
+    let mut value = layout.clone().into_os_string();
+    if both {
+        value.push(":");
+        value.push(&older);
+    }
+    assert!(layout.starts_with(root) && older.starts_with(root));
+    let separators = value
+        .as_encoded_bytes()
+        .iter()
+        .filter(|byte| **byte == b':')
+        .count();
+    assert_eq!(separators, usize::from(both));
     Ok(value)
 }
 
