@@ -4,6 +4,8 @@ import { bundle, withPage } from "./browser.mjs";
 
 const fixture = await bundle(new URL("./fixtures/terminal-wheel.mjs", import.meta.url).pathname);
 const BURST = 400;
+const FRAME_MS_MAX = 100;
+const PAGE_MS_MAX = 15000;
 const INPUT_BYTES_MAX = 4096;
 const FULL_SCREEN = "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[H\x1b[2Jfull screen";
 const WHEEL_DOWN = /\x1b\[<65;\d+;\d+M/g;
@@ -35,7 +37,7 @@ async function fullScreen(check, keys = true) {
   });
 }
 
-test("a wheel burst on a full-screen agent while the engine is busy is sent in a few batches, never one send per event", async () => {
+test("a wheel burst on a full-screen agent while the engine is busy is sent in a few batches, never one send per event", { timeout: BURST * FRAME_MS_MAX + PAGE_MS_MAX }, async () => {
   await fullScreen(async ({ evaluate, send, at }) => {
     await evaluate("Fixture.holdSends(true)");
     await wheel(send, at, BURST);
