@@ -27,6 +27,7 @@ const CHROME_ROWS: usize = 4 + 1;
 const DETAIL_ROWS: usize = 3;
 const MODAL_WIDTH: u16 = 66;
 const COMPOSER_WIDTH: usize = 72;
+const FOLDER_CHARS_MAX: usize = 1024;
 const SUBTITLE: &str =
     "Long-term memory every project can use. Nothing is saved without your click.";
 const EMPTY: &str = "When agents find something worth keeping, the project shows it under \"Save to memory\". One click saves it here, and every project can use it.";
@@ -41,6 +42,10 @@ pub fn memory_plain(code: &str) -> &'static str {
         "memory_duplicate" => "This memory is already saved.",
         "memory_full" => "Memory is full. Delete an old memory first.",
         "memory_project_missing" => "That project no longer exists.",
+        "memory_import_folder_invalid" => {
+            "Choose a folder that exists. A link to a folder can't be imported."
+        }
+        "memory_import_invalid" => "A file in this folder can't be imported.",
         "memory_missing" | "knowledge_entry_missing" => "This memory no longer exists.",
         "memory_already_global" => "This memory is already saved for every project.",
         "knowledge_source_revoked" => "Its source was removed, so it can't be saved.",
@@ -67,9 +72,10 @@ pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
         (MemoryOrigin::Promoted { project_id, .. }, _)
         | (_, MemoryScope::Project { project_id }) => project_name(project_id, ctx),
-        (MemoryOrigin::Written | MemoryOrigin::Selected { .. }, MemoryScope::Global) => {
-            "You".into()
-        }
+        (
+            MemoryOrigin::Written | MemoryOrigin::Selected { .. } | MemoryOrigin::Imported { .. },
+            MemoryScope::Global,
+        ) => "You".into(),
     }
 }
 
@@ -77,6 +83,11 @@ pub fn source(memory: &SavedMemory, ctx: &Ctx) -> String {
 /// Inputs: the memory and context. Output: "Saved by you for every project." and so on.
 pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
     match (&memory.origin, &memory.scope) {
+        (MemoryOrigin::Imported { file }, MemoryScope::Project { project_id }) => format!(
+            "Imported from {} for {} only.",
+            printable(file.clone()),
+            project_name(project_id, ctx)
+        ),
         (_, MemoryScope::Project { project_id }) => {
             format!("Saved for {} only.", project_name(project_id, ctx))
         }
@@ -86,9 +97,10 @@ pub fn saved_line(memory: &SavedMemory, ctx: &Ctx) -> String {
                 project_name(project_id, ctx)
             )
         }
-        (MemoryOrigin::Written | MemoryOrigin::Selected { .. }, MemoryScope::Global) => {
-            "Saved by you for every project.".into()
-        }
+        (
+            MemoryOrigin::Written | MemoryOrigin::Selected { .. } | MemoryOrigin::Imported { .. },
+            MemoryScope::Global,
+        ) => "Saved by you for every project.".into(),
     }
 }
 
@@ -111,9 +123,20 @@ pub fn scopes(ctx: &Ctx) -> Vec<MemoryScope> {
 enum Mode {
     List,
     View,
-    Delete { delete_focused: bool },
-    Add { field: Box<TextField>, scope: usize },
-    Suggestion { save_focused: bool },
+    Delete {
+        delete_focused: bool,
+    },
+    Add {
+        field: Box<TextField>,
+        scope: usize,
+    },
+    Import {
+        field: Box<TextField>,
+        project: usize,
+    },
+    Suggestion {
+        save_focused: bool,
+    },
 }
 
 enum Picked<'a> {
@@ -133,6 +156,7 @@ pub struct Memory {
     deleting: bool,
     suggesting: bool,
     adding: bool,
+    importing: bool,
     deciding: Option<(Suggestion, bool)>,
     scoped: Vec<MemoryScope>,
     selected: usize,
@@ -160,6 +184,7 @@ impl Memory {
             deleting: false,
             suggesting: false,
             adding: false,
+            importing: false,
             deciding: None,
             scoped: Vec::new(),
             selected: 0,
@@ -323,6 +348,109 @@ impl Memory {
             }
         }
         Flow::Handled
+    }
+
+    fn project_choices(ctx: &Ctx) -> Vec<(ProjectId, String)> {
+        ctx.store
+            .projects
+            .ready()
+            .into_iter()
+            .flatten()
+            .map(|card| (card.id.clone(), card.name.clone()))
+            .collect()
+    }
+
+    fn open_importer(&mut self, ctx: &mut Ctx) {
+        if Self::project_choices(ctx).is_empty() {
+            ctx.say(Message::error(
+                "Add a project first.",
+                "Imported memories belong to one project.",
+            ));
+            return;
+        }
+        self.mode = Mode::Import {
+            field: Box::new(TextField::new("Folder", FOLDER_CHARS_MAX)),
+            project: 0,
+        };
+    }
+
+    fn import_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Mode::Import { field, project } = &mut self.mode else {
+            return Flow::Ignored;
+        };
+        let choices = Self::project_choices(ctx);
+        if choices.is_empty() {
+            self.mode = Mode::List;
+            return Flow::Handled;
+        }
+        *project = (*project).min(choices.len() - 1);
+        match key {
+            Key::Esc => self.mode = Mode::List,
+            Key::Tab => *project = (*project + 1) % choices.len(),
+            Key::BackTab => *project = (*project + choices.len() - 1) % choices.len(),
+            Key::Enter if self.importing => {}
+            Key::Enter => {
+                let typed = field.value().trim();
+                let folder = match (typed.strip_prefix("~/"), ctx.home.as_deref()) {
+                    (Some(rest), Some(home)) => format!("{home}/{rest}"),
+                    _ => typed.to_owned(),
+                };
+                if !folder.starts_with('/') {
+                    field.error = Some(
+                        "Use the full path of the folder, such as ~/.claude/projects/my-app/memory."
+                            .into(),
+                    );
+                    return Flow::Handled;
+                }
+                field.error = None;
+                self.importing = true;
+                let generation = ctx.next_generation();
+                send(
+                    ctx,
+                    SettingsJob::ImportMemory {
+                        project: choices[*project].0.clone(),
+                        folder,
+                        generation,
+                    },
+                );
+            }
+            other => {
+                field.key(other);
+            }
+        }
+        Flow::Handled
+    }
+
+    fn importer(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
+        let Mode::Import { field, project } = &self.mode else {
+            return (Vec::new(), None);
+        };
+        let theme = &ctx.theme;
+        let choices = Self::project_choices(ctx);
+        let chosen = choices
+            .get((*project).min(choices.len().saturating_sub(1)))
+            .map_or("No project", |choice| choice.1.as_str());
+        let mut lines = vec![
+            styled("Import memory", Role::Accent, theme),
+            styled(
+                "Each markdown file in the folder becomes one memory of the chosen project. MEMORY.md, links and other files are left out.",
+                Role::Muted,
+                theme,
+            ),
+            Line::default(),
+        ];
+        let top = lines.len() as u16;
+        let (field_lines, at) = field.lines(limit.min(COMPOSER_WIDTH), true, theme, ctx.glyphs);
+        lines.extend(field_lines);
+        lines.push(Line::default());
+        lines.push(join([
+            styled("For  ", Role::Heading, theme),
+            Line::raw(format!("{} {chosen} {}", ctx.glyphs.left, ctx.glyphs.right)),
+        ]));
+        if self.importing {
+            lines.push(ctx.loading("Importing"));
+        }
+        (lines, at.map(|at| Position::new(at.x, at.y + top)))
     }
 
     fn decide(&mut self, keep: bool, ctx: &mut Ctx) {
@@ -497,6 +625,9 @@ impl Memory {
         let glyphs = ctx.glyphs;
         if matches!(self.mode, Mode::Add { .. }) {
             return self.composer(limit, ctx);
+        }
+        if matches!(self.mode, Mode::Import { .. }) {
+            return self.importer(limit, ctx);
         }
         match &self.load {
             Load::Failed(code) => {
@@ -743,6 +874,13 @@ impl Screen for Memory {
                 hint("Esc", "Cancel"),
             ];
         }
+        if matches!(self.mode, Mode::Import { .. }) {
+            return vec![
+                hint("Enter", "Import"),
+                hint("Tab", "Projects"),
+                hint("Esc", "Cancel"),
+            ];
+        }
         if !matches!(self.load, Load::Ready(())) {
             return vec![sections_hint(ctx.glyphs), hint("Esc", "Home")];
         }
@@ -753,6 +891,7 @@ impl Screen for Memory {
             None => Vec::new(),
         };
         hints.push(hint("a", "Add"));
+        hints.push(hint("i", "Import"));
         if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
         }
@@ -762,13 +901,14 @@ impl Screen for Memory {
     }
 
     fn typing(&self) -> bool {
-        self.filtering || matches!(self.mode, Mode::Add { .. })
+        self.filtering || matches!(self.mode, Mode::Add { .. } | Mode::Import { .. })
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),
             Mode::Add { .. } => return self.add_key(key, ctx),
+            Mode::Import { .. } => return self.import_key(key, ctx),
             Mode::Suggestion { .. } => return self.suggestion_key(key, ctx),
             Mode::View => {
                 match key {
@@ -797,6 +937,7 @@ impl Screen for Memory {
         match key {
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char('a') if ready && !self.adding => self.open_composer(),
+            Key::Char('i') if ready && !self.importing => self.open_importer(ctx),
             Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
                 self.filtering = true
             }
@@ -875,6 +1016,23 @@ impl Screen for Memory {
                     )),
                 }
             }
+            Some(SettingsEvent::MemoryImported(result)) if self.importing => {
+                self.importing = false;
+                match result {
+                    Ok(report) => {
+                        self.mode = Mode::List;
+                        ctx.say(Message::success(
+                            &format!("Imported {}, skipped {}.", report.imported, report.skipped),
+                            "",
+                        ));
+                    }
+                    Err(code) => ctx.say(Message::error(
+                        "Could not import memories.",
+                        memory_plain(code),
+                    )),
+                }
+                self.reload(ctx);
+            }
             Some(SettingsEvent::Suggestions(result)) if self.suggesting => {
                 self.suggesting = false;
                 match result {
@@ -932,7 +1090,7 @@ impl Screen for Memory {
         let theme = &ctx.theme;
         let room = usize::from(MODAL_WIDTH) - 4;
         match self.mode {
-            Mode::List | Mode::Add { .. } | Mode::Suggestion { .. } => None,
+            Mode::List | Mode::Add { .. } | Mode::Import { .. } | Mode::Suggestion { .. } => None,
             Mode::View => {
                 let mut body: Vec<Line<'static>> = wrap(&sanitize(&memory.text), room)
                     .into_iter()
@@ -1005,7 +1163,12 @@ impl Screen for Memory {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.waiting || self.deleting || self.adding || self.suggesting || self.deciding.is_some()
+        self.waiting
+            || self.deleting
+            || self.adding
+            || self.importing
+            || self.suggesting
+            || self.deciding.is_some()
     }
 
     fn place(&self) -> Option<Place> {

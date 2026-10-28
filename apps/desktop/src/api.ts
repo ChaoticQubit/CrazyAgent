@@ -840,7 +840,7 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
 
 /** What the native folder chooser is for: a skill folder, an existing project folder to add, or
  * the folder that holds the owner's projects. Each shows its own fixed prompt. */
-export type FolderPurpose = "skill" | "project" | "projects_home";
+export type FolderPurpose = "skill" | "project" | "projects_home" | "memory";
 
 /** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
  * chosen folder's full path, or null when the owner closed the chooser. */
@@ -869,6 +869,25 @@ export function savedMemories(project: string | null, search: string, before: nu
  * and the text. Output: ok once saved. */
 export function addMemory(project: string | null, text: string): Promise<Result<void>> {
   return change("desktop_add_memory", { project, text, generation: nextGeneration() });
+}
+
+/** How an import of a memory folder ended: memories saved and markdown files not saved. */
+export interface MemoryImportCounts {
+  imported: number;
+  skipped: number;
+}
+
+/** Imports the markdown memory files of a folder the owner chose into one project's memory,
+ * one memory per file. Inputs: the project id and the folder's full path. Output: the counts,
+ * or the plain error of a change that was refused or is still unconfirmed. */
+export async function importMemory(project: string, folder: string): Promise<Result<MemoryImportCounts>> {
+  const result = await call<MemoryImportCounts & { stopped: IntentReceipt | null }>("desktop_import_memory", { project, folder, generation: nextGeneration() });
+  if (result.kind !== "ok") return result;
+  if (result.value.stopped) {
+    const stopped = receiptResult(result.value.stopped);
+    if (stopped.kind !== "ok") return stopped;
+  }
+  return { kind: "ok", value: { imported: result.value.imported, skipped: result.value.skipped } };
 }
 
 /** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */

@@ -695,6 +695,9 @@ impl NativeBridge {
                     Some(project_id.as_str().to_owned()),
                     None,
                 ),
+                crazyagent::memory::library::LibraryAction::Import { project_id, .. } => {
+                    ("memory_add", Some(project_id.as_str().to_owned()), None)
+                }
                 crazyagent::memory::library::LibraryAction::SaveSelection {
                     project_id, ..
                 } => (

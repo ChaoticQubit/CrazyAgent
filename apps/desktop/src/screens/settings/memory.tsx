@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  addMemory, deleteMemory, dismissSuggestion, memoryEdit, memorySuggestions, saveEditedSuggestion, saveSuggestion, savedMemories,
+  addMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories,
   MEMORY_TEXT_BYTES_MAX, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
@@ -14,7 +14,10 @@ const NOT_READY = "This change isn't ready in this build yet.";
 /** Says where a saved memory applies and where it came from. Inputs: the memory and project
  * names by id. Output: "App-wide", "App-wide, from Harbor Notes" or "Harbor Notes only". */
 export function memorySource(memory: SavedMemory, names: Map<string, string>): string {
-  if (memory.scope === "project") return `${names.get(memory.project_id ?? "") ?? "A removed project"} only`;
+  if (memory.scope === "project") {
+    const only = `${names.get(memory.project_id ?? "") ?? "A removed project"} only`;
+    return memory.origin === "imported" && memory.source_path ? `${only}, imported from ${memory.source_path}` : only;
+  }
   if (memory.origin !== "promoted") return "App-wide";
   return `App-wide, from ${names.get(memory.from_project_id ?? "") ?? "a removed project"}`;
 }
@@ -44,6 +47,33 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
         maxLength={NOTE_MAX} counterAt={NOTE_MAX - 200} error={error} />
       <span><Button type="submit" variant="primary" icon="brain" pending={pending} pendingLabel="Saving...">Add memory</Button></span>
     </form>
+  </Panel>;
+}
+
+function ImportMemoryForm({ projects, initial, onImport }: {
+  projects: { id: string; name: string }[];
+  initial: string;
+  onImport: (project: string) => Promise<string>;
+}) {
+  const [project, setProject] = useState(initial);
+  const [pending, setPending] = useState(false);
+  const [done, setDone] = useState("");
+  const chosen = projects.some((item) => item.id === project) ? project : projects[0]?.id ?? "";
+  const run = async () => {
+    if (!chosen || pending) return;
+    setPending(true);
+    setDone(await onImport(chosen));
+    setPending(false);
+  };
+  return <Panel title="Import memory">
+    <div className="stack-small">
+      <p className="secondary">Choose a folder of markdown memory files, such as a Claude Code project memory folder. Each file becomes one memory of the chosen project. MEMORY.md, links and other files are left out.</p>
+      {projects.length === 0 ? <p className="muted">Add a project first. Imported memories belong to one project.</p> : <>
+        <Select id="memory-import-project" label="Into project" value={chosen} options={projects.map((item) => ({ value: item.id, label: item.name }))} onValue={setProject} />
+        <span><Button icon="folder" pending={pending} pendingLabel="Importing..." onClick={() => void run()}>Import memory</Button></span>
+      </>}
+      {done && <p className="muted small" role="status">{done}</p>}
+    </div>
   </Panel>;
 }
 
@@ -81,7 +111,7 @@ export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel 
  * (one click is the owner's approval), saved memory for the chosen scope with search, older
  * pages and delete, and a form to add a memory. Inputs: the reads, filters, last failure and
  * the actions. */
-export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry }: {
+export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry }: {
   saved: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
   scope: string;
@@ -92,6 +122,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onSearch: (search: string) => void;
   onScope: (scope: string) => void;
   onAdd: (text: string) => Promise<boolean>;
+  onImport: (project: string) => Promise<string>;
   onSave: (suggestion: Suggestion) => void;
   onSaveEdited: (suggestion: Suggestion, text: string) => void;
   onDismiss: (suggestion: Suggestion) => void;
@@ -144,6 +175,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
     </div></Panel>}
     <Panel title="Saved" actions={filters} padded={false}>{list}</Panel>
     <AddMemoryForm where={where} onAdd={onAdd} />
+    <ImportMemoryForm projects={projects} initial={scope} onImport={onImport} />
   </div>;
 }
 
@@ -194,6 +226,18 @@ export function MemorySettings() {
         session.showToast("Saved to memory.");
         reloadSaved();
         return true;
+      }}
+      onImport={async (project) => {
+        setFailure("");
+        const picked = session.noteResult(await pickFolder("memory"));
+        if (picked.kind !== "ok") { setFailure(plain(picked)); return ""; }
+        if (picked.value === null) return "";
+        const result = session.noteResult(await importMemory(project, picked.value));
+        reloadSaved();
+        if (result.kind !== "ok") { setFailure(plain(result)); return ""; }
+        const done = `Imported ${result.value.imported}, skipped ${result.value.skipped}.`;
+        session.showToast(done);
+        return done;
       }}
       onSave={(suggestion) => void act(suggestion.id, () => saveSuggestion(suggestion), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}
       onSaveEdited={(suggestion, text) => void act(suggestion.id, () => saveEditedSuggestion(suggestion, text), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}

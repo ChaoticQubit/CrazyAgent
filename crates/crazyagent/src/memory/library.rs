@@ -17,7 +17,7 @@ pub const SCOPE_ITEMS_MAX: usize = 200;
 pub const LIBRARY_ITEMS_MAX: usize = 2000;
 pub const LAUNCH_ITEMS_MAX: usize = 24;
 pub const LAUNCH_BYTES_MAX: usize = 12288;
-const TEXT_BYTES_MAX: usize = 4096;
+pub const TEXT_BYTES_MAX: usize = 4096;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 8192;
 const RENDER_HEADER_BYTES_MAX: usize = 1024;
 const RESEARCH_ROWS_MAX: i64 = 4096;
@@ -50,8 +50,9 @@ impl MemoryScope {
     }
 }
 
-/// How a saved memory came to exist: typed by the owner, or promoted by the
-/// owner from a kept project memory at the named entry version.
+/// How a saved memory came to exist: typed by the owner, promoted by the owner
+/// from a kept project memory at the named entry version, selected in a project
+/// file, or imported from a markdown file of a folder the owner chose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryOrigin {
@@ -63,6 +64,9 @@ pub enum MemoryOrigin {
     },
     Selected {
         path: String,
+    },
+    Imported {
+        file: String,
     },
 }
 
@@ -116,6 +120,11 @@ pub enum LibraryAction {
         path: String,
         text: String,
     },
+    Import {
+        project_id: ProjectId,
+        file: String,
+        text: String,
+    },
 }
 
 impl LibraryAction {
@@ -132,6 +141,13 @@ impl LibraryAction {
                     return Err(error("context_path_invalid"));
                 }
                 validate_note(text)
+            }
+            Self::Import { file, text, .. } => {
+                if super::import::file_name_valid(file) && super::import::text_valid(text) {
+                    Ok(())
+                } else {
+                    Err(error("memory_import_invalid"))
+                }
             }
             Self::Promote { version: 0, .. } => Err(error("memory_changed")),
             Self::Remember {
@@ -283,7 +299,9 @@ pub fn validate_page(search: Option<&str>, limit: u8) -> Result<(), EngineError>
     Ok(())
 }
 
-const CODES: [&str; 14] = [
+const CODES: [&str; 16] = [
+    "memory_import_invalid",
+    "memory_import_folder_invalid",
     "memory_selection_stale",
     "memory_source_removed",
     "memory_note_blank",
@@ -328,6 +346,12 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "memory_project_missing" => Some("That project no longer exists."),
         "memory_search_invalid" => Some("Keep the search on one line, up to 100 characters."),
         "memory_page_invalid" => Some("Show between 1 and 20 memories at a time."),
+        "memory_import_invalid" => Some(
+            "This file can't be imported. Keep it under 4096 characters without hidden characters.",
+        ),
+        "memory_import_folder_invalid" => {
+            Some("Choose a folder that exists. A link to a folder can't be imported.")
+        }
         "memory_selection_stale" => {
             Some("This text is no longer in that file. Open the file again and select it again.")
         }
@@ -388,7 +412,33 @@ pub(crate) fn execute(
             path,
             text,
         } => save_selection(tx, project_id, path, text.trim(), revision),
+        LibraryAction::Import {
+            project_id,
+            file,
+            text,
+        } => import(tx, project_id, file, text),
     }
+}
+
+fn import(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    file: &str,
+    text: &str,
+) -> Result<Outcome, EngineError> {
+    if !project_exists(tx, project)? {
+        return rejected("memory_project_missing");
+    }
+    let scope = MemoryScope::Project {
+        project_id: project.clone(),
+    };
+    let digest = hash(format!("{}\n{file}\n{text}", project.as_str()).as_bytes());
+    let id = RequestId::new(format!("import-{}", &digest[..32])).map_err(error)?;
+    if let Some(code) = blocked(tx, &id, &scope, text, "memory_duplicate")? {
+        return rejected(code);
+    }
+    let origin = MemoryOrigin::Imported { file: file.into() };
+    insert(tx, &id, &scope, &origin, text)
 }
 
 fn save_selection(
@@ -1012,7 +1062,7 @@ fn kept_research(
 
 fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
     match origin {
-        MemoryOrigin::Written => ApprovedKind::Note,
+        MemoryOrigin::Written | MemoryOrigin::Imported { .. } => ApprovedKind::Note,
         MemoryOrigin::Promoted { .. } => ApprovedKind::Promoted,
         MemoryOrigin::Selected { .. } => ApprovedKind::Selection,
     }
