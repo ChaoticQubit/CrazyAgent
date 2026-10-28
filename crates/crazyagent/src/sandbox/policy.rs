@@ -47,6 +47,14 @@ impl AgentAccess {
         }
     }
 
+    /// Tells whether this level gives agents more than `other`: Full access more than Own
+    /// branch, Own branch more than Sandboxed. Input: the level to compare with. Output:
+    /// true when this one is wider.
+    pub fn wider_than(self, other: Self) -> bool {
+        let rank = |level: Self| Self::ALL.iter().position(|each| *each == level);
+        rank(self) > rank(other)
+    }
+
     /// The name shown to the owner.
     pub fn label(self) -> &'static str {
         match self {
@@ -277,6 +285,10 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(offered, AgentAccess::ALL);
         assert_eq!(AgentAccess::default(), AgentAccess::Sandboxed);
+        assert!(AgentAccess::Full.wider_than(AgentAccess::OwnBranch));
+        assert!(AgentAccess::OwnBranch.wider_than(AgentAccess::Sandboxed));
+        assert!(!AgentAccess::Sandboxed.wider_than(AgentAccess::Full));
+        assert!(!AgentAccess::Full.wider_than(AgentAccess::Full));
         assert_eq!(AgentAccess::NEW_PROJECT, AgentAccess::OwnBranch);
     }
 

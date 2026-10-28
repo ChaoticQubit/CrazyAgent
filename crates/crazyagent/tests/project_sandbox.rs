@@ -1466,6 +1466,355 @@ fn an_own_branch_agent_commits_in_its_own_clone_but_never_writes_the_project_git
 }
 
 #[test]
+fn an_own_branch_agent_never_repoints_the_store_its_clone_borrows() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git_dir = clone.join(".git");
+    let objects = git_dir.join("objects");
+    let info = objects.join("info");
+    let alternates = info.join("alternates");
+    let line = fs::read(&alternates).unwrap();
+    assert_eq!(
+        line,
+        format!("{}\n", case.project.join(".git").join("objects").display()).into_bytes()
+    );
+    let elsewhere = case.home.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&info.join("http-alternates"))),
+            info.join("http-alternates"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&git_dir.join("OBJECTS").join("INFO").join("HTTP-ALTERNATES"))
+            ),
+            info.join("http-alternates"),
+        ),
+        (
+            format!("printf x > {}", quoted(&git_dir.join("commondir"))),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&clone.join(".GIT").join("COMMONDIR"))
+            ),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&git_dir.join("OBJECTS").join("cd"))
+            ),
+            objects.join("cd"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&objects.join("ab"))
+            ),
+            objects.join("ab"),
+        ),
+        (
+            format!("mv {} {}", quoted(&info), quoted(&objects.join("moved"))),
+            objects.join("moved"),
+        ),
+        (
+            format!("mv {} {}", quoted(&objects), quoted(&git_dir.join("moved"))),
+            git_dir.join("moved"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+    for script in [
+        format!(
+            "printf '%s\\n' {} >> {}",
+            quoted(&elsewhere),
+            quoted(&alternates)
+        ),
+        format!("printf x > {}", quoted(&alternates)),
+        format!(
+            "printf x > {}",
+            quoted(&git_dir.join("OBJECTS").join("INFO").join("ALTERNATES"))
+        ),
+        format!("rm -f {}", quoted(&alternates)),
+        format!(
+            "printf x > {} && mv {} {}",
+            quoted(&case.tmp.join("swap")),
+            quoted(&case.tmp.join("swap")),
+            quoted(&alternates)
+        ),
+    ] {
+        let output = run(&confined, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+        assert_eq!(fs::read(&alternates).unwrap(), line, "{script}");
+    }
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} repack -q -a -d",
+            quoted(&clone),
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "the clone's own objects and packs stay writable: {committed:?}"
+    );
+    assert_eq!(fs::read(&alternates).unwrap(), line);
+}
+
+#[test]
+fn an_own_branch_agent_never_redirects_or_replaces_its_clones_git_folder() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git_dir = clone.join(".git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&git_dir.join("commondir"))),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!("printf 'gitdir: x\\n' > {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mkdir {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&git_dir.join(".git"))
+            ),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mv {} {}", quoted(&git_dir), quoted(&clone.join("moved"))),
+            clone.join("moved"),
+        ),
+        (
+            format!(
+                "mv {} {}",
+                quoted(&clone.join(".GIT")),
+                quoted(&clone.join("moved-upper"))
+            ),
+            clone.join("moved-upper"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+        assert!(
+            fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir()),
+            "{script}"
+        );
+    }
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+}
+
+#[test]
+fn an_own_branch_agent_never_plants_the_fallback_repository_upload_pack_tries() {
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let fallback = clone.join(".git.git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for script in [
+        format!("mkdir {}", quoted(&fallback)),
+        format!("mkdir {}", quoted(&clone.join(".GIT.GIT"))),
+        format!("printf 'gitdir: x\\n' > {}", quoted(&fallback)),
+        format!("ln -s {} {}", quoted(&elsewhere), quoted(&fallback)),
+        format!(
+            "mkdir {} && mv {} {}",
+            quoted(&elsewhere.join("repo")),
+            quoted(&elsewhere.join("repo")),
+            quoted(&fallback)
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &fallback);
+    }
+}
+
+#[test]
+fn an_own_branch_agent_never_writes_a_multi_pack_index_into_its_clone() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let pack = clone.join(".git").join("objects").join("pack");
+    fs::create_dir_all(&pack).unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} repack -q -a -d",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&pack.join("multi-pack-index"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&pack.join("multi-pack-index-0123.bitmap"))
+            ),
+            pack.join("multi-pack-index-0123.bitmap"),
+        ),
+        (
+            format!("mkdir {}", quoted(&pack.join("multi-pack-index.d"))),
+            pack.join("multi-pack-index.d"),
+        ),
+        (
+            format!("cd {} && {git} multi-pack-index write", quoted(&clone)),
+            pack.join("multi-pack-index"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+}
+
+#[test]
+fn a_multi_pack_index_an_agent_plants_after_the_engine_checked_its_clone_never_lands() {
+    use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["config", "user.email", "owner@local"],
+        &["config", "user.name", "owner"],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let clone = worktrees.join("agent-1");
+    crazyagent::landing::add_agent_clone(&case.project, &clone).unwrap();
+    let clone = clone.canonicalize().unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&clone);
+    let engine = case.root.join("engine");
+    fs::create_dir(&engine).unwrap();
+    let db = crazyagent::landing::open(&engine).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &case.project, &clone, &git_dir).unwrap();
+    let workspace = Workspace {
+        project: crazyagent::protocol::ProjectId::new("project-1").unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "1".into(),
+            label: "Agent 1".into(),
+        },
+        repository: case.project.clone(),
+        worktree: clone.clone(),
+        git_dir: git_dir.clone(),
+    };
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let commit = |file: &str| {
+        let committed = run(
+            &confined,
+            &profile,
+            &format!(
+                "cd {} && printf 'agent work\\n' > {file} && {git} add {file} && {git} commit -q -m {file}",
+                quoted(&clone),
+            ),
+        );
+        assert!(committed.status.success(), "{committed:?}");
+    };
+    let turn = |name: &str| TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: name.into(),
+        prompt_line: "Write work".into(),
+    };
+
+    commit("one.txt");
+    let set = crazyagent::landing::record_turn_end(&db, &workspace, &turn("turn-1"))
+        .unwrap()
+        .expect("the engine checked and fetched the clone");
+
+    let pack = git_dir.join("objects").join("pack");
+    let index = pack.join("multi-pack-index");
+    for script in [
+        format!("printf x > {}", quoted(&index)),
+        format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+        format!(
+            "cd {} && {git} repack -q -a -d && {git} multi-pack-index write",
+            quoted(&clone)
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &index);
+    }
+
+    commit("two.txt");
+    let again = crazyagent::landing::record_turn_end(&db, &workspace, &turn("turn-2"))
+        .unwrap()
+        .expect("the next check passes: no index was planted");
+    assert_eq!(again, set);
+    let head = run(
+        &confined,
+        &profile,
+        &format!("cd {} && {git} rev-parse HEAD", quoted(&clone)),
+    );
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+    let sets = crazyagent::landing::list(&db, &workspace.project).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(
+        sets[0].head, head,
+        "the set holds only the agent's own commits"
+    );
+    assert!(!index.exists());
+}
+
+#[test]
 fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(Path::new(AGENT_GIT).is_file());
     let case = case();

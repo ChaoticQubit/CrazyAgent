@@ -1094,6 +1094,9 @@ impl ProjectSandbox {
                 checkout.admin.display()
             ));
         }
+        if let Some(clone) = &self.clone {
+            text.push_str(&clone_store_denies(clone));
+        }
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
@@ -1620,6 +1623,57 @@ fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
     regex_escape(&text)
+}
+
+/// The Seatbelt rules that keep an Own branch agent from repointing the object store its
+/// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
+/// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
+/// it may never replace, rename or relink, no move or removal of its `objects` or
+/// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
+/// git folder, the fallback repository git's upload-pack serves when the git folder fails
+/// git's repository test (RL-1), and no `objects/pack/multi-pack-index` file, folder or
+/// companion, which can name a pack outside the store (RL-2), each name in any letter case,
+/// while its own loose objects and packs stay writable. The engine's fetch checks the same
+/// store before it runs (w-landing). Input: the clone. Output: the rule text.
+fn clone_store_denies(clone: &Path) -> String {
+    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
+    let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
+    let objects = format!("{git}/{}", any_case("objects"));
+    let info = format!("{objects}/{}", any_case("info"));
+    let index = format!(
+        "{objects}/{}/{}",
+        any_case("pack"),
+        any_case("multi-pack-index")
+    );
+    let text = format!(
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
+        any_case("alternates"),
+        any_case("http-alternates"),
+        any_case("commondir")
+    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 8);
+    assert!(text.contains("(vnode-type SYMLINK)"));
+    text
+}
+
+/// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
+/// case-insensitive volume finds however they are typed. Input: text without a quote or
+/// backslash. Output: the pattern text, without anchors.
+fn any_case(text: &str) -> String {
+    regex_escape(text)
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphabetic() {
+                format!(
+                    "[{}{}]",
+                    character.to_ascii_lowercase(),
+                    character.to_ascii_uppercase()
+                )
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
