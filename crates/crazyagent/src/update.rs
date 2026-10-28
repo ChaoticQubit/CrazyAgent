@@ -188,10 +188,16 @@ pub fn read_channel(root: &Path) -> Result<Channel, UpdateError> {
 }
 
 /// Saves the update channel to `<root>/update.toml` (owner-only on Unix), replacing the
-/// file atomically. Inputs: the data folder and the channel. Output: Ok, or `update_io`.
+/// file atomically, and creates a missing data folder as the engine does: private to
+/// this user (0700). Inputs: the data folder and the channel. Output: Ok, or `update_io`.
 pub fn save_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
     let failed = |error| io_failure("Can't save the update channel", error);
-    std::fs::create_dir_all(root).map_err(failed)?;
+    crate::paths::private_folder(root).map_err(|error| {
+        fail(
+            "update_io",
+            format!("Can't save the update channel: {error}"),
+        )
+    })?;
     let temporary = root.join(".update.toml.new");
     if let Err(error) = std::fs::remove_file(&temporary)
         && error.kind() != ErrorKind::NotFound

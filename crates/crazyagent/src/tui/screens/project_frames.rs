@@ -73,10 +73,11 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_context_item(project, path, offset)
                 .await
                 .map(SetupView::Item),
-            SetupQuery::Memories { project, after } => controller
-                .project_memories(project, after)
-                .await
-                .map(SetupView::Memories),
+            SetupQuery::Memories { project, after } => match after {
+                None => controller.all_project_memories(project).await,
+                Some(after) => controller.project_memories(project, Some(after)).await,
+            }
+            .map(SetupView::Memories),
             SetupQuery::ReadPaths { project } => controller
                 .project_read_paths(project)
                 .await

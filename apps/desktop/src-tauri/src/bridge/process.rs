@@ -55,7 +55,8 @@ impl NativeBridge {
     /// Saves the owner's instructions whole, run without the bridge lock, when no other save
     /// landed since they were read. Inputs: none for the app-wide text, or the project id;
     /// the text; the version read; and only for "Keep mine" after a stale reply, the older
-    /// version the owner opened. Output: the saved version, or the stale reply with the
+    /// version the owner opened. Output: the saved version with, for app or project text,
+    /// what agents now get beside what a Claude master takes, or the stale reply with the
     /// newer text.
     pub fn save_process_text(
         &self,

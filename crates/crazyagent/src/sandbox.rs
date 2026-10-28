@@ -27,6 +27,42 @@ pub mod windows;
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
+/// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
+/// matches a local address by port only (`localhost` there matches every local address), so
+/// it cannot keep an agent's listener on loopback; it can keep these ports free.
+pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
+
+/// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
+/// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.
+pub const KEPT_PORTS_MAX: usize = 64;
+
+/// The loopback ports the owner's configured model endpoints listen on, which a tools-on
+/// agent must not bind before the owner's model server does. An endpoint URL that does not
+/// parse names no port. Input: the model access settings. Output: the ports, sorted, once
+/// each.
+pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
+    let mut ports: Vec<u16> = access
+        .connections
+        .iter()
+        .filter_map(|connection| match &connection.endpoint {
+            crate::config::ModelEndpoint::Http { url } => url::Url::parse(url).ok(),
+            crate::config::ModelEndpoint::Native {} => None,
+        })
+        .filter(|url| match url.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        })
+        .filter_map(|url| url.port_or_known_default())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(ports.len() <= access.connections.len());
+    ports
+}
+
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
@@ -406,8 +442,9 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// Network reach of a sandboxed agent: open when the agent's tools are on,
-/// otherwise only the listed model endpoints.
+/// Network reach of a sandboxed agent: open when the agent's tools are on, except that
+/// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
+/// keeps, otherwise only the listed model endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -492,6 +529,7 @@ pub struct ProjectSandbox {
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
+    kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
@@ -541,10 +579,33 @@ impl ProjectSandbox {
             scratch: None,
             hidden: Vec::new(),
             network,
+            kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
             checkout: None,
         })
+    }
+
+    /// Keeps the ports of the owner's configured local model endpoints free of this agent's
+    /// listeners, beside [`OWNER_PORTS`], when its network is open. Input: the ports, as
+    /// [`owner_ports`] lists them. Output: the sandbox, or a refusal for port 0 or more than
+    /// `KEPT_PORTS_MAX` ports.
+    pub fn keep_ports(mut self, ports: &[u16]) -> Result<Self, SandboxError> {
+        if ports.contains(&0) {
+            return Err(invalid("kept ports must be nonzero"));
+        }
+        self.kept_ports.extend(
+            ports
+                .iter()
+                .copied()
+                .filter(|port| !OWNER_PORTS.contains(port)),
+        );
+        self.kept_ports.sort_unstable();
+        self.kept_ports.dedup();
+        if self.kept_ports.len() > KEPT_PORTS_MAX {
+            return Err(invalid("at most 64 kept ports"));
+        }
+        Ok(self)
     }
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
@@ -594,11 +655,12 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Confines the agent's writes to its own git worktree of the project: the worktree,
-    /// its admin folder in `.git/worktrees` and the shared object store, beside its home,
-    /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
-    /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
-    /// name each other. Output: the confined sandbox, or `Invalid`.
+    /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
+    /// except its HEAD, which only the engine moves, and the object store, beside its home,
+    /// temp dir and extra worktrees; the project stays readable. Makes the admin folder's
+    /// `modules` store so every platform guards a real folder there. Input: a canonical
+    /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
+    /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
         if self.checkout.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
@@ -639,6 +701,12 @@ impl ProjectSandbox {
                 .iter()
                 .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
         );
+        ensure_store(&admin.join("modules")).map_err(|problem| match problem.kind() {
+            io::ErrorKind::InvalidData => {
+                invalid("the worktree's submodule store must be a plain folder")
+            }
+            _ => SandboxError::Io(problem),
+        })?;
         self.read_roots.push(self.project_root.clone());
         self.checkout = Some(Checkout {
             worktree: worktree.to_path_buf(),
@@ -790,21 +858,25 @@ impl ProjectSandbox {
         &self.network
     }
 
-    /// Paths inside the project folder no agent may write although the folder is writable:
-    /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// the git config with its lock file, and `.git/modules`, where git keeps submodule
-    /// repositories. Every platform boundary keeps these read-only, except that Windows
-    /// guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
-    pub fn protected_paths(&self) -> [PathBuf; 6] {
+    /// Paths no agent may write although they sit in a writable root: both `context/`
+    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
+    /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
+    /// Every platform boundary keeps these read-only, except that Windows guards the config
+    /// but not its lock (`windows::GIT_CONFIG_LOCK`).
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
         let git = self.project_root.join(".git");
-        [
+        let mut paths = vec![
             self.project_root.join("context"),
             self.project_root.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
             git.join("modules"),
-        ]
+        ];
+        if let Some(checkout) = &self.checkout {
+            paths.push(checkout.admin.join("modules"));
+        }
+        paths
     }
 
     /// Every folder this sandbox lets the agent write: the project folder, or for a
@@ -918,6 +990,10 @@ impl ProjectSandbox {
         text.push_str(&self.nested_git_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            text.push_str(&format!(
+                "(deny file-write*\n  (literal \"{}/HEAD\"))\n",
+                checkout.admin.display()
+            ));
         }
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
@@ -928,6 +1004,14 @@ impl ProjectSandbox {
                 text.push_str(
                     "(allow network-outbound (remote ip \"*:*\"))\n(allow network-inbound (local ip \"*:*\"))\n(allow network-bind (local ip \"*:*\"))\n(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
                 );
+                let owner = OWNER_PORTS
+                    .iter()
+                    .chain(&self.kept_ports)
+                    .map(|port| format!(" (local ip \"*:{port}\")"))
+                    .collect::<String>();
+                text.push_str(&format!(
+                    "(deny network-bind{owner})\n(deny network-inbound{owner})\n"
+                ));
                 text.push_str(
                     "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n",
                 );
@@ -1020,24 +1104,25 @@ impl ProjectSandbox {
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
     /// below a writable working tree, except that tree's own top-level `.git` and the
     /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
-    /// at a tree's root, not below it, so the `.+/` guard never matches them. A `.git`
-    /// placed directly or by renaming onto that name is denied; renaming a whole folder
-    /// that already holds a `.git` in is a path-blind move Seatbelt cannot see and stays a
-    /// residual. Input: the policy. Output: the rule text.
+    /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
+    /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
+    /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
+    /// included, in every non-working-tree writable root (the admin folder, object store,
+    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
+    /// (SM1-R). Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
         let dot_git = "\\.[gG][iI][tT]";
-        let roots: Vec<&Path> = match &self.checkout {
-            Some(checkout) => std::iter::once(checkout.worktree.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-            None => std::iter::once(self.project_root.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-        };
+        let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
-        for root in &roots {
+        for root in &working {
             nested.push_str(&format!(
                 "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        for root in &other {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
                 seatbelt_pattern(root)
             ));
         }
@@ -1052,9 +1137,37 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == roots.len() + 1);
+        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
         assert!(text.ends_with(")\n"));
         text
+    }
+
+    /// Splits the agent's writable roots into the working-tree roots, where the root's own
+    /// top-level `.git` is a legitimate repository link the engine adds, and every other
+    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
+    /// store, home, temp or scratch root, is denied so no agent can create a repository to
+    /// rename whole into a worktree.
+    fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+        let mut working: Vec<&Path> = Vec::new();
+        let mut other: Vec<&Path> = Vec::new();
+        match &self.checkout {
+            Some(checkout) => {
+                working.push(checkout.worktree.as_path());
+                other.push(checkout.admin.as_path());
+                other.push(checkout.objects.as_path());
+            }
+            None => working.push(self.project_root.as_path()),
+        }
+        other.push(self.agent_home.as_path());
+        other.push(self.agent_tmp.as_path());
+        if let Some(scratch) = &self.scratch {
+            other.push(scratch.as_path());
+        }
+        for worktree in &self.worktrees {
+            working.push(worktree.as_path());
+        }
+        (working, other)
     }
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
@@ -1367,6 +1480,31 @@ fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a O
 
 fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
+}
+
+/// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
+/// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
+/// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
+/// Input: the store path. Output: Ok, or `InvalidData` for any other entry at the path.
+pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = fs::DirBuilder::new().create(path);
+    match created {
+        Err(problem) if problem.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a submodule store must be a plain folder",
+                ))
+            }
+        }
+        made => made,
+    }
 }
 
 /// The owner's home folder from the user profile, canonical when it resolves, which

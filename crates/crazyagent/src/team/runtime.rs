@@ -1537,6 +1537,10 @@ impl TeamRuntime {
             .map(|(id, _)| *id)
     }
 
+    /// Sends a project's oldest pending message to its master, starting a per-message master
+    /// when none runs. Nothing is sent while a master of the project is still stopping or
+    /// restarting, as after the live switch goes off, so the project never runs two masters
+    /// at once. Takes the setup, live access and paused accounts.
     fn feed_master(
         &mut self,
         stored: &StoredSetup,
@@ -1547,12 +1551,11 @@ impl TeamRuntime {
         if super::master::live(&self.connection, project)? {
             return self.feed_live(project);
         }
-        let restarting = self
-            .workers
-            .values()
-            .any(|w| &w.project == project && w.role == AgentRole::Master && w.restarting);
+        let settling = self.workers.values().any(|w| {
+            &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
+        });
         let master = self.master(project);
-        if restarting || master.is_some_and(|id| self.workers[&id].busy.is_some()) {
+        if settling || master.is_some_and(|id| self.workers[&id].busy.is_some()) {
             return Ok(());
         }
         let pending: Option<(i64, String, String)> = self
@@ -2895,7 +2898,14 @@ impl TeamRuntime {
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network).map_err(sandboxed)?;
+        let kept = if tools {
+            (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+        } else {
+            Vec::new()
+        };
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
+            .and_then(|sandbox| sandbox.keep_ports(&kept))
+            .map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }

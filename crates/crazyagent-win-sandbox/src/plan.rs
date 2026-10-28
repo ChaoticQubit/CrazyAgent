@@ -340,6 +340,35 @@ mod tests {
     }
 
     #[test]
+    fn a_present_submodule_store_is_denied_while_git_keeps_add_entries() {
+        let git = r"C:\Users\mira\Projects\shop\.git";
+        let modules = r"C:\Users\mira\Projects\shop\.git\modules";
+        let built = || profile(&[], &[PROJECT, HOME, TMP], &[(modules, Guard::ReadOnly)]);
+
+        let present = super::plan(&built(), |_| true).unwrap();
+        assert!(
+            present.contains(&ace(modules, Access::DenyWrite)),
+            "the engine-created store is not write-denied"
+        );
+        assert!(
+            present.contains(&ace(git, Access::Anchor)),
+            ".git is not anchored, so index.lock cannot be made"
+        );
+        assert!(
+            !present
+                .iter()
+                .any(|entry| entry.path == git && entry.access == Access::KeepEntries),
+            ".git lost add-entries for a present store"
+        );
+
+        let missing = super::plan(&built(), |path| path != modules).unwrap();
+        assert!(
+            missing.contains(&ace(git, Access::KeepEntries)),
+            "a missing store should push the guard up to .git (the regression the engine pre-create avoids)"
+        );
+    }
+
+    #[test]
     fn covered_roots_collapse_and_paths_compare_without_case() {
         let planned = plan(&profile(
             &[

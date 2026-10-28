@@ -528,6 +528,39 @@ fn committed(tx: &Transaction<'_>, provenance: &OwnerProvenance) -> Result<(), E
     Ok(())
 }
 
+/// Tells whether a session's owner provenance is the request that created it: the
+/// owner's Open, or a New session with or without cancelling a running turn, each rebuilt
+/// from the session's own project, source basis and selection. Every check of how a
+/// session was opened uses this one rule. Takes the session. Returns whether the stored
+/// request hash is one of them.
+pub(super) fn opened_by_owner(session: &MasterSessionView) -> Result<bool, EngineError> {
+    let opening = |action: MasterOwnerAction| -> Result<bool, EngineError> {
+        let original = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: session.owner.operation_id.clone(),
+            expected_revision: session.owner.revision_before.clone(),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            },
+        };
+        Ok(original.mutation_hash()? == session.owner.request_hash)
+    };
+    let renewal = |cancel_running: bool| MasterOwnerAction::NewSession {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+        cancel_running,
+    };
+    Ok(opening(MasterOwnerAction::Open {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+    })? || opening(renewal(false))?
+        || opening(renewal(true))?)
+}
+
 fn decode_session(
     tx: &Transaction<'_>,
     row: &Row<'_>,
@@ -559,36 +592,7 @@ fn decode_session(
         return Err(error("master_session_record"));
     }
     committed(tx, &session.owner)?;
-    let opened_by = |action: MasterOwnerAction| -> Result<bool, EngineError> {
-        let original = OwnerRequest {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: session.owner.operation_id.clone(),
-            expected_revision: session.owner.revision_before.clone(),
-            operation: OwnerOperation::Apply {
-                mutation: OwnerMutation::ProjectMaster { action },
-            },
-        };
-        Ok(original.mutation_hash()? == session.owner.request_hash)
-    };
-    let opened = opened_by(MasterOwnerAction::Open {
-        project_id: session.project_id.clone(),
-        expected_config_id: session.config_id.clone(),
-        expected_source_hash: session.source_hash.clone(),
-        selection: Box::new(session.selection.clone()),
-    })?;
-    let mut renewed = false;
-    for cancel_running in [false, true] {
-        renewed = renewed
-            || (!opened
-                && opened_by(MasterOwnerAction::NewSession {
-                    project_id: session.project_id.clone(),
-                    expected_config_id: session.config_id.clone(),
-                    expected_source_hash: session.source_hash.clone(),
-                    selection: Box::new(session.selection.clone()),
-                    cancel_running,
-                })?);
-    }
-    if !opened && !renewed {
+    if !opened_by_owner(&session)? {
         return Err(error("master_open_provenance"));
     }
     let mut statement = tx
@@ -649,6 +653,10 @@ fn latest(
         .transpose()
 }
 
+/// Reads one stored turn and checks it against its session and the owner operation that
+/// took its input. An input entry an older engine pruned leaves no text to hash, so such a
+/// turn still reads when its operation holds and no other entry took that cursor. Inputs:
+/// the transaction, session, row and owner revision. Output: the turn or a plain error.
 fn decode_turn(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -681,22 +689,26 @@ fn decode_turn(
         validate_runtime_record(tx, session, &turn)?;
         return Ok(turn);
     }
-    let input_owner: Option<(String, String)> = tx.query_row("SELECT CASE WHEN length(o.owner_id)=64 THEN o.owner_id END,CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END FROM conversation_entries c JOIN owner_operations o ON o.event_cursor=c.event_cursor AND o.origin='native_owner' WHERE c.project=?1 AND c.event_cursor=?2 AND c.kind='message' AND c.brief_version=0 AND o.operation_id=?3", params![session.project_id.as_str(), signed(input)?, turn.id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(error)?;
-    let (owner, text) = input_owner.ok_or_else(|| error("master_input_provenance"))?;
+    let provenance = input_operation(tx, &turn)?;
+    let Some(text) = turn_input(tx, session, &turn)? else {
+        let kept: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversation_entries WHERE event_cursor=?1)",
+                [signed(input)?],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if kept {
+            return Err(error("master_input_provenance"));
+        }
+        validate_runtime_record(tx, session, &turn)?;
+        return Ok(turn);
+    };
     ConversationMutation::AppendMessage {
         project_id: session.project_id.clone(),
         text: text.clone(),
     }
     .validate()?;
-    let (provenance, result) = owner_lookup(tx, "native_owner", &owner, &turn.id, None)?
-        .ok_or_else(|| error("master_input_provenance"))?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(input)
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(error("master_input_provenance"));
-    }
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -737,25 +749,7 @@ fn resolve_provenance(
     {
         return Err(refused());
     }
-    let input = signed(turn.input_cursor.value())?;
-    let owner: Option<Option<String>> = tx
-        .query_row(
-            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
-            params![turn.id.as_str(), input],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let owner = owner.flatten().ok_or_else(refused)?;
-    let (provenance, result) =
-        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(refused());
-    }
+    let provenance = input_operation(tx, turn)?;
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -774,6 +768,59 @@ fn resolve_provenance(
         return Err(refused());
     }
     Ok(())
+}
+
+/// Reads the native owner's operation that took a turn's input: applied, with the turn's
+/// id, recorded at the turn's input revision one revision after the one it was asked at.
+/// Inputs: the transaction and the turn. Output: its provenance, or
+/// `master_input_provenance`.
+fn input_operation(
+    tx: &Transaction<'_>,
+    turn: &MasterTurnView,
+) -> Result<OwnerProvenance, EngineError> {
+    let refused = || error("master_input_provenance");
+    let owner: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
+            params![turn.id.as_str(), signed(turn.input_cursor.value())?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let owner = owner.flatten().ok_or_else(refused)?;
+    let (provenance, result) =
+        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
+    if provenance.event_cursor != Some(turn.input_cursor.clone())
+        || provenance.revision_after != turn.input_cursor
+        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
+        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
+    {
+        return Err(refused());
+    }
+    Ok(provenance)
+}
+
+/// Reads the owner's message a turn took as input from the project's conversation.
+/// Inputs: the transaction, session and turn. Output: the text, None once an older
+/// engine pruned the entry, or `master_input_provenance` for text past its bound.
+fn turn_input(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Option<String>, EngineError> {
+    let text: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0",
+            params![
+                session.project_id.as_str(),
+                signed(turn.input_cursor.value())?
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    text.map(|text| text.ok_or_else(|| error("master_input_provenance")))
+        .transpose()
 }
 
 fn load_turn(
@@ -2392,19 +2439,34 @@ fn current_prompt(
     checked_prompt(&session.session_id, turn_id, message, context.as_deref())
 }
 
+/// The text a turn hands its master: the engine's request, or the owner's message.
+/// Inputs: the transaction, session and turn. Output: the text, or None once an older
+/// engine pruned the owner's message.
 fn turn_message(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
     turn: &MasterTurnView,
-) -> Result<String, EngineError> {
+) -> Result<Option<String>, EngineError> {
     if let Some(request) = &turn.engine_request {
-        return Ok(request.text.clone());
+        return Ok(Some(request.text.clone()));
     }
-    tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
+    turn_input(tx, session, turn)
+}
+
+/// The text a turn about to run hands its master, which it must still have.
+/// Inputs: the transaction, session and turn. Output: the text, or
+/// `master_input_provenance` once the owner's message is gone.
+fn running_message(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    turn_message(tx, session, turn)?.ok_or_else(|| error("master_input_provenance"))
 }
 
 const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
 const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
+const INPUT_GONE: &str = "(This message is no longer kept.)";
 
 /// Reads the earlier turns of this conversation that reached a model, oldest first, as
 /// the entries the next prompt carries. Inputs: the transaction, session and current
@@ -2441,7 +2503,12 @@ fn prior_turns(
         }
         let asked = match &earlier.engine_request {
             Some(request) => format!("Engine: {}", request.line),
-            None => format!("Owner: {}", turn_message(tx, session, &earlier)?),
+            None => format!(
+                "Owner: {}",
+                turn_message(tx, session, &earlier)?
+                    .as_deref()
+                    .unwrap_or(INPUT_GONE)
+            ),
         };
         let mut entry = match &earlier.reply {
             Some(reply) => format!("{asked}\nYou: {}", reply.text),
@@ -2531,7 +2598,7 @@ fn prompt(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
-    let message = turn_message(tx, session, turn)?;
+    let message = running_message(tx, session, turn)?;
     let context = prompt_context(tx, session)?;
     let entries = prior_turns(tx, session, turn)?;
     let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
@@ -2642,7 +2709,7 @@ fn bundle(
         .map_err(|problem| EngineError(problem.0))?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
-        message: turn_message(tx, &session, turn)?,
+        message: running_message(tx, &session, turn)?,
         owner_turn: turn.engine_request.is_none().then_some(turn.ordinal),
         instructions,
         tools,
@@ -6001,6 +6068,202 @@ fallback_allowed = false
             .unwrap();
         assert_eq!(projects, 0, "the project is removed in the same action");
         drop(tx);
+        case.close().await;
+    }
+
+    impl Fixture {
+        /// Starts a new session as the owner's New session does, parking the live one and
+        /// cancelling its turn, then submits `message` there. Inputs: the owner operation
+        /// name and the message. Output: the fixture bound to the new session and its turn.
+        async fn renewed(self, id: &str, message: &str) -> Self {
+            let basis = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 1,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::NewSession {
+                        project_id: self.session.project_id.clone(),
+                        expected_config_id: basis.config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(self.session.selection.clone()),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Makes a parked session live again as the owner's Resume does, parking the live
+        /// one and cancelling its turn, then submits `message` there. Inputs: the owner
+        /// operation name, the parked session and the message. Output: the fixture bound to
+        /// that session and its new turn.
+        async fn resumed(self, id: &str, session: &SessionId, message: &str) -> Self {
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Resume {
+                        project_id: self.session.project_id.clone(),
+                        session_id: session.clone(),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Submits `message` to the project's live session and binds the fixture to that
+        /// session and the turn it queued. Inputs: the owner operation name and the message.
+        /// Output: the rebound fixture.
+        async fn submitted(mut self, id: &str, message: &str) -> Self {
+            let project_id = self.session.project_id.clone();
+            let live = |state: OwnerReadReply| match state.data {
+                OwnerData::ProjectMaster {
+                    session: Some(session),
+                } => *session,
+                _ => panic!("actual live master session missing"),
+            };
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit {
+                        project_id: project_id.clone(),
+                        session_id: session.session_id.clone(),
+                        text: message.into(),
+                    },
+                },
+            )
+            .await;
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMasterTurns {
+                    project_id,
+                    session_id: session.session_id.clone(),
+                    cursor: None,
+                    limit: 8,
+                },
+            )
+            .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turns missing");
+            };
+            let queued: Vec<MasterTurnView> = page
+                .turns
+                .into_iter()
+                .filter(|turn| turn.phase == MasterTurnPhase::Queued)
+                .collect();
+            assert_eq!(queued.len(), 1, "one queued turn in the live session");
+            self.session = session;
+            self.turn = queued.into_iter().next().unwrap();
+            assert_eq!(self.session.current_turn.as_ref(), Some(&self.turn.id));
+            self
+        }
+    }
+
+    const RENEWED: &str = "Name the main language of this project in one word.";
+
+    /// A session the owner started with New session prepares its turns as an opened one
+    /// does: its New session provenance is the request that created it, so the master
+    /// bootstrap admits it instead of refusing every turn with a scope conflict.
+    #[tokio::test]
+    async fn a_session_started_with_new_session_prepares_its_turns() {
+        let first = Fixture::new(true).await;
+        let opened = first.session.session_id.clone();
+        let case = first.renewed("renew-rcli-master", RENEWED).await;
+        assert_ne!(case.session.session_id, opened);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a renewed session must prepare its turn"),
+            Err(failure) => panic!("a renewed session must prepare its turn: {}", failure.0),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, case.session.session_id);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, case.session.session_id);
+        assert_eq!(prepared.lease.task_id, case.session.bootstrap_task_id);
+        assert!(prepared.cwd.is_dir());
+        case.close().await;
+    }
+
+    /// A renewed session the owner parks and resumes keeps preparing turns: Resume keeps
+    /// the New session provenance the session was created with, and the bootstrap admits it.
+    #[tokio::test]
+    async fn a_resumed_renewed_session_prepares_its_turns() {
+        let case = Fixture::new(true)
+            .await
+            .renewed("renew-rcli-master", RENEWED)
+            .await;
+        let renewed = case.session.session_id.clone();
+        let case = case
+            .renewed("renew-rcli-master-again", PROMPT)
+            .await
+            .resumed("resume-renewed-master", &renewed, RENEWED)
+            .await;
+        assert_eq!(case.session.session_id, renewed);
+        assert_eq!(case.session.phase, MasterSessionPhase::Configured);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a resumed renewed session must prepare its turn"),
+            Err(failure) => panic!(
+                "a resumed renewed session must prepare its turn: {}",
+                failure.0
+            ),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, renewed);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&renewed, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, renewed);
         case.close().await;
     }
 

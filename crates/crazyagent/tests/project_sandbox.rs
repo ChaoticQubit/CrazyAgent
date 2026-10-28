@@ -500,6 +500,14 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 .join("nested")
                 .join(".git"),
         ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
     ] {
         write_refused(&sandbox, &profile, &script, &target);
     }
@@ -554,6 +562,26 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
                 wt = quoted(&worktree)
             ),
             worktree.join("filed").join(".git"),
+        ),
+        (
+            format!("cd {t} && git init -q box", t = quoted(&case.tmp)),
+            case.tmp.join("box").join(".git"),
+        ),
+        (
+            format!("mkdir -p {h}/proj/.git", h = quoted(&case.home)),
+            case.home.join("proj").join(".git"),
+        ),
+        (
+            format!(
+                "mkdir -p {a}/evil/.git",
+                a = quoted(&case.project.join(".git").join("worktrees").join("one"))
+            ),
+            case.project
+                .join(".git")
+                .join("worktrees")
+                .join("one")
+                .join("evil")
+                .join(".git"),
         ),
     ] {
         write_refused(&confined, &profile, &script, &target);
@@ -617,6 +645,192 @@ fn network_is_open_only_when_tools_are_on() {
     );
     assert!(connect(&model, "model-a.sb", allowed_port));
     assert!(!connect(&model, "model-b.sb", other_port));
+}
+
+/// Starts `nc -l` on one address and port inside the sandbox, sends it a line from inside
+/// the sandbox when `connect` is set, and stops it. Returns what the listener received and
+/// what it reported.
+fn listen(
+    sandbox: &ProjectSandbox,
+    case: &Case,
+    name: &str,
+    host: &str,
+    port: u16,
+    connect: bool,
+) -> (String, String) {
+    let got = case.tmp.join(format!("{name}.got"));
+    let said = case.tmp.join(format!("{name}.err"));
+    let client = if connect {
+        format!("printf hello | /usr/bin/nc -w 2 {host} {port}; ")
+    } else {
+        String::new()
+    };
+    let script = format!(
+        "/usr/bin/nc -l {host} {port} > {} 2> {} & pid=$!; /bin/sleep 1; {client}/bin/sleep 0.3; kill $pid 2>/dev/null; wait $pid; exit 0",
+        quoted(&got),
+        quoted(&said)
+    );
+    let output = run(sandbox, &case.profiles.join(name), &script);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        fs::read_to_string(&got).unwrap_or_default(),
+        fs::read_to_string(&said).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    let free = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = free.local_addr().unwrap().port();
+    drop(free);
+    assert_eq!(
+        listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
+        ("hello".to_owned(), String::new()),
+        "an agent's dev server on loopback takes connections"
+    );
+    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
+    for port in crazyagent::sandbox::OWNER_PORTS {
+        for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+            let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
+            let (got, said) = listen(&open, &case, &name, host, port, false);
+            assert_eq!(got, "", "{host} {port}");
+            assert!(
+                said.contains("Operation not permitted"),
+                "an agent cannot take {host}:{port} from the owner's tool: {said}"
+            );
+        }
+    }
+}
+
+/// One owner model connection in settings, at `url`. Input: its id and URL. Output: the
+/// connection as the settings file writes it.
+fn connection(id: &str, url: &str) -> String {
+    format!(
+        r#"{{ id = "{id}", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-account", endpoint = {{ kind = "http", url = "{url}" }}, model = {{ id = "qwen2.5:0.5b", author = "openai-compatible" }}, auth = {{ method = "none" }} }}"#
+    )
+}
+
+/// Writes owner settings whose one local model connection listens on `port`, as the owner
+/// configures LM Studio or vLLM, and reads them back through the engine's settings
+/// resolution. Input: the case and the port. Output: the model access settings.
+fn local_model_access(case: &Case, port: u16) -> crazyagent::config::ModelAccess {
+    use std::os::unix::fs::PermissionsExt;
+    let global = case.root.join("global.toml");
+    fs::write(
+        &global,
+        format!(
+            "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{}]\npools = [{{ id = \"local-pool\", members = [\"local-connection\"], projects = [], roles = [], fallback_allowed = false }}]\n",
+            connection("local-connection", &format!("http://127.0.0.1:{port}/v1"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
+    crazyagent::config::resolve_config(&global, &case.root.join("project.toml"))
+        .unwrap()
+        .settings
+        .model_access
+        .unwrap()
+}
+
+#[test]
+fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
+    let case = case();
+    let server = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    let ports = crazyagent::sandbox::owner_ports(&local_model_access(&case, port));
+    assert_eq!(ports, [port]);
+    let open = sandbox(&case, SandboxNetwork::Open)
+        .keep_ports(&ports)
+        .unwrap();
+    assert!(
+        open.profile().contains(&format!(
+            "(deny network-bind (local ip \"*:1455\") (local ip \"*:11434\") (local ip \"*:{port}\"))"
+        )),
+        "{}",
+        open.profile()
+    );
+    let served = std::thread::spawn(move || {
+        let (mut stream, _) = server.accept().unwrap();
+        let mut got = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut got).unwrap();
+        got
+    });
+    let sent = run(
+        &open,
+        &case.profiles.join("reach-model.sb"),
+        &format!("printf hello | /usr/bin/nc -w 2 127.0.0.1 {port}"),
+    );
+    assert!(
+        sent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sent.stderr)
+    );
+    assert_eq!(
+        served.join().unwrap(),
+        "hello",
+        "a tools-on agent still reaches the owner's model server on a kept port"
+    );
+    for host in ["127.0.0.1", "0.0.0.0", "::1"] {
+        let name = format!("kept-{port}-{}.sb", host.replace([':', '.'], "-"));
+        let (got, said) = listen(&open, &case, &name, host, port, false);
+        assert_eq!(got, "", "{host} {port}");
+        assert!(
+            said.contains("Operation not permitted"),
+            "an agent cannot take {host}:{port} from the owner's model server: {said}"
+        );
+    }
+}
+
+#[test]
+fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
+    let access: crazyagent::config::ModelAccess = toml::from_str(&format!(
+        "accounts = [\"local-account\"]\nconnections = [{}]\n",
+        [
+            connection("a", "http://localhost:1234/v1"),
+            connection("b", "http://[::1]:8000/v1"),
+            connection("c", "https://LOCALHOST/v1"),
+            connection("d", "http://127.0.0.1:8080/v1"),
+            connection("e", "http://127.0.0.1:8080/v2"),
+            connection("f", "http://10.0.0.5:9000/v1"),
+            connection("g", "https://api.example.com/v1"),
+            connection("h", "not a url"),
+        ]
+        .join(", ")
+    ))
+    .unwrap();
+    assert_eq!(
+        crazyagent::sandbox::owner_ports(&access),
+        [443, 1234, 8000, 8080],
+        "loopback endpoints only, each port once, the scheme's port when none is named"
+    );
+    let case = case();
+    let open = sandbox(&case, SandboxNetwork::Open);
+    assert!(matches!(
+        open.clone().keep_ports(&[0]),
+        Err(SandboxError::Invalid(_))
+    ));
+    let many: Vec<u16> =
+        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+    assert!(matches!(
+        open.clone().keep_ports(&many),
+        Err(SandboxError::Invalid(_))
+    ));
+    let kept = open
+        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .unwrap()
+        .keep_ports(&[1455, 11434, 20_000])
+        .unwrap();
+    assert_eq!(
+        kept.profile().matches("(local ip \"*:20000\")").count(),
+        2,
+        "a kept port is denied once for bind and once for inbound"
+    );
 }
 
 #[test]
@@ -834,6 +1048,113 @@ fn a_sandbox_confines_only_to_an_engine_worktree_whose_git_links_agree() {
     fs::remove_file(&link).unwrap();
     fs::write(&link, &original).unwrap();
     assert!(confine(&one).is_ok());
+}
+
+#[test]
+fn a_confined_agent_cannot_move_its_worktree_head_but_git_still_works_there() {
+    let (case, sandbox, profile, worktree) = git_case();
+    let moved = owner_git(
+        &case.project,
+        &case.home,
+        &["commit", "-q", "--allow-empty", "-m", "second"],
+    );
+    assert!(moved.status.success(), "{moved:?}");
+    let second = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
+    let second = String::from_utf8(second.stdout).unwrap().trim().to_owned();
+    let admin = case
+        .project
+        .join(".git")
+        .join("worktrees")
+        .join("engine-one");
+    let head = admin.join("HEAD");
+    let before = fs::read_to_string(&head).unwrap();
+    assert_ne!(before.trim(), second);
+    let confined = sandbox.confine_to_worktree(&worktree).unwrap();
+    let place = quoted(&worktree);
+    let quiet = run(
+        &confined,
+        &profile,
+        &format!("cd {place} && git status --short && git reset -q --hard HEAD && echo ok"),
+    );
+    assert!(
+        quiet.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&quiet.stdout), "ok\n");
+    for script in [
+        format!("cd {place} && git update-ref --no-deref HEAD {second}"),
+        format!("cd {place} && git checkout -q --detach {second}"),
+        format!("printf 'ref: refs/heads/main\\n' > {}", quoted(&head)),
+        format!("mv {} {}", quoted(&head), quoted(&admin.join("HEAD.old"))),
+        format!("rm {}", quoted(&head)),
+    ] {
+        let output = run(&confined, &profile, &script);
+        assert!(!output.status.success(), "{script}");
+        assert_eq!(fs::read_to_string(&head).unwrap(), before, "{script}");
+    }
+    assert!(!admin.join("HEAD.lock").exists());
+    assert!(!admin.join("HEAD.old").exists());
+}
+
+#[test]
+fn a_confined_sandbox_guards_a_real_admin_submodule_store_and_refuses_a_planted_one() {
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let store = case.project.join(".git/worktrees/one/modules");
+    assert!(fs::symlink_metadata(&store).is_err());
+    let confine =
+        || sandbox(&case, SandboxNetwork::Only(Vec::new())).confine_to_worktree(&worktree);
+    let confined = confine().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(&store).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+    assert!(confined.protected_paths().contains(&store));
+    assert!(
+        !sandbox(&case, SandboxNetwork::Only(Vec::new()))
+            .protected_paths()
+            .contains(&store)
+    );
+    assert!(confine().unwrap().protected_paths().contains(&store));
+    fs::remove_dir(&store).unwrap();
+    fs::write(&store, b"planted").unwrap();
+    let result = confine();
+    assert!(
+        matches!(result, Err(SandboxError::Invalid(_))),
+        "{:?}",
+        result.map(|sandbox| sandbox.profile())
+    );
+    assert_eq!(fs::read(&store).unwrap(), b"planted");
+    fs::remove_file(&store).unwrap();
+    std::os::unix::fs::symlink(&case.outside, &store).unwrap();
+    assert!(matches!(confine(), Err(SandboxError::Invalid(_))));
+    assert!(
+        fs::symlink_metadata(&store)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]

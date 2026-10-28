@@ -217,6 +217,51 @@ fn a_linked_record_is_never_followed_by_the_tool_or_the_engine() {
     );
 }
 
+/// A master that replaces its private temporary folder with a link to another folder gets
+/// nothing read from or removed in that folder by the engine; a real folder still works.
+#[test]
+fn a_swapped_private_folder_is_never_followed_by_the_engine() {
+    let directory = tempfile::tempdir().unwrap();
+    let agent = directory.path().join("agent-1");
+    let elsewhere = directory.path().join("owner-folder");
+    std::fs::create_dir(&agent).unwrap();
+    std::fs::create_dir(&elsewhere).unwrap();
+    let line = "{\"harness\":null,\"task\":\"Read the owner file\"}\n";
+    let outside = elsewhere.join(DROP_FILE);
+    std::fs::write(&outside, line).unwrap();
+    let tmp = agent.join("tmp");
+    symlink(&elsewhere, &tmp).unwrap();
+    let drop = tmp.join(DROP_FILE);
+
+    assert!(
+        take(&drop).is_empty(),
+        "the engine does not read through a swapped folder"
+    );
+    clear(&drop);
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        line,
+        "the file in the linked folder is neither read nor removed"
+    );
+
+    std::fs::remove_file(&tmp).unwrap();
+    std::fs::create_dir(&tmp).unwrap();
+    std::fs::write(&drop, line).unwrap();
+    assert_eq!(
+        take(&drop),
+        [Delegation {
+            harness: None,
+            prompt: "Read the owner file".into(),
+            role: None,
+        }]
+    );
+    assert!(
+        std::fs::symlink_metadata(&drop).is_err(),
+        "taking clears the record"
+    );
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), line);
+}
+
 #[test]
 fn the_engine_keeps_only_valid_recorded_proposals() {
     let directory = tempfile::tempdir().unwrap();

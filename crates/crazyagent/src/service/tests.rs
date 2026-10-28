@@ -314,26 +314,89 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
 }
 
 #[test]
-fn windows_path_command_passes_the_folder_as_an_argument() {
-    let command = windows_path_command(Path::new("/c/Program Files/CrazyAgent"));
-    let command: Vec<_> = command
-        .into_iter()
-        .map(|part| part.into_string().unwrap())
+fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
+    let folder = Path::new("/c/Program Files/Cra'zy;$(exit 7)");
+    let command = windows_path_command(folder);
+    assert_eq!(command.get_program(), "powershell.exe");
+    let args: Vec<_> = command
+        .get_args()
+        .map(|part| part.to_str().unwrap())
         .collect();
+    assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
+    assert!(args[3].contains("[Environment]::SetEnvironmentVariable('Path'"));
+    assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
+    assert!(!args[3].contains("$args"));
+    assert!(!args[3].contains("Cra'zy"));
+    assert_eq!(args.len(), 4);
+    let envs: Vec<_> = command.get_envs().collect();
     assert_eq!(
-        command[..4],
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command"
-        ]
+        envs,
+        [(
+            OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
+            Some(folder.as_os_str())
+        )]
     );
-    assert!(command[4].contains("[Environment]::SetEnvironmentVariable('Path'"));
-    assert!(command[4].contains("$args[0]"));
-    assert!(!command[4].contains("CrazyAgent"));
-    assert_eq!(command[5], "/c/Program Files/CrazyAgent");
-    assert_eq!(command.len(), 6);
+}
+
+/// Reads the user's stored PATH through PowerShell. Takes nothing. Returns the value, empty
+/// when it is unset.
+#[cfg(windows)]
+fn user_path() -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.Write([Environment]::GetEnvironmentVariable('Path','User'))",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Stores the user's PATH back as it was, handing the value over in the environment.
+/// Takes the value. Returns nothing; panics when PowerShell fails.
+#[cfg(windows)]
+fn restore_user_path(value: &str) {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Environment]::SetEnvironmentVariable('Path', $env:CRAZYAGENT_TEST_PATH, 'User')",
+            ])
+            .env("CRAZYAGENT_TEST_PATH", value)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
+    let before = user_path();
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("cra'zy;$(exit 7)");
+    std::fs::create_dir(&folder).unwrap();
+    let executable = folder.join("crazyagent.exe");
+    let first = link_cli(&executable, root.path());
+    let second = link_cli(&executable, root.path());
+    let after = user_path();
+    restore_user_path(&before);
+    assert_eq!(first.unwrap(), folder);
+    assert_eq!(second.unwrap(), folder);
+    let shown = folder.to_str().unwrap();
+    assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
+    assert_eq!(user_path(), before);
 }
 
 #[cfg(unix)]

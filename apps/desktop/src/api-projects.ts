@@ -418,14 +418,6 @@ export interface MemoryItem {
 
 export type MemoryDecision = { decision: "Keep" } | { decision: "Reject" } | { decision: "Remove" };
 
-export const MEMORY_PAGES_MAX = 20;
-
-/** Reads a project's memories, research saved for approval included, page by page.
- * Inputs: the project id and the last memory id already shown, or null.
- * Output: one engine batch of memories. */
-export function loadProjectMemories(id: string, after: string | null): Promise<Result<MemoryItem[]>> {
-  return call<MemoryItem[]>("desktop_project_memories", { id, after });
-}
 
 /** One decision the project's IDE asked the owner to confirm: the memory at the asked
  * version and whether to approve or reject it. */

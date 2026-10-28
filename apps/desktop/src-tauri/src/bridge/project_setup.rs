@@ -355,11 +355,11 @@ impl NativeBridge {
     /// Takes the project id.
     /// Returns the folders in saved order and the version a change sends back.
     pub async fn project_read_paths(
-        &mut self,
+        &self,
         id: &str,
     ) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
         let paths = self
-            .controller()?
+            .reader()?
             .project_read_paths(project(id)?)
             .await
             .map_err(|e| read_failure(&e.0))?;
@@ -369,13 +369,9 @@ impl NativeBridge {
     /// Lists a set-up project's files for the console's `@` completion: tracked and
     /// untracked, not ignored paths relative to its folder that contain the query.
     /// Takes the project id and the query. Returns at most 200 paths in git's order.
-    pub async fn project_files(
-        &mut self,
-        id: &str,
-        query: &str,
-    ) -> Result<Vec<String>, BridgeError> {
+    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
         let paths = self
-            .controller()?
+            .reader()?
             .project_files(
                 project(id)?,
                 query.to_owned(),

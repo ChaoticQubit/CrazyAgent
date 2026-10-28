@@ -414,22 +414,25 @@ fn remove_folder(path: &Path) -> Result<(), AgentHomeError> {
     }
 }
 
+/// Reads an instruction file through one open that follows no link in its last part and
+/// never waits on a FIFO, then checks the opened file itself, so nothing swapped in after
+/// a check is read or waited on. Takes the path. Returns the text, empty for a missing
+/// file, `process_text_unsafe` for a link or any other non-regular file, or another code.
 fn read_bounded(path: &Path) -> Result<String, AgentHomeError> {
-    let named = match fs::symlink_metadata(path) {
+    let file = match crate::platform::open_plain(path) {
+        Ok(file) => file,
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
             return Ok(String::new());
         }
+        Err(_) if fs::symlink_metadata(path).is_ok_and(|named| !named.is_file()) => {
+            return Err(failure("process_text_unsafe"));
+        }
         Err(_) => return Err(failure("process_text_unreadable")),
-        Ok(metadata) => metadata,
     };
-    if !named.is_file() {
-        return Err(failure("process_text_unsafe"));
-    }
-    let file = File::open(path).map_err(|_| failure("process_text_unreadable"))?;
     let held = file
         .metadata()
         .map_err(|_| failure("process_text_unreadable"))?;
-    if !held.is_file() || !same_file(&named, &held) {
+    if !held.is_file() {
         return Err(failure("process_text_unsafe"));
     }
     read_text(file)
@@ -446,16 +449,6 @@ fn read_text(file: File) -> Result<String, AgentHomeError> {
     let text = String::from_utf8(bytes).map_err(|_| failure("process_text_invalid"))?;
     validate(&text)?;
     Ok(text)
-}
-
-#[cfg(unix)]
-fn same_file(named: &fs::Metadata, held: &fs::Metadata) -> bool {
-    named.dev() == held.dev() && named.ino() == held.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(named: &fs::Metadata, held: &fs::Metadata) -> bool {
-    named.len() == held.len()
 }
 
 fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeError> {

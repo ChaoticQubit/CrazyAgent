@@ -9,10 +9,14 @@ use serde::{Deserialize, Serialize};
 pub const ROWS_MAX: usize = 25;
 pub const DAYS_MAX: usize = 60;
 pub const LIMITS_MAX: usize = 64;
+/// The most bytes an encoded report takes, leaving room in one reply frame for the
+/// reply that carries it.
+pub const REPORT_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 256;
 pub const HARNESSES_MAX: usize = 32;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-const OFFSET_MINUTES_MAX: i32 = 14 * 60;
+const OFFSET_MINUTES_MAX: u32 = 14 * 60;
+const SHARES: usize = 8;
 const AGENT_BYTES_MAX: usize = 192;
 const HARNESS_BYTES_MAX: usize = 128;
 
@@ -411,12 +415,41 @@ fn agent_lines(
         .map_err(storage)
 }
 
+/// Keeps a report within `REPORT_BYTES_MAX` encoded bytes so its reply fits one frame:
+/// while it is larger, every group keeps a smaller share of its cap, losing its least-used
+/// rows, oldest days and last accounts' limits first. Projects and agents, whose flagged
+/// rows follow their top rows up to `2 * ROWS_MAX`, take their cap from their own length
+/// when it passes `ROWS_MAX`. Input: the report.
+/// Output: the report that fits, or `usage_unavailable`.
+fn fit(mut report: UsageReport) -> Result<UsageReport, EngineError> {
+    let projects = report.projects.len().max(ROWS_MAX);
+    let agents = report.agents.len().max(ROWS_MAX);
+    assert!(projects <= 2 * ROWS_MAX && agents <= 2 * ROWS_MAX);
+    for share in (0..=SHARES).rev() {
+        let kept = |cap: usize| cap * share / SHARES;
+        report.projects.truncate(kept(projects));
+        report.agents.truncate(kept(agents));
+        report.pools.truncate(kept(ROWS_MAX));
+        report.accounts.truncate(kept(ROWS_MAX));
+        report.lines.truncate(kept(ROWS_MAX));
+        report.agent_lines.truncate(kept(ROWS_MAX));
+        let oldest = report.days.len().saturating_sub(kept(DAYS_MAX));
+        report.days.drain(..oldest);
+        report.limits.truncate(kept(LIMITS_MAX));
+        let encoded = serde_json::to_vec(&report).map_err(|_| failure("usage_unavailable"))?;
+        if encoded.len() <= REPORT_BYTES_MAX {
+            return Ok(report);
+        }
+    }
+    Err(failure("usage_unavailable"))
+}
+
 /// Builds the usage page's numbers for the range starting at `since_ms`, None for all
 /// time, with days cut at local midnight `offset_minutes` east of UTC, for one project or
 /// every project. Inputs: the store, the project, the range start, the viewer's offset and
 /// the time. Output: the report, at most `ROWS_MAX` rows a group, the latest `DAYS_MAX`
-/// days and `LIMITS_MAX` accounts; `usage_request_invalid` for an offset beyond 14 hours,
-/// or `usage_unavailable`.
+/// days and `LIMITS_MAX` accounts, trimmed by `fit` to `REPORT_BYTES_MAX`;
+/// `usage_request_invalid` for an offset beyond 14 hours, or `usage_unavailable`.
 pub fn report(
     db: &Connection,
     project: Option<&ProjectId>,
@@ -424,7 +457,9 @@ pub fn report(
     offset_minutes: i32,
     now_ms: i64,
 ) -> Result<UsageReport, EngineError> {
-    if offset_minutes.abs() > OFFSET_MINUTES_MAX || since_ms.is_some_and(|since| since > now_ms) {
+    if offset_minutes.unsigned_abs() > OFFSET_MINUTES_MAX
+        || since_ms.is_some_and(|since| since > now_ms)
+    {
         return Err(failure("usage_request_invalid"));
     }
     let since = since_ms.unwrap_or(i64::MIN);
@@ -465,7 +500,7 @@ pub fn report(
     days.reverse();
     let mut limits = all_limits(db)?;
     limits.truncate(LIMITS_MAX);
-    let report = UsageReport {
+    let report = fit(UsageReport {
         since_ms,
         total,
         runs,
@@ -493,7 +528,7 @@ pub fn report(
         limits,
         not_reported_by: unreported_harnesses(db, project, since)?,
         health: health(db)?,
-    };
+    })?;
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);
     assert!(report.not_reported_by.len() <= HARNESSES_MAX);
@@ -501,4 +536,4 @@ pub fn report(
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(crate) mod tests;

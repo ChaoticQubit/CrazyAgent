@@ -16,7 +16,7 @@ import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
 import { freshAlerts, unseenByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
-import { updateStore } from "./screens/settings/updates-state";
+import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
 import { GoToLayer } from "./ui/go-to";
 
@@ -86,12 +86,13 @@ function UpdatesAlone({ session }: { session: Session }) {
 /** The full-window state for an engine of another version than this app: the engine's own
  * message naming both versions, Restart engine on this app's version, Try again, and Check
  * for updates, since a newer app can also end the mismatch. Inputs: the version read, the
- * restart state and the handlers. */
-export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
+ * restart state, the handlers and whether an update install holds Restart engine off. */
+export function EngineOutdatedView({ versions, restart, onRestart, onRetry, installing = false }: {
   versions: Loaded<EngineVersions>;
   restart: EngineRestart;
   onRestart: () => void;
   onRetry: () => void;
+  installing?: boolean;
 }) {
   const message = versions.kind === "ok" && versions.value.message ? displayText(versions.value.message) : plainError("engine_version_mismatch");
   return <main id="main" className="full-state">
@@ -100,7 +101,7 @@ export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
       <Icon name="refresh-cw" size={28} />
       <h1>CrazyAgent's engine needs a restart</h1>
       <p className="secondary">{message}</p>
-      <RestartEngine restart={restart} onRestart={onRestart} primary />
+      <RestartEngine restart={restart} onRestart={onRestart} primary disabled={installing} />
       <span><Button icon="refresh-cw" onClick={onRetry}>Try again</Button></span>
       <UpdateLink />
     </div>
@@ -110,7 +111,8 @@ export function EngineOutdatedView({ versions, restart, onRestart, onRetry }: {
 function EngineOutdated({ onRetry }: { onRetry: () => void }) {
   const [versions] = useLoad(engineVersions);
   const [restart, restartNow] = useEngineRestart(onRetry);
-  return <EngineOutdatedView versions={versions} restart={restart} onRestart={restartNow} onRetry={onRetry} />;
+  const update = useSyncExternalStore(updateStore.subscribe, updateStore.get, updateStore.get);
+  return <EngineOutdatedView versions={versions} restart={restart} onRestart={restartNow} onRetry={onRetry} installing={blocking(update)} />;
 }
 
 function Launching() {

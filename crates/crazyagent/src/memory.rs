@@ -1132,7 +1132,10 @@ fn read(
     for body in rows {
         let entry: KnowledgeEntry = serde_json::from_str(&body.map_err(error)?).map_err(error)?;
         entry.assert_consistent();
-        if live_entry(tx, &entry)? && (!global || globally_approved(tx, &entry)?) {
+        if live_entry(tx, &entry)?
+            && !hidden_text(&entry.text)
+            && (!global || globally_approved(tx, &entry)?)
+        {
             entries.push(entry);
         }
         if entries.len() >= bounds.batch_size {

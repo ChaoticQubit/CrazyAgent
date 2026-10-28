@@ -50,6 +50,31 @@ test("ranges start at the viewer's local midnight and hold whole local days", ()
   assert.ok(Object.is(usage.offsetMinutes({ getTimezoneOffset: () => 0 }), 0));
 });
 
+test("ranges and day labels follow the engine's fixed-offset days across a daylight saving change", () => {
+  const zone = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  try {
+    const spring = new Date(Date.UTC(2026, 2, 11, 19));
+    const offset = usage.offsetMinutes(spring);
+    assert.equal(offset, -420);
+    assert.equal(usage.rangeStart("7d", spring), Date.UTC(2026, 2, 5, 7));
+    assert.equal(usage.rangeStart("7d", new Date(Date.UTC(2026, 10, 3, 19))), Date.UTC(2026, 9, 28, 8));
+    const dates = [5, 6, 7, 8, 9, 10, 11];
+    const days = dates.map((date) => ({ day_ms: Math.floor((Date.UTC(2026, 2, date, 12) + offset * MINUTE) / DAY) * DAY - offset * MINUTE, tokens: tokens({ input: date }) }));
+    assert.equal(days[0].day_ms, Date.UTC(2026, 2, 5, 7));
+    const label = (date) => new Date(Date.UTC(2026, 2, date)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+    assert.deepEqual(days.map((day) => usage.dayLabel(day.day_ms, offset)), dates.map(label));
+    const words = text(render({ nowMs: spring.getTime(), report: { kind: "ok", value: report({ days }) } }));
+    const at = dates.map((date) => words.indexOf(`${label(date)} `));
+    assert.ok(at.every((index, place) => index >= 0 && (place === 0 || index > at[place - 1])), `every day keeps its own date, in order: ${words}`);
+    assert.equal(words.split(label(7)).length, 2, "the Saturday before the change is listed once");
+    assert.ok(!words.includes(new Date(Date.UTC(2026, 2, 4)).toLocaleDateString(undefined, { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" })), "no day before the range is listed");
+  } finally {
+    if (zone === undefined) delete process.env.TZ;
+    else process.env.TZ = zone;
+  }
+});
+
 test("token counts read compactly with the cache share of prompt tokens", () => {
   assert.equal(usage.compactCount(950), "950");
   assert.equal(usage.compactCount(1234), "1.2K");

@@ -365,13 +365,14 @@ impl Editor {
             self.top = self.row + 1 - rows;
         }
         let line: Vec<char> = self.lines[self.row].chars().collect();
-        let cells = |from: usize, to: usize| -> usize {
-            line[from..to].iter().map(|c| char_width(shown(*c))).sum()
-        };
         self.left = self.left.min(self.column);
-        while cells(self.left, self.column) >= width {
-            self.left += 1;
+        let mut start = self.column;
+        let mut used = 0;
+        while start > self.left && used + char_width(shown(line[start - 1])) < width {
+            used += char_width(shown(line[start - 1]));
+            start -= 1;
         }
+        self.left = start;
         let shown_lines = self.lines[self.top..(self.top + rows).min(self.lines.len())]
             .iter()
             .map(|text| {
@@ -388,7 +389,7 @@ impl Editor {
                 out
             })
             .collect();
-        let cursor = (cells(self.left, self.column), self.row - self.top);
+        let cursor = (used, self.row - self.top);
         assert!(cursor.0 < width && cursor.1 < rows);
         (shown_lines, cursor)
     }
@@ -440,8 +441,9 @@ impl ProcessPage {
         if self.pending.is_some() {
             return;
         }
-        self.pending = Some(query.clone());
-        ctx.request(Request::Process(Box::new(query)));
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.pending = Some(query);
+        }
     }
 
     fn changed(&self) -> bool {
@@ -555,7 +557,7 @@ impl ProcessPage {
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
             (
                 ProcessQuery::Save { text, .. },
-                Ok(ProcessReply::Saved(SavedText::Saved { version: next })),
+                Ok(ProcessReply::Saved(reply @ SavedText::Saved { version: next, .. })),
             ) => {
                 if let State::Ready { saved, version } = &mut self.state {
                     assert!(*next > *version);
@@ -564,10 +566,13 @@ impl ProcessPage {
                 }
                 self.problem = None;
                 self.conflict = None;
-                ctx.say(Message::success(
-                    "Instructions saved.",
-                    "Agents started from now on get them.",
-                ));
+                ctx.say(match reply.claude_warning() {
+                    None => Message::success(
+                        "Instructions saved.",
+                        "Agents started from now on get them.",
+                    ),
+                    Some(warning) => Message::warning("Instructions saved.", &warning),
+                });
             }
             (
                 ProcessQuery::Save { .. },

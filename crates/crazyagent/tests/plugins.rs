@@ -26,13 +26,17 @@ struct Case {
 
 impl Case {
     async fn new() -> Self {
+        Self::with_settings(SETTINGS).await
+    }
+
+    async fn with_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-plugins-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        fs::write(&global, SETTINGS).unwrap();
+        fs::write(&global, settings).unwrap();
         fs::set_permissions(&global, fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = watch::channel(false);
         let mut case = Self {
@@ -121,6 +125,15 @@ fn fixture(root: &Path) -> String {
     fs::write(&path, FIXTURE).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     path.display().to_string()
+}
+
+/// Settings with one local model connection the owner configured at
+/// `http://127.0.0.1:<port>/v1`, as for LM Studio or vLLM. Input: the port. Output: the
+/// global settings text.
+fn local_model_settings(port: u16) -> String {
+    format!(
+        "{SETTINGS}\n[model_access]\naccounts = [\"local-account\"]\nconnections = [{{ id = \"local-connection\", provider = \"openai-compatible\", harness = \"rcli\", protocol = \"openai-chat\", account_ref = \"local-account\", endpoint = {{ kind = \"http\", url = \"http://127.0.0.1:{port}/v1\" }}, model = {{ id = \"qwen2.5:0.5b\", author = \"openai-compatible\" }}, auth = {{ method = \"none\" }} }}]\npools = [{{ id = \"local-pool\", members = [\"local-connection\"], projects = [], roles = [], fallback_allowed = false }}]\n"
+    )
 }
 
 fn secret(value: &str) -> AccountSecret {
@@ -301,6 +314,68 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
 /// offered the approved server: launch_context_live.rs
 /// real_codex_and_claude_receive_the_approved_skill_server_and_context.
 /// No test checks a real third-party MCP server: none is installed or approved.
+#[tokio::test]
+async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches_agents() {
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = create_project(&mut controller, "app").await;
+    let root = case.root.path().to_path_buf();
+    let hidden = root.join("picked").join("hidden");
+    fs::create_dir_all(&hidden).unwrap();
+    fs::write(
+        hidden.join("SKILL.md"),
+        "---\nname: fmt\ndescription: Formats changed files.\u{e0041}\u{e0042}\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let refused = controller
+        .add_skill(Scope::Global, hidden.display().to_string())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "skill_description_hidden");
+    assert!(plain_problem(&refused.0).is_some());
+
+    let added = controller
+        .add_skill(Scope::Global, skill_folder(&root, "fmt", "fmt"))
+        .await
+        .unwrap();
+    assert_eq!(added.refused, None);
+    let effective = controller.project_plugins(project.clone()).await.unwrap();
+    assert!(effective.skills.iter().any(|skill| skill.name == "fmt"));
+    let stored = PathBuf::from(&added.folder).join("SKILL.md");
+    fs::set_permissions(&stored, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(
+        &stored,
+        "---\nname: fmt\ndescription: Teaches fmt.\u{e0041}\u{e0042}\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let effective = controller.project_plugins(project.clone()).await.unwrap();
+    assert!(
+        effective.skills.iter().all(|skill| skill.name != "fmt"),
+        "a stored skill whose SKILL.md hides text is not given to agents"
+    );
+    let listed = controller.plugin_skills(None).await.unwrap();
+    let fmt = listed.iter().find(|skill| skill.name == "fmt").unwrap();
+    assert_eq!(
+        fmt.refused.as_deref(),
+        Some("skill_description_hidden"),
+        "the skill list says why agents no longer get it"
+    );
+    controller
+        .remove_skill(fmt.id.clone(), fmt.version)
+        .await
+        .unwrap();
+    assert!(
+        controller
+            .plugin_skills(None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|skill| skill.name != "fmt"),
+        "the refused skill can still be removed"
+    );
+    case.close().await;
+}
+
 #[tokio::test]
 async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones() {
     let mut case = Case::new().await;
@@ -675,6 +750,49 @@ async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
         !folder.exists(),
         "a removed server leaves no check folder behind"
     );
+    case.close().await;
+}
+
+/// A checked server gets the open network agents get, but while the owner's local model
+/// server is down it cannot listen on that configured endpoint's port and answer the
+/// prompts sent there; another loopback port stays free for it to bind.
+#[tokio::test]
+async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
+    let (kept, other) = {
+        let first = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let second = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        (
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port(),
+        )
+    };
+    let case = Case::with_settings(&local_model_settings(kept)).await;
+    let controller = case.controller().await;
+    let root = case.root.path().to_path_buf();
+    for (name, port, first) in [("kept", kept, "refused"), ("other", other, "listened")] {
+        let spec = ServerSpec::Stdio {
+            command: fixture(&root),
+            args: vec!["listen".into(), port.to_string()],
+        };
+        let server = controller
+            .add_mcp_server(Scope::Global, name.into(), spec.clone(), vec![])
+            .await
+            .unwrap();
+        controller
+            .approve_mcp_server(server.id.clone(), spec)
+            .await
+            .unwrap();
+        let checked = controller
+            .check_mcp_server(server.id.clone())
+            .await
+            .unwrap();
+        assert_eq!(checked.problem, None, "{name}");
+        assert_eq!(
+            checked.tools,
+            vec![first, "anonymous"],
+            "{name} port {port}: a check listens only where the owner's model server does not"
+        );
+    }
     case.close().await;
 }
 

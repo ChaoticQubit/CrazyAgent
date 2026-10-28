@@ -105,16 +105,30 @@ fn the_app_and_a_project_text_are_saved_and_read_through_the_protocol() {
     let project = with_project(&root, &folder);
 
     assert_eq!(read(&root, None).unwrap(), shown("", 0));
-    assert_eq!(
-        save(&root, None, "App rule.\n", 0).unwrap(),
-        SavedText::Saved { version: 1 }
+    let saved = save(&root, None, "App rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
     assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
 
     assert_eq!(read(&root, Some(project.clone())).unwrap(), shown("", 0));
-    assert_eq!(
-        save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap(),
-        SavedText::Saved { version: 1 }
+    let saved = save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
     assert_eq!(
         fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
@@ -296,9 +310,16 @@ fn stale_process_text_save_is_refused() {
     for scope in [None, Some(project.clone())] {
         let opened = read(&root, scope.clone()).unwrap();
         assert_eq!(opened, shown("", 0));
-        assert_eq!(
-            save(&root, scope.clone(), "Desktop rule.\n", opened.version).unwrap(),
-            SavedText::Saved { version: 1 }
+        let saved = save(&root, scope.clone(), "Desktop rule.\n", opened.version).unwrap();
+        assert!(
+            matches!(
+                saved,
+                SavedText::Saved {
+                    version: 1,
+                    size: Some(_)
+                }
+            ),
+            "{saved:?}"
         );
         assert_eq!(
             save(&root, scope.clone(), "TUI rule.\n", opened.version).unwrap(),
@@ -325,10 +346,16 @@ fn stale_process_text_save_is_refused() {
                 "Keep mine is only for a version newer than the one opened"
             );
         }
-        assert_eq!(
-            keep(&root, scope.clone(), "TUI rule.\n", 1, Some(0)).unwrap(),
-            SavedText::Saved { version: 2 },
-            "Keep mine writes over the version the conflict showed"
+        let kept = keep(&root, scope.clone(), "TUI rule.\n", 1, Some(0)).unwrap();
+        assert!(
+            matches!(
+                kept,
+                SavedText::Saved {
+                    version: 2,
+                    size: Some(_)
+                }
+            ),
+            "Keep mine writes over the version the conflict showed: {kept:?}"
         );
         assert_eq!(read(&root, scope.clone()).unwrap(), shown("TUI rule.\n", 2));
         let records = kept_over(&root, scope.as_ref());
@@ -375,7 +402,7 @@ fn stale_process_text_save_is_refused() {
         runs.into_iter().map(|run| run.join().unwrap()).collect()
     });
     let won: Vec<usize> = (0..racers)
-        .filter(|index| results[*index] == SavedText::Saved { version: 3 })
+        .filter(|index| matches!(results[*index], SavedText::Saved { version: 3, .. }))
         .collect();
     assert_eq!(won.len(), 1, "two saves never both win: {results:?}");
     let winner = format!("Racer {}.\n", won[0]);
@@ -453,7 +480,10 @@ fn stale_agent_instructions_save_is_refused() {
     let parser = "Only touch the parser.\n";
     assert_eq!(
         agent_save(&root, &project, agent, parser, 0, None).unwrap(),
-        SavedText::Saved { version: 1 }
+        SavedText::Saved {
+            version: 1,
+            size: None
+        }
     );
     assert_eq!(
         agent_save(&root, &project, agent, "Write the docs.\n", 0, None).unwrap(),
@@ -476,7 +506,10 @@ fn stale_agent_instructions_save_is_refused() {
     );
     assert_eq!(
         agent_save(&root, &project, agent, "Write the docs.\n", 1, Some(0)).unwrap(),
-        SavedText::Saved { version: 2 },
+        SavedText::Saved {
+            version: 2,
+            size: None
+        },
         "Keep mine writes over the version the conflict showed"
     );
     let item = versioned::agent_instructions_item(&project, agent);

@@ -96,6 +96,7 @@ enum Reply {
     },
     Saved {
         version: u64,
+        size: Option<ProcessSaved>,
     },
     Stale {
         version: u64,
@@ -145,12 +146,57 @@ pub struct ProcessText {
 pub enum SavedText {
     Saved {
         version: u64,
+        size: Option<ProcessSaved>,
     },
     Stale {
         version: u64,
         current: ProcessText,
         writer: LastWriter,
     },
+}
+
+impl SavedText {
+    /// The short sentence to show after a save a Claude master may refuse, as
+    /// [`ProcessSaved::claude_warning`] gives it for an app or project save. Input: the
+    /// save's result. Output: the sentence, or none for a stale reply, an agent's own text
+    /// or a save a Claude master takes.
+    pub fn claude_warning(&self) -> Option<String> {
+        match self {
+            SavedText::Saved {
+                size: Some(size), ..
+            } => size.claude_warning(),
+            _ => None,
+        }
+    }
+}
+
+/// What a saved instructions text comes to: the bytes of app and project instructions the
+/// project's agents now receive (the largest across set-up projects after an app save) and
+/// the most a Claude master is sure to take beside the largest project context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessSaved {
+    pub bytes: u32,
+    pub claude_bytes_max: u32,
+}
+
+impl ProcessSaved {
+    /// The short sentence to show after a save a Claude master may refuse, naming what it
+    /// takes and what agents now get; it fits an 80-column status line after "Instructions
+    /// saved.". Input: the save. Output: the sentence, or none when a Claude master takes it.
+    pub fn claude_warning(&self) -> Option<String> {
+        (self.bytes > self.claude_bytes_max).then(|| {
+            format!(
+                "Shorten: a Claude master takes {}, not {}.",
+                kilobytes(self.claude_bytes_max),
+                kilobytes(self.bytes)
+            )
+        })
+    }
+}
+
+fn kilobytes(bytes: u32) -> String {
+    format!("{:.1} KB", f64::from(bytes) / 1024.0)
 }
 
 #[derive(Debug)]
@@ -186,7 +232,8 @@ impl OwnerClient {
     /// Inputs: none for the app, or the project; the text, at most
     /// `agent_home::TEXT_BYTES_MAX` bytes; the version it was read at; and only for "Keep
     /// mine" after a stale reply, the version the owner opened, older than `version`.
-    /// Output: the saved version, the stale reply with the newer text, or a refusal.
+    /// Output: the saved version with what agents now receive beside what a Claude master
+    /// is sure to take, the stale reply with the newer text, or a refusal.
     pub async fn save_process_text(
         &self,
         project: Option<ProjectId>,
@@ -205,7 +252,11 @@ impl OwnerClient {
 
     async fn save_reply(&self, action: Action, text: String) -> Result<SavedText, EngineError> {
         match self.process_exchange(action, Some(text)).await? {
-            (Reply::Saved { version }, None) => Ok(SavedText::Saved { version }),
+            (Reply::Saved { version, size }, None)
+                if size.is_none_or(|size| size.bytes as usize <= PROCESS_BYTES_MAX) =>
+            {
+                Ok(SavedText::Saved { version, size })
+            }
             (
                 Reply::Stale {
                     version,
@@ -468,7 +519,9 @@ pub(super) async fn serve(
             };
             (reply, Some(current.text))
         }
-        Ok(Answer::Saved(SavedText::Saved { version })) => (Reply::Saved { version }, None),
+        Ok(Answer::Saved(SavedText::Saved { version, size })) => {
+            (Reply::Saved { version, size }, None)
+        }
         Ok(Answer::Saved(SavedText::Stale {
             version,
             current,
@@ -691,7 +744,10 @@ fn save_agent_text(
         Ok(next) => {
             tx.commit().map_err(|_| unknown())?;
             assert_eq!(next, version + 1);
-            Ok(SavedText::Saved { version: next })
+            Ok(SavedText::Saved {
+                version: next,
+                size: None,
+            })
         }
         Err(Refusal::Stale(stale)) => {
             let (text, current) = crate::storage::agent_text::read(&tx, project, agent)
@@ -765,7 +821,10 @@ fn save_text(
             store_text(root, folder.as_deref(), text)?;
             tx.commit().map_err(|_| unknown())?;
             assert_eq!(next, version + 1);
-            Ok(SavedText::Saved { version: next })
+            Ok(SavedText::Saved {
+                version: next,
+                size: Some(sized(root, project, text)),
+            })
         }
         Err(Refusal::Stale(stale)) => {
             assert_ne!(stale.current, version);
@@ -801,6 +860,69 @@ fn store_text(root: &Path, folder: Option<&Path>, text: &str) -> Result<(), Engi
         Some(folder) => crate::agent_home::save_project(folder, text),
     }
     .map_err(|problem| EngineError(problem.0))
+}
+
+/// The most set-up projects an app-wide save reads for its Claude warning, as many as Home
+/// lists.
+const SAVED_PROJECTS_MAX: i64 = 200;
+
+const _: () = assert!(
+    PROCESS_BYTES_MAX <= u32::MAX as usize
+        && super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize
+);
+
+/// Measures what the owner's instructions come to after a save that landed, from the text
+/// just saved: the app and project text the project's agents now receive, the largest
+/// across set-up projects after an app save, beside what a Claude master is sure to take.
+/// A text that cannot be read counts as empty, so a landed save never reports a failure.
+/// Inputs: the engine root, the project, none for the app, and the saved text. Output: the
+/// sizes.
+fn sized(root: &Path, project: Option<&ProjectId>, saved: &str) -> ProcessSaved {
+    let given = match project {
+        Some(_) => {
+            let app = crate::agent_home::read_app(root).unwrap_or_default();
+            crate::agent_home::render(&app, saved).len()
+        }
+        None => project_texts(root)
+            .iter()
+            .map(|own| crate::agent_home::render(saved, own).len())
+            .fold(crate::agent_home::render(saved, "").len(), usize::max),
+    };
+    assert!(given <= PROCESS_BYTES_MAX);
+    ProcessSaved {
+        bytes: given as u32,
+        claude_bytes_max: super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX as u32,
+    }
+}
+
+/// Reads the instructions of the set-up projects, at most `SAVED_PROJECTS_MAX`, so an app
+/// save can tell whether it pushes one past what a Claude master takes. A project whose
+/// folder or text cannot be read is left out. Input: the engine root. Output: the texts.
+fn project_texts(root: &Path) -> Vec<String> {
+    let Ok(connection) = read_only(root) else {
+        return Vec::new();
+    };
+    let Ok(tx) = connection.unchecked_transaction() else {
+        return Vec::new();
+    };
+    let ids: Vec<String> =
+        match tx.prepare("SELECT project FROM project_setups ORDER BY project LIMIT ?1") {
+            Ok(mut statement) => statement
+                .query_map([SAVED_PROJECTS_MAX], |row| row.get(0))
+                .map(|rows| rows.flatten().collect())
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+    assert!(ids.len() <= SAVED_PROJECTS_MAX as usize);
+    ids.iter()
+        .filter_map(|id| {
+            let project = ProjectId::new(id).ok()?;
+            let folder = crate::launch_context::agent_project(&tx, &project)
+                .ok()?
+                .folder?;
+            crate::agent_home::read_project(&folder).ok()
+        })
+        .collect()
 }
 
 /// Reads what one team agent of a project received at its last launch from its private

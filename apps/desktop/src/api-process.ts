@@ -72,10 +72,16 @@ export interface ProcessText {
   version: number;
 }
 
-/** What a save of instructions did: stored as the next version, or refused as stale because
- * another save landed after the version it named, with that newer text and who saved it. */
+/** What a save comes to: the bytes of app and project instructions the project's agents now
+ * get (the largest across set-up projects after an app save) and the most a Claude master is
+ * sure to take. */
+export type ProcessSaved = { bytes: number; claude_bytes_max: number };
+
+/** What a save of instructions did: stored as the next version, with what it comes to for app
+ * or project text and null for an agent's, or refused as stale because another save landed
+ * after the version it named, with that newer text and who saved it. */
 export type SavedText =
-  | { kind: "saved"; version: number }
+  | { kind: "saved"; version: number; size: ProcessSaved | null }
   | { kind: "stale"; version: number; current: ProcessText; writer: LastWriter };
 
 /** Reads the owner's instructions. Input: null for app-wide, or the project id.
@@ -87,9 +93,19 @@ export function loadProcess(projectId: string | null): Promise<Result<ProcessTex
 /** Saves the owner's instructions whole when no other save landed since they were read.
  * Inputs: null for app-wide, or the project id; the text; the version read; and, only for
  * "Keep mine" after a stale reply, the older version the owner opened. Output: saved with
- * the new version, or stale with the newer text. Agents launched after a save get it. */
+ * the new version and what it comes to, or stale with the newer text. Agents launched after
+ * a save get it. */
 export function saveProcess(projectId: string | null, text: string, version: number, opened: number | null = null): Promise<Result<SavedText>> {
   return call<SavedText>("desktop_save_process_text", { projectId, text, version, opened });
+}
+
+/** The line shown after a save: the plain saved line, or, when a Claude master may refuse the
+ * instructions, what it takes beside what agents now get. Input: what the save comes to, null
+ * when it reports none. Output: the line. */
+export function savedMessage(saved: ProcessSaved | null): string {
+  if (saved === null || saved.bytes <= saved.claude_bytes_max) return "Instructions saved. Agents started from now on get them.";
+  const size = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
+  return `Instructions saved, but a project's agents now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
 }
 
 /** Reads the owner's ~/.claude/CLAUDE.md for a preview. Only the owner's Import click calls

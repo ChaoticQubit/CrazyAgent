@@ -11,6 +11,12 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounts (
 )";
 const REGISTRY_MAX: i64 = 1_000_000;
 
+/// Creates the saved accounts table, so the start sweep can check a key against it.
+/// Input: the engine connection. Output: any SQLite failure.
+pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(error)
+}
+
 pub(crate) enum Command {
     Add(Box<ModelConnection>, AccountDetails),
     Rename(CredentialRef, String),
@@ -39,6 +45,52 @@ pub(crate) enum ResultValue {
 struct Record {
     connection: ModelConnection,
     details: AccountDetails,
+}
+
+/// The folder beside the engine database that holds account keys, one 0600 file per key
+/// named by its credential reference.
+pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
+
+/// Deletes one account key file from the engine root's owner-only key folder, for the start
+/// sweep of keys a committed removal left behind. Inputs: the engine root and the key's
+/// credential reference. Output: Ok when the file is gone, including when it or the folder
+/// was already missing; `account_key_store_unsafe` for a folder that is not this user's 0700
+/// directory.
+#[cfg(unix)]
+pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    if CredentialRef::new(name).is_err() || name.starts_with('.') {
+        return Err(error("account_key_reference_invalid"));
+    }
+    let directory = match rustix::fs::open(
+        root.join(ACCOUNT_KEYS),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    };
+    let metadata = directory.metadata().map_err(error)?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(error("account_key_store_unsafe"));
+    }
+    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Refuses to delete an account key where the Unix owner-only key folder does not exist.
+/// Takes the engine root and the reference, both unused. Returns
+/// `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn remove_key_file(_root: &Path, _name: &str) -> Result<(), EngineError> {
+    Err(error("account_key_store_unavailable"))
 }
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
@@ -123,7 +175,7 @@ pub(super) fn execute(
     admission: &Admission,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
-    db.execute_batch(SCHEMA).map_err(error)?;
+    initialize(db)?;
     match command {
         Command::List(after, limit) => list(db, config, admission, after.as_ref(), limit),
         Command::Get(id) => {
@@ -236,6 +288,9 @@ pub(super) fn execute(
             check_owner_admission(&tx, admission)?;
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
+            if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
+                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
+            }
             tx.commit().map_err(error)?;
             Ok(ResultValue::Removed(Box::new(connection)))
         }

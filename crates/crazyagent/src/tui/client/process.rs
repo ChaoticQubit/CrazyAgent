@@ -31,8 +31,8 @@ pub(in crate::tui) enum ProcessQuery {
 }
 
 /// What one Process request returned: a seed text, the saved text with its version, what a
-/// save did (saved, or stale with the newer text), or what one team agent received at its
-/// last launch.
+/// save did (saved with what it comes to beside what a Claude master takes, or stale with
+/// the newer text), or what one team agent received at its last launch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),

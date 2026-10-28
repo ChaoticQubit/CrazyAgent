@@ -212,12 +212,104 @@ test("a link whose text looks like a URL on another host names the target host; 
   assert.equal(md.linkTargetHost("", "https://other.example/"), null);
 });
 
+test("URL text in brackets, quotes or before punctuation still names another host, and URL text that cannot be read asks", () => {
+  assert.equal(md.linkTargetHost("github.com.", "https://evil.example/login"), "evil.example");
+  assert.equal(md.linkTargetHost("(https://github.com/login)", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("<github.com>,", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("“github.com”", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("( github.com )", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("https://github.com:99999", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("https://github.com:99999", "https://github.com/"), "github.com", "text that cannot be read as a URL never passes as the target");
+  assert.equal(md.linkTargetHost(`github.com/${"a".repeat(3000)}`, "https://evil.example/"), "evil.example", "long URL text is checked by its start");
+  assert.equal(md.linkTargetHost(`github.com/${"a".repeat(3000)}`, "https://github.com/a"), null);
+  assert.equal(md.linkTargetHost("github.com.", "https://github.com/"), null);
+  assert.equal(md.linkTargetHost("[acme.dev]", "https://www.acme.dev/"), null);
+  assert.equal(md.linkTargetHost("the docs.", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("e.g.", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("(see below)", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("...", "https://other.example/"), null);
+  assert.equal(md.linkTargetHost("github.com", "not a url"), null, "a target that is not a URL has no host to name");
+});
+
+test("link text that names a host among other words asks when any named host differs from the target", () => {
+  assert.equal(md.linkTargetHost("see example.com for details", "https://other.example/"), "other.example");
+  assert.equal(md.linkTargetHost("the https://github.com/login page", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("docs at acme.dev, mirror at evil.example", "https://acme.dev/"), "acme.dev", "every named host must match");
+  assert.equal(md.linkTargetHost("github.com,evil.example", "https://evil.example/"), "evil.example");
+  assert.equal(md.linkTargetHost("github.com@evil.example", "https://github.com/"), "github.com");
+  assert.equal(md.linkTargetHost("open https://github.com:99999 now", "https://github.com/"), "github.com");
+  assert.equal(md.linkTargetHost("ｇｉｔｈｕｂ．ｃｏｍ", "https://evil.example/"), "evil.example", "full-width text names a host too");
+  assert.equal(md.linkTargetHost("github。com", "https://evil.example/"), "evil.example", "an ideographic full stop is a dot in a host");
+  assert.equal(md.linkTargetHost("github。com", "https://github.com/"), null);
+  assert.equal(md.linkTargetHost("see github.com for details", "https://github.com/x"), null);
+  assert.equal(md.linkTargetHost("read https://acme.dev/docs/index.html first", "https://www.acme.dev/docs"), null, "a file name in a URL path is not a host");
+  assert.equal(md.linkTargetHost("read the guide, then e.g. section 1.2", "https://other.example/"), null);
+  const many = (count) => Array.from({ length: count }, () => "acme.dev").join(" ");
+  assert.equal(md.linkTargetHost(many(md.SHOWN_HOSTS_MAX), "https://acme.dev/"), null);
+  assert.equal(md.linkTargetHost(many(md.SHOWN_HOSTS_MAX + 1), "https://acme.dev/"), "acme.dev", "text naming more hosts than are checked asks");
+});
+
+test("link text naming a local host or an IP address asks like any other host", () => {
+  const evil = "https://evil.example/login";
+  for (const text of ["localhost", "localhost:3000", "Open the app at http://localhost:3000", "http://intranet/wiki", "1.2.3.4", "http://127.0.0.1:8080",
+    "[::1]", "http://[::1]:8080", "see [::1] here", "[docs.example]", "256.1.1.1"]) {
+    assert.equal(md.linkTargetHost(text, evil), "evil.example", text);
+  }
+  assert.equal(md.linkTargetHost("http://localhost:3000", "http://localhost:5173/"), null);
+  assert.equal(md.linkTargetHost("[0:0::1]", "http://[::1]:8080/"), null, "hosts compare as the URL parser reads them");
+  assert.equal(md.linkTargetHost("1.2.3.4", "https://1.2.3.4/"), null);
+  for (const text of ["meet at 10:30", "ratio 3:1", "step 2", "see below:", "note: done", "intranet", "2130706433"]) {
+    assert.equal(md.linkTargetHost(text, evil), null, text);
+  }
+});
+
 test("every link shows its target on hover", () => {
   const markup = render("[https://docs.example](https://other.example/x) and [docs](https://acme.dev/a)");
   assert.match(markup, /<a href="https:\/\/other.example\/x" title="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a>/);
   assert.match(markup, /<a href="https:\/\/acme.dev\/a" title="https:\/\/acme.dev\/a" [^>]*>docs<\/a>/);
   assert.deepEqual(md.parseInline("[see https://a.example or <https://c.example> **now**](https://b.example)"), [{ kind: "link", href: "https://b.example", children: [
     { kind: "text", text: "see https://a.example or https://c.example " }, { kind: "strong", children: [{ kind: "text", text: "now" }] }] }]);
+});
+
+test("a Sources list shows each report link once with its target beside differing text, only when asked for", () => {
+  const source = "[https://docs.example](https://other.example/x), [docs](https://acme.dev/a) and [docs again](https://acme.dev/a)";
+  const listed = renderToStaticMarkup(createElement(md.MarkdownView, { source, sources: true, onOpenLink: () => {} }));
+  const list = listed.slice(listed.indexOf('<section class="pj-sources"'));
+  assert.match(list, /^<section class="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources<\/h3><ol>/);
+  assert.equal((list.match(/<li>/g) ?? []).length, 2);
+  assert.match(list, /<a href="https:\/\/other.example\/x" [^>]*>https:\/\/docs.example<\/a><span class="pj-small pj-muted pj-mono"> https:\/\/other.example\/x<\/span>/);
+  assert.match(list, /<a href="https:\/\/acme.dev\/a" [^>]*>docs<\/a><span class="pj-small pj-muted pj-mono"> https:\/\/acme.dev\/a<\/span>/);
+  assert.doesNotMatch(render(source), /pj-sources/);
+  const context = readFileSync(new URL("../src/screens/project/context.tsx", import.meta.url), "utf8");
+  assert.match(context, /<MarkdownView source=\{text\} onOpenLink=\{open\} sources /, "the Context tab lists Sources through the reader");
+  assert.doesNotMatch(context, /pj-sources|markdownLinks/, "the Context tab keeps no Sources list of its own that skips the ask");
+});
+
+test("a click on a Sources link whose URL text names another host asks first like the report link; other Sources open at once", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(linksFixture);
+    return evaluate(`(async () => {
+      const tick = () => new Promise((done) => setTimeout(done, 0));
+      const source = (text) => [...document.querySelectorAll(".pj-sources a")].find((anchor) => anchor.textContent === text);
+      const button = (label) => [...document.querySelectorAll("dialog[open] button")].find((item) => item.textContent === label);
+      Fixture.mount("[https://docs.example](https://other.example/x) and [the docs](https://third.example/)", true);
+      const steps = {};
+      source("https://docs.example").click(); await tick();
+      steps.asked = Fixture.state();
+      button("Cancel").click(); await tick();
+      steps.cancelled = Fixture.state();
+      source("https://docs.example").click(); await tick();
+      button("Open").click(); await tick();
+      steps.confirmed = Fixture.state();
+      source("the docs").click(); await tick();
+      steps.direct = Fixture.state();
+      return steps;
+    })()`);
+  });
+  assert.deepEqual(seen.asked, { opened: [], question: "Open other.example?", body: "The link text shows https://docs.example, but it opens https://other.example/x." });
+  assert.deepEqual(seen.cancelled, { opened: [], question: null, body: null });
+  assert.deepEqual(seen.confirmed, { opened: ["https://other.example/x"], question: null, body: null });
+  assert.deepEqual(seen.direct, { opened: ["https://other.example/x", "https://third.example/"], question: null, body: null });
 });
 
 test("a click on a link whose URL text names another host asks first; Cancel opens nothing, Open opens the target, other links open at once", async () => {

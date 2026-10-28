@@ -738,18 +738,28 @@ fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| failure("empty service command"))?;
+    run_process(std::process::Command::new(program).args(args))
+}
+
+/// Runs one service command to its end with no input, capturing its output. Input: the
+/// command. Output: Ok on success, else an error showing its program, arguments, status
+/// and error text, never its environment.
+fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
+    let program = process.get_program().to_string_lossy().into_owned();
     let output = crate::spawn_gate::output(
-        std::process::Command::new(program)
-            .args(args)
+        process
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
     )
-    .map_err(|error| failure(format!("{}: {error}", program.to_string_lossy())))?;
+    .map_err(|error| failure(format!("{program}: {error}")))?;
     if output.status.success() {
         return Ok(());
     }
-    let shown: Vec<_> = command.iter().map(|part| part.to_string_lossy()).collect();
+    let shown: Vec<_> = std::iter::once(process.get_program())
+        .chain(process.get_args())
+        .map(|part| part.to_string_lossy())
+        .collect();
     let detail = String::from_utf8_lossy(&output.stderr);
     Err(failure(format!(
         "`{}` failed ({}): {}",
@@ -1037,28 +1047,31 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
         .parent()
         .ok_or_else(|| failure("the executable has no folder"))?
         .to_path_buf();
-    run_checked(&windows_path_command(&folder))?;
+    run_process(&mut windows_path_command(&folder))?;
     Ok(folder)
 }
 
+/// The environment variable that hands the folder to the Windows PATH command. PowerShell
+/// joins every argument after `-Command` into the script text, so the folder never goes
+/// on the command line.
+pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
+
 /// The PowerShell command that appends a folder to the user's PATH once. Input: the
-/// folder, passed as an argument rather than inside the script. Output: the command.
-pub fn windows_path_command(folder: &Path) -> Vec<OsString> {
-    let script = "$f=$args[0]; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
-if ($null -eq $p) { $p='' }; \
-if (-not (($p -split ';') -contains $f)) { \
-[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }";
-    [
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .chain(std::iter::once(folder.as_os_str().to_os_string()))
-    .collect()
+/// folder, handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never
+/// as script. Output: the command; it fails when that variable arrives empty.
+pub fn windows_path_command(folder: &Path) -> std::process::Command {
+    let script = format!(
+        "$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
+$p=[Environment]::GetEnvironmentVariable('Path','User'); \
+if ($null -eq $p) {{ $p='' }}; \
+if (-not (($p -split ';') -contains $f)) {{ \
+[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }}"
+    );
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
+    command
 }
 
 #[cfg(test)]

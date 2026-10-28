@@ -34,6 +34,8 @@ const TASK_HISTORY: &str =
 pub const STATUS_TASKS_MAX: i64 = 100;
 pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
+pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
+const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
 pub const DELEGATE_MARKER: &str = "DELEGATE";
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
@@ -1830,6 +1832,79 @@ pub(crate) fn paused_until(
             |row| row.get(0),
         )
         .optional()
+}
+
+/// The project's team status as the owner reads it: `status`, with task and message texts
+/// cut until it fits one owner reply. Takes a connection and the stored setup. Returns the
+/// status, or `team_status_bounds` when even the shortest texts do not fit.
+pub fn owner_status(
+    connection: &Connection,
+    stored: &StoredSetup,
+) -> Result<TeamStatus, EngineError> {
+    fit_status(status(connection, stored)?, encoded_len::<TeamStatus>)
+}
+
+/// The project's team graph as the owner reads it, built from a status whose texts are cut
+/// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
+/// the graph, or `team_status_bounds` when even the shortest texts do not fit.
+pub fn owner_graph(
+    connection: &Connection,
+    stored: &StoredSetup,
+) -> Result<TeamGraph, EngineError> {
+    let status = fit_status(status(connection, stored)?, |status| {
+        encoded_len(&graph(status))
+    })?;
+    Ok(graph(&status))
+}
+
+/// Cuts every task prompt, result and problem and every message text to one shared cap,
+/// halving it until `size` of the status fits `STATUS_REPLY_BYTES_MAX`; a cut text says how
+/// many bytes it left out and no task or message is dropped. Takes the status and the size
+/// measure. Returns the status, or `team_status_bounds` when the shortest cap still does not fit.
+fn fit_status(
+    mut status: TeamStatus,
+    size: impl Fn(&TeamStatus) -> Result<usize, EngineError>,
+) -> Result<TeamStatus, EngineError> {
+    if size(&status)? <= STATUS_REPLY_BYTES_MAX {
+        return Ok(status);
+    }
+    let tasks = status.tasks.clone();
+    let messages = status.messages.clone();
+    for cap in STATUS_TEXT_CAPS {
+        for (task, whole) in status.tasks.iter_mut().zip(&tasks) {
+            task.prompt = cut_text(&whole.prompt, cap);
+            task.result = whole.result.as_deref().map(|text| cut_text(text, cap));
+            task.problem = whole.problem.as_deref().map(|text| cut_text(text, cap));
+        }
+        for (message, whole) in status.messages.iter_mut().zip(&messages) {
+            message.text = cut_text(&whole.text, cap);
+        }
+        if size(&status)? <= STATUS_REPLY_BYTES_MAX {
+            assert_eq!(status.tasks.len(), tasks.len());
+            assert_eq!(status.messages.len(), messages.len());
+            return Ok(status);
+        }
+    }
+    Err(error("team_status_bounds"))
+}
+
+/// Cuts text to `cap` bytes on a character boundary and, when anything was cut, ends it with
+/// a note of how many bytes were left out. Takes the text and the cap. Returns the text,
+/// whole when it fits.
+fn cut_text(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_owned();
+    }
+    let kept = bound_text(text, cap);
+    let left = text.len() - kept.len();
+    assert!(left > 0 && kept.len() <= cap);
+    format!("{kept} [... {left} more bytes]")
+}
+
+/// Measures a value as the JSON an owner reply carries. Takes the value. Returns its length
+/// in bytes.
+fn encoded_len<T: Serialize>(value: &T) -> Result<usize, EngineError> {
+    Ok(serde_json::to_vec(value).map_err(error)?.len())
 }
 
 /// Reads a project's team plan use, agents, recent tasks and recent conversation.

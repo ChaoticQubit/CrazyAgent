@@ -279,7 +279,7 @@ pub(in crate::tui) enum SettingsEvent {
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
-    ScheduleSet(Result<(), String>),
+    ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
 }
 
@@ -313,7 +313,9 @@ impl SettingsEvent {
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
-            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
+            SettingsJob::SetSchedule { generation, .. } => {
+                Self::ScheduleSet(*generation, Err(problem))
+            }
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
         }
     }
@@ -509,16 +511,19 @@ impl NativeOwner {
                 change,
                 version,
                 generation,
-            } => SettingsEvent::ScheduleSet(match self.settings_controller() {
-                Ok(controller) => applied(
-                    controller
-                        .set_account_schedule(change, version, generation)
-                        .await,
-                    "account_schedule_outcome_unknown",
-                    lost,
-                ),
-                Err(error) => Err(error),
-            }),
+            } => SettingsEvent::ScheduleSet(
+                generation,
+                match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller
+                            .set_account_schedule(change, version, generation)
+                            .await,
+                        "account_schedule_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                },
+            ),
             SettingsJob::AddMemory {
                 scope,
                 text,
@@ -649,7 +654,7 @@ impl NativeOwner {
     }
 
     /// Reads the research memories waiting for the owner and the ones kept in a
-    /// project, the first page of each project's inbox, as the desktop does.
+    /// project, every inbox batch of each project, as the desktop does.
     /// Inputs: the projects and the lost-connection flag. Output: at most
     /// SUGGESTIONS_MAX suggestions, or the first plain problem code.
     pub(super) async fn suggestions(
@@ -661,7 +666,7 @@ impl NativeOwner {
         let mut found: Vec<Suggestion> = Vec::new();
         for project in projects.into_iter().take(SUGGESTION_PROJECTS_MAX) {
             let entries = controller
-                .project_memories(project, None)
+                .all_project_memories(project)
                 .await
                 .map_err(|error| problem(&error, lost))?;
             found.extend(entries.into_iter().filter_map(|entry| {

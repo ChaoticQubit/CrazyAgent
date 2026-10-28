@@ -948,7 +948,7 @@ impl ProjectPage {
             SettingsEvent::Schedule(Err(code)) => {
                 self.screen.problem = Some(failed(code, "Could not read the account order."));
             }
-            SettingsEvent::ScheduleSet(result) => {
+            SettingsEvent::ScheduleSet(_, result) => {
                 if let Err(code) = result {
                     self.screen.problem = Some(failed(code, "Could not save the account order."));
                 }

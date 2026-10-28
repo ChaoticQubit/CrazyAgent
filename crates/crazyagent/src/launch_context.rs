@@ -693,13 +693,7 @@ pub(crate) fn ask_rule(reach: AskReach) -> String {
 }
 
 fn skill_description(path: &Path) -> String {
-    let mut text = String::new();
-    File::open(path)
-        .and_then(|file| file.take(64 * 1024).read_to_string(&mut text))
-        .ok()
-        .and_then(|_| crate::plugins::skill_folder::frontmatter(&text).ok())
-        .map(|(_, description)| description)
-        .unwrap_or_default()
+    crate::plugins::skill_folder::stored_description(path).unwrap_or_default()
 }
 
 fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {

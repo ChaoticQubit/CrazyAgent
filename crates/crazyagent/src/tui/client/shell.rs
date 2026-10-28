@@ -152,7 +152,7 @@ impl NativeOwner {
                 .count()
         });
         let suggestions = controller
-            .project_memories(project.clone(), None)
+            .all_project_memories(project.clone())
             .await
             .map_or(0, |entries| {
                 entries

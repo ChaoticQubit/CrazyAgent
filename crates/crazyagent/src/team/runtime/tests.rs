@@ -2141,6 +2141,63 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
     host.close(&[]).unwrap();
 }
 
+/// An owner message waiting as the live switch goes off is sent only once the stopping
+/// live master has ended, so the project never runs a per-message master beside it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    let master = masters(&fixture.connection)[0];
+
+    super::super::master::set_live(&fixture.connection, &project, false).unwrap();
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Are you still there?",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let state = |f: &Fixture| -> String {
+        f.connection
+            .query_row(
+                "SELECT state FROM team_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    team.tick().unwrap();
+    assert_eq!(
+        masters(&fixture.connection),
+        [master],
+        "no second master starts while the live one stops"
+    );
+    assert_eq!(state(&fixture), "pending");
+
+    fixture.until(
+        &mut team,
+        "the message is sent once the live master has ended",
+        |f| state(f) != "pending",
+    );
+    assert_eq!(state(&fixture), "sent");
+    assert_eq!(fixture.agent_status(master).0, AgentStatus::Stopped);
+    assert!(!super::super::master::live(&fixture.connection, &project).unwrap());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1

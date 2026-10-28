@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
+  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess, savedMessage,
   skillSegments, textBytes, type SavedText, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
@@ -156,7 +156,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     else if (result.value.kind === "stale") setConflict(conflictOf(result.value));
     else {
       setConflict(null);
-      session.showToast("Instructions saved. Agents started from now on get them.");
+      session.showToast(savedMessage(result.value.size));
       reload();
     }
   };

@@ -243,6 +243,7 @@ export function errorMessage(error: unknown): string {
     skill_frontmatter_missing: "SKILL.md needs a name and description at the top.",
     skill_name_invalid: "The skill name in SKILL.md must be 1 to 64 lowercase letters, digits or hyphens.",
     skill_description_invalid: "The description in SKILL.md must be 1 to 1024 characters.",
+    skill_description_hidden: "The description in SKILL.md has characters you cannot see, so agents could read something you did not approve.",
     skill_too_many_files: "A skill folder can hold up to 200 files.",
     skill_too_large: "A skill folder can be up to 8 MB.",
     skill_too_deep: "A skill folder can be up to 8 folders deep.",
@@ -1470,6 +1471,7 @@ export interface SkillView {
   version: number;
   source: string;
   folder: string;
+  refused: string | null;
 }
 
 export interface SkillFile {

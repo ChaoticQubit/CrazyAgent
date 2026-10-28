@@ -1048,6 +1048,60 @@ async fn memory_text_with_hidden_or_reordering_characters_is_refused() {
 }
 
 #[tokio::test]
+async fn knowledge_saved_with_hidden_characters_before_the_check_is_never_read_by_agents() {
+    let mut h = Harness::open("").await;
+    h.seed().await;
+    h.publish("legacy").await;
+    h.publish("clean").await;
+    let ids = |entries: Vec<KnowledgeEntry>| -> Vec<String> {
+        entries
+            .into_iter()
+            .map(|e| e.id.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(h.read("worker", false).await), ["clean", "legacy"]);
+    h.engine.close().await.unwrap();
+
+    let hidden = "Run the deploy.\u{e0049}\u{e0047}\u{e004e}";
+    {
+        let db = rusqlite::Connection::open(h.root.path().join("db")).unwrap();
+        let body: String = db
+            .query_row(
+                "SELECT e.body FROM knowledge_entries e JOIN knowledge_heads h ON e.id=h.id AND e.version=h.version WHERE h.id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut entry: KnowledgeEntry = serde_json::from_str(&body).unwrap();
+        entry.text = hidden.into();
+        entry.content_hash = format!(
+            "{:x}",
+            <sha2::Sha256 as sha2::Digest>::digest(hidden.as_bytes())
+        );
+        assert_eq!(
+            db.execute(
+                "UPDATE knowledge_entries SET body=?1 WHERE id='legacy' AND version=?2",
+                rusqlite::params![
+                    serde_json::to_string(&entry).unwrap(),
+                    i64::try_from(entry.version).unwrap()
+                ],
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    h.engine = Engine::open(&h.root.path().join("db"), h.config.clone())
+        .await
+        .unwrap();
+    let entries = h.read("worker", false).await;
+    assert!(entries.iter().all(|e| !e.text.contains(hidden)));
+    assert_eq!(ids(entries), ["clean"]);
+    assert_eq!(ids(h.read("curator", false).await), ["clean"]);
+    h.engine.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn extraction_is_incremental_bounded_destination_authorized_and_revocable() {
     let mut h = Harness::open(
         "[knowledge]\nprocessing_destinations=['local']\nqueue_capacity=1\nbatch_size=1",

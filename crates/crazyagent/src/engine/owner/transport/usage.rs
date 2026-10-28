@@ -156,6 +156,24 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// A usage request read and checked once: a report already built, or a change still to
+/// make under the owner barrier, with the engine folder whose store it changes.
+enum Prepared {
+    Report(Box<UsageReport>),
+    Change(PathBuf, Change),
+}
+
+/// A change a usage request makes to the usage store.
+enum Change {
+    Refresh,
+    SetReset(CredentialRef, WindowKind, Option<i64>),
+}
+
+/// Serves one usage request. The report is built first; then, under the owner barrier, the
+/// grant is checked again, any change is made and the reply is written, so a revocation
+/// that returned saw every change and reply admitted before it and lets none through after.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -164,7 +182,9 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
+    let prepared = prepare(engine, authority, packet, admission, bytes).await;
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match finish(authority, packet, admission, prepared).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -175,16 +195,19 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
-async fn handle(
+/// Reads and checks a usage request, and builds a report outside the owner barrier.
+/// Inputs: the engine, authority, packet, admission and request body.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<Reply, EngineError> {
+) -> Result<Prepared, EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("usage_request_bounds"));
     }
@@ -197,37 +220,61 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
-    tokio::task::spawn_blocking(move || {
-        let db = usage::open(&root)?;
-        let now = crate::team::now_ms();
-        Ok(match action {
-            Action::Report {
-                project,
-                since_ms,
-                offset_minutes,
-            } => Reply::Report {
-                report: Box::new(usage::report::report(
+    Ok(match action {
+        Action::Report {
+            project,
+            since_ms,
+            offset_minutes,
+        } => Prepared::Report(Box::new(
+            tokio::task::spawn_blocking(move || {
+                let db = usage::open(&root)?;
+                usage::report::report(
                     &db,
                     project.as_ref(),
                     since_ms,
                     offset_minutes,
-                    now,
-                )?),
-            },
-            Action::Refresh => {
-                usage::service::request_refresh(&db, now)?;
-                Reply::Done
+                    crate::team::now_ms(),
+                )
+            })
+            .await
+            .map_err(|_| failure("usage_unavailable"))??,
+        )),
+        Action::Refresh => Prepared::Change(root, Change::Refresh),
+        Action::SetReset {
+            account,
+            window,
+            at_ms,
+        } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
+    })
+}
+
+/// Answers a prepared request under the owner barrier its caller holds: checks the grant
+/// again, then makes any change. Inputs: the authority, packet, admission and the prepared
+/// request. Output: the reply, or the refusal.
+async fn finish(
+    authority: &Authority,
+    packet: &[u8; 37],
+    admission: &Admission,
+    prepared: Result<Prepared, EngineError>,
+) -> Result<Reply, EngineError> {
+    let prepared = prepared?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    let (root, change) = match prepared {
+        Prepared::Report(report) => return Ok(Reply::Report { report }),
+        Prepared::Change(root, change) => (root, change),
+    };
+    tokio::task::spawn_blocking(move || {
+        let db = usage::open(&root)?;
+        match change {
+            Change::Refresh => usage::service::request_refresh(&db, crate::team::now_ms()),
+            Change::SetReset(account, window, at_ms) => {
+                usage::set_reset_override(&db, &account, window, at_ms)
             }
-            Action::SetReset {
-                account,
-                window,
-                at_ms,
-            } => {
-                usage::set_reset_override(&db, &account, window, at_ms)?;
-                Reply::Done
-            }
-        })
+        }
     })
     .await
-    .map_err(|_| failure("usage_unavailable"))?
+    .map_err(|_| failure("usage_unavailable"))??;
+    Ok(Reply::Done)
 }

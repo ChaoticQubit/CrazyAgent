@@ -22,7 +22,8 @@ impl OwnerController {
     /// Saves the owner's instructions whole when no other save landed since they were read.
     /// Inputs: none for the app-wide text, or the project; the text; the version read; and,
     /// only for "Keep mine" after a stale reply, the older version the owner opened.
-    /// Output: the saved version, the stale reply with the newer text, or a refusal such as
+    /// Output: the saved version with what agents now receive beside what a Claude master is
+    /// sure to take, the stale reply with the newer text, or a refusal such as
     /// `process_text_too_large`.
     pub async fn save_process_text(
         &self,

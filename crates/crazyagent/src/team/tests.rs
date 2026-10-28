@@ -2807,3 +2807,46 @@ fn the_owner_marks_one_project_s_notifications_seen_up_to_an_id_and_no_other_pro
     );
     assert_eq!(state(&other), [(foreign, false)]);
 }
+
+#[test]
+fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
+    let (_directory, connection) = database();
+    let setup = stored("long-texts", Vec::new());
+    let prompt = "Fix the gate. ".repeat(150);
+    let result = "Résumé of the change. ".repeat(300);
+    for index in 0..17_i64 {
+        let done = index < 9;
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,attempts,result,created_ms,started_ms,finished_ms)
+                 VALUES (?1,'master','claude-code',1,?2,?3,1,?4,?5,?5,?6)",
+                params![
+                    setup.project_id.as_str(),
+                    format!("{index} {prompt}"),
+                    if done {
+                        TaskStatus::Done.name()
+                    } else {
+                        TaskStatus::Running.name()
+                    },
+                    done.then(|| result.clone()),
+                    1_000 + index,
+                    done.then_some(2_000 + index),
+                ],
+            )
+            .unwrap();
+    }
+    let full = status(&connection, &setup).unwrap();
+    assert!(serde_json::to_vec(&full).unwrap().len() > STATUS_REPLY_BYTES_MAX);
+    let read = owner_status(&connection, &setup).unwrap();
+    assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
+    assert_eq!(read.tasks.len(), full.tasks.len());
+    for (task, whole) in read.tasks.iter().zip(&full.tasks) {
+        assert_eq!((task.id, task.status), (whole.id, whole.status));
+        let kept = task.prompt.split(" [... ").next().unwrap();
+        assert!(!kept.is_empty() && whole.prompt.starts_with(kept));
+    }
+    let cut = read.tasks[0].result.as_deref().unwrap();
+    assert!(cut.ends_with(" more bytes]"), "{cut}");
+    let graph = owner_graph(&connection, &setup).unwrap();
+    assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
+}

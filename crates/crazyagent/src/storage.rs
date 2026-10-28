@@ -34,6 +34,7 @@ mod native_auth;
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
+pub(crate) mod trash;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
@@ -893,7 +894,8 @@ fn open_actor_database(
     } else {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     };
-    let canonical_path = std::fs::canonicalize(parent).map_err(error)?.join(
+    let canonical_root = std::fs::canonicalize(parent).map_err(error)?;
+    let canonical_path = canonical_root.join(
         path.file_name()
             .ok_or_else(|| error("database name missing"))?,
     );
@@ -910,6 +912,7 @@ fn open_actor_database(
     } else {
         migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
         initialize_authority_schemas(&connection)?;
+        trash::sweep(&connection, &canonical_root)?;
     }
     assert!(connection.is_autocommit());
     assert_eq!(
@@ -937,6 +940,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::ide::bridge::memory::initialize(connection)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
+    accounts::initialize(connection)?;
+    trash::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
@@ -2416,7 +2421,10 @@ fn owner_read(
             ),
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
-            status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+            status: Box::new(crate::team::owner_status(
+                &tx,
+                &stored_setup(&tx, project_id)?,
+            )?),
         },
         OwnerRead::IdeAsks { project_id } => OwnerData::IdeAsks {
             asks: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
@@ -2425,10 +2433,10 @@ fn owner_read(
             events: Box::new(crate::team::events::app(&tx)?),
         },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
-            graph: Box::new(crate::team::graph(&crate::team::status(
+            graph: Box::new(crate::team::owner_graph(
                 &tx,
                 &stored_setup(&tx, project_id)?,
-            )?)),
+            )?),
         },
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
