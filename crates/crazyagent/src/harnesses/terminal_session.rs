@@ -53,6 +53,9 @@ pub struct TerminalSession {
     _relay: Option<Relay>,
 }
 
+/// The most bytes a key file the engine reads back may hold: the longest key it writes.
+const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
+
 /// An account's key file and the exact bytes this launch wrote into it. The file is removed
 /// when the agent session holding it ends, and only while it still holds those bytes, so a
 /// refused or torn-down launch never deletes a key file another launch has since written for
