@@ -1514,20 +1514,23 @@ fn seatbelt_pattern(path: &Path) -> String {
 /// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
 /// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
 /// it may never replace, rename or relink, no move or removal of its `objects` or
-/// `objects/info` folder, and no symlink in its store, each name in any letter case,
-/// while its own loose objects and packs stay writable. The engine's fetch checks the same
+/// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
+/// git folder, the fallback repository git's upload-pack serves when the git folder fails
+/// git's repository test (RL-1), each name in any letter case, while its own loose objects
+/// and packs stay writable. The engine's fetch checks the same
 /// store before it runs (w-landing). Input: the clone. Output: the rule text.
 fn clone_store_denies(clone: &Path) -> String {
+    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
     let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
     let objects = format!("{git}/{}", any_case("objects"));
     let info = format!("{objects}/{}", any_case("info"));
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
         any_case("alternates"),
         any_case("http-alternates"),
         any_case("commondir")
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 6);
+    assert_eq!(text.matches("(regex #\"^/").count(), 7);
     assert!(text.contains("(vnode-type SYMLINK)"));
     text
 }

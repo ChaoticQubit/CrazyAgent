@@ -1306,6 +1306,32 @@ fn an_own_branch_agent_never_redirects_or_replaces_its_clones_git_folder() {
 }
 
 #[test]
+fn an_own_branch_agent_never_plants_the_fallback_repository_upload_pack_tries() {
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let fallback = clone.join(".git.git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for script in [
+        format!("mkdir {}", quoted(&fallback)),
+        format!("mkdir {}", quoted(&clone.join(".GIT.GIT"))),
+        format!("printf 'gitdir: x\\n' > {}", quoted(&fallback)),
+        format!("ln -s {} {}", quoted(&elsewhere), quoted(&fallback)),
+        format!(
+            "mkdir {} && mv {} {}",
+            quoted(&elsewhere.join("repo")),
+            quoted(&elsewhere.join("repo")),
+            quoted(&fallback)
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &fallback);
+    }
+}
+
+#[test]
 fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(Path::new(AGENT_GIT).is_file());
     let case = case();
