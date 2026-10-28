@@ -6,6 +6,29 @@ export const SIZE_MIN = 2;
 export const SIZE_MAX = 1000;
 export const QUEUED_CHUNKS_MAX = 256;
 
+/** Where the owner types to a live master: straight into its terminal, only in the message
+ * box under it, or in both. */
+export type InputChoice = "terminal" | "box" | "both";
+export const INPUT_DEFAULT: InputChoice = "terminal";
+export const INPUT_CHOICES: { value: InputChoice; label: string }[] = [
+  { value: "terminal", label: "Terminal only" },
+  { value: "box", label: "Message box only" },
+  { value: "both", label: "Both" },
+];
+
+/** Reads a stored master input choice. Input: the stored text, if any. Output: the choice,
+ * or `INPUT_DEFAULT` for anything else. */
+export function inputChoice(stored: string | null): InputChoice {
+  const known = INPUT_CHOICES.find((choice) => choice.value === stored);
+  return known ? known.value : INPUT_DEFAULT;
+}
+
+/** What one input choice turns on. Input: the choice. Output: whether keys reach the
+ * terminal and whether the message box shows. */
+export function inputMode(choice: InputChoice): { keys: boolean; box: boolean } {
+  return { keys: choice !== "box", box: choice !== "terminal" };
+}
+
 const encoder = new TextEncoder();
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -32,6 +55,25 @@ export function keyOverride(event: { type: string; key: string; shiftKey: boolea
   const shiftEnter = event.key === "Enter" && event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey;
   if (!shiftEnter) return { typed: null, xterm: true };
   return { typed: event.type === "keydown" ? NEW_LINE : null, xterm: false };
+}
+
+/** Whether a key copies the terminal's selection instead of reaching the agent: Cmd+C on a
+ * Mac, Ctrl+C or Ctrl+Shift+C elsewhere, and only while text is selected, so Ctrl+C with
+ * nothing selected still interrupts the agent and Ctrl+C on a Mac always does. Every event of
+ * the key matches, so none of them reaches xterm. Inputs: the key event, whether text is
+ * selected and whether this is a Mac. Output: true when the key copies. */
+export function copyKey(event: { key: string; altKey: boolean; ctrlKey: boolean; metaKey: boolean }, selected: boolean, mac: boolean): boolean {
+  if (!selected || event.altKey || event.key.toLowerCase() !== "c") return false;
+  return mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+}
+
+/** The text Copy output puts on the clipboard: every line of the terminal's buffer, without
+ * trailing spaces or the blank rows under the last written line. Input: the buffer's lines.
+ * Output: the text, lines joined by new lines. */
+export function outputText(lines: string[]): string {
+  const kept = lines.map((line) => line.trimEnd());
+  while (kept.length > 0 && kept[kept.length - 1] === "") kept.pop();
+  return kept.join("\n");
 }
 
 /** Encodes xterm's binary event, one byte per character code, such as some mouse reports.
@@ -105,6 +147,33 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
       if (!run(() => send(chunk))) return;
     }
   };
+}
+
+/** Splits a terminal's input into a typed lane and a wheel lane on one send queue. Wheel
+ * reports that arrive while earlier input is still being sent wait as one batch that later
+ * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
+ * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
+ * Inputs: the queue and the send call for one chunk. Output: the two lanes. */
+export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+  const keys = keyQueue(run, send);
+  let batch: number[] | null = null;
+  const typed = (bytes: Uint8Array) => {
+    batch = null;
+    keys(bytes);
+  };
+  const wheel = (bytes: Uint8Array) => {
+    if (bytes.length > INPUT_BYTES_MAX) return typed(bytes);
+    if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
+      batch.push(...bytes);
+      return;
+    }
+    const waiting = Array.from(bytes);
+    batch = run(() => {
+      if (batch === waiting) batch = null;
+      return send(waiting);
+    }) ? waiting : null;
+  };
+  return { typed, wheel };
 }
 
 /** Sends typed input in order, one chunk at a time, on a queue of its own. Inputs: the send

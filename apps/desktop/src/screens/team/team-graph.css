@@ -299,6 +299,7 @@
 }
 
 .tg-terminal {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -362,6 +363,74 @@
   background: var(--surface);
   color: var(--text-3);
   font-size: 12px;
+}
+
+.tg-terminal-note .btn:first-of-type {
+  margin-left: auto;
+}
+
+.tg-terminal-menu {
+  right: auto;
+}
+
+.tg-terminal-menu .menu-item:disabled {
+  background: none;
+  color: var(--text-3);
+  cursor: default;
+}
+
+.tg-terminal.embedded .tg-terminal-note .btn {
+  font-family: var(--font);
+}
+
+.tg-terminal-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.tg-terminal.embedded {
+  border: 0;
+  border-radius: 0;
+  min-height: 0;
+}
+
+.tg-terminal.embedded .tg-terminal-screen {
+  padding: var(--space-3) var(--space-2) var(--space-2) var(--space-5);
+}
+
+.tg-terminal.embedded .tg-terminal-note {
+  min-height: 32px;
+  padding: 0 var(--space-2) 0 var(--space-5);
+  border-top: 1px solid var(--terminal-border);
+  background: var(--terminal-surface);
+  color: var(--terminal-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.tg-terminal.embedded .tg-composer {
+  border-top-color: var(--terminal-border);
+  background: var(--terminal-surface);
+}
+
+.tg-terminal.embedded .tg-composer-input {
+  border-color: var(--terminal-border);
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+}
+
+.tg-terminal.embedded .tg-composer-foot .tg-terminal-note {
+  min-height: 0;
+  padding: 0;
+  border-top: 0;
+  background: transparent;
+  color: var(--terminal-muted);
+}
+
+.tg-terminal.embedded .tg-terminal-state {
+  background: transparent;
+  color: var(--terminal-muted);
 }
 
 .tg-composer {

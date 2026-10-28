@@ -560,22 +560,45 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 const HISTORY_ROWS_MAX: usize = SCROLLBACK_LINES as usize;
 const BRACKETED_PASTE_ON: &[u8] = b"\x1b[?2004h";
 const CURSOR_KEYS_ON: &[u8] = b"\x1b[?1h";
+const ALTERNATE_SCREEN_ON: &[u8] = b"\x1b[?1049h";
+const MOUSE_STANDARD_ON: &[u8] = b"\x1b[?1000h";
+const MOUSE_BUTTON_ON: &[u8] = b"\x1b[?1002h";
+const MOUSE_ALL_ON: &[u8] = b"\x1b[?1003h";
+const MOUSE_UTF8_ON: &[u8] = b"\x1b[?1005h";
+const MOUSE_SGR_ON: &[u8] = b"\x1b[?1006h";
 
-/// The pane's input modes a new viewer must take on so its keys and pastes reach the agent's
-/// app as a terminal attached from the start would send them.
+/// The pane's modes a new viewer must take on so it shows the screen and sends keys, pastes
+/// and mouse reports as a terminal attached from the start would. An app drawing on its
+/// alternate screen with mouse reporting on, such as a full-screen agent that keeps its own
+/// scrollback, then gets the wheel, instead of the view scrolling history the app no longer
+/// shows.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Modes {
     bracketed_paste: bool,
     cursor_keys: bool,
+    alternate_screen: bool,
+    mouse_standard: bool,
+    mouse_button: bool,
+    mouse_all: bool,
+    mouse_utf8: bool,
+    mouse_sgr: bool,
 }
 
 fn render(screen: &[Vec<u8>], cols: u16, rows: u16, cursor: (u16, u16), modes: Modes) -> Vec<u8> {
     let mut bytes = Vec::new();
-    if modes.bracketed_paste {
-        bytes.extend_from_slice(BRACKETED_PASTE_ON);
-    }
-    if modes.cursor_keys {
-        bytes.extend_from_slice(CURSOR_KEYS_ON);
+    for (on, sequence) in [
+        (modes.alternate_screen, ALTERNATE_SCREEN_ON),
+        (modes.bracketed_paste, BRACKETED_PASTE_ON),
+        (modes.cursor_keys, CURSOR_KEYS_ON),
+        (modes.mouse_standard, MOUSE_STANDARD_ON),
+        (modes.mouse_button, MOUSE_BUTTON_ON),
+        (modes.mouse_all, MOUSE_ALL_ON),
+        (modes.mouse_utf8, MOUSE_UTF8_ON),
+        (modes.mouse_sgr, MOUSE_SGR_ON),
+    ] {
+        if on {
+            bytes.extend_from_slice(sequence);
+        }
     }
     bytes.extend_from_slice(b"\x1b[0m\x1b[H\x1b[2J");
     for (row, line) in screen.iter().take(usize::from(rows)).enumerate() {
@@ -621,10 +644,30 @@ struct Located {
     history: usize,
 }
 
+/// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
+/// screen and mouse modes. A screen or mouse flag that an older tmux leaves empty reads as
+/// off. Takes the reply lines. Returns the pane, or none for a reply of another shape.
 fn located(lines: &[Vec<u8>]) -> Option<Located> {
     let text = std::str::from_utf8(lines.first()?).ok()?;
     let fields: Vec<&str> = text.split(' ').collect();
-    let [pane, window, x, y, cols, rows, paste, keys, history] = fields.as_slice() else {
+    let [
+        pane,
+        window,
+        x,
+        y,
+        cols,
+        rows,
+        paste,
+        keys,
+        history,
+        alternate,
+        standard,
+        button,
+        all,
+        sgr,
+        utf8,
+    ] = fields.as_slice()
+    else {
         return None;
     };
     if !pane.starts_with('%') || !window.starts_with('@') {
@@ -636,6 +679,13 @@ fn located(lines: &[Vec<u8>]) -> Option<Located> {
         "1" => Some(true),
         _ => None,
     };
+    let mode = |text: &str| {
+        if text.is_empty() {
+            Some(false)
+        } else {
+            flag(text)
+        }
+    };
     Some(Located {
         pane: pane.as_bytes().to_vec(),
         window: window.as_bytes().to_vec(),
@@ -645,6 +695,12 @@ fn located(lines: &[Vec<u8>]) -> Option<Located> {
         modes: Modes {
             bracketed_paste: flag(paste)?,
             cursor_keys: flag(keys)?,
+            alternate_screen: mode(alternate)?,
+            mouse_standard: mode(standard)?,
+            mouse_button: mode(button)?,
+            mouse_all: mode(all)?,
+            mouse_utf8: mode(utf8)?,
+            mouse_sgr: mode(sgr)?,
         },
         history: history.parse::<usize>().ok()?.min(HISTORY_ROWS_MAX),
     })
@@ -870,7 +926,7 @@ impl Tmux {
             format!("-{history}")
         };
         let line = format!(
-            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}}' ; capture-pane {} -S {start} -t {target}",
+            "list-panes -t {target} -f '#{{pane_active}}' -F '#{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{pane_height}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{history_size}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}' ; capture-pane {} -S {start} -t {target}",
             control.capture
         );
         let (reply, answer) = sync_channel(1);

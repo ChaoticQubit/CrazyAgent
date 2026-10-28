@@ -98,6 +98,8 @@ export function shown() {
     status: document.querySelector(".cs-status")?.textContent ?? null,
     owner: [...document.querySelectorAll(".cs-owner")].map((line) => line.textContent),
     buttons: [...document.querySelectorAll("button")].map((item) => item.textContent.trim()).filter(Boolean),
+    titles: Object.fromEntries([...document.querySelectorAll("button[title]")].map((item) => [item.textContent.trim(), item.title])),
+    state: document.querySelector(".pj-console-state")?.textContent ?? null,
     text: document.getElementById("panel").textContent,
     viewport: window.innerHeight,
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
@@ -137,6 +139,21 @@ export function paste(text) {
   const data = new DataTransfer();
   data.setData("text/plain", text);
   terminal.textarea.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+}
+
+/** Selects everything in the terminal, as a drag over all of it does. */
+export function selectAll() {
+  terminal.selectAll();
+}
+
+/** The text xterm holds as the selection. */
+export function selection() {
+  return terminal.getSelection();
+}
+
+/** Clears the terminal's selection. */
+export function clearSelection() {
+  terminal.clearSelection();
 }
 
 /** The text the routed keys typed, in order. */
