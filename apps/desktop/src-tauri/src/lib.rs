@@ -107,9 +107,12 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing or `reinstall` asks, else starts it, then
-/// waits for the engine with the shared bound. Inputs: the layout, the service and
-/// whether to replace the definition with this app's sidecar. Output: Ok once it answers.
+/// Installs the service when it is missing, when `reinstall` asks or when the installed
+/// definition runs another executable, else starts it, then waits for the engine with the
+/// shared bound. The service runs the sidecar, or its private copy when the sidecar sits
+/// in the AppImage mount folder or another folder other users can change.
+/// Inputs: the layout, the service and whether to replace the definition with this app's
+/// sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -120,7 +123,18 @@ async fn start_engine(
         .status()
         .map_err(|_| engine_failure("engine_service_failed"))?
         .installed;
-    if reinstall || !installed {
+    let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
+    let service = crazyagent::service::Service {
+        executable: crazyagent::service::installable(
+            &service.executable,
+            layout,
+            crazyagent::version::VERSION,
+            appdir.as_deref(),
+        )
+        .map_err(|_| engine_failure("engine_service_failed"))?,
+        ..service.clone()
+    };
+    if reinstall || !installed || !service.current() {
         if !service.executable.is_file() {
             return Err(engine_failure("engine_sidecar_missing"));
         }
@@ -132,6 +146,7 @@ async fn start_engine(
         service
             .install()
             .map_err(|_| engine_failure("engine_service_failed"))?;
+        crazyagent::service::prune_copies(layout, &service.executable);
     } else {
         service
             .start()
