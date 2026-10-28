@@ -85,6 +85,30 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
+/** A choice the owner saved on a team control and the status value it replaced. */
+export interface Held<T> {
+  choice: T;
+  from: T;
+}
+
+/** What a team control keeps after a save. Inputs: the held choice and the save's note, empty
+ * when the engine applied it. Output: the choice to keep, or null to show the status. */
+export function afterSave<T>(_held: Held<T>, _note: string): Held<T> | null {
+  return null;
+}
+
+/** The value a team control shows: the held choice, otherwise the status value. Inputs: the
+ * held choice or null, the status value and how two values compare. Output: the value. */
+export function shownChoice<T>(held: Held<T> | null, current: T, _same: (a: T, b: T) => boolean = Object.is): T {
+  return held === null ? current : held.choice;
+}
+
+type Limits = { turn: number | null; session: number | null; idle: number | null };
+
+function sameLimits(a: Limits, b: Limits): boolean {
+  return a.turn === b.turn && a.session === b.session && a.idle === b.idle;
+}
+
 /** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
  * task and an agent session may run, choose what a master harness switch does with the
  * conversation, choose whether finished agents stay in the list and graph or move to the
@@ -97,27 +121,30 @@ export function TeamControls({ projectId, status, harness, reload }: {
   harness?: (id: string) => string;
   reload: () => void;
 }) {
-  const [warm, setWarm] = useState<boolean | null>(null);
-  const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
-  const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
-  const [finished, setFinished] = useState<"hide" | "show" | null>(null);
+  const [warm, setWarm] = useState<Held<boolean> | null>(null);
+  const [limits, setLimits] = useState<Held<Limits> | null>(null);
+  const [onSwitch, setOnSwitch] = useState<Held<SwitchMode> | null>(null);
+  const [finished, setFinished] = useState<Held<"hide" | "show"> | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [sent, setSent] = useState("");
   const options = delegateOptions(status, harness);
-  const checked = warm ?? status.keep_warm;
-  const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
+  const saved: Limits = { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
+  const listed: "hide" | "show" = status.show_finished === true ? "show" : "hide";
+  const checked = shownChoice(warm, status.keep_warm);
+  const shown = shownChoice(limits, saved, sameLimits);
   const check = taskInput(text);
   const subs = options.length > 1;
 
   async function toggle(on: boolean) {
-    setWarm(on);
+    const held = { choice: on, from: status.keep_warm };
+    setWarm(held);
     setBusy(true);
     const message = changeNote(await keepTeamWarm(projectId, on), "keeping agents ready");
     setBusy(false);
-    setWarm(null);
+    setWarm(afterSave(held, message));
     setNote(message);
     reload();
   }
@@ -126,31 +153,34 @@ export function TeamControls({ projectId, status, harness, reload }: {
     if (busy) return;
     const secs = value === NO_LIMIT ? null : Number(value);
     const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
-    setLimits(next);
+    const held = { choice: next, from: saved };
+    setLimits(held);
     setBusy(true);
     const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle), "team time limits");
     setBusy(false);
-    setLimits(null);
+    setLimits(afterSave(held, message));
     setNote(message);
     reload();
   }
 
   async function chooseSwitch(mode: SwitchMode) {
-    setOnSwitch(mode);
+    const held = { choice: mode, from: switchMode(status) };
+    setOnSwitch(held);
     setBusy(true);
     const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
     setBusy(false);
-    setOnSwitch(null);
+    setOnSwitch(afterSave(held, message));
     setNote(message);
     reload();
   }
 
   async function view(choice: "hide" | "show") {
-    setFinished(choice);
+    const held = { choice, from: listed };
+    setFinished(held);
     setBusy(true);
     const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
     setBusy(false);
-    setFinished(null);
+    setFinished(afterSave(held, message));
     setNote(message);
     reload();
   }
@@ -182,11 +212,11 @@ export function TeamControls({ projectId, status, harness, reload }: {
         onValue={(value) => void limit("idle", value)}
         helper={`Off keeps an idle sub-agent running until the team stops. An idle master stops ${limitLabel(MASTER_IDLE_STOP_SECS)} after its work is done and is never stopped while that work is still going.`} />
     </div>
-    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
+    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={shownChoice(onSwitch, switchMode(status))} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
     <div className="pj-row">
       <span aria-hidden="true">Finished agents</span>
-      <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
+      <Segmented label="Finished agents" value={shownChoice(finished, listed)} onValue={(choice) => { if (!busy) void view(choice); }}
         options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
       <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
     </div>
