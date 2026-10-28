@@ -32,6 +32,8 @@ pub const HANDOFF_TURN_BYTES_MAX: usize = HANDOFF_BYTES_MAX / 4;
 pub const TURN_OMITTED: &str = "(Earlier replies in this turn were left out.)";
 /// The fewest bytes of room an older turn is cut into rather than left out.
 const HANDOFF_TURN_MIN_BYTES: usize = 160;
+/// The longest title a handoff part has, naming the conversation it comes from.
+const HANDOFF_TITLE_BYTES_MAX: usize = 128;
 
 const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
@@ -757,10 +759,10 @@ pub fn switched_note(to: &str, mode: SwitchMode) -> String {
 }
 
 /// Builds the Carry over handoff the new master harness reads first: a line naming the
-/// switch, then the earlier turns newest first, each cut to `HANDOFF_TURN_BYTES_MAX` so the
-/// newest always fits, the last cut to the room left, `HANDOFF_OMITTED` when any were cut
-/// or left out, then the open tasks. Takes the connection, project, session, the kept
-/// conversation and the earlier harness's display name. Returns the handoff.
+/// switch, then one part per earlier conversation, the kept harness conversation first and
+/// the engine's master conversation second, each newest first within its share of
+/// `HANDOFF_BYTES_MAX`, then the open tasks. Takes the connection, project, session, the
+/// kept conversation and the earlier harness's display name. Returns the handoff.
 pub fn handoff(
     connection: &Connection,
     project: &ProjectId,
@@ -768,13 +770,30 @@ pub fn handoff(
     kept: Option<&SessionConversation>,
     from: &str,
 ) -> Result<String, EngineError> {
-    let mut entries = turn_entries(connection, project, session)?;
+    let mut parts: Vec<(String, Vec<String>)> = Vec::new();
     if let Some(kept) =
         kept.filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
     {
-        entries.extend(record_turns(kept));
+        let entries = record_turns(kept);
+        if !entries.is_empty() {
+            let label = harness_label(&kept.harness);
+            parts.push((
+                fit(
+                    format!("From the {label} conversation, newest first:"),
+                    HANDOFF_TITLE_BYTES_MAX,
+                ),
+                entries,
+            ));
+        }
     }
-    let header = if entries.is_empty() {
+    let engine = turn_entries(connection, project, session)?;
+    if !engine.is_empty() {
+        parts.push((
+            "From CrazyAgent's master conversation, newest first:".to_owned(),
+            engine,
+        ));
+    }
+    let header = if parts.is_empty() {
         format!(
             "The owner switched this conversation's master from {from} to you. Its earlier turns could not be read."
         )
@@ -784,31 +803,18 @@ pub fn handoff(
         )
     };
     let mut text = fit(header, HANDOFF_BYTES_MAX / 4);
-    let budget = HANDOFF_BYTES_MAX - HANDOFF_OMITTED.len() - 2;
-    let mut given = 0;
-    let mut cut = false;
-    for entry in entries.iter().rev() {
-        let entry = fit(entry.clone(), HANDOFF_TURN_BYTES_MAX);
-        let room = budget.saturating_sub(text.len() + 2);
-        if room < HANDOFF_TURN_MIN_BYTES {
-            break;
-        }
-        let whole = entry.len() <= room;
+    let mut left = HANDOFF_BYTES_MAX - text.len() - 2 * parts.len();
+    for (index, (title, entries)) in parts.iter().enumerate() {
+        let share = match parts.get(index + 1) {
+            Some((next_title, next)) => {
+                (left / 2).max(left.saturating_sub(part_bytes(next_title, next)))
+            }
+            None => left,
+        };
+        let part = handoff_part(title, entries, share);
+        left -= part.len();
         text.push_str("\n\n");
-        text.push_str(&fit(entry, room));
-        given += 1;
-        if !whole {
-            cut = true;
-            break;
-        }
-    }
-    assert!(
-        entries.is_empty() || given > 0,
-        "the newest turn is always handed over"
-    );
-    if cut || given < entries.len() {
-        text.push_str("\n\n");
-        text.push_str(HANDOFF_OMITTED);
+        text.push_str(&part);
     }
     assert!(text.len() <= HANDOFF_BYTES_MAX);
     if let Some(state) = session_state(connection, project, session)? {
@@ -817,6 +823,48 @@ pub fn handoff(
     }
     assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
     Ok(text)
+}
+
+/// The room a handoff part needs to hand every entry over whole, its omitted line included.
+/// Takes the part's title and entries. Returns the size.
+fn part_bytes(title: &str, entries: &[String]) -> usize {
+    let room = title.len() + 2 + HANDOFF_OMITTED.len();
+    entries.iter().fold(room, |bytes, entry| {
+        bytes + 2 + entry.len().min(HANDOFF_TURN_BYTES_MAX)
+    })
+}
+
+/// One part of a switch handoff within `room` bytes: its title, then its entries newest
+/// first, each cut to `HANDOFF_TURN_BYTES_MAX` so the newest always fits, the one crossing
+/// the room cut to what is left, and `HANDOFF_OMITTED` when any were cut or left out. Takes
+/// the title, the entries oldest first and the room. Returns the part.
+fn handoff_part(title: &str, entries: &[String], room: usize) -> String {
+    let budget = room - HANDOFF_OMITTED.len() - 2;
+    let mut text = title.to_owned();
+    let mut given = 0;
+    let mut cut = false;
+    for entry in entries.iter().rev() {
+        let entry = fit(entry.clone(), HANDOFF_TURN_BYTES_MAX);
+        let left = budget.saturating_sub(text.len() + 2);
+        let whole = entry.len() <= left;
+        if !whole && left < HANDOFF_TURN_MIN_BYTES {
+            break;
+        }
+        text.push_str("\n\n");
+        text.push_str(&fit(entry, left));
+        given += 1;
+        if !whole {
+            cut = true;
+            break;
+        }
+    }
+    assert!(given > 0, "the newest turn of a part is always handed over");
+    if cut || given < entries.len() {
+        text.push_str("\n\n");
+        text.push_str(HANDOFF_OMITTED);
+    }
+    assert!(text.len() <= room);
+    text
 }
 
 /// Reads the conversation a session kept as one entry per turn, oldest first: what was typed
@@ -1105,6 +1153,97 @@ mod tests {
         assert!(!text.contains(HANDOFF_OMITTED), "{text}");
         let turn = &text[newest..older];
         assert!(turn.len() <= HANDOFF_TURN_BYTES_MAX + 2, "{}", turn.len());
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
+
+    /// A session with turns in both the kept harness conversation and the engine's master
+    /// conversation hands over each in its own part, newest first, so the newest engine
+    /// turns are never crowded out by a long harness conversation.
+    #[test]
+    fn a_switch_handoff_keeps_a_part_for_each_conversation_newest_first() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-parts").unwrap();
+        for turn in 1..=3_i64 {
+            let body = serde_json::json!({
+                "engine_request": {"line": format!("Check the build {turn:02}")},
+                "reply": {"text": format!("Build reply {turn:02}")},
+            });
+            connection
+                .execute(
+                    "INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'succeeded',?5)",
+                    rusqlite::params![
+                        session.as_str(),
+                        turn,
+                        format!("turn-{turn}"),
+                        1000 + turn,
+                        body.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        let id = "2f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let mut lines = String::new();
+        for turn in 1..=20 {
+            let words = format!("turn {turn:02} ").repeat(60);
+            lines.push_str(
+                &serde_json::json!({"type": "user", "message": {"content": words}}).to_string(),
+            );
+            lines.push('\n');
+            lines.push_str(
+                &serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": format!("answer {turn:02}")}], "stop_reason": "end_turn"}})
+                    .to_string(),
+            );
+            lines.push('\n');
+        }
+        std::fs::write(&record, lines).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+
+        let text = handoff(&connection, &project, &session, Some(&kept), "Claude Code").unwrap();
+        let terminal = text
+            .find("From the Claude Code conversation, newest first:")
+            .expect("the harness conversation has its part");
+        let newest_record = text
+            .find("answer 20")
+            .expect("its newest turn is handed over");
+        let older_record = text.find("answer 19").expect("then the one before");
+        let engine = text
+            .find("From CrazyAgent's master conversation, newest first:")
+            .expect("the engine conversation has its part");
+        let newest_engine = text
+            .find("Engine: Check the build 03\nYou: Build reply 03")
+            .expect("the newest engine turn is handed over");
+        let oldest_engine = text
+            .find("Engine: Check the build 01\nYou: Build reply 01")
+            .expect("every engine turn fits");
+        assert!(
+            terminal < newest_record
+                && newest_record < older_record
+                && older_record < engine
+                && engine < newest_engine
+                && newest_engine < oldest_engine,
+            "{text}"
+        );
+        assert!(
+            text.contains(HANDOFF_OMITTED),
+            "the harness part was cut: {text}"
+        );
+        assert!(!text.contains("answer 01"), "{text}");
         assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
     }
 
