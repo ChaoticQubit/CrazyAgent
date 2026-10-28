@@ -279,12 +279,22 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
                 .stderr(Stdio::piped()),
         )
         .unwrap();
-        String::from_utf8(output.stdout).unwrap()
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
     };
-    assert_eq!(hooks_path(&on, &project), "");
-    assert_eq!(hooks_path(&on, &agent), "/dev/null\n");
-    assert_eq!(hooks_path(&on, &project.join(".git")), "/dev/null\n");
-    assert_eq!(hooks_path(&off, &project), "/dev/null\n");
+    let unset = (Some(1), String::new(), String::new());
+    let forced = (Some(0), "/dev/null\n".to_owned(), String::new());
+    assert_eq!(
+        hooks_path(&on, &project),
+        unset,
+        "git ran and found the key unset"
+    );
+    assert_eq!(hooks_path(&on, &agent), forced);
+    assert_eq!(hooks_path(&on, &project.join(".git")), forced);
+    assert_eq!(hooks_path(&off, &project), forced);
 }
 
 /// INT1-1: a git that cannot read an agent folder's `.git` treats it as missing and walks

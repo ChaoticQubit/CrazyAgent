@@ -1784,6 +1784,10 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::Full);
+    assert!(
+        !view.ide_git_hooks,
+        "a save with the switch off turns it off"
+    );
     assert_eq!(
         view.toolchains
             .iter()

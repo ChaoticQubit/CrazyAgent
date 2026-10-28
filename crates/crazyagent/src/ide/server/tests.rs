@@ -481,6 +481,36 @@ async fn port_is_stable_for_a_project_across_restarts() {
     restarted.stop_all().await;
 }
 
+/// INT1-4: the IDE hooks switch reaches the git shim through the product's launch path. A
+/// launch with it on writes the shim that lets git run hooks in the canonical project
+/// folder alone; the next launch with it off writes the plain shim again.
+#[tokio::test]
+async fn the_hooks_switch_reaches_the_git_shim_through_open() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("hooks");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    servers.open(&project, &root, &build, true).await.unwrap();
+    let folder = servers.project_folder(&project).unwrap();
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let on = fs::read_to_string(&shim).unwrap();
+    assert_eq!(on, crate::ide::git::shim_text(Some(&root)).unwrap());
+    assert_ne!(on, crate::ide::git::SHIM_TEXT);
+    assert!(
+        on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
+        "{on}"
+    );
+    assert!(servers.stop(&project).await);
+    servers.open(&project, &root, &build, false).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::SHIM_TEXT
+    );
+    servers.stop_all().await;
+}
+
 #[tokio::test]
 async fn idle_server_stops_after_the_idle_limit() {
     let checkout = scratch();
