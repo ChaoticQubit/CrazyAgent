@@ -958,11 +958,23 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
             },
             generation: woke,
         },
-        Err("team_agent_running"),
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: "team_agent_running".to_owned(),
+            },
+        )),
     ));
     let text = render(&mut shell).join("\n");
     assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
     assert!(text.contains("It is already running."), "{text}");
+    assert!(
+        !text.contains("Waking Sub-agent 3."),
+        "a wake the engine refused is not reported as waking: {text}"
+    );
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused wake reads nothing again"
+    );
 
     shell.key(Key::Char('h'));
     let sent = requests(&mut shell);
@@ -978,6 +990,44 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
     assert_eq!((project_id, *show), (&project(), true));
     shell.key(Key::Char('h'));
     assert!(requests(&mut shell).is_empty(), "one change at a time");
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: "project_setup_missing".to_owned(),
+            },
+        )),
+    ));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused change reads nothing again"
+    );
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("Could not change where finished agents show."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Finished agents: Hide."),
+        "a refused change keeps the setting: {text}"
+    );
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { show: true, .. },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
     shell.arrive(setup_reply(
         SetupQuery::TeamChange {
             action: TeamAction::FinishedAgents {
