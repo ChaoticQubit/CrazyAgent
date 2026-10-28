@@ -698,6 +698,37 @@ async fn desktop_team_status(
 }
 
 #[tauri::command]
+async fn desktop_team_agent_messages(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    before: Option<crazyagent::team::agent_messages::Cursor>,
+    limit: Option<u16>,
+) -> Result<crazyagent::team::agent_messages::AgentMessages, BridgeError> {
+    main_window(&window)?;
+    read(&state)
+        .await?
+        .team_agent_messages(&id, agent, before, limit)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_message_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    settings: crazyagent::team::agent_messages::MessageSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_message_settings(&id, settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_message(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2535,6 +2566,8 @@ pub fn run() {
             desktop_project_agent_policy,
             desktop_set_project_agent_policy,
             desktop_team_status,
+            desktop_team_agent_messages,
+            desktop_team_message_settings,
             desktop_team_message,
             desktop_team_delegate,
             desktop_team_cancel,

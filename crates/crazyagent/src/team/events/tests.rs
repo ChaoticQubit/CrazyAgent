@@ -193,6 +193,7 @@ fn a_question_on_a_real_sub_agent_screen_is_recorded_once_and_its_typed_answer_r
             host.as_ref(),
             &project(),
             &format!("codex-{agent}"),
+            Said::Answer,
             "1"
         )
         .unwrap(),
@@ -513,7 +514,15 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         "the master is not a sub-agent to send to"
     );
     let send = |agent: String, text: &str| {
-        send_to_agent(&fixture.connection, host.as_ref(), &project(), &agent, text).unwrap()
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent,
+            Said::Message,
+            text,
+        )
+        .unwrap()
     };
     assert_eq!(send(live.to_string(), "  \n"), Err("team_message_invalid"));
     assert_eq!(
@@ -589,6 +598,7 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
             host.as_ref(),
             &project(),
             &named.to_string(),
+            Said::Message,
             "hi"
         )
         .unwrap(),
@@ -1858,4 +1868,117 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     let delivered = view(connection, &project()).unwrap().questions;
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
+}
+
+/// What the master typed into a sub-agent is kept for the agent's Messages timeline only once
+/// its terminal took it (MSG-A): a message and an answer are kept with the master as speaker
+/// and their kind, their escape, control and bidirectional characters dropped, while blank
+/// or long text and an agent that is stopped or has no terminal keep nothing. With the
+/// project's keep setting off the timeline still shows a message was sent, with no text.
+#[test]
+fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() {
+    use super::super::agent_messages::{EntryKind, MessageSettings, Speaker, read, save_settings};
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let live = fixture.agent(PROJECT, "sub", "codex", "working");
+    let stopped = fixture.agent(PROJECT, "sub", "codex", "stopped");
+    let paneless = fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.pane(&host, live, &["/bin/sh", "-c", "exec cat"]);
+    let kept = || -> i64 {
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_agent_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let send = |agent: i64, said: Said, text: &str| {
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent.to_string(),
+            said,
+            text,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        send(live, Said::Message, "Check the login page first"),
+        Ok(live)
+    );
+    assert_eq!(
+        send(
+            live,
+            Said::Answer,
+            "Use option 2\u{1b}[31m red\u{0} \u{9b}1m \u{202e}reversed\u{2066} done"
+        ),
+        Ok(live)
+    );
+    assert_eq!(kept(), 2);
+    for (agent, text) in [
+        (live, "  \n".to_owned()),
+        (live, "x".repeat(SEND_BYTES_MAX + 1)),
+        (stopped, "hi".to_owned()),
+        (paneless, "hi".to_owned()),
+    ] {
+        assert!(send(agent, Said::Message, &text).is_err(), "{agent}");
+    }
+    assert_eq!(kept(), 2, "a refused or untyped text is never kept");
+
+    let page = read(&fixture.connection, &project(), live, None, None).unwrap();
+    let said: Vec<(Speaker, EntryKind, Option<&str>)> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            (
+                Speaker::Master,
+                EntryKind::Answer,
+                Some("Use option 2(31m red 1m reversed done")
+            ),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Check the login page first")
+            ),
+        ]
+    );
+    assert!(!page.older);
+
+    let tx =
+        Transaction::new_unchecked(&fixture.connection, TransactionBehavior::Immediate).unwrap();
+    save_settings(
+        &tx,
+        &project(),
+        &MessageSettings {
+            keep_master_messages: false,
+            ..MessageSettings::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(send(live, Said::Message, "Secret plan"), Ok(live));
+    let newest = read(&fixture.connection, &project(), live, None, None)
+        .unwrap()
+        .entries
+        .remove(0);
+    assert_eq!(
+        (newest.from, newest.kind, newest.text),
+        (Speaker::Master, EntryKind::Message, None),
+        "with the setting off only the fact of the message is kept"
+    );
+    let stored: Option<String> = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_agent_messages ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None, "no text is stored when the setting is off");
 }

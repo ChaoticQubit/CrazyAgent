@@ -618,6 +618,12 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    TeamAgentMessages {
+        project_id: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+        limit: Option<u16>,
+    },
     ProjectFiles {
         project_id: ProjectId,
         query: String,
@@ -754,6 +760,17 @@ impl OwnerRead {
             Self::ProjectContextItem { path, .. } => {
                 if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
                     return Err(failure("context_path_invalid"));
+                }
+                return Ok(None);
+            }
+            Self::TeamAgentMessages { agent, limit, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                if limit.is_some_and(|limit| {
+                    limit == 0 || limit > crate::team::agent_messages::PAGE_MAX
+                }) {
+                    return Err(failure("team_messages_limit_invalid"));
                 }
                 return Ok(None);
             }
@@ -1094,6 +1111,9 @@ pub enum OwnerData {
     },
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
+    },
+    TeamAgentMessages {
+        messages: Box<crate::team::agent_messages::AgentMessages>,
     },
     ProjectFiles {
         project_id: ProjectId,

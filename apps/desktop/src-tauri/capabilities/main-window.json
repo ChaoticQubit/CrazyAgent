@@ -39,6 +39,8 @@
     "allow-desktop-team-time-limits",
     "allow-desktop-team-on-harness-switch",
     "allow-desktop-team-finished-agents",
+    "allow-desktop-team-agent-messages",
+    "allow-desktop-team-message-settings",
     "allow-desktop-team-live-master",
     "allow-desktop-team-pause",
     "allow-desktop-team-hand-off",
