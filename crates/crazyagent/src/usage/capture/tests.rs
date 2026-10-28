@@ -964,3 +964,56 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
         "the walk read all {FOLDERS} folders of 1,000 records"
     );
 }
+
+/// A home past the entry bound still counts the record that changed last: the walk enters
+/// the most recently changed folder first and reads every entry of it, so the bound leaves
+/// out only folders that changed before. Here that record is the last entry of a folder of
+/// 1,100 records that a walk in plain directory order reaches last.
+#[test]
+fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+    const FOLDERS: usize = 20;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("projects");
+    let at =
+        |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + secs);
+    for folder in 0..FOLDERS {
+        let dir = projects.join(format!("f{folder:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..1100 {
+            std::fs::File::create(dir.join(format!("s{file:04}.jsonl")))
+                .unwrap()
+                .set_modified(at(u64::try_from(file).unwrap()))
+                .unwrap();
+        }
+    }
+    let listed = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let folders = listed(&projects);
+    let last = folders[0].clone();
+    for dir in &folders[1..] {
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(at(0))
+            .unwrap();
+    }
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    let added = scan_home(
+        &db,
+        home.path(),
+        Format::Claude,
+        &attribution(RunKind::Agent, None),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (added.input, added.output),
+        (7, 3),
+        "the record that changed last is counted"
+    );
+}

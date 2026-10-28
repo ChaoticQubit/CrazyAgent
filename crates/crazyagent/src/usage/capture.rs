@@ -293,8 +293,9 @@ fn codex_line(
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
 /// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
-/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all and keeps only the
-/// newest records it saw, so a home an agent filled costs a bounded scan.
+/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all, entering the most
+/// recently changed folder first, and keeps only the newest records it saw, so a home an
+/// agent filled costs a bounded scan that leaves out its least recently changed folders.
 /// Inputs: the home and the format. Output: the paths.
 fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let root = match format {
@@ -305,6 +306,12 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let mut folders = vec![(root, 0)];
     let mut visited = 0;
     let mut examined = 0;
+    let changed = |entry: &std::fs::DirEntry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    };
     'walk: while let Some((folder, level)) = folders.pop() {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
@@ -313,7 +320,8 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
-        for entry in entries.flatten().take(FILES_PER_SCAN_MAX * 4) {
+        let mut below = Vec::new();
+        for entry in entries.flatten() {
             if examined == ENTRIES_PER_SCAN_MAX {
                 break 'walk;
             }
@@ -324,21 +332,19 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if kind.is_dir() && level < WALK_DEPTH_MAX {
-                folders.push((entry.path(), level + 1));
+                below.push((changed(&entry), entry.path()));
             } else if kind.is_file()
                 && name.ends_with(".jsonl")
                 && (format == Format::Claude || name.starts_with("rollout-"))
             {
-                let changed = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                newest.push((std::cmp::Reverse(changed), entry.path()));
+                newest.push((std::cmp::Reverse(changed(&entry)), entry.path()));
                 if newest.len() > FILES_PER_SCAN_MAX {
                     newest.pop();
                 }
             }
         }
+        below.sort_unstable();
+        folders.extend(below.into_iter().map(|(_, path)| (path, level + 1)));
     }
     assert!(examined <= ENTRIES_PER_SCAN_MAX && newest.len() <= FILES_PER_SCAN_MAX);
     newest
