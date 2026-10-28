@@ -417,6 +417,12 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
     assert_eq!(run.status, ResearchStatus::Queued);
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
+    assert_eq!(
+        job.error.as_deref(),
+        Some(
+            "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        )
+    );
     assert!(!process_group_alive(run.process_group.unwrap()));
 }
 

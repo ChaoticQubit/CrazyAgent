@@ -1357,6 +1357,49 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
     );
 }
 
+#[test]
+fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
+    const REASON: &str = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+    let project = ProjectId::new("tidepool").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Tidepool".into(), None);
+    screen.now_ms = 600_000;
+    screen.jobs = Some(vec![ResearchJob {
+        id: 7,
+        project_id: project,
+        kind: ResearchKind::MarketResearch,
+        kind_label: "Market research".into(),
+        status: ResearchStatus::Queued,
+        status_label: "Queued".into(),
+        report_path: "context/research/market_research.md".into(),
+        harness: "codex".into(),
+        tools: true,
+        attempts: 0,
+        claimer: None,
+        error: Some(REASON.into()),
+        cancel_requested: false,
+        output_bytes: 2048,
+        created_ms: 1_000,
+        started_ms: Some(2_000),
+        heartbeat_ms: Some(3_000),
+        finished_ms: None,
+    }]);
+    screen.open(Tab::Agents);
+    let look = Look::plain();
+    for (width, height) in [(80u16, 24u16), (120, 36)] {
+        let shown = text(&project_screen(&mut screen, width, height, &look).rows);
+        let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains(REASON), "{shown}");
+        assert!(!shown.contains("running"), "{shown}");
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.trim_start().starts_with("Market research")
+                    && line.contains("Started")),
+            "{shown}"
+        );
+    }
+}
+
 fn stored(project: &ProjectId) -> StoredSetup {
     StoredSetup {
         project_id: project.clone(),

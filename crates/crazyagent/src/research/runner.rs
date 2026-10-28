@@ -297,7 +297,7 @@ enum Ending {
     Cancelled,
     Interrupted,
     RateLimited,
-    Narrowed,
+    Narrowed(Narrowing),
 }
 
 /// What a running research job's sandbox profile was built with, checked against the saved
@@ -321,6 +321,28 @@ impl Granted {
             Some(self.access),
             &self.toolchains,
         )
+    }
+}
+
+/// The plain line a research job stopped for a narrowed policy shows while it waits to run
+/// again. Takes the cause. Returns the line.
+fn requeued_reason(cause: Narrowing) -> &'static str {
+    match cause {
+        Narrowing::Access => {
+            "The project's agent access was lowered, so this research was stopped and queued again; its next run uses the new level"
+        }
+        Narrowing::TurnedOff => {
+            "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        }
+        Narrowing::NotAllowed => {
+            "A toolchain this research ran with is no longer allowed for the project (turned off, or no longer used by the project), so it was stopped and queued again; its next run goes without it"
+        }
+        Narrowing::PolicyUnreadable => {
+            "The project's agent access could not be read, so this research was stopped and queued again"
+        }
+        Narrowing::FolderUnreadable => {
+            "The project folder could not be read to check this research's toolchains, so it was stopped and queued again"
+        }
     }
 }
 
@@ -572,7 +594,7 @@ impl ResearchRunner {
             process_group,
         };
         if jobs.home_moving(project.root)? {
-            jobs.release(&job)?;
+            jobs.release(&job, None)?;
             let status = jobs
                 .get(job.id)?
                 .map_or(ResearchStatus::Queued, |job| job.status);
@@ -616,8 +638,12 @@ impl ResearchRunner {
                     jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
-                if let Ending::Interrupted | Ending::Narrowed = ending {
-                    let _ = jobs.release(&job);
+                if let Ending::Interrupted | Ending::Narrowed(_) = ending {
+                    let reason = match ending {
+                        Ending::Narrowed(cause) => Some(requeued_reason(cause)),
+                        _ => None,
+                    };
+                    let _ = jobs.release(&job, reason);
                     let status = jobs
                         .get(job.id)?
                         .map_or(ResearchStatus::Queued, |job| job.status);
@@ -643,7 +669,7 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(RunError::Busy) => {
-                jobs.release(&job)?;
+                jobs.release(&job, None)?;
                 let status = jobs
                     .get(job.id)?
                     .map_or(ResearchStatus::Queued, |job| job.status);
@@ -1143,8 +1169,8 @@ impl ResearchRunner {
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
                 }
-                if granted.narrowed(jobs).is_some() {
-                    break Ending::Narrowed;
+                if let Some(cause) = granted.narrowed(jobs) {
+                    break Ending::Narrowed(cause);
                 }
             }
             std::thread::sleep(POLL);
@@ -1189,8 +1215,8 @@ impl ResearchRunner {
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
                 }
-                if granted.narrowed(jobs).is_some() {
-                    break Ending::Narrowed;
+                if let Some(cause) = granted.narrowed(jobs) {
+                    break Ending::Narrowed(cause);
                 }
             }
             match session.next_event(POLL) {

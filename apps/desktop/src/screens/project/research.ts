@@ -281,7 +281,7 @@ export function researchRow(job: ResearchJob, now: number): ResearchRow {
   const ran = job.started_ms === null ? "" : elapsed((job.finished_ms ?? now) - job.started_ms);
   const base = { title: job.kind_label, elapsed: "", report: false, active: false };
   switch (job.status) {
-    case "queued": return { ...base, status: "Queued", tone: "neutral", progress: "Waiting to start", active: true };
+    case "queued": return { ...base, status: "Queued", tone: "neutral", progress: job.error?.trim() || "Waiting to start", active: true };
     case "needs_pool": {
       const limit = rateLimit(job);
       if (limit) return { ...base, status: `Rate limited until ${localClock(limit.until)}`, tone: "warn", progress: limit.reason };
