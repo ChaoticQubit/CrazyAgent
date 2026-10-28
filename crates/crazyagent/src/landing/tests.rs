@@ -2469,6 +2469,15 @@ impl Case {
         self.owner(&["for-each-ref", "--format=%(refname) %(objectname)", prefix])
     }
 
+    /// The owner's engine refs when the clone's base ref is the only one, as `owner_refs`
+    /// lists them (GA-R5). Output: the listing.
+    fn base_ref_only(&self) -> String {
+        let base = store::base_of(&self.db, self.workspace.worktree.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        format!("refs/crazyagent/base/agent-own {base}\n")
+    }
+
     /// Plants in the agent's own clone, under a blob id its commit stored there, the
     /// stored bytes of another text, as an agent with full git in its clone can.
     /// Inputs: the id and the text.
@@ -2586,7 +2595,11 @@ fn an_own_branch_agent_commits_on_its_branch_and_the_project_refs_stay_as_they_w
     assert_eq!(case.owner_refs("refs/tags"), "");
     assert_eq!(
         case.owner_refs("refs/crazyagent"),
-        format!("refs/crazyagent/pending/{} {first}\n", id.as_str())
+        format!(
+            "{}refs/crazyagent/pending/{} {first}\n",
+            case.base_ref_only(),
+            id.as_str()
+        )
     );
     case.edit("README", "uncommitted\n");
     assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
@@ -2744,7 +2757,7 @@ fn objects_planted_in_an_own_branch_clone_never_reach_a_change_set() {
         "changes_agent_branch_invalid"
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
     assert_eq!(case.tip(), tip);
     assert_eq!(
         case.checkout(),
@@ -2878,7 +2891,7 @@ fn a_clone_that_borrows_another_object_store_is_refused_and_imports_nothing() {
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/heads"), heads);
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// One way an agent can make git serve another repository, history or object source
@@ -3193,7 +3206,7 @@ fn a_clone_that_redirects_its_repository_is_refused_and_imports_nothing() {
         let leaked = case.owner_has(&secret);
         let sets = list(&case.db, &case.workspace.project).unwrap().len();
         let moved = case.owner_refs("refs/heads") != heads
-            || !case.owner_refs("refs/crazyagent").is_empty();
+            || case.owner_refs("refs/crazyagent") != case.base_ref_only();
         if code != "changes_workspace_invalid" || leaked || sets != 0 || moved {
             held.push(format!(
                 "{}: {code}, foreign object imported {leaked}, change sets {sets}, refs moved {moved}",
@@ -3238,7 +3251,7 @@ fn a_redirect_made_after_the_checks_is_never_served() {
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
     assert_eq!(case.owner_refs("refs/heads"), heads);
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// Temp files an interrupted git command leaves in the clone's pack folder do not stop
@@ -3323,7 +3336,7 @@ fn repack_temp_files_let_the_turn_end_but_a_temp_pack_git_would_read_is_refused(
     assert!(temp("4242", "idx").is_file() && temp("31337", "pack").is_file());
     assert!(!case.owner_has(&secret), "a temp pack was served");
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert!(case.owner_refs("refs/crazyagent").is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 
     branch_at(&case, &own);
     case.edit("README", "one\ntwo\nthree\nfour\n");
@@ -3433,7 +3446,7 @@ fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project()
         "a refused clone's object reached the project"
     );
     assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
-    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
 /// Engine git never opens an agent's own clone, whose config is the agent's: the engine
@@ -3455,5 +3468,37 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         &case.repo,
         &case.workspace.git_dir,
         Some(&case.workspace.worktree),
+    );
+}
+
+/// The owner repository keeps the commit an Own branch clone borrows as its base under an
+/// engine ref that follows the base, so the owner rewriting their branch and pruning
+/// leaves the clone's history readable (GA-R5).
+#[test]
+fn the_owner_repository_keeps_an_own_branch_clone_s_base_through_a_rewrite_and_prune() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    let linked = case.repo.parent().unwrap().join("agent-1");
+    case.owner(&["worktree", "remove", "--force", linked.to_str().unwrap()]);
+    case.owner(&["commit", "-q", "--amend", "-m", "Start, reworded"]);
+    assert_ne!(case.tip(), base);
+    case.owner(&["reflog", "expire", "--expire=now", "--all"]);
+    case.owner(&["gc", "-q", "--prune=now"]);
+    assert!(
+        case.owner_has(&base),
+        "the clone's base survived the owner's prune"
+    );
+    assert_eq!(case.agent_head(), base);
+    case.agent(&["log", "-q", "--format=%H"]);
+
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &head, NOW_MS).unwrap();
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/crazyagent/base/agent-own"])
+            .trim(),
+        head,
+        "the base ref follows the clone's base"
     );
 }

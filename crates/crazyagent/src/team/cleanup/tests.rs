@@ -678,7 +678,23 @@ fn a_finished_clone_agent_with_everything_landed_is_removed_without_git_in_its_c
     let mut listed = case.listed();
     listed.sort_unstable();
     assert_eq!(listed, [1, 2]);
+    let base_refs = || {
+        git_in(
+            &case.home,
+            &case.repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/crazyagent/base",
+            ],
+        )
+    };
+    assert_eq!(
+        base_refs(),
+        "refs/crazyagent/base/agent-1\nrefs/crazyagent/base/agent-2\n"
+    );
     assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+    assert_eq!(base_refs(), "", "each removed clone's base ref is gone");
     for id in [1, 2] {
         assert!(!case.worktree(id).exists(), "agent {id}'s clone is gone");
         assert!(!case.folder(id).exists() && !case.profile(id).exists());
