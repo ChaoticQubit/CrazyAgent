@@ -194,13 +194,24 @@ async fn large_schedule(root: &Path) -> Result<(), String> {
         matches!(receipt.outcome, ActionOutcome::Applied),
         "the owner can still shrink a schedule past one reply"
     );
+    let read = bridge
+        .account_schedule()
+        .await
+        .map_err(|e| e.code.to_owned())?;
+    let ids: Vec<_> = read.projects.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(
+        ids,
+        (1..600).map(project).collect::<Vec<_>>(),
+        "the desktop reads a schedule past one reply whole"
+    );
     Ok(())
 }
 
 /// A schedule of 600 project overrides, more than one owner reply carries, still takes
 /// desktop changes, including one that shrinks it: a change never reads the whole schedule.
+/// The desktop then reads it whole, page by page.
 #[tokio::test]
-async fn the_desktop_bridge_changes_a_schedule_larger_than_one_reply() {
+async fn the_desktop_bridge_changes_and_reads_a_schedule_larger_than_one_reply() {
     let root = tempfile::Builder::new()
         .prefix("ca-desk-sched-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())

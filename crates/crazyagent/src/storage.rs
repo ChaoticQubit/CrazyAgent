@@ -2474,9 +2474,10 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
-        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
-            schedule: crate::scheduling::load(&tx)?,
-        },
+        OwnerRead::AccountSchedule { after } => {
+            let (schedule, next) = crate::scheduling::load_page(&tx, after.as_ref())?;
+            OwnerData::AccountSchedule { schedule, next }
+        }
         OwnerRead::AccountRanking => OwnerData::AccountRanking {
             pools: crate::scheduling::ranking(
                 &tx,

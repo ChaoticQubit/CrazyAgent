@@ -2229,6 +2229,7 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::scheduling::forget_project(tx, project_id.as_str())?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
