@@ -209,7 +209,7 @@ fn only_an_overview_this_engine_wrote_is_shown_as_the_mapping_agents() {
         .unwrap();
     let shown = |database: &mut Connection| {
         let tx = database.transaction().unwrap();
-        let view = status(&tx, &ProjectId::new("demo".into()).unwrap())
+        let view = status(&tx, &ProjectId::new("demo").unwrap())
             .unwrap()
             .unwrap();
         (view.overview, view.folder_overview)
