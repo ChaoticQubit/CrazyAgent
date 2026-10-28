@@ -375,6 +375,71 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
     );
 }
 
+/// A project made in the projects home keeps its context in `.crazyagent/context`: `o` on
+/// each context file the engine listed opens that file, not a missing one beside the project.
+#[test]
+fn o_opens_each_listed_context_file_from_the_folder_the_engine_listed_it_in() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-ctx-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let project = root.path().canonicalize().unwrap().join("notes-cli");
+    let state = project.join(".crazyagent");
+    std::fs::create_dir_all(state.join("context/research")).unwrap();
+    std::fs::write(state.join("context/brief.md"), "# Brief").unwrap();
+    std::fs::write(state.join("context/research/market.md"), "# Market").unwrap();
+    let id = ProjectId::new("notes-cli").unwrap();
+    let stored = crate::project_setup::StoredSetup {
+        project_id: id.clone(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![ResearchKind::CompetitorResearch],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: project.display().to_string(),
+        created_ms: 1_793_000_000_000,
+        revision: 1,
+    };
+    let context = crate::project_setup::list_context(&stored).unwrap();
+    let paths: Vec<&str> = context
+        .items
+        .iter()
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(paths, ["context/brief.md", "context/research/market.md"]);
+    let mut screen = super::project::ProjectScreen::new(id, "Notes CLI".into(), None);
+    screen.setup = Some(stored);
+    screen.context = Some(context.clone());
+
+    let opened: Vec<_> = context
+        .items
+        .iter()
+        .map(|item| {
+            screen
+                .context_request(&item.path)
+                .map(|request| opening(&request))
+        })
+        .collect();
+
+    assert_eq!(
+        opened,
+        vec![
+            Some(Ok(Opening::Open(state.join("context/brief.md")))),
+            Some(Ok(Opening::Open(state.join("context/research/market.md")))),
+        ],
+        "every listed context file opens from the project's .crazyagent folder"
+    );
+}
+
 #[test]
 fn a_project_folder_is_revealed_and_only_documents_inside_it_open() {
     let root = tempfile::Builder::new()
@@ -707,6 +772,7 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),
@@ -1239,6 +1305,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),
@@ -1644,6 +1711,7 @@ async fn a_file_the_engine_cannot_write_into_the_project_says_why() {
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),

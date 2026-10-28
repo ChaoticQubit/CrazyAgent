@@ -2446,3 +2446,163 @@ fn a_project_sets_its_own_account_order_or_follows_its_pool() {
         ProjectReply::AccountOrder(None)
     );
 }
+
+/// A document longer than one chunk is opened, another file is opened while its second
+/// chunk is in flight, then the first is opened again: the late chunk never starts the new
+/// preview, which reads from offset 0 and shows the whole document in order.
+#[tokio::test]
+async fn reopening_a_file_while_a_chunk_is_in_flight_reads_it_from_the_start() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-chunk-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sources = tempfile::tempdir().unwrap();
+    let long: String = (1..=2000).map(|line| format!("line {line:05}\n")).collect();
+    assert!(long.len() > 2 * crate::project_setup::CONTEXT_CHUNK_BYTES);
+    std::fs::write(sources.path().join("long.md"), &long).unwrap();
+    std::fs::write(sources.path().join("short.md"), "# Short\n").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    let project = ProjectId::new("chunks").unwrap();
+    let document = |name: &str| sources.path().join(name).to_str().unwrap().to_owned();
+    let created = controller
+        .setup_project(
+            project.clone(),
+            ProjectSpec {
+                name: "Chunks".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Long documents.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Cli],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![document("long.md"), document("short.md")],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        created,
+        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+    ));
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let now = 1_793_000_000_000;
+    settle(&mut screen, &mut controller, now).await;
+    let long_path = "context/documents/long.md";
+    let item = |offset: u64| SetupQuery::Item {
+        project: project.clone(),
+        path: long_path.into(),
+        offset,
+    };
+
+    screen.read(long_path);
+    let first = screen.next_query(now).unwrap();
+    assert_eq!(first, item(0));
+    send(&mut screen, &mut controller, first).await;
+    let second = screen.next_query(now).unwrap();
+    let SetupQuery::Item { offset, .. } = &second else {
+        panic!("the preview reads its next chunk: {second:?}");
+    };
+    assert!(*offset > 0, "{second:?}");
+    let in_flight = serve(&mut controller, second.clone()).await;
+    screen.read("context/documents/short.md");
+    screen.read(long_path);
+    screen.apply(&second, in_flight);
+
+    let restart = screen.next_query(now);
+    assert_eq!(
+        restart,
+        Some(item(0)),
+        "the reopened preview reads from the start"
+    );
+    send(&mut screen, &mut controller, restart.unwrap()).await;
+    for _ in 0..8 {
+        let Some(query) = screen.next_query(now) else {
+            break;
+        };
+        send(&mut screen, &mut controller, query).await;
+    }
+    let preview = screen.preview.as_ref().unwrap();
+    assert_eq!(preview.path, long_path);
+    assert_eq!(preview.next, None);
+    assert_eq!(preview.text, long, "the whole document, in order");
+}
+
+/// A stack entry may hold a comma, which the engine allows: saving the General form after
+/// changing only the name keeps every stack entry as it was.
+#[test]
+fn the_general_form_keeps_stack_entries_holding_commas_when_the_stack_is_untouched() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(screen.key(control_u), ProjectReply::Handled);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the name change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update {
+            name, setup: sent, ..
+        } => {
+            assert_eq!(name.as_deref(), Some("Notes Pro"));
+            assert_eq!(sent.tech_stack, setup.tech_stack);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}
+
+/// Appending to a stack whose saved entry holds a comma keeps that entry whole: only the
+/// text the owner typed splits on commas.
+#[test]
+fn editing_the_stack_keeps_saved_entries_holding_commas_whole() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    screen.key(key(KeyCode::Tab));
+    screen.key(key(KeyCode::Tab));
+    assert_eq!(screen.general.as_ref().unwrap().cursor, 2);
+    assert_eq!(screen.paste(", go, kotlin"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the stack change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update { setup: sent, .. } => {
+            assert_eq!(sent.tech_stack, ["C, C++ interop", "rust", "go", "kotlin"]);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}

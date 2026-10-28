@@ -44,7 +44,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
@@ -2681,6 +2681,11 @@ pub fn run() {
                             && url.scheme() == "http"
                             && url.host_str() == Some("127.0.0.1")
                             && url.port() == Some(1420))
+                })
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                        window.state::<TerminalState>().0.page_started();
+                    }
                 })
                 .build()?;
             Ok(())

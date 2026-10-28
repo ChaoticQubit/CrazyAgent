@@ -17,9 +17,12 @@ use crate::terminal::{AgentId, TerminalFrame};
 /// Output: one model access edit; `Assign` gives the project exactly the chosen
 /// pool, or none, and `Remove` also takes the pool off every project using it; it
 /// carries how many projects its confirmation showed and is refused when that changed.
+/// `Create` carries the id its form drew once, so a retry of the same form never adds
+/// a second pool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
+        id: CredentialRef,
         name: String,
         members: Vec<CredentialRef>,
         quota: ProviderQuotaPolicy,
@@ -303,9 +306,23 @@ pub struct Activity {
     pub notifications: usize,
 }
 
+/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
+/// Input: the pool name. Output: the id, or `pool_id_unavailable`.
+pub fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
+    let stem: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .flat_map(|character| character.to_lowercase())
+        .collect();
+    let nonce = crate::engine::owner::random_id().map_err(|_| "pool_id_unavailable".to_owned())?;
+    CredentialRef::new(format!("pool-{stem}-{nonce}")).map_err(|_| "pool_id_unavailable".into())
+}
+
 /// One project as Home shows it, built only from engine data.
 /// Input: the stored project, its setup and research jobs, and pool names.
-/// Output: the card fields in plain words.
+/// Output: the card fields in plain words, and the assigned pool's id, by which the
+/// pool screens find the projects of one pool, as two pools may share a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectCard {
     pub id: ProjectId,
@@ -313,6 +330,7 @@ pub struct ProjectCard {
     pub about: String,
     pub platforms: Vec<Platform>,
     pub pool: Option<String>,
+    pub pool_id: Option<CredentialRef>,
     pub research: ResearchCounts,
     pub created_ms: Option<i64>,
     pub activity: Activity,
@@ -345,6 +363,7 @@ impl ProjectCard {
                 .map(|setup| setup.platforms.clone())
                 .unwrap_or_default(),
             pool,
+            pool_id: setup.and_then(|setup| setup.pool.clone()),
             research: ResearchCounts::of(jobs),
             created_ms: setup.map(|setup| setup.created_ms),
             activity: Activity::default(),

@@ -845,6 +845,7 @@ mod tests {
             about: String::new(),
             platforms: Vec::new(),
             pool: None,
+            pool_id: None,
             research: ResearchCounts {
                 running,
                 ..Default::default()

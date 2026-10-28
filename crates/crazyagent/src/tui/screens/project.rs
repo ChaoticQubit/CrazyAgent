@@ -236,6 +236,13 @@ pub(in crate::tui) struct Preview {
 }
 
 impl Preview {
+    /// The offset of the chunk this preview reads next: 0 before its first chunk, then the
+    /// engine's next offset, so a chunk read for an earlier preview of the same file is
+    /// told apart. Takes the preview. Returns the offset, or none once it is complete.
+    fn wanted(&self) -> Option<u64> {
+        if self.loaded { self.next } else { Some(0) }
+    }
+
     /// Gives the report rendered for a width, rendering once per width.
     /// Takes the width in cells.
     /// Returns the wrapped lines.
@@ -399,20 +406,13 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form.
+    /// Builds the engine edit from the form, with the stack read by [`stack_entries`].
     /// Takes the form and the setup it edits.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
         let about = self.about.value().trim().to_owned();
-        let tech_stack: Vec<String> = self
-            .stack
-            .value()
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let tech_stack = stack_entries(self.stack.value(), &setup.tech_stack);
         let platforms: Vec<Platform> = Platform::ALL
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))
@@ -444,6 +444,47 @@ impl GeneralEdit {
             },
         })
     }
+}
+
+/// Reads the stack field: entries split by commas, where a saved entry that holds a comma
+/// and still shows whole between separators stays one entry, so editing the field never
+/// splits an entry the owner did not touch. Inputs: the field text and the saved entries.
+/// Output: the trimmed entries without empty ones, or the saved entries themselves while
+/// the field still shows them as the form wrote them.
+fn stack_entries(text: &str, saved: &[String]) -> Vec<String> {
+    if text == saved.join(", ") {
+        return saved.to_vec();
+    }
+    let mut whole: Vec<&str> = saved
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| entry.contains(','))
+        .collect();
+    whole.sort_by_key(|entry| std::cmp::Reverse(entry.len()));
+    let mut entries = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        let kept = whole.iter().copied().find(|entry| {
+            rest.strip_prefix(*entry).is_some_and(|after| {
+                let after = after.trim_start();
+                after.is_empty() || after.starts_with(',')
+            })
+        });
+        let (entry, after) = match kept {
+            Some(entry) => (entry, &rest[entry.len()..]),
+            None => rest.split_once(',').unwrap_or((rest, "")),
+        };
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            entries.push(entry.to_owned());
+        }
+        rest = after;
+    }
+    entries
 }
 
 fn sorted<T: Ord + Copy>(list: &[T]) -> Vec<T> {
@@ -815,8 +856,12 @@ impl ProjectScreen {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
-                    SetupQuery::Item { path, .. } => {
-                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                    SetupQuery::Item { path, offset, .. } => {
+                        if let Some(preview) = self
+                            .preview
+                            .as_mut()
+                            .filter(|p| &p.path == path && p.wanted() == Some(*offset))
+                        {
                             preview.next = None;
                             preview.problem = Some(plain_problem(&problem));
                             preview.cache = None;
@@ -865,7 +910,11 @@ impl ProjectScreen {
                 self.agent_policy_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
-                if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                if let Some(preview) = self
+                    .preview
+                    .as_mut()
+                    .filter(|p| p.path == chunk.path && p.wanted() == Some(chunk.offset))
+                {
                     preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
@@ -1083,15 +1132,11 @@ impl ProjectScreen {
         counts
     }
 
-    /// Names one context file to open: the folder its context paths start from and the
-    /// path inside it. Takes the path inside the project folder.
-    /// Returns the request, or none before the folder is known.
+    /// Names one context file to open: the folder the engine listed the context in, which is
+    /// `.crazyagent/` for projects in the projects home, and the path inside it.
+    /// Takes a listed context path. Returns the request, or none before the context is read.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
-        let folder = self
-            .setup
-            .as_ref()
-            .map(|setup| setup.folder.clone())
-            .or_else(|| self.context.as_ref().map(|context| context.folder.clone()))?;
+        let folder = self.context.as_ref()?.folder.clone();
         Some(OpenRequest::Context {
             folder,
             path: path.to_owned(),
