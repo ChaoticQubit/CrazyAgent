@@ -19,6 +19,39 @@ use ratatui::style::Style;
 
 const SPINNER: &str = "\u{283c}";
 
+/// The project tabs for the tab strip: each label after its section glyph, with the count of
+/// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
+/// the width, the glyphs go. Inputs: the running count, the width and the look. Output: the
+/// labels and counts in tab order.
+pub(in crate::tui) fn tab_items(
+    running: usize,
+    width: usize,
+    look: &Look,
+) -> Vec<(String, String)> {
+    let glyphed: usize = Tab::ALL
+        .iter()
+        .map(|tab| cells(look.glyph(tab.glyph())) + 1 + cells(tab.label()))
+        .sum::<usize>()
+        + 2 * (Tab::ALL.len() - 1)
+        + 2;
+    Tab::ALL
+        .iter()
+        .map(|tab| {
+            let count = if *tab == Tab::Agents && running > 0 {
+                running.to_string()
+            } else {
+                String::new()
+            };
+            let label = if glyphed <= width {
+                format!("{} {}", look.glyph(tab.glyph()), tab.label())
+            } else {
+                tab.label().to_owned()
+            };
+            (label, count)
+        })
+        .collect()
+}
+
 /// Draws one project tab with its tab strip, header status and help keys.
 /// Takes the screen state, the frame size and the look; the reader caches rendered reports.
 /// Returns the body rows, cursor, breadcrumb and help keys.
@@ -32,20 +65,7 @@ pub(in crate::tui) fn project_screen(
     let body_height = usize::from(height).saturating_sub(4);
     let content = width.saturating_sub(4);
     let running = screen.counts().0;
-    let items: Vec<(String, String)> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            let count = if *tab == Tab::Agents && running > 0 {
-                running.to_string()
-            } else {
-                String::new()
-            };
-            (
-                format!("{} {}", look.glyph(tab.glyph()), tab.label()),
-                count,
-            )
-        })
-        .collect();
+    let items = tab_items(running, width, look);
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
     let banner = screen.recovery.rows(content, look);
     let room = body_height.saturating_sub(2 + banner.len());
@@ -61,6 +81,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Conversation => conversation(screen, content, room, look),
         Tab::Agents => agents(screen, width, content, room, look),
         Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
+        Tab::Questions => screen.questions.rows(content, room, screen.offset, look),
         Tab::Context => {
             if screen.reading
                 && width < 100

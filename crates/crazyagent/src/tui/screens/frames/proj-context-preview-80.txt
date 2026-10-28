@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  …  /  Context  /  market_research.md
 ────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
-───────────────────────────────────────────────────────━━━━━━━━━────────────────
+  Overview   Conversation   Agents   Changes   Questions   Context   Settings
+───────────────────────────────────────────────────────────━━━━━━━──────────────
   research/market_research.md                                  Market research
 
   Market research: Fieldnotes Mobile

@@ -24,7 +24,7 @@ Ecologists keep field notes on paper or in general note apps that lose data with
 1. National Park Service data  https://www.nps.gov
 ";
 
-fn clocks(text: &str) -> String {
+pub(super) fn clocks(text: &str) -> String {
     let characters: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut index = 0;

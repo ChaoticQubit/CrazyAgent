@@ -771,6 +771,11 @@ impl ProjectPage {
         {
             ctx.request(Request::Changes(Box::new(query)));
         }
+        if self.screen.tab == Tab::Questions
+            && let Some(query) = self.screen.questions.next_query(now_ms())
+        {
+            ctx.request(Request::Questions(Box::new(query)));
+        }
         if self.screen.tab == Tab::Settings
             && let Some(job) = self.screen.plugins.next_job()
         {
@@ -987,6 +992,12 @@ impl ProjectPage {
         self.screen.tab == Tab::Changes && !self.screen.boxed()
     }
 
+    fn questions_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Questions
+            && self.screen.edit.is_none()
+            && self.screen.review.is_none()
+    }
+
     fn plugins_have_keys(&self) -> bool {
         self.screen.tab == Tab::Settings && !self.screen.boxed()
     }
@@ -1044,6 +1055,7 @@ impl Screen for ProjectPage {
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
+            || (self.questions_have_keys() && self.screen.questions.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1063,6 +1075,14 @@ impl Screen for ProjectPage {
             if let Some(target) = self.screen.changes.take_reveal() {
                 self.reveal(target, ctx);
             }
+            self.pump(ctx);
+            self.redraw(ctx);
+            return Flow::Handled;
+        }
+        if self.questions_have_keys()
+            && let Some(event) = key_event(key)
+            && self.screen.questions.key(event)
+        {
             self.pump(ctx);
             self.redraw(ctx);
             return Flow::Handled;
@@ -1132,6 +1152,7 @@ impl Screen for ProjectPage {
                     self.screen.plugins.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
+                OwnerEvent::Questions(event) => self.screen.questions.apply(event),
                 OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
                     self.screen.recovery.apply(event);
                 }
@@ -1153,6 +1174,7 @@ impl Screen for ProjectPage {
                 self.screen.forget_reads();
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();
+                self.screen.questions.forget_reads();
                 self.screen.recovery.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
@@ -1202,6 +1224,7 @@ impl Screen for ProjectPage {
             || self.waiting.is_some()
             || self.screen.plugins.busy()
             || self.screen.changes.busy()
+            || self.screen.questions.busy()
             || self.screen.recovery.busy()
     }
 
