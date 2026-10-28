@@ -13,7 +13,7 @@ use crate::memory::library::{
     LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
-use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
+use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::CredentialRef;
 use crate::usage::report::UsageReport;
 
@@ -76,6 +76,9 @@ pub(in crate::tui) enum SettingsJob {
     ImportSkills {
         picks: Vec<(String, Option<String>)>,
     },
+    Hooks {
+        project: Option<ProjectId>,
+    },
     Plugin(PluginChange),
     AppSetup(AppSetupJob),
     Schedule,
@@ -93,6 +96,14 @@ pub(in crate::tui) enum PluginChange {
     AddSkill {
         scope: Scope,
         folder: String,
+    },
+    AddHooks {
+        scope: Scope,
+        folder: String,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
     },
     SetSkill {
         id: String,
@@ -161,6 +172,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::SkillDetail { .. } => "SkillDetail",
             Self::ImportScan => "ImportScan",
             Self::ImportSkills { .. } => "ImportSkills",
+            Self::Hooks { .. } => "Hooks",
             Self::Plugin(_) => "Plugin",
             Self::AppSetup(job) => job.name(),
             Self::Schedule => "Schedule",
@@ -272,6 +284,7 @@ pub(in crate::tui) enum SettingsEvent {
     ),
     ImportScan(Result<crate::skills::import::ImportList, String>),
     Imported(Result<ImportOutcomes, String>),
+    Hooks(Option<ProjectId>, Result<Vec<HookView>, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
@@ -308,6 +321,7 @@ impl SettingsEvent {
             }
             SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
             SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
+            SettingsJob::Hooks { project } => Self::Hooks(project.clone(), Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
@@ -491,6 +505,16 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
+            SettingsJob::Hooks { project } => SettingsEvent::Hooks(
+                project.clone(),
+                match self.settings_controller() {
+                    Ok(controller) => controller
+                        .plugin_hooks(project)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                },
+            ),
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
             }
@@ -589,6 +613,12 @@ impl NativeOwner {
         let done = match change {
             PluginChange::AddSkill { scope, folder } => {
                 controller.add_skill(scope, folder).await.map(|_| None)
+            }
+            PluginChange::AddHooks { scope, folder } => {
+                controller.add_hooks(scope, folder).await.map(|_| None)
+            }
+            PluginChange::SetHook { id, enabled } => {
+                controller.set_hook_enabled(id, enabled).await.map(|_| None)
             }
             PluginChange::SetSkill { id, enabled } => controller
                 .set_skill_enabled(id, enabled)

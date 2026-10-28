@@ -1,7 +1,8 @@
 use crate::agent_git::Layout;
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
-    EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec,
+    EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
+    ServerSpec, hook_folder,
 };
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
@@ -70,6 +71,9 @@ const STATE: &str = "crazyagent";
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
+const HOOK_PLUGINS: &str = "hook-plugins";
+const HOOK_ROOT: &str = "CRAZYAGENT_HOOK_ROOT";
+const PLUGIN_ROOT: &str = "${CLAUDE_PLUGIN_ROOT}";
 
 const _: () = assert!(
     HEADER_BYTES_MAX
@@ -109,22 +113,25 @@ pub struct AgentContext {
 }
 
 /// The owner's app and project instructions and the instruction files one launch writes
-/// into the agent's home, with the project they belong to.
+/// into the agent's home, with the project they belong to and the hooks the owner turned on
+/// for it.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
     given: crate::agent_home::Given,
+    hooks: Vec<EffectiveHook>,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
-/// transcript, and the lock that keeps a second launch out of that home. Dropping it
-/// deletes every file holding a secret and the copied skills, unless `keep` left them to a
-/// pane that still runs.
+/// transcript, whether its generated plugin holds hooks, and the lock that keeps a second
+/// launch out of that home. Dropping it deletes every file holding a secret and the copied
+/// skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
     files: Option<InstalledFiles>,
     transcripts: bool,
+    hooks: bool,
     _lock: File,
 }
 
@@ -161,6 +168,8 @@ pub fn for_project(
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
+        .map_err(|problem| LaunchError(problem.0))?;
     drop(tx);
     let given = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
@@ -169,6 +178,7 @@ pub fn for_project(
         process: Some(Box::new(Process {
             project: home_project,
             given,
+            hooks,
         })),
         transcripts,
     })
@@ -474,6 +484,7 @@ impl AgentContext {
                 codex: id == "codex",
             }),
             transcripts: self.transcripts,
+            hooks: false,
             _lock: lock,
         };
         remove(&state);
@@ -485,6 +496,10 @@ impl AgentContext {
                 .map_err(|problem| LaunchError(problem.0))?;
         }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
+        let hooks: &[EffectiveHook] = match &self.process {
+            Some(process) if tools => &process.hooks,
+            _ => &[],
+        };
         let skills = tools && !self.plugins.skills.is_empty();
         let names: Vec<&str> = match skills {
             true => self
@@ -524,7 +539,7 @@ impl AgentContext {
                 text.push('\n');
                 text.push_str(&process.given.text);
             }
-            if skills {
+            if skills || !hooks.is_empty() {
                 let plugin = state.join("plugin");
                 directory(&plugin, true)?;
                 directory(&plugin.join(".claude-plugin"), true)?;
@@ -532,8 +547,11 @@ impl AgentContext {
                     &plugin.join(".claude-plugin").join("plugin.json"),
                     PLUGIN_MANIFEST.as_bytes(),
                 )?;
-                self.copy_skills(&plugin.join("skills"))?;
-                text.push_str(&skills_index(&plugin.join("skills"), &self.plugins.skills));
+                if skills {
+                    self.copy_skills(&plugin.join("skills"))?;
+                    text.push_str(&skills_index(&plugin.join("skills"), &self.plugins.skills));
+                }
+                installed.hooks = write_hooks(&plugin, hooks)?;
                 installed
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
@@ -558,6 +576,7 @@ impl AgentContext {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
         assert!(installed.arguments.len() <= 6);
+        assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
         Ok(installed)
     }
 
@@ -596,6 +615,12 @@ impl Installed {
         self.transcripts
     }
 
+    /// Tells whether this launch's generated plugin holds the hooks the owner turned on, so
+    /// Claude Code must run with hooks allowed.
+    pub fn runs_hooks(&self) -> bool {
+        self.hooks
+    }
+
     /// Names where this launch wrote its files, for the record of a pane that may outlive
     /// the engine. Output: the files, none once `keep` left them to the pane.
     pub fn files(&self) -> Option<&InstalledFiles> {
@@ -613,6 +638,7 @@ impl Installed {
             arguments: Vec::new(),
             files: Some(files.clone()),
             transcripts: false,
+            hooks: false,
             _lock: lock,
         })
     }
@@ -1014,6 +1040,72 @@ fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let written = write_private(path, &bytes);
     bytes.fill(0);
     written
+}
+
+/// Writes the hooks one Claude launch runs into its generated plugin: each hook's stored
+/// plugin folder copied once under `hook-plugins/<folder id>`, and `hooks/hooks.json`
+/// holding every hook with its command run from that copy, so `CLAUDE_PLUGIN_ROOT` names
+/// the hook's own plugin files while the skills stay in the generated plugin. A plugin
+/// path a shell double quote cannot hold gets no hooks. Inputs: the generated plugin
+/// folder and the hooks. Output: whether hooks were written, or a launch refusal.
+fn write_hooks(plugin: &Path, hooks: &[EffectiveHook]) -> Result<bool, LaunchError> {
+    let quotable = plugin.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|character| character.is_control() || "\"$`\\".contains(character))
+    });
+    if hooks.is_empty() || !quotable {
+        return Ok(false);
+    }
+    let copies = plugin.join(HOOK_PLUGINS);
+    directory(&copies, true)?;
+    let mut tally = hook_folder::Tally::default();
+    let mut copied: Vec<&Path> = Vec::new();
+    let mut events = serde_json::Map::new();
+    for hook in hooks {
+        let id = hook
+            .folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| crate::protocol::single_component(name))
+            .ok_or_else(|| failure("launch_context_hook_unavailable"))?;
+        if !copied.contains(&hook.folder.as_path()) {
+            hook_folder::copy_stored(&hook.folder, &copies.join(id), &mut tally).map_err(
+                |code| match code {
+                    "hooks_too_large" => failure("launch_context_too_large"),
+                    _ => failure("launch_context_hook_unavailable"),
+                },
+            )?;
+            copied.push(&hook.folder);
+        }
+        let command = format!(
+            "{HOOK_ROOT}=\"{PLUGIN_ROOT}/{HOOK_PLUGINS}/{id}\"; export CLAUDE_PLUGIN_ROOT=\"${HOOK_ROOT}\"; {}",
+            hook.command
+                .replace(PLUGIN_ROOT, &format!("${{{HOOK_ROOT}}}"))
+        );
+        let mut entry = serde_json::json!({"type": "command", "command": command});
+        if let Some(timeout) = hook.timeout {
+            entry["timeout"] = timeout.into();
+        }
+        let mut group = serde_json::json!({"hooks": [entry]});
+        if let Some(matcher) = &hook.matcher {
+            group["matcher"] = matcher.clone().into();
+        }
+        match events
+            .entry(hook.event.clone())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        {
+            serde_json::Value::Array(groups) => groups.push(group),
+            _ => unreachable!("each event holds a list of groups"),
+        }
+    }
+    assert!(!copied.is_empty() && copied.len() <= hooks.len());
+    directory(&plugin.join("hooks"), true)?;
+    write_private(
+        &plugin.join("hooks").join("hooks.json"),
+        serde_json::json!({"hooks": events}).to_string().as_bytes(),
+    )?;
+    Ok(true)
 }
 
 fn copy_tree(

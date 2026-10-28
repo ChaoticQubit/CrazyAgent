@@ -1,10 +1,10 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -728,6 +728,23 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
   return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
 }
 
+/** Reads hooks for global settings (no project) or one project's settings, where global
+ * hooks carry the project's own switch. Output: hooks in engine order. */
+export function listHooks(projectId?: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_plugin_hooks", { projectId: projectId ?? null });
+}
+
+/** Adds the command hooks a plugin folder defines, each turned on; nothing in the folder runs.
+ * Inputs: where they apply and the folder's full path. Output: the added hooks. */
+export function addHooks(scope: PluginScope, folder: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_add_hooks", { scope, folder });
+}
+
+/** Turns a hook on or off where it was added. Inputs: hook id and the switch. */
+export function setHookEnabled(id: string, enabled: boolean): Promise<Result<HookView>> {
+  return call<HookView>("desktop_set_hook_enabled", { id, enabled });
+}
+
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
@@ -840,7 +857,7 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
 
 /** What the native folder chooser is for: a skill folder, an existing project folder to add, or
  * the folder that holds the owner's projects. Each shows its own fixed prompt. */
-export type FolderPurpose = "skill" | "project" | "projects_home";
+export type FolderPurpose = "skill" | "project" | "projects_home" | "plugin";
 
 /** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
  * chosen folder's full path, or null when the owner closed the chooser. */

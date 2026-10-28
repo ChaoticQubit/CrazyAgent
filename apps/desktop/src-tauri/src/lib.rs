@@ -29,7 +29,7 @@ use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
-use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
@@ -1783,6 +1783,38 @@ async fn desktop_plugin_servers(
 }
 
 #[tauri::command]
+async fn desktop_plugin_hooks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<Vec<HookView>, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.plugin_hooks(project_id).await
+}
+
+#[tauri::command]
+async fn desktop_add_hooks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    scope: Scope,
+    folder: String,
+) -> Result<Vec<HookView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.add_hooks(scope, folder).await
+}
+
+#[tauri::command]
+async fn desktop_set_hook_enabled(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    enabled: bool,
+) -> Result<HookView, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.set_hook_enabled(id, enabled).await
+}
+
+#[tauri::command]
 async fn desktop_add_skill(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2631,6 +2663,9 @@ pub fn run() {
             desktop_local_models,
             desktop_plugin_skills,
             desktop_plugin_servers,
+            desktop_plugin_hooks,
+            desktop_add_hooks,
+            desktop_set_hook_enabled,
             desktop_add_skill,
             desktop_set_skill_enabled,
             desktop_remove_skill,

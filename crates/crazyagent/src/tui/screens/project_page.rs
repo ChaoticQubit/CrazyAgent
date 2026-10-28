@@ -1007,6 +1007,9 @@ impl ProjectPage {
             PluginsReply::AddServer => {
                 return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
             }
+            PluginsReply::AddHooks => {
+                return Flow::Replace(Box::new(AddPlugin::hooks().for_project(project, name)));
+            }
             PluginsReply::OpenSkill { id, name: skill } => {
                 return Flow::Replace(Box::new(
                     SkillDetailPage::new(id, skill).for_project(project, name),

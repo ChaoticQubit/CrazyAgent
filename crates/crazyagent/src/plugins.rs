@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 pub mod check;
+pub mod hook_folder;
 pub mod skill_folder;
 
 pub const SKILLS_PER_SCOPE_MAX: usize = 100;
@@ -20,8 +21,10 @@ pub const SECRET_NAME_BYTES_MAX: usize = 64;
 pub const TOOLS_MAX: usize = 256;
 pub const TOOL_NAME_BYTES_MAX: usize = 128;
 pub const TOOL_NAMES_BYTES_MAX: usize = 12 * 1024;
+pub const HOOKS_PER_SCOPE_MAX: usize = 100;
+pub const HOOKS_PER_PLUGIN_MAX: usize = 64;
 
-/// Where a skill or MCP server applies: every project, or one project only.
+/// Where a skill, MCP server or hook applies: every project, or one project only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Scope {
@@ -281,6 +284,39 @@ pub struct EffectiveServer {
     pub secrets: Vec<EffectiveSecret>,
 }
 
+/// One hook as Settings lists it: the plugin it came from, the Claude Code event and
+/// matcher it runs on, its command, where it applies and whether it is on. `follows` names
+/// the skill or MCP server the hook came with; the hook runs only while that item is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookView {
+    pub id: String,
+    pub name: String,
+    pub plugin: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub scope: Scope,
+    pub scope_label: String,
+    pub enabled: bool,
+    pub on_here: Option<bool>,
+    pub follows: Option<String>,
+    pub source: String,
+}
+
+/// One hook an agent launch writes into its generated plugin: the plugin's stored folder
+/// copy its command runs from, the event, matcher, command and timeout in seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveHook {
+    pub plugin: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub timeout: Option<u32>,
+    pub folder: PathBuf,
+}
+
 /// The exact skills and MCP servers agents launched for one project receive.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -498,6 +534,25 @@ const PROBLEMS: &[(&str, &str)] = &[
         "plugin_secret_store_unavailable",
         "CrazyAgent can't write its plugin folder.",
     ),
+    ("hooks_none_found", "This folder has no Claude Code hooks."),
+    (
+        "hooks_invalid",
+        "The hooks file in this folder is not valid hooks JSON.",
+    ),
+    ("hooks_too_many", "This plugin has more than 64 hooks."),
+    (
+        "hooks_too_large",
+        "The files these hooks run are larger than 16 MB or 2048 files.",
+    ),
+    (
+        "hook_plugin_name_invalid",
+        "The plugin name must be 1 to 32 letters, digits, ., - or _.",
+    ),
+    (
+        "hooks_already_added",
+        "These hooks were already added here.",
+    ),
+    ("hook_limit", "There are already 100 hooks here."),
 ];
 
 /// Turns a plugins refusal code into the sentence shown to the owner.
