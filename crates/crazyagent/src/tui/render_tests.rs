@@ -574,6 +574,7 @@ fn home_cards_show_suggested_memories_beside_new_team_notifications() {
         let mut ctx = ready(width, height);
         if narrow {
             ctx.store.setup = Load::Ready(tools(&[Dependency::Uv]));
+            ctx.store.accounts = Load::Ready(accounts());
         }
         ctx.store.projects = Load::Ready(cards.clone());
         ctx.store.pools = Load::Ready(pools());
