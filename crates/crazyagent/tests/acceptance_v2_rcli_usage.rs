@@ -31,20 +31,25 @@ const ATTACH_TIME: Duration = Duration::from_secs(20);
 const READY_TIME: Duration = Duration::from_secs(20);
 const TURN_TIME: Duration = Duration::from_secs(240);
 const TAGS_BYTES_MAX: u64 = 1 << 20;
+const PROBE_FIRST: (u64, u64, u64) = (50, 0, 5);
 const PROBE: [(u64, u64, u64); 2] = [(100, 0, 10), (200, 0, 20)];
-const COUNTED_WHEN: &str = "the engine scans usage while its team runtime runs: a writable engine with Codex or Claude Code installed";
+const STDERR_TAIL_BYTES: usize = 4096;
+const COUNTED_WHEN: &str =
+    "the engine counts usage only while its team runtime runs, which needs one registered harness";
 
 /// One `crazyagent engine` process on the test's own root, started with the RCLI host the
-/// test names, so the master runs through that host and never the owner's engine.
+/// test names, so the master runs through that host and never the owner's engine, and with
+/// a Codex or Claude Code executable, so its team runtime and usage upkeep run.
 struct Engine {
     child: Child,
     stdout: PathBuf,
 }
 
 impl Engine {
-    /// Starts the engine on a root with an explicit RCLI host and waits for `ready`.
-    /// Inputs: the root and the RCLI bundle. Output: the running engine.
-    fn start(root: &Path, rcli: &Path) -> Self {
+    /// Starts the engine on a root with an explicit RCLI host and team harness and waits for
+    /// `ready`. Inputs: the root, the RCLI bundle and the harness flag with its executable.
+    /// Output: the running engine.
+    fn start(root: &Path, rcli: &Path, (flag, harness): (&str, &Path)) -> Self {
         let stdout = root.join("engine.stdout");
         let child = crazyagent::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
@@ -55,6 +60,7 @@ impl Engine {
                 .arg("engine.sock")
                 .arg("--writable-settings")
                 .args([OsStr::new("--rcli-executable"), rcli.as_os_str()])
+                .args([OsStr::new(flag), harness.as_os_str()])
                 .stdin(Stdio::null())
                 .stdout(File::create(&stdout).unwrap())
                 .stderr(File::create(root.join("engine.stderr")).unwrap()),
@@ -136,18 +142,23 @@ fn rcli_bundle() -> PathBuf {
     bundle
 }
 
-/// Fails the test as UNAVAILABLE when the engine it starts would run no usage scans, as
-/// the engine resolves Codex and Claude Code from the PATH it inherits.
-fn usage_scans_run() {
+/// The harness the engine registers so its usage upkeep runs: Codex, else Claude Code,
+/// found on PATH the way the engine's default start finds them, since the positional start
+/// this test uses looks up nothing. Output: the engine flag and the resolved executable;
+/// neither on PATH fails the test as UNAVAILABLE.
+fn scanning_harness() -> (&'static str, PathBuf) {
     let found = crazyagent::paths::resolve_harnesses(
         Harnesses::default(),
         std::env::var_os("PATH").as_deref(),
         None,
     );
-    assert!(
-        found.codex.is_some() || found.claude.is_some(),
-        "UNAVAILABLE: {COUNTED_WHEN}; neither is on PATH"
-    );
+    let (flag, executable) = match (found.codex, found.claude) {
+        (Some(codex), _) => ("--codex-executable", codex),
+        (None, Some(claude)) => ("--claude-executable", claude),
+        (None, None) => panic!("UNAVAILABLE: Codex or Claude Code on PATH ({COUNTED_WHEN})"),
+    };
+    assert!(executable.is_absolute(), "{executable:?}");
+    (flag, executable)
 }
 
 /// Reads the local Ollama's model list. Output: the raw reply, at most [`TAGS_BYTES_MAX`].
@@ -517,6 +528,39 @@ async fn report_until(
     }
 }
 
+/// Proves the engine's usage upkeep scans before the test reads any count from it: the probe
+/// agent's first total reaches the page within six scan periods. A failure carries the end
+/// of the engine's stderr, where a failed upkeep start says why usage is not counted.
+/// Inputs: the engine root, the reader, the project, and the probe record and row key.
+async fn upkeep_runs(
+    root: &Path,
+    owner: &OwnerController,
+    project: &ProjectId,
+    (record, key): (&Path, &str),
+) {
+    append(record, &token_count(PROBE_FIRST));
+    let start = Instant::now();
+    loop {
+        let report = owner
+            .usage_report(Some(project.clone()), None, 0)
+            .await
+            .unwrap();
+        if row(&report.agents, key).is_some_and(|row| row.tokens == counted(PROBE_FIRST)) {
+            return;
+        }
+        if start.elapsed() >= SCAN_EVERY * 6 {
+            let stderr = std::fs::read(root.join("engine.stderr")).unwrap_or_default();
+            let tail = &stderr[stderr.len().saturating_sub(STDERR_TAIL_BYTES)..];
+            panic!(
+                "the usage upkeep never scanned the probe record within {:?} ({COUNTED_WHEN}); engine stderr ends: {}",
+                SCAN_EVERY * 6,
+                String::from_utf8_lossy(tail)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// Appends each probe total to the probe agent's record and waits until the page counts it.
 /// Each count after the first proves the scan before it finished over every other record.
 /// Inputs: the owner client, the project, the probe record and row key, and the totals.
@@ -547,16 +591,17 @@ async fn rescanned(
 /// real turn through CrazyAgent's own pinned RCLI host against the local Ollama model; the
 /// usage page then shows that turn's reported tokens under the project's master row, stored
 /// against the RCLI harness, the pool and the account, never as not reported, and the
-/// desktop and TUI readers show the same row. Two later scans leave the row unchanged.
+/// desktop and TUI readers show the same row. A probe Codex record first proves the usage
+/// upkeep scans; two later scans leave the master row unchanged.
 ///
 /// Needs `CRAZYAGENT_RCLI` naming the verified `crazyagent-rcli` bundle, Ollama serving
-/// `qwen2.5:0.5b` at 127.0.0.1:11434 and Codex or Claude Code on PATH; without one the test
-/// fails as UNAVAILABLE. The engine runs on its own root with no provider key and never
-/// reads the owner's profile.
+/// `qwen2.5:0.5b` at 127.0.0.1:11434 and Codex or Claude Code on PATH, which the engine is
+/// given explicitly; without one the test fails as UNAVAILABLE. The engine runs on its own
+/// root with no provider key and never reads the owner's profile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
     let bundle = rcli_bundle();
-    usage_scans_run();
+    let (flag, harness) = scanning_harness();
     local_model_served().await;
     let fixture = tempfile::Builder::new()
         .prefix("ca-av2-rcli-")
@@ -569,7 +614,7 @@ async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
 
-    let mut engine = Engine::start(&root, &bundle);
+    let mut engine = Engine::start(&root, &bundle, (flag, &harness));
     let (owner, identity) = OwnerClient::discover(&root, OwnerClientKind::Desktop, ATTACH_TIME)
         .await
         .unwrap();
@@ -613,6 +658,10 @@ async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
     let desk = OwnerController::attach(&root, OwnerClientKind::Desktop, ATTACH_TIME)
         .await
         .unwrap();
+    let probe = add_probe(&root);
+    let probe_key = format!("team-{probe}");
+    let record = codex_rollout(&root, probe);
+    upkeep_runs(&root, &desk, &project, (&record, &probe_key)).await;
     let report = report_until(
         &desk,
         &project,
@@ -633,7 +682,11 @@ async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
         "the page never names RCLI as not reporting: {:?}",
         report.not_reported_by
     );
-    assert_eq!(report.total, master.tokens, "the turn is the only usage");
+    assert_eq!(
+        report.total,
+        master.tokens.plus(counted(PROBE_FIRST)),
+        "the turn and the probe's first total are the only usage"
+    );
     assert_eq!(
         row(&report.pools, POOL).map(|row| row.tokens),
         Some(master.tokens),
@@ -672,9 +725,6 @@ async fn the_usage_page_shows_an_rcli_master_turn_under_rcli_counted_once() {
         "the TUI's usage page over every project shows the same master row"
     );
 
-    let probe = add_probe(&root);
-    let probe_key = format!("team-{probe}");
-    let record = codex_rollout(&root, probe);
     let rescan = rescanned(&desk, &project, (&record, &probe_key), &PROBE).await;
     assert_eq!(
         row(&rescan.agents, &key),
