@@ -1248,6 +1248,7 @@ impl OwnerServer {
                     .parent()
                     .ok_or_else(|| failure("owner_root_unavailable"))?,
                 crate::ide::server::IDLE_LIMIT,
+                crate::ide::server::START_LIMIT,
                 Arc::clone(&ide),
                 root.path.join(SOCKET),
             );

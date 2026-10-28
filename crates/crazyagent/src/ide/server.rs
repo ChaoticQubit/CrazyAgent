@@ -79,6 +79,7 @@ pub struct ServerInfo {
 pub struct Servers {
     folder: PathBuf,
     idle: Duration,
+    start: Duration,
     grants: Arc<bridge::Grants>,
     socket: PathBuf,
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
@@ -132,22 +133,26 @@ fn preparation(extensions: &Path) -> Arc<Mutex<()>> {
 
 impl Servers {
     /// The IDE servers of one engine, none running yet. Inputs: the engine's data folder,
-    /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched,
-    /// [`IDLE_LIMIT`] outside tests, the owner server's IDE capability grants and its owner
-    /// socket, `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach.
-    /// Output: the register.
+    /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched
+    /// and how long a launch may take to listen, [`IDLE_LIMIT`] and [`START_LIMIT`] outside
+    /// tests, the owner server's IDE capability grants and its owner socket,
+    /// `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach. Output: the
+    /// register.
     pub(crate) fn new(
         data: &Path,
         idle: Duration,
+        start: Duration,
         grants: Arc<bridge::Grants>,
         socket: PathBuf,
     ) -> Self {
         assert!(!idle.is_zero());
+        assert!(!start.is_zero());
         assert_eq!(socket.parent().and_then(Path::parent), Some(data));
         assert_eq!(socket.file_name(), Some(std::ffi::OsStr::new("owner.sock")));
         Self {
             folder: data.join(super::FOLDER),
             idle,
+            start,
             grants,
             socket,
             slots: Mutex::default(),
@@ -305,8 +310,9 @@ impl Servers {
             ready: false,
             proxy,
         });
-        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle));
-        if let Err(error) = ready(&slot, launch, server_port, group, &self.closed).await {
+        tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle, self.start));
+        let listening = ready(&slot, launch, server_port, group, self.start, &self.closed).await;
+        if let Err(error) = listening {
             stop_launch(&slot, launch).await;
             return Err(error);
         }
@@ -531,15 +537,16 @@ async fn reuse(slot: &Slot) -> Option<ServerInfo> {
 }
 
 /// Waits until a launch listens on its port, the launch ends, [`Servers::stop_all`] began
-/// (`closed`) or [`START_LIMIT`] passes.
+/// (`closed`) or its `start` limit passes.
 async fn ready(
     slot: &Slot,
     launch: u64,
     port: u16,
     group: Pid,
+    start: Duration,
     closed: &AtomicBool,
 ) -> Result<(), EngineError> {
-    let deadline = Instant::now() + START_LIMIT;
+    let deadline = Instant::now() + start;
     loop {
         if closed.load(Ordering::SeqCst) {
             return Err(failure("ide_servers_closed"));
@@ -569,22 +576,22 @@ async fn ready(
 }
 
 /// Stops a launch once it exited, went untouched for `idle`, or was not ready within
-/// [`START_LIMIT`] of its start because the open that started it was cut, checking again
-/// under the start lock so an open that is still starting or just reused it keeps it.
-/// Runs from the moment the launch is stored and ends with the launch.
-async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
+/// `start` of its start because the open that started it was cut, checking again under the
+/// start lock so an open that is still starting or just reused it keeps it. Runs from the
+/// moment the launch is stored and ends with the launch.
+async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration, start: Duration) {
     loop {
-        tokio::time::sleep(WATCH_POLL.min(idle)).await;
+        tokio::time::sleep(WATCH_POLL.min(idle).min(start)).await;
         let Some(slot) = weak.upgrade() else {
             return;
         };
-        match due(&slot, launch, idle) {
+        match due(&slot, launch, idle, start) {
             None => return,
             Some(false) => continue,
             Some(true) => {}
         }
         let _start = slot.start.lock().await;
-        match due(&slot, launch, idle) {
+        match due(&slot, launch, idle, start) {
             None => return,
             Some(false) => continue,
             Some(true) => {
@@ -596,13 +603,13 @@ async fn watch(weak: Weak<Slot>, launch: u64, idle: Duration) {
 }
 
 /// Whether a launch should stop: none when the slot holds another launch or none, else
-/// whether it exited, went untouched for `idle`, or is still not ready [`START_LIMIT`]
-/// after it started.
-fn due(slot: &Slot, launch: u64, idle: Duration) -> Option<bool> {
+/// whether it exited, went untouched for `idle`, or is still not ready `start` after it
+/// started.
+fn due(slot: &Slot, launch: u64, idle: Duration, start: Duration) -> Option<bool> {
     let mut state = locked(&slot.state);
     let running = state.as_mut().filter(|running| running.launch == launch)?;
     let exited = !matches!(running.child.try_wait(), Ok(None));
-    let unready = !running.ready && running.started.elapsed() >= START_LIMIT;
+    let unready = !running.ready && running.started.elapsed() >= start;
     Some(exited || unready || running.touched.elapsed() >= idle)
 }
 

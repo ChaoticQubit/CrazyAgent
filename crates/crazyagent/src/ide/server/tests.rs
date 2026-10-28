@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const BUILD: &str = "vscodium-1.143.17183";
 const GONE_WAIT: Duration = Duration::from_secs(15);
 const PREPARATION_HELD: Duration = Duration::from_secs(15);
+const CUT_START_LIMIT: Duration = Duration::from_secs(3);
 
 /// The pinned VSCodium reh-web build that IDE-1 extracted into the project-local cache, in
 /// the `.local-state/ide-cache` of the nearest checkout above this crate. A machine without
@@ -35,6 +36,7 @@ fn servers_in(data: &Path, idle: Duration) -> Servers {
     Servers::new(
         data,
         idle,
+        START_LIMIT,
         Arc::default(),
         data.join("engine").join("owner.sock"),
     )
@@ -584,6 +586,31 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
     gone(group).await;
 }
 
+/// A cut launch that nobody opens again stops once its start limit passes, long before
+/// the idle limit, since it never passed `ready`: with the production idle limit only the
+/// start limit can end it.
+#[tokio::test]
+async fn an_open_cut_while_its_server_starts_stops_at_its_start_limit_well_before_idle() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = Servers::new(
+        data.path(),
+        IDLE_LIMIT,
+        CUT_START_LIMIT,
+        Arc::default(),
+        data.path().join("engine").join("owner.sock"),
+    );
+    let project = project("cut-start");
+    let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
+    assert!(
+        present(group),
+        "the cut launch runs on with nobody waiting for it"
+    );
+    gone(group).await;
+    assert_eq!(servers.group(&project), None);
+    assert!(!servers.touch(&project));
+}
+
 /// An open that finds an extension preparation still running on its folder, as one an open
 /// cut by the IDE tab's timeout leaves behind, waits for it and starts nothing beside it,
 /// so two installs never race on one extensions folder; it goes on once that one ends.
@@ -1099,7 +1126,13 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
     let data = scratch();
     let grants: Arc<bridge::Grants> = Arc::default();
     let socket = data.path().join("engine").join("owner.sock");
-    let servers = Servers::new(data.path(), IDLE_LIMIT, Arc::clone(&grants), socket);
+    let servers = Servers::new(
+        data.path(),
+        IDLE_LIMIT,
+        START_LIMIT,
+        Arc::clone(&grants),
+        socket,
+    );
     let project = project("built-in");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
