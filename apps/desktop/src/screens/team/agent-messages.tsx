@@ -25,10 +25,20 @@ function Entry({ entry, name, results, onOpenLink }: { entry: AgentMessage; name
     {entry.result !== null && results === "first_line" && <>
       <span className="am-result">{displayText(resultLine(entry.result))}</span>
       <span><button type="button" className="btn quiet small" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? `Hide ${what}` : `Show ${what}`}</button></span>
-      {open && <div className="pj-md am-md"><MarkdownView source={entry.result} onOpenLink={onOpenLink} /></div>}
+      {open && <ResultView name={name} what={what} source={entry.result} onOpenLink={onOpenLink} />}
     </>}
     {entry.result_more && <span className="am-note">Shortened here. The whole {what} is in the Tasks list.</span>}
   </li>;
+}
+
+/** An opened result or problem in a frame named for the agent, so Markdown it holds, a rule or a
+ * bold "Master" among it, never reads as another author's row. Inputs: the agent's name, whether
+ * it is a result or a problem, the Markdown and the link handler. Output: the framed result. */
+export function ResultView({ name, what, source, onOpenLink }: { name: string; what: "result" | "problem"; source: string; onOpenLink: (href: string) => void }) {
+  return <figure className="am-md">
+    <figcaption className="am-from">{`${what === "problem" ? "Problem" : "Result"} from ${displayText(name)}`}</figcaption>
+    <div className="pj-md"><MarkdownView source={source} onOpenLink={onOpenLink} /></div>
+  </figure>;
 }
 
 /** One sub-agent's Messages timeline, newest first: each entry's time, who it comes from by the
