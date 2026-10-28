@@ -124,7 +124,7 @@ impl PaneRecord {
         });
         (path.is_absolute()
             && record.cwd.is_absolute()
-            && record.pid > 0
+            && record.pid > 1
             && key
             && resumed
             && context
@@ -253,7 +253,7 @@ impl TerminalSession {
                 });
             }
             if !settled {
-                let _ = host.kill(&agent);
+                let _ = super::end_left_pane(host.as_ref(), &agent, "adopt");
                 return Err(failure("launch_adopt_unsettled"));
             }
             replay(&mut reader, &limits, &mut events)?;
@@ -274,6 +274,8 @@ impl TerminalSession {
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
+            uncertain: false,
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

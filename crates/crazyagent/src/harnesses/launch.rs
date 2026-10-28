@@ -42,6 +42,8 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 /// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
 /// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
 /// web search tool and no MCP server.
@@ -342,6 +344,53 @@ pub struct LaunchError(pub String);
 
 pub(super) fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
+}
+
+/// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
+/// names the group's leader and is above 1; an id that names no process does nothing.
+#[cfg(unix)]
+pub(crate) fn kill_group(group: u32) {
+    let Ok(raw) = i32::try_from(group) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    assert!(pid.as_raw_nonzero().get() > 1);
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+/// Waits until no process of a killed agent's group is left, killing again
+/// any member that is still there. Takes the group id; returns once the group
+/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
+/// stopped while one of its processes still lingers unnoticed. Output: whether
+/// the group is empty.
+#[cfg(unix)]
+pub(crate) fn await_group_exit(group: u32) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    let started = Instant::now();
+    while rustix::process::test_kill_process_group(pid).is_ok()
+        && started.elapsed() < GROUP_EXIT_WAIT
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    !group_alive(group)
+}
+
+/// Tells whether a process of a group is still there, without signalling it. Takes the
+/// group id. Output: false for an id that names no process.
+#[cfg(unix)]
+pub(crate) fn group_alive(group: u32) -> bool {
+    i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on

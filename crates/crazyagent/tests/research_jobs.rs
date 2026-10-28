@@ -176,11 +176,42 @@ fn stale_running_jobs_from_a_dead_runner_are_requeued() {
     let jobs = ResearchJobs::open(&path).unwrap();
     let id = jobs.enqueue("project-a", "market", "codex", true).unwrap();
     let dead = jobs.claim("project-a", "dead-runner", 1).unwrap().unwrap();
-    assert_eq!(jobs.recover_stale(60_000).unwrap(), 0);
-    assert_eq!(jobs.recover_stale(0).unwrap(), 1);
+    assert_eq!(jobs.recover_stale(60_000, 3).unwrap(), 0);
+    assert_eq!(jobs.recover_stale(0, 3).unwrap(), 1);
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status, ResearchStatus::Queued);
     assert!(jobs.finish(&dead, "x").is_err());
+}
+
+/// A job whose runner keeps dying is taken back by stale recovery only while attempts
+/// remain, so it ends failed at the attempt limit instead of looping and spending budget on
+/// every claim (finding_6fc0af2b54f7fc72).
+#[test]
+fn a_job_whose_runner_keeps_dying_fails_at_the_attempt_limit() {
+    let (_temp, path) = store();
+    let jobs = ResearchJobs::open(&path).unwrap();
+    let id = jobs.enqueue("project-a", "market", "codex", true).unwrap();
+    let mut claims = 0;
+    while let Some(dead) = jobs.claim("project-a", "dying-runner", 1).unwrap() {
+        claims += 1;
+        assert_eq!(dead.attempts, claims);
+        assert_eq!(jobs.recover_stale(0, 2).unwrap(), 1);
+        if claims > 20 {
+            break;
+        }
+    }
+    assert_eq!(
+        claims, 2,
+        "a job whose runner keeps dying was claimed {claims} times"
+    );
+    assert!(jobs.recover_stale(0, 0).is_err());
+    assert!(jobs.recover_stale(0, 11).is_err());
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(job.status, ResearchStatus::Failed);
+    assert_eq!(job.error.as_deref(), Some("Agent stopped responding"));
+    assert!(job.claimer.is_none());
+    assert!(job.finished_ms.is_some());
+    assert!(jobs.work().unwrap().is_empty());
 }
 
 #[test]
@@ -388,7 +419,7 @@ fn a_run_whose_claim_stale_recovery_took_back_cannot_act_after_the_runner_claims
     let jobs = ResearchJobs::open(&path).unwrap();
     let id = jobs.enqueue("project-a", "market", "codex", true).unwrap();
     let stale = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
-    assert_eq!(jobs.recover_stale(0).unwrap(), 1);
+    assert_eq!(jobs.recover_stale(0, 3).unwrap(), 1);
     let live = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
     assert_eq!((stale.id, live.id), (id, id));
     assert_eq!(stale.claimer, live.claimer);

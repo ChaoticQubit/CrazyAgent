@@ -1071,7 +1071,7 @@ impl Host for Tmux {
         let pid = pid
             .parse::<u32>()
             .ok()
-            .filter(|pid| *pid > 0 && pane.starts_with('%'))
+            .filter(|pid| *pid > 1 && pane.starts_with('%'))
             .ok_or_else(|| failure("terminal_command_failed"))?;
         Ok(PaneRef {
             agent: agent.clone(),
@@ -1130,6 +1130,22 @@ impl Host for Tmux {
         self.live_control()?
             .run(&format!("kill-window -t {}", target(agent)))
             .map(drop)
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        let lines = self.live_control()?.ask(&format!(
+            "list-panes -t {} -F '#{{pane_pid}}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let [line] = lines.as_slice() else {
+            return Err(failure("terminal_command_failed"));
+        };
+        std::str::from_utf8(line)
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
+            .filter(|pid| *pid > 1)
+            .map(Some)
+            .ok_or_else(|| failure("terminal_command_failed"))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

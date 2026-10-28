@@ -399,6 +399,16 @@ pub fn agent_env<'a>(
     Ok(env)
 }
 
+/// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`],
+/// keeping that descriptor and variable from the harness, then replaces the shim with the
+/// harness program and its arguments.
+#[cfg(unix)]
+macro_rules! warden_then_harness {
+    () => {
+        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
+    };
+}
+
 /// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
 /// harness program and its arguments. It joins the engine's process group, starts a new
 /// session and replaces itself with the harness, so the agent holds no controlling terminal
@@ -411,9 +421,62 @@ pub const SESSION_SHIM: [&str; 5] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-e",
-    r#"setpgrp(0, getpgrp(getppid())) or die "crazyagent: no new session: $!\n"; my $tries = 0; until (POSIX::setsid() > 0) { $!{EPERM} && ++$tries < 200 or die "crazyagent: no new session: $!\n"; select(undef, undef, undef, 0.005) } if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
+    concat!(
+        r#"setpgrp(0, getpgrp(getppid())) or die "crazyagent: no new session: $!\n"; my $tries = 0; until (POSIX::setsid() > 0) { $!{EPERM} && ++$tries < 200 or die "crazyagent: no new session: $!\n"; select(undef, undef, undef, 0.005) } "#,
+        warden_then_harness!()
+    ),
     "--",
 ];
+
+/// The shim a pane agent starts through inside `sandbox-exec`, followed by the harness
+/// program and its arguments: the [`SESSION_SHIM`] without its new session, since a pane's
+/// harness keeps the pane's terminal and process group. Handed a [`warden::WARDEN_FD`] by
+/// the pane's [`KEEPER`], it forks the run's warden first.
+#[cfg(target_os = "macos")]
+pub const PANE_SHIM: [&str; 5] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-e",
+    warden_then_harness!(),
+    "--",
+];
+
+/// A pane's first process, outside the sandbox, followed by the sandboxed command it keeps.
+/// It starts that command holding one end of a socket pair as the run's warden descriptor
+/// and waits until the command exits or the pane is asked to stop with hangup or terminate.
+/// Then it shuts its end, so the warden kills every process left in the sandbox, sessions
+/// of their own included, and it exits only once the warden confirmed that or found
+/// signals not confined; otherwise it keeps the pane open, ignoring terminate, until a
+/// hangup. A confining profile keeps every agent signal from it, and the terminal keys
+/// that signal the pane's group do not end it.
+#[cfg(target_os = "macos")]
+pub const KEEPER: [&str; 6] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-MSocket",
+    "-e",
+    r#"$^F = 1023; my $why = ""; $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1) } shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    "--",
+];
+
+/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
+/// the pane ends every process its agent started. Input: the argv `sandbox-exec -f
+/// <profile> <program> <arguments>`. Output: the kept argv, or none for any other argv.
+#[cfg(target_os = "macos")]
+pub fn kept_pane(argv: Vec<String>) -> Option<Vec<String>> {
+    if argv.len() < 4 || argv[0] != SANDBOX_EXEC || argv[1] != "-f" {
+        return None;
+    }
+    let length = argv.len();
+    let mut kept: Vec<String> = KEEPER.iter().map(|part| (*part).to_owned()).collect();
+    let mut rest = argv.into_iter();
+    kept.extend(rest.by_ref().take(3));
+    kept.extend(PANE_SHIM.iter().map(|part| (*part).to_owned()));
+    kept.extend(rest);
+    assert_eq!(kept.len(), KEEPER.len() + PANE_SHIM.len() + length);
+    assert_eq!(kept[KEEPER.len()], SANDBOX_EXEC);
+    Some(kept)
+}
 
 /// Builds the one command every sandboxed headless agent process starts from: `-f
 /// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared

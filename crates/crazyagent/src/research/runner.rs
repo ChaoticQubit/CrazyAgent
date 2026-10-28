@@ -8,7 +8,9 @@ use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
 };
-use crate::harnesses::terminal_session::TerminalSession;
+#[cfg(unix)]
+use crate::harnesses::launch::{await_group_exit, kill_group};
+use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
@@ -58,8 +60,6 @@ const URL_BYTES_MAX: usize = 2048;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(unix)]
 const SETUP_TIMED_OUT: &str = "setup_timed_out";
-#[cfg(unix)]
-const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const LIFELINE: &str = "IFS= read -r word; [ \"$word\" = done ] || kill -s KILL -- \"-$1\"";
 const RUNS_PER_ATTEMPT_MAX: u32 = 100;
@@ -413,7 +413,8 @@ impl ResearchRunner {
 
     /// Runs every research agent in its harness's interactive app in a pane of `host` named
     /// `research-<run>`, where the owner can watch it work. Panes an earlier engine left end
-    /// here, since that engine's jobs go back to the queue. Takes the host.
+    /// here with every process their harness started, since that engine's jobs go back to
+    /// the queue; a cleanup not confirmed is reported on stderr. Takes the host.
     /// Returns the runner, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
         let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
@@ -421,8 +422,8 @@ impl ResearchRunner {
             if !agent.as_str().starts_with(PANE_PREFIX) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => {}
+            match end_left_pane(host.as_ref(), &agent, "research") {
+                Ok(_) => {}
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(host_error(problem)),
             }
@@ -463,6 +464,11 @@ impl ResearchRunner {
     /// The job store this runner claims from.
     pub fn database(&self) -> &Path {
         &self.database
+    }
+
+    /// The attempt limit of this runner's jobs, which stale recovery obeys too.
+    pub fn attempts_max(&self) -> u32 {
+        self.limits.attempts_max
     }
 
     /// The engine-owned folder holding this runner's sandbox profiles and
@@ -865,12 +871,14 @@ impl ResearchRunner {
         }
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
-        ensure_repository(&root, &tmp)?;
-        add_worktree(&sandbox, &profile, &worktree)?;
-        let sandbox = sandbox.confine_to_worktree(&worktree)?;
-        sandbox.install(&profile)?;
-        drop(setup);
+        let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
+            let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
+            ensure_repository(&root, &tmp)?;
+            add_worktree(&sandbox, &profile, &worktree)?;
+            let sandbox = sandbox.confine_to_worktree(&worktree)?;
+            sandbox.install(&profile)?;
+            Ok(sandbox)
+        })??;
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
@@ -910,9 +918,16 @@ impl ResearchRunner {
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
             let ending = self.supervise_pane(jobs, job, &granted, &mut session, &prompt, &output);
-            let _ = session.stop();
+            let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            if stopped.is_err() {
+                if let Some(credential) = credential {
+                    credential.retain();
+                }
+                std::mem::forget(lease);
+                return Err(RunError::Uncertain("harness_cleanup_uncertain"));
+            }
             drop(credential);
             drop(lease);
             return Ok((ending?, group, output));
@@ -1196,6 +1211,28 @@ impl ResearchRunner {
             write_private(&self.state.join("agents"), output, last.as_bytes())?;
         }
         Ok(ending)
+    }
+
+    /// Runs `work`, which can wait long on the setup locks and the bounded git steps, while
+    /// a second connection refreshes the claim `job` every `HEARTBEAT`, so the wait is not
+    /// taken back as stale; the refresh ends with `work`, also when it panics. Inputs: the
+    /// claimed job and the work. Output: the work's result, or the store's open error.
+    fn keep_held<T>(&self, job: &ResearchJob, work: impl FnOnce() -> T) -> Result<T, RunError> {
+        let keeper = ResearchJobs::open(&self.database)?;
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        Ok(std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while matches!(
+                    stopped.recv_timeout(HEARTBEAT),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let _ = keeper.heartbeat(job, 0);
+                }
+            });
+            let result = work();
+            drop(stop);
+            result
+        }))
     }
 
     /// Names this launch of a job so it never reuses the agent state or the
@@ -2167,7 +2204,7 @@ fn wait_bounded(mut child: Child, limit: Duration) -> Result<Ended, RunError> {
 #[cfg(unix)]
 fn stop_timed_out(child: &mut Child) {
     let group = child.id();
-    stop_group(group);
+    kill_group(group);
     let _ = child.wait();
     await_group_exit(group);
 }
@@ -2220,7 +2257,7 @@ impl AgentProcess {
             Ok(lifeline) => lifeline,
             Err(error) => {
                 let mut child = child;
-                stop_group(group);
+                kill_group(group);
                 let _ = child.wait();
                 await_group_exit(group);
                 let _ = crate::sandbox::warden::fire_reported(warden, "agent");
@@ -2245,7 +2282,7 @@ impl AgentProcess {
     #[cfg(unix)]
     pub(crate) fn stop(&mut self) -> Result<(), &'static str> {
         if !self.stopped {
-            stop_group(self.group);
+            kill_group(self.group);
             let _ = self.child.wait();
             await_group_exit(self.group);
             self.cleanup = crate::sandbox::warden::fire_reported(self.warden.take(), "agent");
@@ -2331,39 +2368,6 @@ impl Drop for Lifeline {
     /// Releases the lifeline if the run did not already.
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-#[cfg(unix)]
-fn stop_group(group: u32) {
-    let Ok(raw) = i32::try_from(group) else {
-        return;
-    };
-    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
-        return;
-    };
-    assert!(pid.as_raw_nonzero().get() > 1);
-    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-}
-
-/// Waits until no process of a killed agent's group is left, killing again
-/// any member that is still there. Takes the group id; returns once the group
-/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
-/// stopped while one of its processes still lingers unnoticed.
-#[cfg(unix)]
-fn await_group_exit(group: u32) {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
-        return;
-    };
-    let started = Instant::now();
-    while rustix::process::test_kill_process_group(pid).is_ok()
-        && started.elapsed() < GROUP_EXIT_WAIT
-    {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -2763,6 +2767,116 @@ mod tests {
             .unwrap();
         assert!(free.join(".git").is_dir());
         assert!(!busy.join(".git").exists());
+    }
+
+    /// Records `id` as a project of the engine database with `folder` as its folder, so a
+    /// research run reads the project's launch context. Inputs: the database, the project
+    /// id and its folder.
+    fn register_project(database: &Path, id: &str, folder: &Path) {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        let row = crate::protocol::StoredProject {
+            project_id: project,
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        };
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+    }
+
+    /// A run that waits for its repository's setup lock longer than the stale limit keeps
+    /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
+    /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_run_waiting_for_its_repository_setup_keeps_its_claim() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let limits = ResearchLimits {
+            wall_time: Duration::from_secs(10),
+            ..ResearchLimits::default()
+        };
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            limits,
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "local-model".into(),
+            }),
+        };
+        let stale = Duration::from_millis(1500);
+        let held = repository_setup(&folder);
+        let (waiting, recovered) = std::thread::scope(|scope| {
+            let run = scope.spawn(|| runner.run_once(&project));
+            let started = Instant::now();
+            while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(stale * 2);
+            let waiting = !run.is_finished();
+            let recovered = jobs.recover_stale(stale.as_millis() as u64, 2).unwrap();
+            drop(held);
+            let _ = run.join();
+            (waiting, recovered)
+        });
+        assert!(waiting, "the run never waited for its repository setup");
+        assert_eq!(
+            recovered, 0,
+            "a run waiting for its repository setup lost its claim as stale"
+        );
     }
 
     struct EngineRoot {
@@ -3211,7 +3325,7 @@ mod tests {
             group_members(kept_group) >= 2,
             "a released lifeline killed the agent's group"
         );
-        stop_group(kept_group);
+        kill_group(kept_group);
         kept.wait().unwrap();
         await_group_exit(kept_group);
         let mut orphan = spawn();

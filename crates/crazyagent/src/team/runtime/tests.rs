@@ -1900,6 +1900,109 @@ fn an_owner_stop_ends_an_agent_whose_harness_has_not_drawn_its_screen_yet() {
     assert!(team.shutdown().unwrap().is_empty());
 }
 
+/// RV-DS-75: an agent in a pane that left a process in its group which ignores hangup and
+/// terminate, as a dev server started in the background does, has that process ended by the
+/// owner's stop before the agent shows as stopped, so the app never says stopped while agent
+/// work still runs with the account's credential released.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_stop_ends_every_process_the_pane_agent_left_in_its_group() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\n(trap '' HUP TERM; exec /bin/sleep 300) < /dev/null > /dev/null 2>&1 &\necho $! > \"$HOME/server.pid\"\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents.clone())
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Start the dev server".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        f.status()
+            .agents
+            .iter()
+            .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
+    });
+    let member = fixture.status().agents.remove(0);
+    let group =
+        rustix::process::Pid::from_raw(i32::try_from(member.process_group.unwrap()).unwrap())
+            .unwrap();
+    let written = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{}", member.id))
+        .join("home/server.pid");
+    fixture.until(&mut team, "the agent starts its background process", |_| {
+        std::fs::read_to_string(&written).is_ok_and(|text| text.ends_with('\n'))
+    });
+    let server = std::fs::read_to_string(&written)
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .unwrap();
+    assert_eq!(rustix::process::getpgid(Some(server)).unwrap(), group);
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    let register = listed[0].id.clone();
+
+    let stopper = {
+        let agents = agents.clone();
+        std::thread::spawn(move || agents.stop(&register))
+    };
+    fixture.until(&mut team, "the agent shows as stopped", |f| {
+        f.agent_status(member.id).0 == AgentStatus::Stopped
+    });
+    let reaped = Instant::now() + Duration::from_secs(3);
+    while rustix::process::test_kill_process(server).is_ok() && Instant::now() < reaped {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let still = rustix::process::test_kill_process(server).is_ok();
+    if still {
+        let _ = rustix::process::kill_process(server, rustix::process::Signal::KILL);
+    }
+    assert!(
+        !still,
+        "the agent shows as stopped while its background process still runs"
+    );
+    assert!(rustix::process::test_kill_process_group(group).is_err());
+    assert_eq!(stopper.join().unwrap().unwrap().state, RunState::Stopped);
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
 #[test]
 fn a_conversation_note_names_the_task_its_agent_how_it_ended_and_where_its_result_is() {
     let ended =

@@ -17,7 +17,9 @@ use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
     RUN_TIME_MAX,
 };
-use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
+use crate::harnesses::terminal_session::{
+    AgentSession, PaneRecord, Resume, TerminalSession, end_left_pane,
+};
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
@@ -599,8 +601,8 @@ impl TeamRuntime {
                 None => Some("the engine has no record of it".to_owned()),
             };
             if let Some(reason) = refusal {
-                match host.kill(&agent) {
-                    Ok(()) => {}
+                match end_left_pane(host.as_ref(), &agent, "team") {
+                    Ok(_) => {}
                     Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                     Err(problem) => return Err(problem.into()),
                 }
@@ -818,8 +820,8 @@ impl TeamRuntime {
             if self.workers.contains_key(&id) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => self.closed_note(id, "its agent had stopped")?,
+            match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(_) => self.closed_note(id, "its agent had stopped")?,
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(problem.into()),
             }
@@ -4579,6 +4581,7 @@ fn work(
     let problem = match started {
         Ok(AgentSession::Terminal(session)) if adopted_live => {
             live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
+                .unwrap_or_else(Some)
         }
         Ok(session) => serve(session, &orders, &reports, &cancel, &interrupt, &leave),
         Err(problem) => Some(problem),
@@ -4602,7 +4605,7 @@ fn live(
         return None;
     };
     let resume = plan.resume.as_ref();
-    let (started, held, keep) = match mode {
+    let (started, mut held, keep) = match mode {
         Mode::Kept { account, context } => {
             let request = match plan.request(account, plan.access) {
                 Ok(request) => request,
@@ -4646,7 +4649,7 @@ fn live(
         }
     };
     let problem = match started {
-        Ok(AgentSession::Terminal(session)) => live_serve(
+        Ok(AgentSession::Terminal(session)) => match live_serve(
             *session,
             resume.is_none().then_some(framing.as_str()),
             orders,
@@ -4654,7 +4657,16 @@ fn live(
             cancel,
             leave,
             keep,
-        ),
+        ) {
+            Ok(problem) => problem,
+            Err(uncertain) => {
+                if let Some((credential, profile)) = held.take() {
+                    credential.retain();
+                    std::mem::forget(profile);
+                }
+                Some(uncertain)
+            }
+        },
         Ok(other) => {
             let _ = other.stop();
             Some(with_code(
@@ -4698,13 +4710,13 @@ fn live_adopted(
     let grant = match next_turn(orders, cancel, None) {
         Next::Turn(_, Some(grant), _) => grant,
         Next::Turn(_, None, _) => {
-            let _ = host.kill(&agent);
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
             record.remove_context_files();
             return Some("The live master was taken over without its signed-in account".into());
         }
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
-                let _ = host.kill(&agent);
+                let _ = end_left_pane(host.as_ref(), &agent, "team");
                 record.remove_context_files();
             }
             return None;
@@ -4718,7 +4730,7 @@ fn live_adopted(
     ) {
         Ok(credential) => credential,
         Err(problem) => {
-            let _ = host.kill(&agent);
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
             record.remove_context_files();
             return Some(with_code(
                 "The signed-in account could not reach the agent",
@@ -4728,7 +4740,14 @@ fn live_adopted(
     };
     let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, None, orders, reports, cancel, leave, true)
+            match live_serve(*session, None, orders, reports, cancel, leave, true) {
+                Ok(problem) => problem,
+                Err(uncertain) => {
+                    credential.retain();
+                    std::mem::forget(profile);
+                    return Some(uncertain);
+                }
+            }
         }
         Ok(other) => {
             let _ = other.stop();
@@ -4738,7 +4757,14 @@ fn live_adopted(
             ))
         }
         Err(problem) => {
-            let _ = host.kill(&agent);
+            if matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(false)) {
+                credential.retain();
+                std::mem::forget(profile);
+                return Some(with_code(
+                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                    Some("harness_cleanup_uncertain"),
+                ));
+            }
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
@@ -4755,7 +4781,9 @@ fn live_adopted(
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Takes the session, the briefing to
 /// type first, the worker's channels and flags, and whether a later engine may take the
-/// pane over. Returns the problem that ended it, if any.
+/// pane over. Returns the problem that ended it, if any, or `Err` with the cleanup problem
+/// when the pane's stop did not confirm its processes gone, so the caller keeps the
+/// account's credential copy and custody use.
 fn live_serve(
     mut session: TerminalSession,
     framing: Option<&str>,
@@ -4764,7 +4792,7 @@ fn live_serve(
     cancel: &AtomicBool,
     leave: &AtomicBool,
     keep: bool,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
@@ -4773,9 +4801,14 @@ fn live_serve(
     if let Some(framing) = framing
         && let Err(problem) = session.send_or_cancel(framing, cancel)
     {
-        session.stop();
-        return (problem.0 != "launch_cancelled")
-            .then(|| with_code("The master could not be briefed", Some(&problem.0)));
+        if let Err(uncertain) = session.stop() {
+            return Err(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(&uncertain.0),
+            ));
+        }
+        return Ok((problem.0 != "launch_cancelled")
+            .then(|| with_code("The master could not be briefed", Some(&problem.0))));
     }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
@@ -4830,10 +4863,13 @@ fn live_serve(
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
     if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
         session.leave();
-    } else {
-        session.stop();
+    } else if let Err(uncertain) = session.stop() {
+        return Err(with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(&uncertain.0),
+        ));
     }
-    problem
+    Ok(problem)
 }
 
 enum Next {

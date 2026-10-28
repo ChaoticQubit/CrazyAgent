@@ -11,6 +11,7 @@ const ERROR_BYTES_MAX: usize = 512;
 const REPORT_PATH_BYTES_MAX: usize = 512;
 const RUNNING_MAX: u32 = 64;
 const ATTEMPTS_MAX: u32 = 10;
+const STALE_ERROR: &str = "Agent stopped responding";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
@@ -464,16 +465,27 @@ impl ResearchJobs {
         )
     }
 
-    /// Requeues running jobs whose heartbeat is older than `stale_ms`, so work
-    /// held by a runner that died is not lost.
-    pub fn recover_stale(&self, stale_ms: u64) -> Result<usize, JobError> {
-        let cutoff = now_ms().saturating_sub(stale_ms.min(i64::MAX as u64) as i64);
+    /// Takes back running jobs whose heartbeat is older than `stale_ms`, so work held by a
+    /// runner that died is not lost: a job requeues while its attempts stay under
+    /// `attempts_max`, else it ends failed, and a job whose cancel was requested ends
+    /// cancelled. Returns how many jobs were taken back.
+    pub fn recover_stale(&self, stale_ms: u64, attempts_max: u32) -> Result<usize, JobError> {
+        if !(1..=ATTEMPTS_MAX).contains(&attempts_max) {
+            return Err(JobError::Invalid("attempt limit must be 1..10"));
+        }
+        let now = now_ms();
+        let cutoff = now.saturating_sub(stale_ms.min(i64::MAX as u64) as i64);
         Ok(self.connection.execute(
             "UPDATE research_jobs
-             SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END,
+             SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+                               WHEN attempts < ?2 THEN 'queued' ELSE 'failed' END,
+                 error = CASE WHEN cancel_requested = 0 AND attempts >= ?2 THEN ?3
+                              ELSE error END,
+                 finished_ms = CASE WHEN cancel_requested = 1 OR attempts >= ?2 THEN ?4
+                                    ELSE finished_ms END,
                  claimer = NULL
              WHERE status = 'running' AND heartbeat_ms <= ?1",
-            params![cutoff],
+            params![cutoff, attempts_max, STALE_ERROR, now],
         )?)
     }
 
