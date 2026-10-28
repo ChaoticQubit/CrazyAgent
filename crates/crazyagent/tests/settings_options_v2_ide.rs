@@ -4,6 +4,7 @@ mod e2e_support;
 
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::ide;
+use crazyagent::ide::fetch::BuildState;
 use crazyagent::protocol::ProjectId;
 use crazyagent::sandbox::policy::AgentPolicy;
 use e2e_support::{Engine, Owner, git, repository, scratch};
@@ -13,6 +14,37 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const PROJECT: &str = "v2-ide-hooks";
+const BUILD: &str = "vscodium-1.143.17183";
+const SERVER_DATA: &str = "server-data";
+
+/// Records the pinned IDE build kept in a `.local-state/ide-cache` above the crate as the
+/// engine's ready build, the state a finished fetch records, and reads it back through the
+/// owner protocol, so the owner's IDE open starts a real server from it. Inputs: the
+/// engine and its owner. Output: none.
+async fn ready_build(engine: &Engine, owner: &Owner) {
+    let build = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .map(|folder| folder.join(".local-state").join("ide-cache").join(BUILD))
+        .find(|build| build.join("out").join("server-main.js").is_file())
+        .expect("no pinned VSCodium reh-web build in a .local-state/ide-cache above the crate");
+    let ready = BuildState::Ready {
+        version: BUILD.trim_start_matches("vscodium-").to_owned(),
+        root: fs::canonicalize(build).unwrap(),
+    };
+    let ide = engine.path().join("ide");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&ide)
+        .unwrap();
+    fs::write(
+        ide.join("build-state.json"),
+        serde_json::to_vec(&ready).unwrap(),
+    )
+    .unwrap();
+    let client = owner.controller.owner_client().unwrap();
+    assert_eq!(client.ide_tab_state(false).await.unwrap().build, ready);
+}
 
 /// One project set up through the running engine, with a real repository in its folder
 /// whose pre-commit hook appends a line to a marker file outside the repository, and an
@@ -76,6 +108,7 @@ impl Hooked {
             ],
         );
         let agent = fs::canonicalize(agent).unwrap();
+        ready_build(&engine, &owner).await;
         Self {
             engine,
             owner,
@@ -124,30 +157,26 @@ impl Hooked {
         assert_eq!(read.version, view.version + 1);
     }
 
-    /// Writes the IDE server's locked Remote settings and git shim exactly as an IDE start
-    /// does: the hooks switch read from the running engine's database, the project folder
-    /// passed only when it is on. Output: the shim the IDE's git runs.
-    fn ide_start(&self) -> PathBuf {
-        let hooks = ide::workspace::project_hooks(self.engine.path(), &self.project).unwrap();
-        let data = self.engine.path();
-        let ide = data.join("ide-e2e");
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&ide)
-            .unwrap();
-        let folder = ide.join(PROJECT);
-        let server_data = folder.join("server");
-        let written = ide::settings::write(
-            &folder,
-            &server_data,
-            data,
-            hooks.then_some(self.folder.as_path()),
-        )
-        .unwrap();
-        let shim = written.machine.parent().unwrap().join(ide::git::SHIM);
+    /// Opens the project's IDE through the owner protocol on the running engine, whose IDE
+    /// start reads the stored hooks switch and writes the server's locked Remote settings and
+    /// git shim from it, then stops the server. Output: the shim the IDE's git runs.
+    async fn ide_start(&self) -> PathBuf {
+        let client = self.owner.controller.owner_client().unwrap();
+        let opened = client.ide_tab_open(self.project.clone()).await.unwrap();
+        assert!(opened.url.starts_with("http://127.0.0.1:"), "{opened:?}");
+        assert!(client.ide_tab_stop(self.project.clone()).await.unwrap());
+        let machine = ide::settings::machine_folder(
+            &self
+                .engine
+                .path()
+                .join("ide")
+                .join(PROJECT)
+                .join(SERVER_DATA),
+        );
+        let shim = machine.join(ide::git::SHIM);
         let settings: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&written.machine).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(machine.join("settings.json")).unwrap())
+                .unwrap();
         assert_eq!(
             settings["git.path"].as_str(),
             shim.to_str(),
@@ -223,14 +252,14 @@ async fn ide_git_hooks_off_commits_from_the_ide_without_running_the_project_hook
         .unwrap();
     assert!(!fresh.ide_git_hooks, "a new project starts with Off");
 
-    let shim = case.ide_start();
+    let shim = case.ide_start().await;
     ide_commit(&shim, &case.folder, &case.folder, "off by default");
     assert_eq!(subject(&case.folder), "off by default");
     assert_eq!(case.hook_runs(), Vec::<String>::new());
 
     case.choose(true).await;
     case.choose(false).await;
-    let shim = case.ide_start();
+    let shim = case.ide_start().await;
     ide_commit(&shim, &case.folder, &case.folder, "off again");
     assert_eq!(subject(&case.folder), "off again");
     assert_eq!(
@@ -253,7 +282,7 @@ async fn ide_git_hooks_off_commits_from_the_ide_without_running_the_project_hook
 async fn ide_git_hooks_on_runs_the_project_hook_in_the_project_folder_alone() {
     let mut case = Hooked::start("ca-v2opt-ide-on-").await;
     case.choose(true).await;
-    let shim = case.ide_start();
+    let shim = case.ide_start().await;
 
     ide_commit(&shim, &case.folder, &case.folder, "hooked");
     assert_eq!(subject(&case.folder), "hooked");
@@ -280,7 +309,7 @@ async fn ide_git_hooks_on_runs_the_project_hook_in_the_project_folder_alone() {
         .unwrap();
     assert!(read.ide_git_hooks, "On survives an engine restart");
     case.owner = owner;
-    let shim = case.ide_start();
+    let shim = case.ide_start().await;
     ide_commit(&shim, &case.folder, &case.folder, "after restart");
     assert_eq!(case.hook_runs().len(), 2);
 }
