@@ -1679,6 +1679,48 @@ fn an_instruction_file_change_is_marked_and_its_hidden_characters_show_as_escape
 }
 
 #[test]
+fn instruction_marks_ignore_case_and_cover_codex_overrides_and_harness_folders() {
+    let case = Case::new();
+    for path in [
+        "claude.md",
+        "web/Agents.md",
+        "AGENTS.override.md",
+        ".claude/commands/x.md",
+        ".codex/config.toml",
+        "docs/.Claude/notes.md",
+        "notes.md",
+    ] {
+        case.edit(path, "Text.\n");
+    }
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert_eq!(page.next, None);
+    let marked: Vec<(&str, bool)> = page
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.as_str(),
+                file.marks.contains(&FileMark::Instructions),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            (".claude/commands/x.md", true),
+            (".codex/config.toml", true),
+            ("AGENTS.override.md", true),
+            ("claude.md", true),
+            ("docs/.Claude/notes.md", true),
+            ("notes.md", false),
+            ("web/Agents.md", true),
+        ]
+    );
+}
+
+#[test]
 fn commits_the_agent_made_in_a_clean_tree_open_a_change_set_above_the_worktree_start() {
     let case = Case::new();
     let start = case.tip();
