@@ -1201,14 +1201,14 @@ async fn a_start_stops_waiting_once_stop_all_began() {
     let slot = Slot::default();
     let group = Pid::from_raw(std::process::id() as i32).unwrap();
     assert_eq!(
-        ready(&slot, 0, 1, group, &AtomicBool::new(true))
+        ready(&slot, 0, 1, group, START_LIMIT, &AtomicBool::new(true))
             .await
             .unwrap_err()
             .0,
         "ide_servers_closed"
     );
     assert_eq!(
-        ready(&slot, 0, 1, group, &AtomicBool::new(false))
+        ready(&slot, 0, 1, group, START_LIMIT, &AtomicBool::new(false))
             .await
             .unwrap_err()
             .0,
