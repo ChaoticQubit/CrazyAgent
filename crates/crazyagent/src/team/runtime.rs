@@ -5333,9 +5333,6 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     }
 }
 
-/// An owner line that names the plain code behind it in the style every window uses, so a
-/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
-/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 /// The owner's line for an agent whose harness could not start: a command that would hold
 /// an MCP secret names its server and secret, any other refusal names its plain code.
 /// Input: the launch error. Output: the line.
@@ -5346,6 +5343,9 @@ fn start_problem(problem: &LaunchError) -> String {
     }
 }
 
+/// An owner line that names the plain code behind it in the style every window uses, so a
+/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
+/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 fn with_code(sentence: &str, cause: Option<&str>) -> String {
     match cause {
         Some(code) => {
