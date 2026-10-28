@@ -3054,6 +3054,110 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
     assert!(run.team.shutdown().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_clone() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
+    crate::sandbox::policy::save(
+        &run.fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            toolchains: Vec::new(),
+        },
+    )
+    .unwrap();
+    let member = run.member;
+    run.fixture
+        .until(&mut run.team, "the Own branch agent is stopped", |f| {
+            f.agent_status(member).0 == AgentStatus::Stopped
+        });
+    let error = |run: &LevelRun| -> String {
+        run.fixture
+            .connection
+            .query_row(
+                "SELECT error FROM team_agents WHERE id=?1",
+                [member],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .unwrap()
+            .unwrap_or_default()
+    };
+    assert!(
+        error(&run).contains("the project's agent access was lowered"),
+        "{}",
+        error(&run)
+    );
+    let landing = crate::landing::open(&run.fixture.base).unwrap();
+    let pending = |landing: &rusqlite::Connection| {
+        crate::landing::list(landing, &run.fixture.setup.project_id)
+            .unwrap()
+            .into_iter()
+            .filter(|set| set.state == crate::landing::ChangeState::Pending)
+            .count()
+    };
+    assert_eq!(pending(&landing), 1, "the agent's commit waits in Changes");
+
+    let mut connection = Connection::open(run.fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::admit_resolve(
+            &tx,
+            &run.fixture.setup.project_id,
+            member,
+            "Resolve the merge.",
+            now_ms(),
+        )
+        .unwrap(),
+        Ok(())
+    );
+    tx.commit().unwrap();
+    run.fixture
+        .until(&mut run.team, "the pinned wake is refused", |f| {
+            f.agent_status(member).0 == AgentStatus::Failed
+        });
+    assert!(
+        error(&run).contains("the project is Sandboxed now; its changes are still in Changes"),
+        "{}",
+        error(&run)
+    );
+    let task: (String, String) = run
+        .fixture
+        .connection
+        .query_row(
+            "SELECT t.status,t.error FROM team_tasks t JOIN team_task_pins p ON p.task=t.id WHERE p.agent=?1",
+            [member],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(task.0, "failed");
+    assert!(
+        task.1
+            .contains("The sub-agent could not start again in its worktree"),
+        "{}",
+        task.1
+    );
+    assert!(
+        std::fs::symlink_metadata(run.worktree.join(".git")).is_ok_and(|found| found.is_dir()),
+        "the refused wake leaves the agent's clone in place"
+    );
+    assert_eq!(
+        pending(&landing),
+        1,
+        "its change set still waits in Changes"
+    );
+    assert!(
+        run.fixture
+            .status()
+            .agents
+            .iter()
+            .all(|agent| agent.status != AgentStatus::Working),
+        "nothing runs the clone at Sandboxed"
+    );
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
 #[test]
 fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
     let plan = |layout: Layout| Plan {
