@@ -3879,18 +3879,21 @@ fn live_adopted(
         }
     };
     let Grant { profile, .. } = *grant;
-    let credential =
-        match profile.hand_to_agent(&managed.home, limits.run_time, &managed.executable) {
-            Ok(credential) => credential,
-            Err(problem) => {
-                let _ = host.kill(&agent);
-                record.remove_context_files();
-                return Some(with_code(
-                    "The signed-in account could not reach the agent",
-                    Some(&problem.0),
-                ));
-            }
-        };
+    let credential = match profile.hand_to_agent(
+        &managed.home,
+        record.run_time_left(limits.run_time),
+        &managed.executable,
+    ) {
+        Ok(credential) => credential,
+        Err(problem) => {
+            let _ = host.kill(&agent);
+            record.remove_context_files();
+            return Some(with_code(
+                "The signed-in account could not reach the agent",
+                Some(&problem.0),
+            ));
+        }
+    };
     let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
             live_serve(*session, None, orders, reports, cancel, leave, true)

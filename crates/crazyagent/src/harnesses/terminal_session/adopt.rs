@@ -136,6 +136,16 @@ impl PaneRecord {
         UNIX_EPOCH + Duration::from_millis(self.since_ms)
     }
 
+    /// Gives what is left of a launch's run time since this pane's harness started, so an
+    /// engine that adopts the pane keeps the launch's deadline. Takes the launch's run time.
+    /// Returns the rest, zero once it has passed.
+    pub fn run_time_left(&self, run_time: Duration) -> Duration {
+        let ran = SystemTime::now()
+            .duration_since(self.since())
+            .unwrap_or_default();
+        run_time.saturating_sub(ran)
+    }
+
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
         std::fs::symlink_metadata(path)
@@ -144,9 +154,21 @@ impl PaneRecord {
     }
 }
 
+/// Adds the transcript facts an adopted pane already had to its event count, since the
+/// engine that launched it may have reported each of them. Fails with `launch_event_limit`
+/// past the launch's event budget, as the session itself would.
+fn count(events: &mut usize, facts: usize, limits: &LaunchLimits) -> Result<(), LaunchError> {
+    *events = events.saturating_add(facts);
+    if *events > limits.events {
+        return Err(failure("launch_event_limit"));
+    }
+    Ok(())
+}
+
 fn replay(
     reader: &mut TranscriptReader,
     limits: &LaunchLimits,
+    events: &mut usize,
 ) -> Result<Option<bool>, LaunchError> {
     let mut open = None;
     for _ in 0..REPLAY_READS_MAX {
@@ -155,6 +177,7 @@ fn replay(
         if reader.bytes() > limits.output_bytes as u64 {
             return Err(failure("launch_output_limit"));
         }
+        count(events, facts.len(), limits)?;
         if facts.is_empty() && reader.bytes() == before {
             return Ok(open);
         }
@@ -174,9 +197,10 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work. The key and context files are removed when the
-    /// session stops, or at once when the pane cannot be taken over. Takes the host, the pane
-    /// name, the stored record and the limits. Returns the idle session, or a plain code.
+    /// longer be matched to the engine's work. The launch's run time and event budget go on
+    /// counting from its start. The key and context files are removed when the session stops,
+    /// or at once when the pane cannot be taken over. Takes the host, the pane name, the
+    /// stored record and the limits. Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
@@ -193,13 +217,16 @@ impl TerminalSession {
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        if replay(&mut reader, &limits)? == Some(true) {
+        let mut events = 0;
+        if replay(&mut reader, &limits, &mut events)? == Some(true) {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;
             let mut settled = false;
             while !settled && Instant::now() < deadline {
                 std::thread::sleep(POLL);
-                settled = reader.read()?.iter().any(|fact| {
+                let facts = reader.read()?;
+                count(&mut events, facts.len(), &limits)?;
+                settled = facts.iter().any(|fact| {
                     matches!(
                         fact,
                         TranscriptEvent::TurnFinished { .. } | TranscriptEvent::Interrupted
@@ -210,7 +237,7 @@ impl TerminalSession {
                 let _ = host.kill(&agent);
                 return Err(failure("launch_adopt_unsettled"));
             }
-            replay(&mut reader, &limits)?;
+            replay(&mut reader, &limits, &mut events)?;
         }
         Ok(Self {
             host,
@@ -219,9 +246,9 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Instant::now() + limits.run_time,
+            deadline: Instant::now() + record.run_time_left(limits.run_time),
             checked: Instant::now(),
-            events: 0,
+            events,
             ready: true,
             turn: false,
             live: false,
