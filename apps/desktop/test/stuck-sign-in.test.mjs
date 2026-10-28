@@ -18,6 +18,8 @@ test("a refusal from a stuck sign-in points the owner at Clear stuck sign-in, no
   assert.match(cancelError("native_auth_operation_missing"), /Delete the account/);
   assert.match(cancelError("native_profile_source_conflict"), /Clear stuck sign-in/);
   assert.equal(cancelError("native_auth_not_active"), undefined);
+  assert.match(api.plainError("native_auth_in_progress"), /still running/);
+  assert.doesNotMatch(api.plainError("native_auth_in_progress"), /Clear stuck sign-in/);
 });
 
 test("the clear toast says cleared only when the engine answered for the sign-in", () => {
