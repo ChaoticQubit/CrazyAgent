@@ -6,6 +6,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BUILD: &str = "vscodium-1.143.17183";
 const GONE_WAIT: Duration = Duration::from_secs(15);
+const PREPARATION_HELD: Duration = Duration::from_secs(15);
 
 /// The pinned VSCodium reh-web build that IDE-1 extracted into the project-local cache, in
 /// the `.local-state/ide-cache` of the nearest checkout above this crate. A machine without
@@ -579,6 +580,48 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
         .unwrap();
     assert_eq!(again, info, "a ready launch is handed back");
     assert_eq!(servers.group(&project), Some(group));
+    servers.stop_all().await;
+    gone(group).await;
+}
+
+/// An open that finds an extension preparation still running on its folder, as one an open
+/// cut by the IDE tab's timeout leaves behind, waits for it and starts nothing beside it,
+/// so two installs never race on one extensions folder; it goes on once that one ends.
+#[tokio::test]
+async fn an_open_waits_for_an_extension_preparation_still_running_on_its_folder() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("prepare-wait");
+    let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
+    let (holding, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let running = preparation(&extensions);
+        let _running = locked(&running);
+        holding.send(()).unwrap();
+        let _ = released.recv();
+    });
+    held.recv().unwrap();
+    let build = cached_build();
+    let open = servers.open(&project, checkout.path(), &build);
+    tokio::pin!(open);
+    let deadline = Instant::now() + PREPARATION_HELD;
+    while Instant::now() < deadline {
+        tokio::select! {
+            opened = &mut open => panic!("the open ran beside a running preparation: {opened:?}"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert_eq!(
+            servers.group(&project),
+            None,
+            "the open started its server beside a running preparation"
+        );
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    open.await.unwrap();
+    let group = servers.group(&project).unwrap();
     servers.stop_all().await;
     gone(group).await;
 }

@@ -3,7 +3,7 @@ use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{PipeWriter, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -114,6 +114,20 @@ fn failure(code: &str) -> EngineError {
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The extension preparations under way, one lock per server extensions folder: a
+/// preparation that runs on after the IDE tab's timeout cut its open still holds its lock,
+/// so the next open of that project waits for it instead of installing beside it.
+static PREPARING: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+
+/// The lock of one server extensions folder's preparation, the same one for every caller
+/// while any holds it; locks nobody holds are dropped as another is handed out. Input: the
+/// extensions folder. Output: its lock.
+fn preparation(extensions: &Path) -> Arc<Mutex<()>> {
+    let mut preparing = locked(&PREPARING);
+    preparing.retain(|_, held| Arc::strong_count(held) > 1);
+    Arc::clone(preparing.entry(extensions.to_path_buf()).or_default())
 }
 
 impl Servers {
@@ -397,8 +411,9 @@ impl Servers {
     /// [`command`] wrote the pin list into its Remote settings: the built-in extension
     /// installed and listed ([`bridge::install_extension`]), every approved extension
     /// installed from its verified VSIX and every other one but the built-in removed
-    /// ([`extensions::on_server_start`]), off the async runtime. A failure stops the start.
-    /// Inputs: the build root and the project's IDE folder. Output: Ok, or a plain refusal.
+    /// ([`extensions::on_server_start`]), off the async runtime and after any preparation of
+    /// the same folder still running ([`preparation`]). A failure stops the start. Inputs:
+    /// the build root and the project's IDE folder. Output: Ok, or a plain refusal.
     async fn prepare_extensions(&self, build: &Path, folder: &Path) -> Result<(), EngineError> {
         let data = self
             .folder
@@ -412,6 +427,8 @@ impl Servers {
             folder.join(SERVER_DATA),
         );
         tokio::task::spawn_blocking(move || {
+            let preparing = preparation(&extensions);
+            let _preparing = locked(&preparing);
             bridge::install_extension(&extensions)?;
             extensions::on_server_start(
                 &data,
