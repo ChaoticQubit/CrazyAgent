@@ -818,12 +818,14 @@ impl ResearchRunner {
         }
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
-        ensure_repository(&root, &tmp)?;
-        add_worktree(&sandbox, &profile, &worktree)?;
-        let sandbox = sandbox.confine_to_worktree(&worktree)?;
-        sandbox.install(&profile)?;
-        drop(setup);
+        let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
+            let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
+            ensure_repository(&root, &tmp)?;
+            add_worktree(&sandbox, &profile, &worktree)?;
+            let sandbox = sandbox.confine_to_worktree(&worktree)?;
+            sandbox.install(&profile)?;
+            Ok(sandbox)
+        })??;
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
         write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
@@ -1128,6 +1130,28 @@ impl ResearchRunner {
             write_private(output, last.as_bytes())?;
         }
         Ok(ending)
+    }
+
+    /// Runs `work`, which can wait long on the setup locks and the bounded git steps, while
+    /// a second connection refreshes the claim `job` every `HEARTBEAT`, so the wait is not
+    /// taken back as stale; the refresh ends with `work`, also when it panics. Inputs: the
+    /// claimed job and the work. Output: the work's result, or the store's open error.
+    fn keep_held<T>(&self, job: &ResearchJob, work: impl FnOnce() -> T) -> Result<T, RunError> {
+        let keeper = ResearchJobs::open(&self.database)?;
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        Ok(std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while matches!(
+                    stopped.recv_timeout(HEARTBEAT),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    let _ = keeper.heartbeat(job, 0);
+                }
+            });
+            let result = work();
+            drop(stop);
+            result
+        }))
     }
 
     /// Names this launch of a job so it never reuses the agent state or the
@@ -2670,6 +2694,116 @@ mod tests {
             .unwrap();
         assert!(free.join(".git").is_dir());
         assert!(!busy.join(".git").exists());
+    }
+
+    /// Records `id` as a project of the engine database with `folder` as its folder, so a
+    /// research run reads the project's launch context. Inputs: the database, the project
+    /// id and its folder.
+    fn register_project(database: &Path, id: &str, folder: &Path) {
+        let connection = rusqlite::Connection::open(database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new(id).unwrap();
+        let setup = crate::project_setup::StoredSetup {
+            project_id: project.clone(),
+            name: id.into(),
+            about: String::new(),
+            tech_stack: vec![],
+            platforms: vec![],
+            research: vec![],
+            pool: None,
+            team: crate::project_setup::TeamPlan {
+                master: "codex".into(),
+                master_tools: false,
+                sub_harnesses: vec![],
+                min_agents: 1,
+                max_agents: 1,
+            },
+            documents: vec![],
+            folder: folder.to_str().unwrap().into(),
+            created_ms: 1,
+            revision: 1,
+        };
+        let row = crate::protocol::StoredProject {
+            project_id: project,
+            spec: crate::protocol::ProjectSpec {
+                name: id.into(),
+                repositories: vec![],
+            },
+        };
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&row).unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                rusqlite::params![id, serde_json::to_string(&setup).unwrap()],
+            )
+            .unwrap();
+    }
+
+    /// A run that waits for its repository's setup lock longer than the stale limit keeps
+    /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
+    /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_run_waiting_for_its_repository_setup_keeps_its_claim() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        register_project(&root.database, "alpha", &folder);
+        let limits = ResearchLimits {
+            wall_time: Duration::from_secs(10),
+            ..ResearchLimits::default()
+        };
+        let runner = ResearchRunner::new(
+            &root.database,
+            &root.state,
+            Path::new("/usr/bin/true"),
+            limits,
+        )
+        .unwrap();
+        let jobs = ResearchJobs::open(&root.database).unwrap();
+        let id = jobs
+            .enqueue("alpha", "market_research", "codex", false)
+            .unwrap();
+        let project = ResearchProject {
+            id: "alpha",
+            root: &folder,
+            account: Some(ResearchAccount::Endpoint {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "local-model".into(),
+            }),
+        };
+        let stale = Duration::from_millis(1500);
+        let held = repository_setup(&folder);
+        let (waiting, recovered) = std::thread::scope(|scope| {
+            let run = scope.spawn(|| runner.run_once(&project));
+            let started = Instant::now();
+            while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            std::thread::sleep(stale * 2);
+            let waiting = !run.is_finished();
+            let recovered = jobs.recover_stale(stale.as_millis() as u64).unwrap();
+            drop(held);
+            let _ = run.join();
+            (waiting, recovered)
+        });
+        assert!(waiting, "the run never waited for its repository setup");
+        assert_eq!(
+            recovered, 0,
+            "a run waiting for its repository setup lost its claim as stale"
+        );
     }
 
     struct EngineRoot {
