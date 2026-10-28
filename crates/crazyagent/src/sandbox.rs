@@ -1512,8 +1512,9 @@ fn seatbelt_pattern(path: &Path) -> String {
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its
 /// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
-/// `http-alternates` or its git folder's `commondir`, no move or removal of its `objects`
-/// or `objects/info` folder, and no symlink in its store, each name in any letter case,
+/// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
+/// it may never replace, rename or relink, no move or removal of its `objects` or
+/// `objects/info` folder, and no symlink in its store, each name in any letter case,
 /// while its own loose objects and packs stay writable. The engine's fetch checks the same
 /// store before it runs (w-landing). Input: the clone. Output: the rule text.
 fn clone_store_denies(clone: &Path) -> String {
@@ -1521,12 +1522,12 @@ fn clone_store_denies(clone: &Path) -> String {
     let objects = format!("{git}/{}", any_case("objects"));
     let info = format!("{objects}/{}", any_case("info"));
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
         any_case("alternates"),
         any_case("http-alternates"),
         any_case("commondir")
     );
-    assert_eq!(text.matches("(regex #\"^/").count(), 5);
+    assert_eq!(text.matches("(regex #\"^/").count(), 6);
     assert!(text.contains("(vnode-type SYMLINK)"));
     text
 }

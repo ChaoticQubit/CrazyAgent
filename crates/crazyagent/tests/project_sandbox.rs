@@ -1241,6 +1241,71 @@ fn an_own_branch_agent_never_repoints_the_store_its_clone_borrows() {
 }
 
 #[test]
+fn an_own_branch_agent_never_redirects_or_replaces_its_clones_git_folder() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git_dir = clone.join(".git");
+    let elsewhere = clone.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&git_dir.join("commondir"))),
+            git_dir.join("commondir"),
+        ),
+        (
+            format!("printf 'gitdir: x\\n' > {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mkdir {}", quoted(&git_dir.join(".git"))),
+            git_dir.join(".git"),
+        ),
+        (
+            format!(
+                "ln -s {} {}",
+                quoted(&elsewhere),
+                quoted(&git_dir.join(".git"))
+            ),
+            git_dir.join(".git"),
+        ),
+        (
+            format!("mv {} {}", quoted(&git_dir), quoted(&clone.join("moved"))),
+            clone.join("moved"),
+        ),
+        (
+            format!(
+                "mv {} {}",
+                quoted(&clone.join(".GIT")),
+                quoted(&clone.join("moved-upper"))
+            ),
+            clone.join("moved-upper"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+        assert!(
+            fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir()),
+            "{script}"
+        );
+    }
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+}
+
+#[test]
 fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(Path::new(AGENT_GIT).is_file());
     let case = case();
