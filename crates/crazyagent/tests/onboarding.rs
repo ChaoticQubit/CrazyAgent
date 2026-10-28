@@ -748,6 +748,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
             .as_deref()
             .is_some_and(|overview| !overview.trim().is_empty())
     );
+    assert_eq!(view.folder_overview, None);
     assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
     assert!(
         view.facts
@@ -1047,7 +1048,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_draft_or_brief_the_folder_came_with_is_never_taken_as_the_engines() {
+async fn a_draft_brief_or_overview_the_folder_came_with_is_never_taken_as_the_engines() {
     let mut bench = Bench::start(|repo| {
         fs::create_dir_all(repo.join(".crazyagent/setup")).unwrap();
         fs::create_dir_all(repo.join(".crazyagent/context")).unwrap();
@@ -1066,7 +1067,14 @@ async fn a_draft_or_brief_the_folder_came_with_is_never_taken_as_the_engines() {
         fresh.draft.pool.as_ref().map(CredentialRef::as_str),
         Some(POOL)
     );
-    assert_eq!(fresh.overview.as_deref(), Some(OWNER_OVERVIEW.trim()));
+    assert_eq!(
+        fresh.overview, None,
+        "the folder's overview is not the mapping agent's"
+    );
+    assert_eq!(
+        fresh.folder_overview.as_deref(),
+        Some(OWNER_OVERVIEW.trim())
+    );
     let setup = bench
         .owner
         .project_setup(project.clone())

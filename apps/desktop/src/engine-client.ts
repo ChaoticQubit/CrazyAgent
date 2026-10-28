@@ -1000,6 +1000,7 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  folder_overview: string | null;
   finished: boolean;
 }
 
