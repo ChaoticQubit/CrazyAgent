@@ -22,6 +22,8 @@ const SETTINGS: &str = "settings.json";
 #[cfg(unix)]
 const UNREADABLE: &str = "settings.json.unreadable";
 #[cfg(unix)]
+const PREVIOUS: &str = "settings.json.previous";
+#[cfg(unix)]
 const MACHINE_TEMPORARY: &str = "machine-settings.json.tmp";
 #[cfg(unix)]
 const LOCKED_TEMPORARY: &str = "locked-settings.json.tmp";
@@ -43,13 +45,14 @@ pub struct Written {
 /// User settings, holding every [`locked`] key, the `extensions.allowed` pin list of the
 /// owner's approved extensions ([`super::extensions::allowed_setting`]), the IDE terminal
 /// profiles ([`super::terminal::machine_profiles`]) and `git.path` naming the git shim
-/// [`super::git::SHIM`] written next to it first ([`super::git::machine_settings`]) over the
-/// owner's own keys there, which are kept; and `<folder>/locked-settings.json` for the
-/// extension. Each file is written whole in
-/// the engine's private IDE folder and renamed into place, so the server never reads a
-/// partial file and a link to the old file changes nothing. A Remote settings file that is
-/// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
-/// never followed. The server's profile locks the whole Remote settings folder
+/// [`super::git::SHIM`] written next to it first ([`super::git::machine_settings`]), and no
+/// other key; and `<folder>/locked-settings.json` for the extension. Each file is written
+/// whole in the engine's private IDE folder and renamed into place, so the server never
+/// reads a partial file and a link to the old file changes nothing. The server can never
+/// write that folder, so a Remote settings file holding any other key, which only an
+/// earlier server could have left, is set aside as `settings.json.previous` and none of it
+/// is carried forward; one that is not a JSON object is kept aside as
+/// `settings.json.unreadable`; a link there is replaced, never followed. The server's profile locks the whole Remote settings folder
 /// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
 /// Inputs: the project's IDE folder, the server data folder inside it and the engine's data
 /// folder above both. Output: the written files, or a plain refusal.
@@ -80,19 +83,20 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
         0o700,
     )?;
     let target = machine.join(SETTINGS);
-    let mut settings = match owner_settings(&target)? {
-        Owner::Kept(settings) => settings,
-        Owner::Unreadable => {
-            std::fs::rename(&target, machine.join(UNREADABLE)).map_err(unwritable)?;
-            Map::new()
-        }
-        Owner::Absent => Map::new(),
-    };
     let locked = locked();
-    settings.extend(locked.clone());
+    let mut settings = locked.clone();
     settings.extend(super::terminal::machine_profiles()?);
     settings.extend(super::extensions::allowed_setting(data));
     settings.extend(super::git::machine_settings(&shim)?);
+    let aside = match owner_settings(&target)? {
+        Owner::Held(held) if held.keys().all(|key| settings.contains_key(key)) => None,
+        Owner::Held(_) => Some(PREVIOUS),
+        Owner::Unreadable => Some(UNREADABLE),
+        Owner::Absent => None,
+    };
+    if let Some(name) = aside {
+        std::fs::rename(&target, machine.join(name)).map_err(unwritable)?;
+    }
     assert!(
         locked
             .iter()
@@ -231,12 +235,12 @@ fn table<const N: usize>(pairs: [(&str, Value); N]) -> Map<String, Value> {
 #[cfg(unix)]
 enum Owner {
     Absent,
-    Kept(Map<String, Value>),
+    Held(Map<String, Value>),
     Unreadable,
 }
 
-/// Reads the owner's keys from the Remote settings file without following a link or waiting
-/// on a special file. Input: its path. Output: absent when missing or not a regular file, the
+/// Reads the keys the Remote settings file holds without following a link or waiting on a
+/// special file. Input: its path. Output: absent when missing or not a regular file, the
 /// object, or unreadable when it holds no JSON object or is over `SETTINGS_BYTES_MAX` bytes.
 #[cfg(unix)]
 fn owner_settings(path: &Path) -> Result<Owner, EngineError> {
@@ -263,7 +267,7 @@ fn owner_settings(path: &Path) -> Result<Owner, EngineError> {
         return Ok(Owner::Unreadable);
     }
     Ok(match serde_json::from_slice(&bytes) {
-        Ok(Value::Object(settings)) => Owner::Kept(settings),
+        Ok(Value::Object(settings)) => Owner::Held(settings),
         _ => Owner::Unreadable,
     })
 }
