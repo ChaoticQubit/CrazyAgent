@@ -72,6 +72,8 @@ fn agent(
         stopped_ms: None,
         persona: None,
         handle: None,
+        register: None,
+        finished: false,
     }
 }
 
@@ -130,6 +132,7 @@ fn team() -> TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
         paused: false,
         live_master: None,
         live_problem: None,

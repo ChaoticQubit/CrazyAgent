@@ -137,6 +137,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::ReviewMemory { .. } => "review",
                         SetupQuery::Team { .. } => "team",
                         SetupQuery::TeamChange { .. } => "team change",
+                        SetupQuery::WakeAgent { .. } => "wake",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
                         SetupQuery::ReadPaths { .. } => "read paths",

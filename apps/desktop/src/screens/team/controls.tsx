@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setOnHarnessSwitch, setTeamTimeLimits } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setOnHarnessSwitch, setTeamTimeLimits, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
-import { Button, Select, Switch, keyLabel, shortcutKey } from "../../ui";
+import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -85,8 +85,9 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
 
 /** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
  * task and an agent session may run, choose what a master harness switch does with the
- * conversation, and hand one task straight to a sub-agent when the master should not plan
- * it. Inputs: the project id, the
+ * conversation, choose whether finished agents stay in the list and graph or move to the
+ * Finished fold-out, and hand one task straight to a sub-agent when the master should not
+ * plan it. Inputs: the project id, the
  * latest team status, a harness name lookup and a reload. Output: the controls. */
 export function TeamControls({ projectId, status, harness, reload }: {
   projectId: string;
@@ -97,6 +98,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [warm, setWarm] = useState<boolean | null>(null);
   const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
   const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
+  const [finished, setFinished] = useState<"hide" | "show" | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -141,6 +143,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function view(choice: "hide" | "show") {
+    setFinished(choice);
+    setBusy(true);
+    const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
+    setBusy(false);
+    setFinished(null);
+    setNote(message);
+    reload();
+  }
+
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
@@ -169,6 +181,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
     </div>
     <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    <div className="pj-row">
+      <span aria-hidden="true">Finished agents</span>
+      <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
+        options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
+      <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
+    </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

@@ -651,6 +651,9 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    WakeAgent {
+        register: String,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -666,6 +669,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    Woke(Box<crate::agents::AgentView>),
     Library(crate::memory::library::LibraryView),
 }
 

@@ -21,6 +21,8 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         stopped_ms: None,
         persona: None,
         handle: None,
+        register: None,
+        finished: false,
     }
 }
 
@@ -66,6 +68,7 @@ fn status() -> TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -184,6 +187,69 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
             (13, "team-5", EdgeState::Failed, Some("Problem 13")),
             (14, "master", EdgeState::Sent, None),
         ]
+    );
+}
+
+#[test]
+fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
+    let held = TeamAgent {
+        task: Some(11),
+        ..agent(7, AgentRole::Sub, "codex", AgentStatus::Idle)
+    };
+    assert!(!held.finished_with(0), "an idle agent holding a task waits");
+    assert!(!agent(8, AgentRole::Sub, "codex", AgentStatus::Starting).finished_with(0));
+    assert!(!agent(2, AgentRole::Master, "codex", AgentStatus::Idle).finished_with(0));
+    assert!(!agent(1, AgentRole::Master, "codex", AgentStatus::Stopped).finished_with(0));
+    let idle = agent(6, AgentRole::Sub, "gemini", AgentStatus::Idle);
+    assert!(idle.finished_with(0));
+    assert!(
+        !idle.finished_with(1),
+        "an agent with a question waiting stays"
+    );
+
+    let mut status = status();
+    for agent in &mut status.agents {
+        agent.finished = agent.finished_with(u16::from(agent.id == 6));
+    }
+    let finished: Vec<i64> = status
+        .agents
+        .iter()
+        .filter(|agent| agent.finished)
+        .map(|agent| agent.id)
+        .collect();
+    assert_eq!(
+        finished,
+        [4, 5],
+        "stopped and failed sub-agents are finished"
+    );
+    let agents = |graph: &TeamGraph| {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Agent)
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let hidden = graph(&status);
+    assert_eq!(agents(&hidden), ["team-3", "team-6"]);
+    assert_eq!(hidden.nodes[0].kind, NodeKind::Master);
+    assert_eq!(
+        hidden.edges.len(),
+        status.tasks.len(),
+        "every task keeps its edge"
+    );
+    assert!(
+        hidden
+            .edges
+            .iter()
+            .all(|edge| edge.to != "team-4" && edge.to != "team-5"),
+        "{:#?}",
+        hidden.edges
+    );
+    status.show_finished = true;
+    assert_eq!(
+        agents(&graph(&status)),
+        ["team-3", "team-4", "team-5", "team-6"]
     );
 }
 

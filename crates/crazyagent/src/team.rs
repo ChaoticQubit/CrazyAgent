@@ -432,6 +432,10 @@ pub enum TeamAction {
         agent: i64,
         handle: String,
     },
+    FinishedAgents {
+        project_id: ProjectId,
+        show: bool,
+    },
 }
 
 impl TeamAction {
@@ -509,6 +513,7 @@ impl TeamAction {
             }
             Self::KeepWarm { .. }
             | Self::OnHarnessSwitch { .. }
+            | Self::FinishedAgents { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -526,6 +531,7 @@ impl TeamAction {
             | Self::KeepWarm { project_id, .. }
             | Self::TimeLimits { project_id, .. }
             | Self::OnHarnessSwitch { project_id, .. }
+            | Self::FinishedAgents { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -829,6 +835,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_master_switch (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
+            );
+            CREATE TABLE IF NOT EXISTS team_finished_view (
+                project TEXT PRIMARY KEY,
+                show INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
@@ -1559,6 +1569,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::FinishedAgents { show, .. } => {
+            tx.execute(
+                "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET show=excluded.show",
+                params![project.as_str(), show],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -1721,6 +1740,27 @@ pub struct TeamAgent {
     pub persona: Option<String>,
     #[serde(default)]
     pub handle: Option<String>,
+    #[serde(default)]
+    pub register: Option<String>,
+    #[serde(default)]
+    pub finished: bool,
+}
+
+impl TeamAgent {
+    /// Tells whether this agent belongs in the Finished fold-out rather than the agents
+    /// list and team graph (DEC-102): an idle, stopped or failed sub-agent that holds no
+    /// task and has no question waiting for the master. The master and every starting or
+    /// working agent stay in view. Takes the questions the agent has waiting.
+    /// Returns true for a finished agent.
+    pub fn finished_with(&self, questions: u16) -> bool {
+        self.role == AgentRole::Sub
+            && questions == 0
+            && self.task.is_none()
+            && matches!(
+                self.status,
+                AgentStatus::Idle | AgentStatus::Stopped | AgentStatus::Failed
+            )
+    }
 }
 
 /// One sub-agent task as the clients poll it.
@@ -1790,6 +1830,8 @@ pub struct TeamStatus {
     pub idle_stop_secs: Option<u32>,
     #[serde(default)]
     pub on_harness_switch: SwitchMode,
+    #[serde(default)]
+    pub show_finished: bool,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -1840,6 +1882,8 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         stopped_ms: row.get(13)?,
         persona,
         handle,
+        register: None,
+        finished: false,
     })
 }
 
@@ -2006,6 +2050,22 @@ pub fn on_harness_switch(
     }
 }
 
+/// Tells whether the owner chose to show finished agents (idle, stopped and failed
+/// sub-agents) in the agents list and team graph instead of their Finished fold-out.
+/// Takes a connection and the project.
+/// Returns false, the Hide default, until the owner picks Show.
+pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT show FROM team_finished_view WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map(|value| value.unwrap_or(false))
+        .map_err(error)
+}
+
 /// Tells whether the owner paused the project's whole team.
 /// Takes a connection and the project.
 /// Returns true from a pause until the owner resumes the team.
@@ -2143,11 +2203,16 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             STATUS_AGENTS_MAX,
         ))
         .map_err(error)?;
-    let agents = statement
+    let mut agents = statement
         .query_map([project.as_str()], agent_row)
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    let entries =
+        crate::agents::hosted_entries(connection, project, runtime::TEAM_HOST).map_err(error)?;
+    for agent in &mut agents {
+        agent.register = entries.get(&agent.id.to_string()).cloned();
+    }
     let mut statement = connection
         .prepare(&recent(
             &format!("SELECT {TASK_COLUMNS} FROM team_tasks WHERE project=?1"),
@@ -2216,6 +2281,15 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         None => Vec::new(),
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
+    let events = events::view(connection, project)?;
+    for agent in &mut agents {
+        let questions = events
+            .questions
+            .iter()
+            .find(|item| item.agent == agent.id)
+            .map_or(0, |item| item.count);
+        agent.finished = agent.finished_with(questions);
+    }
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
     Ok(TeamStatus {
@@ -2225,6 +2299,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         session_limit_secs: limits.session,
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
+        show_finished: show_finished(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
         live_problem,
@@ -2235,7 +2310,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         tasks,
         messages,
         plan: steps,
-        events: events::view(connection, project)?,
+        events,
     })
 }
 
