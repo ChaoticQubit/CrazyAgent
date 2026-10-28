@@ -984,3 +984,41 @@ fn sizes_paths_and_harness_names_read_plainly() {
     assert_eq!(harness_name("claude", None), "Claude Code");
     assert_eq!(harness_name("mystery", None), "mystery");
 }
+
+/// The owner clears the research while its catalog read is still in flight and opens the
+/// harness picker on the team's only slot; the reply for no research replaces the team with
+/// one that has no slots. The picker closes with the team it was opened for, so Enter never
+/// picks into a slot that is gone.
+#[test]
+fn a_catalog_reply_that_replaces_the_team_closes_an_open_harness_picker() {
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["b-claude", "c-codex"]);
+    wizard.research.clear();
+    let (pool, research) = wizard
+        .catalog_request()
+        .expect("the cleared research is read");
+    wizard.go(Step::Team);
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses.len(), 1);
+    wizard.key(key(KeyCode::Down));
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(
+        wizard.picker,
+        Some(Picker {
+            target: PickFor::Slot(0),
+            cursor: 0
+        })
+    );
+
+    let signed = BTreeSet::from([CredentialRef::new("c-codex").unwrap()]);
+    let served = catalog(&config(), pool.as_ref(), &research, &signed).unwrap();
+    assert!(served.default_team.sub_harnesses.is_empty());
+    wizard.apply_catalog(pool, research, Ok(served));
+
+    assert_eq!(
+        wizard.picker, None,
+        "the picker was open for the team the reply replaced"
+    );
+    assert_eq!(wizard.key(key(KeyCode::Enter)), Reply::Handled);
+    assert!(wizard.team.as_ref().unwrap().sub_harnesses.is_empty());
+}
