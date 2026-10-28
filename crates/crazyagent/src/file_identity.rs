@@ -5,7 +5,7 @@
 /// The caller pairs each pinned identity with the live one of the same file; nothing is
 /// rewritten. Inputs: pinned and live pairs, in the same order and of the same length.
 /// Output: true when they name the same files.
-pub(crate) fn same_files(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
+pub fn same_files(pinned: &[(u64, u64)], live: &[(u64, u64)]) -> bool {
     assert_eq!(pinned.len(), live.len(), "file identities are paired");
     let one_device = |pairs: &[(u64, u64)]| pairs.windows(2).all(|pair| pair[0].0 == pair[1].0);
     pinned
