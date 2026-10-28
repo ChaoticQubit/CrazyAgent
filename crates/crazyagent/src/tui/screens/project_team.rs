@@ -1094,6 +1094,10 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
+    /// The Team row: the agent counts and alerts in full, then the team settings that fit
+    /// in order (Keep warm, Task, Session, Idle stop, On harness switch); a setting past the
+    /// width is left out whole, never the counts. Inputs: the content width and the look.
+    /// Output: one row.
     fn summary(&self, content: usize, look: &Look) -> Row {
         let Some(status) = &self.status else {
             return Row::of("Team", look.accent).pad(content);
@@ -1141,16 +1145,34 @@ impl TeamView {
                 .push("  ", Style::new())
                 .push("older history hidden", look.muted);
         }
-        let right = Row::of("Keep warm  ", look.muted)
-            .push(if status.keep_warm { "On" } else { "Off" }, look.fg)
-            .push("  Task  ", look.muted)
-            .push(limit_label(status.turn_limit_secs), look.fg)
-            .push("  Session  ", look.muted)
-            .push(limit_label(status.session_limit_secs), look.fg)
-            .push("  Idle stop  ", look.muted)
-            .push(limit_label(status.idle_stop_secs), look.fg)
-            .push("  On harness switch  ", look.muted)
-            .push(switch_words(status.on_harness_switch), look.fg);
+        let setting = |label: &str, value: String| {
+            Row::of(format!("{label}  "), look.muted).push(value, look.fg)
+        };
+        let settings = [
+            setting(
+                "Keep warm",
+                if status.keep_warm { "On" } else { "Off" }.to_owned(),
+            ),
+            setting("Task", limit_label(status.turn_limit_secs)),
+            setting("Session", limit_label(status.session_limit_secs)),
+            setting("Idle stop", limit_label(status.idle_stop_secs)),
+            setting(
+                "On harness switch",
+                switch_words(status.on_harness_switch).to_owned(),
+            ),
+        ];
+        let mut right = Row::default();
+        for item in settings {
+            let gap = if right.width() == 0 { 0 } else { 2 };
+            if left.width() + 2 + right.width() + gap + item.width() > content {
+                break;
+            }
+            right = if gap == 0 {
+                item
+            } else {
+                right.push("  ", look.muted).cat(item)
+            };
+        }
         spread(content, left, right)
     }
 
