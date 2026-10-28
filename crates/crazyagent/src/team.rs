@@ -918,6 +918,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
             );
+            CREATE TABLE IF NOT EXISTS team_settings_revision (
+                project TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL CHECK(revision > 0)
+            );
             CREATE TABLE IF NOT EXISTS team_finished_view (
                 project TEXT PRIMARY KEY,
                 show INTEGER NOT NULL
@@ -1465,6 +1469,37 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Refuses a time limits or On harness switch change made from a read older than another
+/// client's change, so one client never silently reverts the other, then moves the revision
+/// for the change about to be written. Takes the transaction, the project and the revision the
+/// client read. Returns the `stale_revision` refusal, or none once the revision moved.
+fn claim_settings_revision(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    read: u64,
+) -> Result<Option<Outcome>, EngineError> {
+    let current = settings_revision(tx, project)?;
+    if current != read {
+        return Ok(Some(rejected("stale_revision")));
+    }
+    let next = current
+        .checked_add(1)
+        .and_then(|next| i64::try_from(next).ok())
+        .ok_or_else(|| error("team_settings_revision_invalid"))?;
+    tx.execute(
+        "INSERT INTO team_settings_revision(project,revision) VALUES (?1,?2)
+         ON CONFLICT(project) DO UPDATE SET revision=excluded.revision",
+        params![project.as_str(), next],
+    )
+    .map_err(error)?;
+    assert_eq!(
+        settings_revision(tx, project)?,
+        current + 1,
+        "an applied team settings change moves the revision by one"
+    );
+    Ok(None)
+}
+
 /// Deletes a project's oldest history rows so that one more row fits within `max`.
 /// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
 /// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
@@ -1642,8 +1677,12 @@ pub fn execute(
             turn_secs,
             session_secs,
             idle_secs,
+            revision,
             ..
         } => {
+            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
+                return Ok(stale);
+            }
             tx.execute(
                 "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(project) DO UPDATE SET turn_secs=excluded.turn_secs,
@@ -1653,7 +1692,10 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::OnHarnessSwitch { mode, .. } => {
+        TeamAction::OnHarnessSwitch { mode, revision, .. } => {
+            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
+                return Ok(stale);
+            }
             tx.execute(
                 "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
@@ -2251,6 +2293,27 @@ pub fn on_harness_switch(
     }
 }
 
+/// Reads the revision of a project's time limits and On harness switch setting, which every
+/// applied change to either moves by one. Takes a connection and the project.
+/// Returns 0 until the first change; a stored value below 1 is refused as invalid.
+pub fn settings_revision(connection: &Connection, project: &ProjectId) -> Result<u64, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT revision FROM team_settings_revision WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match stored {
+        None => Ok(0),
+        Some(value) => u64::try_from(value)
+            .ok()
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| error("team_settings_revision_invalid")),
+    }
+}
+
 /// Tells whether the owner chose to show finished agents (idle, stopped and failed
 /// sub-agents) in the agents list and team graph instead of their Finished fold-out.
 /// Takes a connection and the project.
@@ -2667,7 +2730,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
         show_finished: show_finished(connection, project)?,
-        settings_revision: 0,
+        settings_revision: settings_revision(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,

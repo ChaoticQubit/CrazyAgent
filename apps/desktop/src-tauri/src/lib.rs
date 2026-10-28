@@ -756,6 +756,7 @@ async fn desktop_team_keep_warm(
 
 /// Sets a project team's task and session time limits and sub-agent idle stop from Team
 /// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn desktop_team_time_limits(
     window: WebviewWindow,

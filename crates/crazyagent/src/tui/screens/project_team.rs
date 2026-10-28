@@ -210,6 +210,7 @@ impl TeamView {
                     }
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
                         self.notice = Some(Notice::problem(team_plain(&code)));
+                        self.read_ms = None;
                     }
                     Ok(_) => {}
                 }
@@ -1426,6 +1427,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
+        "stale_revision" => {
+            "These settings changed elsewhere. The current ones are shown; pick again.".into()
+        }
         other => plain_problem(other),
     }
 }

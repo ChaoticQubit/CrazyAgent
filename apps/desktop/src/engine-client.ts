@@ -769,6 +769,7 @@ export interface TeamStatus {
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
+  settings_revision?: number;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -880,13 +881,14 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
 }
 
 /** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
- * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
-export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
+ * limits in seconds or null for no limit, the team settings revision read and a generation.
+ * Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation });
 }
 
-export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, revision: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation });
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
