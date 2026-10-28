@@ -4750,8 +4750,9 @@ type Held = (AgentCredential, NativeProfileUse);
 
 /// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
 /// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
-/// access stop that left processes running keeps both until they end, with the copy's
-/// keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
+/// access stop that left processes running, or could not list them, keeps both until a
+/// listing shows none running (see [`crate::harnesses::leftovers::Leftovers::hold`]), with
+/// the copy's keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
 /// harness held, if anything. Output: none for a clean stop, or the plain problem, naming
 /// what still runs and that Full access cannot stop it.
 fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> Option<String> {
@@ -4771,7 +4772,7 @@ fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> O
             ))
         }
         Err(Unstopped::Left(left)) => {
-            let problem = with_code(&left.plain(), Some(crate::harnesses::leftovers::LEFT));
+            let problem = with_code(&left.plain(), Some(left.code()));
             if let Some((mut credential, profile)) = held {
                 credential.stop_renewing();
                 left.hold((credential, profile));

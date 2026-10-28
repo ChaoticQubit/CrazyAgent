@@ -885,12 +885,13 @@ impl ResearchRunner {
                     return Err(RunError::Uncertain(leftovers::UNCERTAIN));
                 }
                 Err(Unstopped::Left(left)) => {
+                    let code = left.code();
                     let mut credential = credential;
                     if let Some(credential) = credential.as_mut() {
                         credential.stop_renewing();
                     }
                     left.hold((credential, lease));
-                    return Err(RunError::Uncertain(leftovers::LEFT));
+                    return Err(RunError::Uncertain(code));
                 }
             }
             drop(credential);

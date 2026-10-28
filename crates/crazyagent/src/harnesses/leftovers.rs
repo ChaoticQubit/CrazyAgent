@@ -1,12 +1,12 @@
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The plain code of a stop that left processes of a Full access agent running.
 pub const LEFT: &str = "harness_full_access_left";
-/// The plain code of a stop whose warden did not confirm its sandbox empty, or whose
-/// processes could not be read.
+/// The plain code of a Full access stop whose processes could not be listed, so it is
+/// neither confirmed clean nor names what still runs.
+pub const UNCHECKED: &str = "harness_full_access_unchecked";
+/// The plain code of a stop whose warden did not confirm its sandbox empty.
 pub const UNCERTAIN: &str = "harness_cleanup_uncertain";
 
 /// How long a stop waits, after the agent's group is killed, for the processes it found
@@ -17,6 +17,9 @@ const SETTLE: Duration = Duration::from_secs(2);
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// How often a held account checks again whether the processes holding it have ended.
 const HOLD_POLL: Duration = Duration::from_secs(2);
+/// How long an account stays held for a stop whose processes could not be listed, when
+/// no later listing works and none was named; the hold ends sooner once one works.
+const UNCHECKED_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The most processes one report names; the rest are counted.
 const NAMED_MAX: usize = 8;
 const PROGRAM_CHARS_MAX: usize = 32;
@@ -43,19 +46,19 @@ const PS_TABLE: &[&str] = &[
 /// Why a stop could not report every process of an agent ended.
 #[derive(Debug)]
 pub enum Unstopped {
-    /// The run's warden did not confirm its sandbox empty, or the processes of a Full
-    /// access agent could not be read.
+    /// The run's warden did not confirm its sandbox empty.
     Uncertain,
-    /// Processes of a Full access agent still run after its stop.
+    /// Processes of a Full access agent still run after its stop, or could not be listed.
     Left(Leftovers),
 }
 
 impl Unstopped {
-    /// Names the failure as a plain code. Input: the failure. Output: [`UNCERTAIN`] or [`LEFT`].
+    /// Names the failure as a plain code. Input: the failure. Output: [`UNCERTAIN`], or the
+    /// leftovers' [`LEFT`] or [`UNCHECKED`].
     pub fn code(&self) -> &'static str {
         match self {
             Self::Uncertain => UNCERTAIN,
-            Self::Left(_) => LEFT,
+            Self::Left(left) => left.code(),
         }
     }
 }
@@ -72,25 +75,44 @@ struct Process {
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session, and every process whose parent is one of them. A
 /// process that left both before it was seen, such as a daemon whose parent already
-/// exited, is not found. `table` is the command that lists the processes.
+/// exited, is not found. `table` is the command that lists the processes; `unchecked`
+/// tells that a listing failed, so the lineage may miss processes.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     leader: i32,
     known: Vec<Process>,
     table: &'static [&'static str],
+    unchecked: bool,
 }
 
 /// The processes a Full access agent left running after its stop, which no Seatbelt
-/// warden can end, never empty.
+/// warden can end, or a stop whose processes could not be listed; never both empty and
+/// checked.
 #[derive(Debug)]
 pub struct Leftovers(Lineage);
 
 impl Leftovers {
-    /// Says plainly which processes still run and that Full access cannot stop them.
-    /// Input: the leftovers. Output: one sentence naming at most `NAMED_MAX` of them by id
-    /// and program, counting the rest.
+    /// Names the leftovers as a plain code. Input: the leftovers. Output: [`UNCHECKED`] when
+    /// none is named because the listing failed, else [`LEFT`].
+    pub fn code(&self) -> &'static str {
+        if self.0.known.is_empty() {
+            UNCHECKED
+        } else {
+            LEFT
+        }
+    }
+
+    /// Says plainly which processes still run and that Full access cannot stop them, or
+    /// that they could not be listed. Input: the leftovers. Output: one sentence naming at
+    /// most `NAMED_MAX` of them by id and program, counting the rest.
     pub fn plain(&self) -> String {
-        assert!(!self.0.known.is_empty());
+        assert!(!self.0.known.is_empty() || self.0.unchecked);
+        if self.0.known.is_empty() {
+            return format!(
+                "Full access could not list what the agent started outside its terminal after its stop, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes",
+                UNCHECKED_HOLD_MAX.as_secs() / 60
+            );
+        }
         let named: Vec<String> = self
             .0
             .known
@@ -104,14 +126,20 @@ impl Leftovers {
         } else {
             format!(" and {more} more")
         };
+        let unlisted = if self.0.unchecked {
+            ". More of them may run: the process list could not be read"
+        } else {
+            ""
+        };
         format!(
-            "Full access cannot stop what the agent started outside its terminal; still running: {}{counted}. Its account stays held until they end",
+            "Full access cannot stop what the agent started outside its terminal; still running: {}{counted}{unlisted}. Its account stays held until they end",
             named.join(", ")
         )
     }
 
-    /// Keeps `held`, such as the agent's credential copy and account lease, until every
-    /// process of the agent has ended, then drops it; the engine's exit ends the hold too.
+    /// Keeps `held`, such as the agent's credential copy and account lease, until a listing
+    /// shows no process of the agent running, then drops it; the engine's exit ends the hold
+    /// too. With none named, it ends after `UNCHECKED_HOLD_MAX` even while no listing works.
     /// When no watching thread starts, `held` is kept for the engine's life instead.
     /// Inputs: the leftovers and what they hold. Output: none.
     pub fn hold<T: Send + 'static>(self, held: T) {
@@ -121,7 +149,14 @@ impl Leftovers {
         let started = std::thread::Builder::new()
             .name("full-access-hold".into())
             .spawn(move || {
-                while lineage.refresh().is_err() || !lineage.known.is_empty() {
+                let begun = Instant::now();
+                loop {
+                    let checked = lineage.refresh().is_ok();
+                    if lineage.known.is_empty()
+                        && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX)
+                    {
+                        break;
+                    }
                     std::thread::sleep(HOLD_POLL);
                 }
                 drop(
@@ -141,8 +176,9 @@ impl Leftovers {
 
 impl Lineage {
     /// Finds a Full access agent's processes before its group is killed. Input: the
-    /// group's leader, whose id is also its session's. Output: the lineage, or
-    /// [`Unstopped::Uncertain`] when the processes cannot be read.
+    /// group's leader, whose id is also its session's. Output: the lineage, marked
+    /// unchecked when the processes cannot be listed, or [`Unstopped::Uncertain`] for a
+    /// leader that is no process id.
     #[cfg(unix)]
     pub(crate) fn of(leader: u32) -> Result<Self, Unstopped> {
         Self::reading(leader, PS_TABLE)
@@ -160,8 +196,9 @@ impl Lineage {
             leader,
             known: Vec::new(),
             table,
+            unchecked: false,
         };
-        lineage.refresh()?;
+        lineage.unchecked = lineage.refresh().is_err();
         Ok(lineage)
     }
 
@@ -173,17 +210,17 @@ impl Lineage {
     }
 
     /// Waits, after the group is killed, up to `SETTLE` for every process found to end.
-    /// Input: the lineage. Output: Ok once none runs, the [`Leftovers`] still running at
-    /// the deadline, or [`Unstopped::Uncertain`] when the processes cannot be read.
+    /// Input: the lineage. Output: Ok once a listing shows none running, else the
+    /// [`Leftovers`] still running at the deadline or, once a listing failed, unchecked.
     #[cfg(unix)]
     pub(crate) fn settle(mut self) -> Result<(), Unstopped> {
         let until = Instant::now() + SETTLE;
         loop {
-            self.refresh()?;
-            if self.known.is_empty() {
+            self.unchecked |= self.refresh().is_err();
+            if self.known.is_empty() && !self.unchecked {
                 return Ok(());
             }
-            if Instant::now() >= until {
+            if self.known.is_empty() || Instant::now() >= until {
                 return Err(Unstopped::Left(Leftovers(self)));
             }
             std::thread::sleep(SETTLE_POLL);
@@ -419,6 +456,7 @@ mod tests {
             leader: 2,
             known,
             table: PS_TABLE,
+            unchecked: false,
         })
         .plain();
         assert!(
@@ -526,7 +564,7 @@ mod tests {
             let read = Lineage::reading(std::process::id(), table);
             let took = started.elapsed();
             assert!(
-                matches!(read, Err(Unstopped::Uncertain)),
+                matches!(&read, Ok(lineage) if lineage.unchecked),
                 "{table:?} was read as a process table after {took:?}: {read:?}"
             );
             assert!(
@@ -544,7 +582,36 @@ mod tests {
             leader: 2,
             known: Vec::new(),
             table: PS_TABLE,
+            unchecked: false,
         })
         .plain();
+    }
+
+    #[test]
+    fn an_unreadable_process_table_holds_the_account_only_until_it_can_be_checked() {
+        let failing: &'static [&'static str] = &["/usr/bin/false"];
+        let lineage = match Lineage::reading(std::process::id(), failing) {
+            Ok(lineage) => lineage,
+            Err(other) => panic!(
+                "an unreadable process table at Full access came back {other:?}, which keeps the account for the engine's life"
+            ),
+        };
+        let mut left = match lineage.settle() {
+            Err(Unstopped::Left(left)) => left,
+            other => panic!("an unreadable process table was reported {other:?}"),
+        };
+        assert_eq!(left.code(), UNCHECKED);
+        let report = left.plain();
+        assert!(report.contains("cannot confirm they ended"), "{report}");
+        assert!(report.ends_with("at most 10 minutes"), "{report}");
+
+        left.0.table = PS_TABLE;
+        let (held, released) = std::sync::mpsc::channel::<()>();
+        left.hold(held);
+        assert_eq!(
+            released.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the account stayed held after the processes could be listed and none ran"
+        );
     }
 }
