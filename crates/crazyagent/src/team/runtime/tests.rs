@@ -1765,7 +1765,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
         launch_end(LaunchError("launch_deadline".into(), None)),
-        (TurnEnd::TimedOut, None)
+        (TurnEnd::TimedOut, Some("launch_deadline".to_owned()))
     );
     assert_eq!(
         launch_end(LaunchError("launch_event_limit".into(), None)),
@@ -6474,6 +6474,8 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         ),
         1
     );
+    team.shutdown().unwrap();
+}
 
 /// A task never waits a tick behind an idle sub-agent past its session: dispatch ends that
 /// agent and gives the task to another idle sub-agent of the harness in the same tick
@@ -6492,6 +6494,7 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
+                revision: 0,
             },
             hand_off(&fixture, "Write a.md"),
             hand_off(&fixture, "Write b.md"),
@@ -6566,6 +6569,7 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
         &[crate::team::TeamAction::OnHarnessSwitch {
             project_id: project.clone(),
             mode: crate::team::SwitchMode::Fresh,
+            revision: 0,
         }],
     );
     switch_session(&fixture.connection, "s-one");

@@ -2119,7 +2119,6 @@ async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
     assert!(!line.contains("in Changes"), "{line}");
 }
 
-<<<<<<< HEAD
 async fn waiting_header(engine: &Engine, place: Place) -> String {
     let mut connection = engine.connect();
     let mut ctx = ctx(160, 30);
@@ -2218,7 +2217,8 @@ async fn a_project_page_counts_its_own_change_sets_and_the_rest_as_other_project
         "{line}"
     );
     assert!(!line.contains("in Changes"), "{line}");
-=======
+}
+
 async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs: u32) {
     let client = Client::new(
         engine.root.path().join("e.sock"),
@@ -2296,5 +2296,203 @@ async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desk
         (Some(1800), Some(7200)),
         "a change from the fresh read applies and keeps the desktop session limit"
     );
->>>>>>> fix/tui-team-route
+}
+
+async fn team_settings_after(keys: &[char]) -> (crate::team::TeamStatus, String) {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('s'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team"), "{sent:?}");
+    for key in keys {
+        shell.key(Key::Char(*key));
+        let sent = pump(&mut shell, &mut connection).await;
+        assert_eq!(sent.first(), Some(&"team change"), "{key}: {sent:?}");
+        assert!(
+            sent.contains(&"team"),
+            "{key} reads the team again: {sent:?}"
+        );
+    }
+    let status = engine.controller.team_status(notes).await.unwrap();
+    (status, render(&mut shell, 80, 24))
+}
+
+fn shows_once(shown: &str, setting: &str) {
+    assert_eq!(
+        shown.lines().filter(|row| row.contains(setting)).count(),
+        1,
+        "{setting:?} shows once, whole, at 80x24:\n{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_show_every_setting_whole_at_80_by_24() {
+    let (status, shown) = team_settings_after(&[]).await;
+    assert_eq!(
+        (
+            status.keep_warm,
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+            status.on_harness_switch,
+        ),
+        (false, None, None, Some(600), crate::team::SwitchMode::Carry)
+    );
+    for setting in [
+        "Keep warm  Off",
+        "Task  Off",
+        "Session  Off",
+        "Idle stop  10 min",
+        "On harness switch  Carry over",
+    ] {
+        shows_once(&shown, setting);
+    }
+    assert!(
+        shown.lines().all(|row| row.chars().count() <= 80),
+        "{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_turn_keep_warm_on() {
+    let (status, shown) = team_settings_after(&['w']).await;
+    assert!(status.keep_warm);
+    shows_once(&shown, "Keep warm  On");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_turn_keep_warm_off_again() {
+    let (status, shown) = team_settings_after(&['w', 'w']).await;
+    assert!(!status.keep_warm);
+    shows_once(&shown, "Keep warm  Off");
+}
+
+async fn task_limit_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['t'; presses]).await;
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (secs, None)
+    );
+    shows_once(&shown, &format!("Task  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_30_min() {
+    task_limit_after(1, Some(1800), "30 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_1_h() {
+    task_limit_after(2, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_2_h() {
+    task_limit_after(3, Some(7200), "2 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_4_h() {
+    task_limit_after(4, Some(14_400), "4 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_8_h() {
+    task_limit_after(5, Some(28_800), "8 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_back_to_off() {
+    task_limit_after(6, None, "Off").await;
+}
+
+async fn session_limit_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['l'; presses]).await;
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (None, secs)
+    );
+    shows_once(&shown, &format!("Session  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_30_min() {
+    session_limit_after(1, Some(1800), "30 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_1_h() {
+    session_limit_after(2, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_2_h() {
+    session_limit_after(3, Some(7200), "2 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_4_h() {
+    session_limit_after(4, Some(14_400), "4 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_8_h() {
+    session_limit_after(5, Some(28_800), "8 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_back_to_off() {
+    session_limit_after(6, None, "Off").await;
+}
+
+async fn idle_stop_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['i'; presses]).await;
+    assert_eq!(status.idle_stop_secs, secs);
+    shows_once(&shown, &format!("Idle stop  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_1_h() {
+    idle_stop_after(1, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_off() {
+    idle_stop_after(2, None, "Off").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_2_min() {
+    idle_stop_after(3, Some(120), "2 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_back_to_10_min() {
+    idle_stop_after(4, Some(600), "10 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_make_a_harness_switch_start_fresh() {
+    let (status, shown) = team_settings_after(&['h']).await;
+    assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Fresh);
+    shows_once(&shown, "On harness switch  Start fresh");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_make_a_harness_switch_carry_over_again() {
+    let (status, shown) = team_settings_after(&['h', 'h']).await;
+    assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Carry);
+    shows_once(&shown, "On harness switch  Carry over");
 }

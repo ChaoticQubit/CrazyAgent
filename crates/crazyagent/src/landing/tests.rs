@@ -2116,7 +2116,7 @@ fn an_instruction_file_change_is_marked_and_its_hidden_characters_show_as_escape
     case.edit("notes.md", "Plain\u{2028}notes.\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
 
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     assert_eq!(page.next, None);
     let marks: Vec<(String, String)> = page
         .files
@@ -2168,7 +2168,7 @@ fn instruction_marks_ignore_case_and_cover_codex_overrides_and_harness_folders()
     }
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
 
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     assert_eq!(page.next, None);
     let marked: Vec<(&str, bool)> = page
         .files
@@ -4094,7 +4094,7 @@ fn files_an_instruction_file_imports_or_links_to_are_marked() {
     case.edit("docs/fresh.md", "Fresh.\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
 
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     assert_eq!(page.next, None);
     let marked: Vec<(&str, bool)> = page
         .files

@@ -1981,6 +1981,7 @@ fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() 
         )
         .unwrap();
     assert_eq!(stored, None, "no text is stored when the setting is off");
+}
 
 /// The master's status reply keeps its newest events within the reply cap: past the cap the
 /// oldest events are left out with a line saying how many, never the newest, and the
