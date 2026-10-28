@@ -148,11 +148,11 @@ export function conflictNote(set: ChangeSet): string | null {
 }
 
 /** The owner's edited commit message as Accept sends it: line ends made \n, trimmed.
- * Input: the editor text. Output: the message, or null when it is empty or longer than
- * the engine takes. */
+ * Input: the editor text. Output: the message, or null when it is empty, longer than the
+ * engine takes or holds a character displayText would show as an escape. */
 export function commitMessage(text: string): string | null {
   const message = text.replace(/\r\n/g, "\n").trim();
-  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX ? message : null;
+  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX && displayText(message) === message ? message : null;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own

@@ -1,5 +1,5 @@
 use super::clone;
-use super::diff::{self, plain};
+use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
@@ -255,12 +255,15 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
-/// `MESSAGE_BYTES_MAX` bytes and plain text. Input: the text. Output: the message, else
-/// `changes_message_invalid`.
+/// `MESSAGE_BYTES_MAX` bytes and without a character `memory::hidden_text` finds. Input:
+/// the text. Output: the message, else `changes_message_invalid`.
 fn edited(text: &str) -> Result<String, EngineError> {
     let message = text.replace("\r\n", "\n");
     let message = message.trim();
-    if message.is_empty() || message.len() > MESSAGE_BYTES_MAX || plain(message) != message {
+    if message.is_empty()
+        || message.len() > MESSAGE_BYTES_MAX
+        || crate::memory::hidden_text(message)
+    {
         return Err(failure("changes_message_invalid"));
     }
     Ok(message.to_owned())
