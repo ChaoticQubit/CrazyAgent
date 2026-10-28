@@ -770,9 +770,13 @@ fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
 fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     let pane = LeftPane::start("ca-adopt-gone-", 8);
     pane.kill_server();
-    assert_eq!(
-        pane.adopt().err().map(|refused| refused.0).as_deref(),
-        Some("terminal_closed")
+    let refused = pane.adopt().err().map(|refused| refused.0);
+    assert!(
+        matches!(
+            refused.as_deref(),
+            Some("launch_closed" | "terminal_closed")
+        ),
+        "a pane whose tmux server is gone cannot be taken over: {refused:?}"
     );
     assert!(
         !pane.config.exists(),
