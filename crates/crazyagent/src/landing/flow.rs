@@ -250,13 +250,14 @@ fn name(text: &str) -> Result<String, EngineError> {
     Ok(text.to_owned())
 }
 
-/// A commit subject from free text: its first line, plain, with paths under `roots`
-/// made relative to them and any other absolute local path cut to its last component,
+/// A commit subject from free text: its first line, plain, every character a reviewer
+/// cannot see shown as an escape by `memory::visible_text`, with paths under `roots` made
+/// relative to them and any other absolute local path cut to its last component,
 /// ended at the last whole word within `SUBJECT_CHARS_MAX` characters. A first word
 /// longer than that is cut to fit. Inputs: the text and the folders, innermost first.
 /// Output: the subject, maybe empty.
 pub(super) fn subject(text: &str, roots: &[&Path]) -> String {
-    let mut line = plain(text.lines().next().unwrap_or_default());
+    let mut line = crate::memory::visible_text(&plain(text.lines().next().unwrap_or_default()));
     for root in roots.iter().filter_map(|root| root.to_str()) {
         if root.len() > 1 {
             line = line.replace(&format!("{}/", root.trim_end_matches('/')), "");

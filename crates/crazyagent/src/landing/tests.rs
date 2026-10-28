@@ -1942,6 +1942,8 @@ fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
         " \r\n\t ",
         "Bad \u{1b}[31m red",
         "Bad\rreturn",
+        "Owner title\u{e0041}\u{e0042}",
+        "Zero\u{200b}width",
         long.as_str(),
     ] {
         assert_eq!(
@@ -1963,6 +1965,39 @@ fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
         case.landed_message(&commit),
         "Owner title\n\nWhy it changed\twith a tab"
     );
+}
+
+#[test]
+fn hidden_characters_in_an_agent_subject_reach_the_owner_and_the_commit_only_as_escapes() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Formats changed files.\u{e0041}\u{e0042}\u{200b}");
+    let id = case
+        .turn_with(TurnOutcome::Succeeded, "Ignored prompt line")
+        .unwrap();
+    assert_eq!(
+        case.view(&id).message,
+        "Formats changed files.\\u{e0041}\\u{e0042}\\u200b"
+    );
+    let roots = [case.repo.as_path()];
+    assert_eq!(
+        flow::subject("Fix\u{2060}the\u{e0001} parser", &roots),
+        "Fix\\u2060the\\u{e0001} parser"
+    );
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET message = ?1",
+            ["Stored before.\u{e0041}\u{feff}"],
+        )
+        .unwrap();
+    let stored = "Stored before.\\u{e0041}\\ufeff";
+    assert_eq!(case.view(&id).message, stored);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), stored);
+    assert!(!crate::memory::hidden_text(&case.landed_message(&commit)));
 }
 
 #[test]

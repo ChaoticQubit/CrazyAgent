@@ -122,9 +122,11 @@ impl Record {
     }
 
     /// The commit message an Accept proposes: the one made from the agent's own commits,
-    /// else the prompt line, else a line naming the agent. Output: the message.
+    /// else the prompt line, else a line naming the agent, with every character a reviewer
+    /// cannot see shown as an escape, so one stored before subjects were escaped is shown
+    /// and landed visibly too. Output: the message.
     pub(super) fn message(&self) -> String {
-        if !self.message.is_empty() {
+        let message = if !self.message.is_empty() {
             self.message.clone()
         } else if !self.prompt_line.is_empty() {
             self.prompt_line.clone()
@@ -133,7 +135,8 @@ impl Record {
                 "Changes from {}",
                 super::flow::subject(&self.agent.label, &[])
             )
-        }
+        };
+        crate::memory::visible_text(&message)
     }
 
     pub(super) fn is_open(&self) -> bool {
