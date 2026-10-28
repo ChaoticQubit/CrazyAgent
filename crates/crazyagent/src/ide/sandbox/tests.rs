@@ -498,11 +498,20 @@ fn setup(dir: &Path, args: &[&str]) -> String {
 }
 
 /// Runs git the way the IDE server's git does: the engine's shim under the installed
-/// profile, with the server's git configuration, real git first on the path and the
-/// server data folder as home. Inputs: the profile, the shim, the home, the folder and the
-/// arguments. Output: whether git exited 0, with what it printed on standard error.
-fn ide_git(profile: &Path, shim: &Path, home: &Path, dir: &Path, args: &[&str]) -> (bool, String) {
-    let output = ide_git_output(profile, shim, home, dir, args);
+/// profile, in the server's environment ([`crate::ide::env::server_env`], with the
+/// project's git ceiling and configuration), real git first on the path and the server data
+/// folder as home. Inputs: the profile, the shim, the home, the project folder, the folder
+/// git runs in and the arguments. Output: whether git exited 0, with what it printed on
+/// standard error.
+fn ide_git(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    root: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> (bool, String) {
+    let output = ide_git_output(profile, shim, home, root, dir, args);
     (
         output.status.success(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -514,20 +523,33 @@ fn ide_git_output(
     profile: &Path,
     shim: &Path,
     home: &Path,
+    root: &Path,
     dir: &Path,
     args: &[&str],
 ) -> std::process::Output {
+    let source = [
+        (
+            std::ffi::OsString::from("PATH"),
+            std::ffi::OsString::from("/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin"),
+        ),
+        (
+            std::ffi::OsString::from("HOME"),
+            home.as_os_str().to_owned(),
+        ),
+    ];
+    let env = crate::ide::env::server_env(
+        source,
+        &home.join("capability"),
+        &home.join("owner.sock"),
+        &home.join("locked-settings.json"),
+        &crate::ide::git::ceiling(root).unwrap(),
+    );
     let mut command = super::command(profile, shim);
     command
         .args(args)
         .current_dir(dir)
         .env_clear()
-        .env(
-            "PATH",
-            "/Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin",
-        )
-        .env("HOME", home)
-        .envs(crate::ide::git::CONFIG_ENV)
+        .envs(env)
         .envs([
             ("GIT_AUTHOR_NAME", "Owner"),
             ("GIT_AUTHOR_EMAIL", "owner@example.invalid"),
@@ -680,8 +702,14 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         for (agent, _) in &agents {
             let name = agent.file_name().unwrap().to_str().unwrap();
             for args in [&["status", "--porcelain"][..], &["add", "notes.txt"]] {
-                let (worked, said) = ide_git(&profile, &shim, &home, agent, args);
+                let (worked, said) = ide_git(&profile, &shim, &home, &root, agent, args);
                 assert!(!worked, "{mode}: git {args:?} worked in {name}: {said}");
+                let reason = if *agent == &bare {
+                    "cannot use bare repository"
+                } else {
+                    "not a git repository"
+                };
+                assert!(said.contains(reason), "{mode}: {name}: {said}");
             }
             assert!(!ran(name), "{mode}: {name}'s filter ran");
         }
@@ -711,18 +739,26 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         fs::read_to_string(&shim).unwrap(),
         crate::ide::git::SHIM_TEXT
     );
-    let (status, said) = ide_git(&profile, &shim, &home, &root, &["status", "--porcelain"]);
+    let (status, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["status", "--porcelain"],
+    );
     assert!(
         status,
         "the Project section's git works under the profile: {said}"
     );
     fs::write(root.join("a.txt"), "off\n").unwrap();
-    let (staged, said) = ide_git(&profile, &shim, &home, &root, &["add", "a.txt"]);
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
     assert!(staged, "Off: the IDE stages in the Project section: {said}");
     let (committed, said) = ide_git(
         &profile,
         &shim,
         &home,
+        &root,
         &root,
         &["commit", "-q", "-m", "off"],
     );
@@ -735,6 +771,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         &profile,
         &shim,
         &home,
+        &root,
         &root,
         &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
     );
@@ -751,9 +788,16 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         crate::ide::git::SHIM_TEXT
     );
     fs::write(root.join("a.txt"), "on\n").unwrap();
-    let (staged, said) = ide_git(&profile, &shim, &home, &root, &["add", "a.txt"]);
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "a.txt"]);
     assert!(staged, "On: {said}");
-    let (committed, said) = ide_git(&profile, &shim, &home, &root, &["commit", "-q", "-m", "on"]);
+    let (committed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["commit", "-q", "-m", "on"],
+    );
     assert!(committed, "On: {said}");
     assert!(
         ran("project-hook"),
@@ -763,6 +807,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         &profile,
         &shim,
         &home,
+        &root,
         &root,
         &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
     );
@@ -863,7 +908,14 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     crate::ide::settings::write(&mine, &home, &data, None).unwrap();
     let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
 
-    let before = ide_git_output(&profile, &shim, &home, &root, &["add", "-A", "--dry-run"]);
+    let before = ide_git_output(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["add", "-A", "--dry-run"],
+    );
     let listed = String::from_utf8_lossy(&before.stdout).into_owned();
     assert!(
         listed.contains("worktrees/agent-3/work.txt"),
@@ -871,7 +923,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     );
 
     assert!(crate::projects_home::exclude_agents(&root).unwrap());
-    let (staged, said) = ide_git(&profile, &shim, &home, &root, &["add", "-A"]);
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &root, &["add", "-A"]);
     assert!(staged, "{said}");
     assert_eq!(
         setup(&root, &["diff", "--cached", "--name-only"]),
@@ -881,6 +933,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         &profile,
         &shim,
         &home,
+        &root,
         &root,
         &["commit", "-q", "-m", "owner"],
     );

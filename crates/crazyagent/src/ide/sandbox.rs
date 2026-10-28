@@ -237,10 +237,11 @@ fn locks(held: &[(&Path, &Path)]) -> String {
 /// The rule that keeps agents from setting the owner's IDE (DEC-098 addendum 9, INT-1): the
 /// server reads no `.vscode` folder anywhere in an agent worktree, no `.code-workspace` file
 /// in one, and nothing at or under the `.git` at an agent folder's top, under either agents
-/// root a project uses (`.crazyagent/worktrees` or `worktrees`), in any letter case. So git
-/// in an agent folder stops at its unreadable `.git`, whether that is an agent's own clone,
-/// a linked worktree's `gitdir:` file or a planted one, and never runs a program its config
-/// or hooks name. Seatbelt checks a followed link's own path as well as where it leads, so a
+/// root a project uses (`.crazyagent/worktrees` or `worktrees`), in any letter case. With
+/// both agents roots as git's search ceiling ([`super::git::ceiling`]), git in an agent
+/// folder then finds no repository, whether its `.git` is an agent's own clone, a linked
+/// worktree's `gitdir:` file or a planted one, neither runs a program its config or hooks
+/// name nor walks up to the project's repository. Seatbelt checks a followed link's own path as well as where it leads, so a
 /// link named so is refused too. The engine's workspace file and Remote settings stay the
 /// only settings source for agent folders. Input: the project folder. Output: the rule text.
 fn agent_config(root: &Path) -> String {

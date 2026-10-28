@@ -362,6 +362,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("GIT_CONFIG_COUNT", "2"),
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
+        ("GIT_CEILING_DIRECTORIES", "/private/tmp/forged-ceiling"),
     ];
     let source = given
         .iter()
@@ -369,7 +370,8 @@ fn server_env_holds_only_allowlisted_names() {
     let capability = Path::new("/private/tmp/ide/project/capability");
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
-    let built = env::server_env(source, capability, socket, locked);
+    let ceiling = crate::ide::git::ceiling(Path::new("/private/tmp/project")).unwrap();
+    let built = env::server_env(source, capability, socket, locked, &ceiling);
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -396,6 +398,10 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
     ));
+    expected.push((
+        crate::ide::git::CEILING_VARIABLE,
+        "/private/tmp/project/.crazyagent/worktrees:/private/tmp/project/worktrees",
+    ));
     expected.extend(crate::ide::git::CONFIG_ENV);
     expected.sort();
     assert_eq!(seen, expected);
@@ -405,6 +411,7 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == env::CAPABILITY_VARIABLE
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
+            || *name == crate::ide::git::CEILING_VARIABLE
             || crate::ide::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == fixed)
@@ -992,6 +999,11 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     assert!(envs.contains(&(
         std::ffi::OsStr::new(env::CAPABILITY_VARIABLE),
         Some(info.capability_path.as_os_str())
+    )));
+    let ceiling = crate::ide::git::ceiling(checkout.path()).unwrap();
+    assert!(envs.contains(&(
+        std::ffi::OsStr::new(crate::ide::git::CEILING_VARIABLE),
+        Some(ceiling.as_os_str())
     )));
     assert!(
         envs.iter()

@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use serde_json::{Map, Value};
+use std::ffi::OsString;
 use std::path::Path;
 
 #[cfg(all(test, unix))]
@@ -44,6 +45,37 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
 const PROJECT_HOOKS_COUNT: &str = "9";
+
+/// The variable that ends git's search for a repository at the agents roots (INT1-1): git in
+/// an agent folder, whose `.git` the IDE sandbox cannot read, then finds no repository
+/// instead of walking up to the project's and acting on it. The server's environment adds it.
+pub const CEILING_VARIABLE: &str = "GIT_CEILING_DIRECTORIES";
+
+/// The [`CEILING_VARIABLE`] value for one project: both agents roots a project uses,
+/// `<root>/.crazyagent/worktrees` and `<root>/worktrees`; git never searches from either
+/// upwards, and the project folder lies above both, so its own git is unchanged. Input: the
+/// canonical project folder. Output: the value, or `ide_project_folder_invalid` for a folder
+/// that is not absolute or holds a `:`, which separates the list.
+pub fn ceiling(root: &Path) -> Result<OsString, EngineError> {
+    if !root.is_absolute() || root.as_os_str().as_encoded_bytes().contains(&b':') {
+        return Err(failure("ide_project_folder_invalid"));
+    }
+    let mut value = root
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("worktrees")
+        .into_os_string();
+    value.push(":");
+    value.push(root.join("worktrees"));
+    assert_eq!(
+        value
+            .as_encoded_bytes()
+            .iter()
+            .filter(|byte| **byte == b':')
+            .count(),
+        1
+    );
+    Ok(value)
+}
 
 /// The workspace keys that keep the IDE's git to the repository at each section's root: no
 /// submodule detection, and no scan for repositories below a section or around an open

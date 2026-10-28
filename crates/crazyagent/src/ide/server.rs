@@ -677,7 +677,8 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// the built-in extension connects to and TMPDIR at its short temp folder, its server data
 /// folder as the working directory (the profile lets it read no folder above), stdout and
 /// stderr into the redacting `output` pipe, and its own process group. The git shim lets
-/// the project's hooks run in `root` only when `project_hooks` is on.
+/// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
+/// at `root`'s agents roots; a `root` holding a `:` is refused.
 fn command(
     build: &Path,
     folder: &Path,
@@ -696,6 +697,7 @@ fn command(
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
     let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
+    let ceiling = super::git::ceiling(root)?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));
@@ -742,6 +744,7 @@ fn command(
             &info.capability_path,
             socket,
             &written.locked,
+            &ceiling,
         ))
         .env("TMPDIR", &tmp)
         .stdin(Stdio::null())
