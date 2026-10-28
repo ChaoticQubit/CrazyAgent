@@ -1294,7 +1294,15 @@ async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, Engine
     .map_err(|_| failure("server_secret_invalid"))?
 }
 
+/// The code a refused plugins request is answered with: the engine's code when it is plain
+/// lowercase words of at most 96 bytes, else `plugins_outcome_unknown`. A storage answer
+/// that did not come within the owner's wait, which the shared engine waits name after a
+/// native sign-in read, is this protocol's `plugins_outcome_unknown` too, so a plugins
+/// client is never told to read a sign-in operation. Input: the error. Output: the code.
 fn public_code(error: EngineError) -> String {
+    if error == crate::engine::owner::native_auth::outcome_unknown() {
+        return unknown().0;
+    }
     if error.0.len() <= 96
         && error
             .0
