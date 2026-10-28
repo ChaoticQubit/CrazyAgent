@@ -1383,6 +1383,103 @@ fn an_own_branch_agent_never_writes_a_multi_pack_index_into_its_clone() {
 }
 
 #[test]
+fn a_multi_pack_index_an_agent_plants_after_the_engine_checked_its_clone_never_lands() {
+    use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["config", "user.email", "owner@local"],
+        &["config", "user.name", "owner"],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let clone = worktrees.join("agent-1");
+    crazyagent::landing::add_agent_clone(&case.project, &clone).unwrap();
+    let clone = clone.canonicalize().unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&clone);
+    let engine = case.root.join("engine");
+    fs::create_dir(&engine).unwrap();
+    let db = crazyagent::landing::open(&engine).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &case.project, &clone, &git_dir).unwrap();
+    let workspace = Workspace {
+        project: crazyagent::protocol::ProjectId::new("project-1").unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "1".into(),
+            label: "Agent 1".into(),
+        },
+        repository: case.project.clone(),
+        worktree: clone.clone(),
+        git_dir: git_dir.clone(),
+    };
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let commit = |file: &str| {
+        let committed = run(
+            &confined,
+            &profile,
+            &format!(
+                "cd {} && printf 'agent work\\n' > {file} && {git} add {file} && {git} commit -q -m {file}",
+                quoted(&clone),
+            ),
+        );
+        assert!(committed.status.success(), "{committed:?}");
+    };
+    let turn = |name: &str| TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: name.into(),
+        prompt_line: "Write work".into(),
+    };
+
+    commit("one.txt");
+    let set = crazyagent::landing::record_turn_end(&db, &workspace, &turn("turn-1"))
+        .unwrap()
+        .expect("the engine checked and fetched the clone");
+
+    let pack = git_dir.join("objects").join("pack");
+    let index = pack.join("multi-pack-index");
+    for script in [
+        format!("printf x > {}", quoted(&index)),
+        format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+        format!(
+            "cd {} && {git} repack -q -a -d && {git} multi-pack-index write",
+            quoted(&clone)
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &index);
+    }
+
+    commit("two.txt");
+    let again = crazyagent::landing::record_turn_end(&db, &workspace, &turn("turn-2"))
+        .unwrap()
+        .expect("the next check passes: no index was planted");
+    assert_eq!(again, set);
+    let head = run(
+        &confined,
+        &profile,
+        &format!("cd {} && {git} rev-parse HEAD", quoted(&clone)),
+    );
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+    let sets = crazyagent::landing::list(&db, &workspace.project).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(
+        sets[0].head, head,
+        "the set holds only the agent's own commits"
+    );
+    assert!(!index.exists());
+}
+
+#[test]
 fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(Path::new(AGENT_GIT).is_file());
     let case = case();
