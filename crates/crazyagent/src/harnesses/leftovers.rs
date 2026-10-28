@@ -33,6 +33,10 @@ const TABLE_TIME: Duration = Duration::from_secs(1);
 const TABLE_BYTES_MAX: u64 = 4 * 1024 * 1024;
 #[cfg(unix)]
 const TABLE_POLL: Duration = Duration::from_millis(5);
+/// How long past `TABLE_TIME` a stop waits for the listing thread to report a listing it
+/// killed at the deadline.
+#[cfg(unix)]
+const TABLE_GRACE: Duration = Duration::from_millis(100);
 /// The command that lists every process with what the lineage needs of it.
 #[cfg(unix)]
 const PS_TABLE: &[&str] = &[
@@ -290,7 +294,7 @@ fn same(known: &Process, now: &Process) -> bool {
 /// Output: each process with its parent's id, or uncertain when the listing fails or is out
 /// of bounds.
 #[cfg(unix)]
-fn table(argv: &[&str]) -> Result<Vec<(Process, i32)>, Unstopped> {
+fn table(argv: &'static [&'static str]) -> Result<Vec<(Process, i32)>, Unstopped> {
     let output = read_bounded(argv)?;
     let listing = String::from_utf8_lossy(&output);
     let user = rustix::process::getuid().as_raw();
@@ -298,16 +302,37 @@ fn table(argv: &[&str]) -> Result<Vec<(Process, i32)>, Unstopped> {
     parse(&listing, user, own)
 }
 
-/// Runs a listing command with a cleared environment and reads its output, at most
-/// `TABLE_BYTES_MAX` bytes within `TABLE_TIME`, and kills it past either bound, so a stalled
-/// or flooding listing never holds up a stop. Input: the program and its arguments.
-/// Output: the output of a run that exited 0 within both bounds, or uncertain.
+/// Runs a listing command with a cleared environment in a thread of its own and takes its
+/// output, at most `TABLE_BYTES_MAX` bytes within `TABLE_TIME` counted from before the
+/// spawn, so neither a spawn held up by a stalled exec nor a stalled or flooding listing
+/// holds up a stop. Input: the program and its arguments. Output: the output of a run that
+/// exited 0 within both bounds, or uncertain.
 #[cfg(unix)]
-fn read_bounded(argv: &[&str]) -> Result<Vec<u8>, Unstopped> {
+fn read_bounded(argv: &'static [&'static str]) -> Result<Vec<u8>, Unstopped> {
+    let deadline = Instant::now() + TABLE_TIME;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("lineage-table".into())
+        .spawn(move || {
+            let _ = sender.send(run_listing(argv, deadline));
+        })
+        .map_err(|_| Unstopped::Uncertain)?;
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE)
+        .ok()
+        .flatten()
+        .ok_or(Unstopped::Uncertain)
+}
+
+/// Starts a listing command and reads its output until `deadline`, killing it past the
+/// deadline or `TABLE_BYTES_MAX`, a child whose spawn returned late included.
+/// Inputs: the program with its arguments and the deadline. Output: the output of a run
+/// that exited 0 within both bounds, or none.
+#[cfg(unix)]
+fn run_listing(argv: &[&str], deadline: Instant) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    let (program, arguments) = argv.split_first().ok_or(Unstopped::Uncertain)?;
-    let deadline = Instant::now() + TABLE_TIME;
+    let (program, arguments) = argv.split_first()?;
     let mut child = crate::spawn_gate::spawn(
         Command::new(program)
             .args(arguments)
@@ -318,11 +343,11 @@ fn read_bounded(argv: &[&str]) -> Result<Vec<u8>, Unstopped> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),
     )
-    .map_err(|_| Unstopped::Uncertain)?;
+    .ok()?;
     let read = child.stdout.take().and_then(|stdout| {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::Builder::new()
-            .name("lineage-table".into())
+            .name("lineage-table-read".into())
             .spawn(move || {
                 let mut bytes = Vec::new();
                 let read = stdout.take(TABLE_BYTES_MAX + 1).read_to_end(&mut bytes);
@@ -351,8 +376,8 @@ fn read_bounded(argv: &[&str]) -> Result<Vec<u8>, Unstopped> {
         }
     };
     match (read, status) {
-        (Some(bytes), Some(status)) if status.success() => Ok(bytes),
-        _ => Err(Unstopped::Uncertain),
+        (Some(bytes), Some(status)) if status.success() => Some(bytes),
+        _ => None,
     }
 }
 
