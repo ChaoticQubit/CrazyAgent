@@ -36,6 +36,13 @@ export function stillResuming(banner: Banner): boolean {
   return banner.runs.some((run) => run.state === "interrupted" || run.state === "resuming");
 }
 
+/** Whether the banner reads again on its timer: while a run still waits to resume, and after a
+ * failed read of a kept banner, so its stale runs refresh once the engine answers. A failed first
+ * read offers Try again instead. Inputs: the banner shown and the failure line. Output: true then. */
+export function keepsReading(banner: Banner | null, problem: string): boolean {
+  return banner !== null && (stillResuming(banner) || problem !== "");
+}
+
 /** Describes one interrupted run: who, which turn and what it was asked, and what happens next.
  * Input: the run. Output: one line. */
 export function runLine(run: RecoveryRun): string {
@@ -142,7 +149,7 @@ export function RecoveryBanner({ project }: { project: string }) {
   const [note, setNote] = useState("");
   useEffect(() => { if (loaded.kind === "ok") setLast(loaded.value); }, [loaded]);
   const { banner, problem } = latestBanner(loaded, last);
-  const polling = banner !== null && stillResuming(banner);
+  const polling = keepsReading(banner, problem);
   useEffect(() => {
     if (!polling) return undefined;
     const timer = window.setInterval(reload, RECOVERY_POLL_MS);

@@ -147,8 +147,25 @@ test("a failed read keeps the last banner in view and the reads going, and a fai
   assert.match(banner.latestBanner({ kind: "not_ready" }, null).problem, /Recovery isn't ready in this engine yet\./);
 
   const page = readFileSync(new URL("../src/screens/project/recovery-banner.tsx", import.meta.url), "utf8");
-  assert.match(page, /const \{ banner, problem \} = latestBanner\(loaded, last\);\n  const polling = banner !== null && stillResuming\(banner\);/);
+  assert.match(page, /const \{ banner, problem \} = latestBanner\(loaded, last\);\n  const polling = keepsReading\(banner, problem\);/);
   assert.match(page, /useEffect\(\(\) => \{ if \(loaded\.kind === "ok"\) setLast\(loaded\.value\); \}, \[loaded\]\);/);
   assert.match(page, /<Button size="small" icon="refresh-cw" onClick=\{reload\}>Try again<\/Button>/);
   assert.match(page, /note=\{\[note, problem\]\.filter\(Boolean\)\.join\(" "\)\}/);
+});
+
+test("a failed read after Retry or Dismiss, with nothing resuming, keeps the banner reading", () => {
+  const failedOnly = { runs: [run(3, "Sub-agent 3", "failed", { reason: "The account is unavailable." })], notices: [], more: 0 };
+  const busy = { kind: "error", code: "owner_busy", message: "" };
+  const kept = banner.latestBanner(busy, failedOnly);
+  assert.equal(kept.banner, failedOnly, "the old copy stays in view");
+  assert.equal(banner.stillResuming(kept.banner), false, "nothing in it resumes");
+  assert.equal(banner.keepsReading(kept.banner, kept.problem), true, "so the failed read itself keeps the reads going until the retried run's outcome shows");
+  const read = banner.latestBanner({ kind: "ok", value: failedOnly }, failedOnly);
+  assert.equal(banner.keepsReading(read.banner, read.problem), false, "a good read with only a failed run waits for Retry, not a timer");
+  const resuming = { runs: [run(5, "Grace", "resuming")], notices: [], more: 0 };
+  assert.equal(banner.keepsReading(resuming, ""), true);
+  const first = banner.latestBanner(busy, null);
+  assert.equal(banner.keepsReading(first.banner, first.problem), false, "a failed first read offers Try again instead");
+  const quiet = banner.latestBanner({ kind: "error", code: "engine_unreachable", message: "" }, failedOnly);
+  assert.equal(banner.keepsReading(quiet.banner, quiet.problem), false, "the reconnect reads again, not the timer");
 });
