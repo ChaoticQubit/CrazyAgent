@@ -11,9 +11,10 @@ pub(super) const IDE_TAB_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Every code an IDE tab request can answer an owner client with: this protocol's own, the
 /// IDE server register's, workspace writer's, settings lock's and sandbox's, the extension
-/// installs and the capability issue every open runs, and the owner connection's it
-/// travels on.
+/// installs, the capability issue and the agents exclude line every open runs, and the
+/// owner connection's it travels on.
 pub const IDE_TAB_CODES: &[&str] = &[
+    "git_exclude_invalid",
     "ide_agent_invalid",
     "ide_build_invalid",
     "ide_build_not_ready",
