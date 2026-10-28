@@ -17,9 +17,11 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
 const TAB_ROWS: usize = 2;
+const HEADER_EXTRA: &str = "Agents also read these lines of its SKILL.md header:";
 
-/// Drops the frontmatter block at the top of a SKILL.md, which the page shows as the
-/// skill's name and description instead. Input: the file text. Output: the Markdown body.
+/// Drops the frontmatter block at the top of a SKILL.md: the page shows it as the skill's
+/// name and description, plus any other header line agents read. Input: the file text.
+/// Output: the Markdown body.
 pub fn skill_body(text: &str) -> &str {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -34,6 +36,37 @@ pub fn skill_body(text: &str) -> &str {
         }
     }
     text
+}
+
+/// The lines of a SKILL.md's frontmatter block, between its two `---` lines, or none when
+/// the file does not open with a closed block. Input: the file text. Output: the lines.
+fn skill_header(text: &str) -> Vec<&str> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return Vec::new();
+    }
+    let mut header = Vec::new();
+    for line in lines {
+        if line.trim_end() == "---" {
+            return header;
+        }
+        header.push(line);
+    }
+    Vec::new()
+}
+
+/// Wraps one header line to the width, keeping its leading spaces on every part so an
+/// indented continuation still reads as part of the field above it.
+/// Inputs: the printable line and the width. Output: the parts.
+fn indented(line: &str, limit: usize) -> Vec<String> {
+    let body = line.trim_start_matches(' ');
+    let indent = (line.len() - body.len()).min(limit / 2);
+    let pad = " ".repeat(indent);
+    wrap(body, limit - indent)
+        .into_iter()
+        .map(|part| format!("{pad}{part}"))
+        .collect()
 }
 
 /// A file size as the page lists it. Input: bytes. Output: such as "812 B" or "4.2 KB".
@@ -241,6 +274,25 @@ impl SkillDetailPage {
             Role::Muted,
             theme,
         ));
+        let (name, description) = (
+            format!("name: {}", skill.name),
+            format!("description: {}", skill.description),
+        );
+        let extra: Vec<&str> = skill_header(&detail.text)
+            .into_iter()
+            .filter(|line| !line.trim().is_empty() && *line != name && *line != description)
+            .collect();
+        if !extra.is_empty() {
+            lines.push(Line::default());
+            lines.push(styled(HEADER_EXTRA, Role::Warning, theme));
+            for line in extra {
+                lines.extend(
+                    indented(&printable(line.to_owned()), limit)
+                        .into_iter()
+                        .map(|part| styled(part, Role::Muted, theme)),
+                );
+            }
+        }
         lines.push(Line::default());
         lines.extend(
             project_markdown::render(skill_body(&detail.text), limit)
