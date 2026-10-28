@@ -297,67 +297,65 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
     assert_eq!(hooks_path(&off, &project), forced);
 }
 
-/// INT1-1: a git that cannot read an agent folder's `.git` treats it as missing and walks
-/// up to the project's repository. With the project's ceiling, git in an agent folder of
-/// either agents root finds no repository, while the project folder and its other folders
-/// keep theirs; a folder holding a `:` or a relative one is refused.
+/// INT1-1, INT1-R2-1: a git that cannot read an agent folder's `.git` treats it as missing
+/// and walks up to the project's repository. The ceiling is the agents root of the project's
+/// own layout: git in an agent folder finds no repository, while the project folder and its
+/// other folders keep theirs, a `.crazyagent` project's own top-level `worktrees` folder among
+/// them; a folder holding a `:` or a relative one is refused.
 #[test]
-fn the_ceiling_stops_git_at_the_agents_roots_and_keeps_the_project() {
+fn the_ceiling_stops_git_at_the_layouts_agents_root_and_keeps_the_project() {
     assert!(ceiling(Path::new("relative/project")).is_err());
     assert!(ceiling(Path::new("/projects/a:b")).is_err());
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
-    let project = base.join("project");
-    let inner = project
-        .join(".crazyagent")
-        .join("worktrees")
-        .join("agent-1");
-    let outer = project.join("worktrees").join("agent-2");
-    let own = project.join("src");
-    for folder in [&inner, &outer, &own] {
-        std::fs::create_dir_all(folder).unwrap();
-    }
-    ok(&project, &["init", "-q"]);
-    let value = ceiling(&project).unwrap();
-    assert_eq!(
-        value,
-        std::ffi::OsString::from(format!(
-            "{}:{}",
-            project.join(".crazyagent/worktrees").display(),
-            project.join("worktrees").display()
-        ))
-    );
-    let top = |dir: &Path, bounded: bool| {
-        let env: Vec<(&str, &str)> = if bounded {
-            vec![(CEILING_VARIABLE, value.to_str().unwrap())]
-        } else {
-            Vec::new()
+    let newer = base.join("newer");
+    let older = base.join("older");
+    let layouts = [
+        (
+            &newer,
+            newer.join(".crazyagent").join("worktrees"),
+            newer.join("worktrees").join("sub"),
+        ),
+        (&older, older.join("worktrees"), older.join("src")),
+    ];
+    for (project, agents, own) in &layouts {
+        let agent = agents.join("agent-1");
+        for folder in [&agent, own, &project.join("src")] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        ok(project, &["init", "-q"]);
+        let value = ceiling(project).unwrap();
+        assert_eq!(&value, agents.as_os_str());
+        let top = |dir: &Path, bounded: bool| {
+            let env: Vec<(&str, &str)> = if bounded {
+                vec![(CEILING_VARIABLE, value.to_str().unwrap())]
+            } else {
+                Vec::new()
+            };
+            git(dir, &env, &["rev-parse", "--show-toplevel"])
         };
-        git(dir, &env, &["rev-parse", "--show-toplevel"])
-    };
-    for agent in [&inner, &outer] {
-        let open = top(agent, false);
+        let open = top(&agent, false);
         assert!(open.status.success());
         assert_eq!(
             String::from_utf8_lossy(&open.stdout).trim(),
             project.to_str().unwrap(),
             "without it, git in an agent folder acts on the project"
         );
-        let bounded = top(agent, true);
-        assert!(!bounded.status.success());
+        let bounded = top(&agent, true);
+        assert!(!bounded.status.success(), "{}", agent.display());
         assert!(
             String::from_utf8_lossy(&bounded.stderr).contains("not a git repository"),
             "{}",
             String::from_utf8_lossy(&bounded.stderr)
         );
-    }
-    for dir in [&project, &own] {
-        let bounded = top(dir, true);
-        assert!(bounded.status.success(), "{}", dir.display());
-        assert_eq!(
-            String::from_utf8_lossy(&bounded.stdout).trim(),
-            project.to_str().unwrap()
-        );
+        for dir in [*project, own, &project.join("src")] {
+            let bounded = top(dir, true);
+            assert!(bounded.status.success(), "{}", dir.display());
+            assert_eq!(
+                String::from_utf8_lossy(&bounded.stdout).trim(),
+                project.to_str().unwrap()
+            );
+        }
     }
 }
 

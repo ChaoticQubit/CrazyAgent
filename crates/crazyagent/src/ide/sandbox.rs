@@ -238,8 +238,8 @@ fn locks(held: &[(&Path, &Path)]) -> String {
 /// server reads no `.vscode` folder anywhere in an agent worktree, no `.code-workspace` file
 /// in one, and nothing at or under the `.git` at an agent folder's top, under either agents
 /// root a project uses (`.crazyagent/worktrees` or `worktrees`), in any letter case. With
-/// both agents roots as git's search ceiling ([`super::git::ceiling`]), git in an agent
-/// folder then finds no repository, whether its `.git` is an agent's own clone, a linked
+/// the layout's agents root as git's search ceiling ([`super::git::ceiling`]), git in an
+/// agent folder then finds no repository, whether its `.git` is an agent's own clone, a linked
 /// worktree's `gitdir:` file or a planted one, neither runs a program its config or hooks
 /// name nor walks up to the project's repository. Seatbelt checks a followed link's own path as well as where it leads, so a
 /// link named so is refused too. The engine's workspace file and Remote settings stay the

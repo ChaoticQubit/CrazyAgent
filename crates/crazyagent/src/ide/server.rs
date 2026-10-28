@@ -702,7 +702,7 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// folder as the working directory (the profile lets it read no folder above), stdout and
 /// stderr into the redacting `output` pipe, and its own process group. The git shim lets
 /// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
-/// at `root`'s agents roots; a `root` holding a `:` is refused.
+/// at `root`'s agents root; a `root` holding a `:` is refused.
 fn command(
     build: &Path,
     folder: &Path,

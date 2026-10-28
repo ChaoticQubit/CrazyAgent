@@ -373,8 +373,8 @@ fn server_env_holds_only_allowlisted_names() {
     let capability = Path::new("/private/tmp/ide/project/capability");
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
-    let ceiling = crate::ide::git::ceiling(Path::new("/private/tmp/project")).unwrap();
-    let built = env::server_env(source, capability, socket, locked, &ceiling);
+    let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
+    let built = env::server_env(source, capability, socket, locked, ceiling);
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -403,7 +403,7 @@ fn server_env_holds_only_allowlisted_names() {
     ));
     expected.push((
         crate::ide::git::CEILING_VARIABLE,
-        "/private/tmp/project/.crazyagent/worktrees:/private/tmp/project/worktrees",
+        "/private/tmp/project/.crazyagent/worktrees",
     ));
     expected.extend(crate::ide::git::CONFIG_ENV);
     expected.sort();

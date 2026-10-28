@@ -62,6 +62,8 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_server_port_taken: "Another program took the IDE's port. Try again.",
   ide_port_unavailable: "No free port was found for the IDE. Try again.",
   ide_token_unreadable: "The IDE's sign-in file couldn't be read. Try again.",
+  ide_project_folder_invalid: "The IDE can't open this project's folder: it's missing or unreadable, or its path holds a colon (:), which the IDE's git can't use. Check the folder is still there; for a colon, add the project again from a folder whose path has none.",
+  git_exclude_invalid: "The IDE didn't start: it couldn't add the agents folder to the project's .git/info/exclude, which keeps agent files out of your commits. Make .git/info a plain folder and .git/info/exclude a plain file under 1 MiB, not links, then open the IDE again.",
 };
 
 /** Says what the IDE tab shows for the engine's IDE state. Input: the state. Output: the
