@@ -235,6 +235,13 @@ pub(in crate::tui) struct Preview {
 }
 
 impl Preview {
+    /// The offset of the chunk this preview reads next: 0 before its first chunk, then the
+    /// engine's next offset, so a chunk read for an earlier preview of the same file is
+    /// told apart. Takes the preview. Returns the offset, or none once it is complete.
+    fn wanted(&self) -> Option<u64> {
+        if self.loaded { self.next } else { Some(0) }
+    }
+
     /// Gives the report rendered for a width, rendering once per width.
     /// Takes the width in cells.
     /// Returns the wrapped lines.
@@ -804,8 +811,12 @@ impl ProjectScreen {
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
                     SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
-                    SetupQuery::Item { path, .. } => {
-                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                    SetupQuery::Item { path, offset, .. } => {
+                        if let Some(preview) = self
+                            .preview
+                            .as_mut()
+                            .filter(|p| &p.path == path && p.wanted() == Some(*offset))
+                        {
                             preview.next = None;
                             preview.problem = Some(plain_problem(&problem));
                             preview.cache = None;
@@ -850,7 +861,11 @@ impl ProjectScreen {
                 self.read_paths_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
-                if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                if let Some(preview) = self
+                    .preview
+                    .as_mut()
+                    .filter(|p| p.path == chunk.path && p.wanted() == Some(chunk.offset))
+                {
                     preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
