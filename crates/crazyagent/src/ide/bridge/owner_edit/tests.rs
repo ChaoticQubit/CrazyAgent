@@ -50,7 +50,21 @@ fn heard(path: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How many owner edits the store keeps. The landing store makes its owner edits table on
+/// the first edit it records, so a store with no table has recorded none.
 fn edits(case: &Case) -> i64 {
+    let made: bool = case
+        .db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='landing_owner_edits')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !made {
+        return 0;
+    }
     case.db
         .query_row("SELECT COUNT(*) FROM landing_owner_edits", [], |row| {
             row.get(0)

@@ -85,7 +85,7 @@ impl Case {
 }
 
 /// The 37-byte handshake: four magic bytes, a slot byte and a 32-byte token.
-fn packet(magic: &[u8; 4], slot: u8, token: &[u8; 32]) -> [u8; 37] {
+pub(in crate::ide::bridge) fn packet(magic: &[u8; 4], slot: u8, token: &[u8; 32]) -> [u8; 37] {
     let mut packet = [0; 37];
     packet[..4].copy_from_slice(magic);
     packet[4] = slot;
@@ -116,7 +116,7 @@ fn token(path: &Path) -> [u8; 32] {
 /// Swaps a capability file's token for its session token, as the extension does first,
 /// and checks the file is gone. Inputs: the owner socket and the capability path. Output:
 /// the session token.
-async fn session(socket: &Path, path: &Path) -> [u8; 32] {
+pub(in crate::ide::bridge) async fn session(socket: &Path, path: &Path) -> [u8; 32] {
     let file = token(path);
     let project = path
         .parent()
@@ -306,13 +306,16 @@ async fn ide_capability_allows_only_ide_requests_for_its_project() {
         exchange(&socket, ide, &request("alpha", change_sets)).await,
         Some(IdeReply::Ok { data: json!([]) })
     );
-    let unbuilt = json!({
+    let asked = json!({
         "name": "ide.extension_request",
         "args": { "id": "acme.tools", "version": "1.2.3" }
     });
     assert_eq!(
-        exchange(&socket, ide, &request("alpha", unbuilt)).await,
-        rejected("ide_request_unavailable")
+        exchange(&socket, ide, &request("alpha", asked)).await,
+        Some(IdeReply::Ok {
+            data: json!({ "state": "confirm" })
+        }),
+        "a capability may ask for an extension for its own project, which the owner confirms"
     );
     assert_eq!(
         exchange(
@@ -766,11 +769,20 @@ fn extension_installs_as_one_folder_with_the_embedded_files() {
     );
     let main = manifest["main"].as_str().unwrap().trim_start_matches("./");
     assert!(EXTENSION_FILES.iter().any(|(name, _)| *name == main));
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension/out");
-    let mut compiled: Vec<String> = std::fs::read_dir(out)
-        .unwrap()
-        .map(|entry| format!("out/{}", entry.unwrap().file_name().to_str().unwrap()))
-        .collect();
+    let extension = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ide-extension");
+    let mut compiled = Vec::new();
+    let mut folders = vec![extension.join("out")];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else {
+                let name = path.strip_prefix(&extension).unwrap();
+                compiled.push(name.to_str().unwrap().to_owned());
+            }
+        }
+    }
     compiled.sort();
     let mut embedded: Vec<&str> = EXTENSION_FILES
         .iter()
@@ -1096,4 +1108,31 @@ async fn sandboxed_terminal_is_refused_where_the_sandbox_is_not_qualified() {
     );
     assert!(!case.root.path().join("ide-shell").exists());
     case.stop().await;
+}
+
+/// Revoking every capability as the owner server stops keeps removing the later files after
+/// one fails, and answers that first failure.
+#[test]
+fn revoking_every_capability_keeps_going_past_a_replaced_file() {
+    let root = tempfile::tempdir().unwrap();
+    let grants = Grants::default();
+    let alpha = grants
+        .issue(root.path(), &ProjectId::new("alpha").unwrap())
+        .unwrap();
+    let beta = grants
+        .issue(root.path(), &ProjectId::new("beta").unwrap())
+        .unwrap();
+    let replacement = alpha.with_extension("new");
+    std::fs::write(&replacement, "replaced\n").unwrap();
+    std::fs::rename(&replacement, &alpha).unwrap();
+    assert_eq!(
+        grants.revoke_all().unwrap_err().0,
+        "ide_capability_replaced_preserved"
+    );
+    assert_eq!(std::fs::read_to_string(&alpha).unwrap(), "replaced\n");
+    assert!(
+        std::fs::symlink_metadata(&beta).is_err(),
+        "the capability after the replaced one is still revoked"
+    );
+    assert!(grants.revoke_all().is_ok(), "nothing is left to revoke");
 }

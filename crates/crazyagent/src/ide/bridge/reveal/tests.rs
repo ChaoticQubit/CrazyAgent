@@ -70,18 +70,18 @@ impl Desk {
         self.service.owner_runtime().unwrap()
     }
 
-    /// Issues a project's IDE capability the way an IDE server launch does. Input: the
-    /// project. Output: the owner socket and the handshake packet the extension sends.
-    fn capability(&self, project: &str) -> (PathBuf, [u8; 37]) {
+    /// Issues a project's IDE capability the way an IDE server launch does and swaps its
+    /// one-time file token for a session, as the built-in extension does before any other
+    /// call. Input: the project. Output: the owner socket and the session's handshake packet.
+    async fn capability(&self, project: &str) -> (PathBuf, [u8; 37]) {
         let path = issue(self.runtime(), &ProjectId::new(project).unwrap()).unwrap();
         let env = launch_env(self.runtime(), &path).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        let mut packet = [0; 37];
-        packet[..4].copy_from_slice(MAGIC);
-        for (at, pair) in text.as_bytes().chunks(2).enumerate() {
-            packet[5 + at] = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
-        }
-        (PathBuf::from(&env[1].1), packet)
+        let socket = PathBuf::from(&env[1].1);
+        let session = crate::ide::bridge::tests::session(&socket, &path).await;
+        (
+            socket,
+            crate::ide::bridge::tests::packet(MAGIC, 0, &session),
+        )
     }
 
     /// Asks the engine, as the TUI does, to show a target in a project's IDE.
@@ -175,8 +175,8 @@ async fn ack(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tui_open_in_ide_sends_one_reveal_to_the_running_ide() {
     let desk = Desk::start().await;
-    let (socket, alpha) = desk.capability("alpha");
-    let (_, beta) = desk.capability("beta");
+    let (socket, alpha) = desk.capability("alpha").await;
+    let (_, beta) = desk.capability("beta").await;
     let mut events = subscribe(&socket, alpha, "alpha").await;
     let mut other = subscribe(&socket, beta, "beta").await;
 
@@ -248,7 +248,7 @@ async fn open_in_ide_without_a_running_desktop_reports_it() {
         "ide_not_running"
     );
 
-    let (socket, alpha) = desk.capability("alpha");
+    let (socket, alpha) = desk.capability("alpha").await;
     assert_eq!(
         refused(desk.reveal("alpha", brief()).await),
         "ide_not_running",
@@ -269,7 +269,7 @@ async fn open_in_ide_without_a_running_desktop_reports_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reveal_names_only_paths_inside_the_workspace_folders() {
     let desk = Desk::start().await;
-    let (socket, alpha) = desk.capability("alpha");
+    let (socket, alpha) = desk.capability("alpha").await;
     let mut events = subscribe(&socket, alpha, "alpha").await;
     let outside = desk.folders[1].join("context");
     std::os::unix::fs::symlink(&outside, desk.folders[0].join("context").join("linked")).unwrap();
@@ -330,7 +330,7 @@ async fn a_reveal_names_only_paths_inside_the_workspace_folders() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reveal_the_ide_never_acknowledges_ends_unanswered() {
     let desk = Desk::start().await;
-    let (socket, alpha) = desk.capability("alpha");
+    let (socket, alpha) = desk.capability("alpha").await;
     let mut events = subscribe(&socket, alpha, "alpha").await;
     let started = std::time::Instant::now();
     let asked = desk.reveal("alpha", brief());

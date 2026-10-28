@@ -564,9 +564,14 @@ impl Grants {
     pub(crate) fn revoke_all(&self) -> Result<(), EngineError> {
         let grants =
             std::mem::take(&mut *self.live.lock().map_err(|_| failure("ide_unavailable"))?);
-        grants.iter().fold(Ok(()), |result, grant| {
-            result.and(remove_capability(&grant.file, grant.identity))
-        })
+        let mut first = Ok(());
+        for grant in &grants {
+            let removed = remove_capability(&grant.file, grant.identity);
+            if first.is_ok() {
+                first = removed;
+            }
+        }
+        first
     }
 }
 
