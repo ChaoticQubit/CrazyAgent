@@ -6,6 +6,7 @@ const base_content_js_1 = require("./base-content.js");
 const comments_js_1 = require("./comments.js");
 const engine_js_1 = require("./engine.js");
 const extensions_js_1 = require("./extensions.js");
+const git_js_1 = require("./git.js");
 const lock_js_1 = require("./lock.js");
 const readonly_js_1 = require("./readonly.js");
 const reveal_js_1 = require("./reveal.js");
@@ -29,6 +30,7 @@ const features = [
     reveal_js_1.reveal,
     terminal_js_1.sandboxedTerminal,
     trust_js_1.registerTrust,
+    git_js_1.remoteGit,
 ];
 function activate(context) {
     (0, lock_js_1.startLock)(context, process.env);

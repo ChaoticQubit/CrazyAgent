@@ -696,6 +696,14 @@ fn ide_request_bounds_are_refused() {
         json!({ "name": "ide.extension_request", "args": { "id": "pub.name", "version": "1.0.0/x" } }),
         json!({ "name": "ide.terminal", "args": { "cols": SIZE_MIN - 1, "rows": 24 } }),
         json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": SIZE_MAX + 1 } }),
+        json!({ "name": "ide.git", "args": { "args": [], "folder": "/tmp/project" } }),
+        json!({ "name": "ide.git", "args": { "args": vec!["fetch"; GIT_ARGS_MAX + 1], "folder": "/tmp/project" } }),
+        json!({ "name": "ide.git", "args": { "args": ["push", ""], "folder": "/tmp/project" } }),
+        json!({ "name": "ide.git", "args": { "args": ["push", "a".repeat(GIT_ARG_BYTES_MAX + 1)], "folder": "/tmp/project" } }),
+        json!({ "name": "ide.git", "args": { "args": ["push", "or\u{0}igin"], "folder": "/tmp/project" } }),
+        json!({ "name": "ide.git", "args": { "args": ["push"], "folder": "project" } }),
+        json!({ "name": "ide.git", "args": { "args": ["push"], "folder": format!("/{}", "a".repeat(PATH_BYTES_MAX)) } }),
+        json!({ "name": "ide.git", "args": { "args": ["push"], "folder": "/tmp/pro\u{0}ject" } }),
     ];
     for call in refused {
         let request: IdeRequest = serde_json::from_slice(&request("alpha", call.clone())).unwrap();
@@ -717,6 +725,12 @@ fn ide_request_bounds_are_refused() {
     ))
     .unwrap();
     terminal.validate().unwrap();
+    let git: IdeRequest = serde_json::from_slice(&request(
+        "alpha",
+        json!({ "name": "ide.git", "args": { "args": ["push", "-u", "origin", "main"], "folder": "/tmp/project" } }),
+    ))
+    .unwrap();
+    git.validate().unwrap();
     let elsewhere = request(
         "alpha",
         json!({ "name": "ide.terminal", "args": { "cols": 80, "rows": 24, "cwd": "/tmp" } }),
@@ -1149,6 +1163,119 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
     for call in &reads {
         assert_eq!(outcome_unknown(call), None, "{call:?}");
     }
+}
+
+/// An IDE git command runs under `GIT_TIME` and answers within its margin, before the
+/// extension's git relay stops waiting, so the relay always hands git the engine's answer
+/// or its refusal, never a timer of its own.
+#[test]
+fn an_ide_git_command_answers_before_the_extension_relay_stops_waiting() {
+    let relay = include_str!("../../../../../apps/ide-extension/src/git.ts");
+    let relay_ms: u64 = relay
+        .split("export const GIT_REQUEST_MS = ")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("the extension declares its git request timer")
+        .replace('_', "")
+        .parse()
+        .unwrap();
+    assert!(GIT_TIME + GIT_ANSWER_MARGIN < Duration::from_millis(relay_ms));
+    let call = IdeCall::Git {
+        args: vec!["push".into(), "origin".into(), "main".into()],
+        folder: "/tmp/project".into(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let before = Instant::now();
+    let answered_by = bound(&call, deadline);
+    assert!(answered_by >= before + GIT_TIME + GIT_ANSWER_MARGIN);
+    assert!(answered_by <= Instant::now() + GIT_TIME + GIT_ANSWER_MARGIN);
+}
+
+/// The IDE's push runs in the engine for the project's own folder and lands on a real git
+/// daemon on 127.0.0.1, while another project's folder, a `-c` override and an unknown
+/// remote are refused without running git.
+#[tokio::test]
+async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else() {
+    use super::remote_git::tests::{Daemon, ok, owner_repository};
+    let mut case = Case::start().await;
+    let served = case.root.path().join("served");
+    std::fs::create_dir(&served).unwrap();
+    ok(
+        &served,
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    let daemon = Daemon::start(&served);
+    let folder = case.root.path().join("projects").join("alpha");
+    owner_repository(&folder, &daemon.url("remote.git"));
+    std::fs::write(folder.join("notes.md"), "Planting notes.\n").unwrap();
+    ok(&folder, &["add", "notes.md"]);
+    ok(&folder, &["commit", "-q", "-m", "Write the notes"]);
+    let head = ok(&folder, &["rev-parse", "HEAD"]);
+    let project = ProjectId::new("alpha").unwrap();
+    let capability = issue(&case.runtime, &project).unwrap();
+    let socket = case.socket(&capability);
+    let ide = packet(MAGIC, 0, &session(&socket, &capability).await);
+    let call = |args: &[&str], folder: &Path| {
+        request(
+            "alpha",
+            json!({ "name": "ide.git", "args": { "args": args, "folder": folder } }),
+        )
+    };
+
+    let pushed = exchange(
+        &socket,
+        ide,
+        &call(&["push", "origin", "main:main"], &folder),
+    )
+    .await;
+    let Some(IdeReply::Ok { data }) = pushed else {
+        panic!("{pushed:?}");
+    };
+    assert_eq!(data["code"], json!(0), "{data}");
+    assert!(
+        data["stderr"].as_str().unwrap().contains("main -> main"),
+        "{data}"
+    );
+    assert_eq!(
+        ok(
+            &served.join("remote.git"),
+            &["rev-parse", "refs/heads/main"]
+        ),
+        head
+    );
+
+    let beta = case.root.path().join("projects").join("beta");
+    for (args, folder, code) in [
+        (
+            ["push", "origin", "main"].as_slice(),
+            beta.as_path(),
+            "ide_git_folder_refused",
+        ),
+        (
+            &["push", "origin", "main"],
+            folder.join("src").as_path(),
+            "ide_git_folder_refused",
+        ),
+        (
+            &["-c", "core.sshCommand=touch /tmp/owned", "push"],
+            folder.as_path(),
+            "ide_git_refused",
+        ),
+        (
+            &["push", "upstream", "main"],
+            folder.as_path(),
+            "ide_git_remote_unknown",
+        ),
+    ] {
+        assert_eq!(
+            exchange(&socket, ide, &call(args, folder)).await,
+            rejected(code),
+            "{args:?} in {}",
+            folder.display()
+        );
+    }
+    drop(daemon);
+    case.stop().await;
 }
 /// Reads one frame of any kind as JSON, or none once the engine closed the connection.
 #[cfg(target_os = "macos")]

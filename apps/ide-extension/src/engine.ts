@@ -163,11 +163,12 @@ export class Engine implements Disposable {
 
   /**
    * Sends one bridge call and waits for its reply. Input: the call name, such as
-   * `ide.change_sets`, and its arguments. Output: the reply. Rejects without a session,
-   * on a broken connection, a malformed frame or no reply within 30 seconds.
+   * `ide.change_sets`, its arguments and how long to wait, 30 seconds unless the call runs
+   * longer in the engine. Output: the reply. Rejects without a session, on a broken
+   * connection, a malformed frame or no reply in time.
    */
-  request<T>(name: string, args: Record<string, unknown> = {}): Promise<Reply<T>> {
-    return this.#token().then((token) => this.#exchange<T>(token, name, args));
+  request<T>(name: string, args: Record<string, unknown> = {}, timeMs = REQUEST_TIME_MS): Promise<Reply<T>> {
+    return this.#token().then((token) => this.#exchange<T>(token, name, args, timeMs));
   }
 
   /**
@@ -215,11 +216,16 @@ export class Engine implements Disposable {
   }
 
   /** Sends one call with a token on its own connection and waits for the one reply. */
-  #exchange<T>(token: Buffer, name: string, args: Record<string, unknown>): Promise<Reply<T>> {
+  #exchange<T>(
+    token: Buffer,
+    name: string,
+    args: Record<string, unknown>,
+    timeMs = REQUEST_TIME_MS,
+  ): Promise<Reply<T>> {
     return new Promise((resolve, reject) => {
       const socket = this.#dial(token, name, args);
       const reader = new FrameReader();
-      const timer = setTimeout(() => socket.destroy(new Error("ide_request_timeout")), REQUEST_TIME_MS);
+      const timer = setTimeout(() => socket.destroy(new Error("ide_request_timeout")), timeMs);
       socket.on("data", (chunk: Buffer) => {
         try {
           const [reply] = reader.push(chunk);
