@@ -2415,6 +2415,8 @@ impl TeamRuntime {
                 return Ok(Err(problem));
             }
         };
+        let made =
+            NewClone((kept.is_none() && layout == Layout::Clone).then(|| plan.working_dir.clone()));
         let worktree = (plan.working_dir != root)
             .then(|| {
                 plan.working_dir
@@ -2458,6 +2460,7 @@ impl TeamRuntime {
                 params![id, stored.project_id.as_str(), landing[0], landing[1], landing[2]],
             )
             .map_err(error)?;
+        made.keep();
         if kept.is_none() {
             let paths = landing.each_ref().map(Path::new);
             let started = crate::landing::open(&self.root).and_then(|db| {
@@ -2689,6 +2692,7 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
+        let mut made = NewClone(None);
         match (adopt, layout) {
             (true, _) => {}
             (false, Layout::Linked) => {
@@ -2702,7 +2706,8 @@ impl TeamRuntime {
                         "the agent's own copy of the project could not be made",
                         Some(&e.0),
                     )
-                })?
+                })?;
+                made = NewClone(Some(worktree.clone()));
             }
         }
         let working_dir = worktree
@@ -2757,6 +2762,7 @@ impl TeamRuntime {
             },
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
+        made.keep();
         Ok((root, plan, mode))
     }
 
@@ -4376,6 +4382,27 @@ fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let (name, email) = crate::landing::owner_git_identity(root, &home).ok()?;
     GitIdentity::new(name, email).ok()
+}
+
+/// The agent's own clone a launch made and has not recorded yet (GA-R2). Dropped before
+/// `keep`, it removes the clone, so a launch that fails after making it leaves no checkout
+/// that no agent row or cleanup would reach. Holds the folder, or none when the launch made
+/// no clone.
+struct NewClone(Option<PathBuf>);
+
+impl NewClone {
+    /// Keeps the clone once the launch no longer fails before recording it.
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for NewClone {
+    fn drop(&mut self) {
+        if let Some(folder) = self.0.take() {
+            let _ = std::fs::remove_dir_all(folder);
+        }
+    }
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,

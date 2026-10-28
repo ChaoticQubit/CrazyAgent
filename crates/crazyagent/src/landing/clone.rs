@@ -45,11 +45,31 @@ pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError>
         b"sha256\n" => "sha256",
         _ => return Err(failure("changes_git_unsupported")),
     };
+    std::fs::create_dir(worktree).map_err(|_| failure("changes_git_failed"))?;
+    let filled = fill(worktree, &branch, alternate, format, &head);
+    if filled.is_err() {
+        let _ = std::fs::remove_dir_all(worktree);
+    }
+    filled
+}
+
+/// Fills the folder `add` just made with the clone, so `add` can remove the folder again
+/// when any step fails (GA-R2): private, its git folder made with no template, the
+/// alternates line naming the owner's objects, its branch at the owner's commit and
+/// checked out with nothing left modified. Inputs: the new worktree, the branch, the
+/// owner's object folder, the object format and the commit. Output: Ok once checked out,
+/// else `changes_git_failed` or a git failure.
+fn fill(
+    worktree: &Path,
+    branch: &str,
+    alternate: &str,
+    format: &str,
+    head: &str,
+) -> Result<(), EngineError> {
     let git_dir = agent_git::git_dir(worktree);
-    let made = std::fs::create_dir(worktree)
-        .and_then(|()| std::fs::set_permissions(worktree, std::fs::Permissions::from_mode(0o700)))
-        .and_then(|()| std::fs::create_dir(&git_dir));
-    made.map_err(|_| failure("changes_git_failed"))?;
+    std::fs::set_permissions(worktree, std::fs::Permissions::from_mode(0o700))
+        .and_then(|()| std::fs::create_dir(&git_dir))
+        .map_err(|_| failure("changes_git_failed"))?;
     let clone = Repo::fresh(&git_dir, worktree);
     clone.run(&[
         "init",
@@ -62,15 +82,15 @@ pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError>
     std::fs::create_dir_all(&info)
         .and_then(|()| std::fs::write(info.join("alternates"), format!("{alternate}\n")))
         .map_err(|_| failure("changes_git_failed"))?;
-    clone.run(&["update-ref", &format!("refs/heads/{branch}"), &head])?;
-    clone.run(&["read-tree", "-u", "--reset", &head])?;
+    clone.run(&["update-ref", &format!("refs/heads/{branch}"), head])?;
+    clone.run(&["read-tree", "-u", "--reset", head])?;
     clone.run(&["update-index", "-q", "--refresh"])?;
     if !clone.run(&["diff-files", "--name-only", "-z"])?.is_empty() {
         return Err(failure("changes_git_failed"));
     }
     let pointer = std::fs::read(git_dir.join("HEAD")).map_err(|_| failure("changes_git_failed"))?;
     assert_eq!(pointer, format!("ref: refs/heads/{branch}\n").as_bytes());
-    assert_eq!(clone.commit_of("HEAD")?.as_deref(), Some(head.as_str()));
+    assert_eq!(clone.commit_of("HEAD")?.as_deref(), Some(head));
     Ok(())
 }
 
