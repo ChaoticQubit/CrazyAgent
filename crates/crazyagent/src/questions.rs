@@ -755,6 +755,19 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
         .collect()
 }
 
+/// Forgets every question of a removed project inside the removal's transaction, so the
+/// badge, notifications and pages never count it again. Inputs: the transaction and the
+/// project. Output: Ok, or `questions_unavailable`.
+pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    ensure(tx)?;
+    tx.execute(
+        "DELETE FROM owner_questions WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(unavailable)?;
+    Ok(())
+}
+
 /// Logs one checked question inside the caller's transaction and notifies the owner.
 /// Inputs: the transaction, the project, the stored asker name and source, the ask, and
 /// whether a pending question of the same asker and text is returned instead. Output: the
