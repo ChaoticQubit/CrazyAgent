@@ -75,8 +75,16 @@ pub struct Status {
 
 /// Builds the PATH the service gives the engine for its harness lookup: the absolute
 /// entries of the installing shell's PATH, then `~/.local/bin` and the usual system
-/// folders, each once. Inputs: the current PATH and home folder. Output: the joined PATH.
-pub fn service_path(current: Option<&OsStr>, home: Option<&Path>) -> OsString {
+/// folders, each once. Folders inside the running AppImage's mount folder `appdir` and
+/// folders [`changeable_by_others`] names are left out, since the service outlives the
+/// mount and must not look harnesses up where another user can plant one.
+/// Inputs: the current PATH, home folder and mount folder. Output: the joined PATH.
+pub fn service_path(
+    current: Option<&OsStr>,
+    home: Option<&Path>,
+    appdir: Option<&Path>,
+) -> OsString {
+    let appdir = appdir.filter(|folder| folder.is_absolute()).map(canonical);
     let mut folders: Vec<PathBuf> = Vec::new();
     let extras = home
         .map(|home| home.join(".local").join("bin"))
@@ -88,7 +96,13 @@ pub fn service_path(current: Option<&OsStr>, home: Option<&Path>) -> OsString {
         .into_iter()
         .chain(extras)
     {
-        if folder.is_absolute() && !folders.contains(&folder) {
+        if folder.is_absolute()
+            && !folders.contains(&folder)
+            && !appdir
+                .as_ref()
+                .is_some_and(|appdir| canonical(&folder).starts_with(appdir))
+            && changeable_by_others(&folder).is_none()
+        {
             folders.push(folder);
         }
     }
@@ -196,7 +210,11 @@ impl Service {
             name,
             executable,
             root: layout.root().to_path_buf(),
-            path: service_path(std::env::var_os("PATH").as_deref(), home.as_deref()),
+            path: service_path(
+                std::env::var_os("PATH").as_deref(),
+                home.as_deref(),
+                std::env::var_os("APPDIR").as_deref().map(Path::new),
+            ),
             definition,
             user: user.filter(|_| platform == Platform::Windows),
         })
@@ -640,27 +658,27 @@ WantedBy=default.target\n",
     }
 }
 
-/// The first entry on an executable's path that someone other than this user or root can
-/// change: an entry another user owns, or a world-writable folder such as `/tmp`, where a
-/// name that goes away can be taken by anyone. It reads the path as written and once its
-/// links are resolved; a link's own mode bits and group-writable folders are not counted,
-/// and an entry that cannot be read counts as changeable. Input: the absolute executable.
+/// The first entry on a path that someone other than this user or root can change: an
+/// entry another user owns, or a world-writable folder such as `/tmp`, where a name that
+/// goes away can be taken by anyone. It reads the path as written and with the links of its
+/// existing part resolved. A link's own mode bits, group-writable folders and missing
+/// entries are not counted (only who can change a folder can create an entry in it), and an
+/// entry that cannot be read counts as changeable. Input: the absolute path.
 /// Output: the entry, or none when only this user and the system can change it.
 #[cfg(unix)]
-pub fn changeable_by_others(executable: &Path) -> Option<PathBuf> {
+pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let me = current_uid();
-    let resolved = std::fs::canonicalize(executable).ok();
-    [Some(executable), resolved.as_deref()]
+    let resolved = canonical(path);
+    [path, resolved.as_path()]
         .into_iter()
-        .flatten()
         .flat_map(Path::ancestors)
         .find(|entry| match std::fs::symlink_metadata(entry) {
             Ok(metadata) => {
                 (metadata.uid() != me && metadata.uid() != 0)
                     || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
             }
-            Err(_) => true,
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         })
         .map(Path::to_path_buf)
 }
@@ -668,7 +686,7 @@ pub fn changeable_by_others(executable: &Path) -> Option<PathBuf> {
 /// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
 /// runs from the folder the installer chose. Input unused. Output: none.
 #[cfg(not(unix))]
-pub fn changeable_by_others(_executable: &Path) -> Option<PathBuf> {
+pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
     None
 }
 

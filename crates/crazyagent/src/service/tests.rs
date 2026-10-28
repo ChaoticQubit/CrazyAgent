@@ -300,6 +300,7 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
             "/opt/homebrew/bin:relative:/Users/owner/bin:/usr/bin",
         )),
         Some(Path::new("/Users/owner")),
+        None,
     );
     assert_eq!(
         path,
@@ -308,7 +309,7 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
         )
     );
     assert_eq!(
-        service_path(None, None),
+        service_path(None, None, None),
         OsString::from("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     );
 }
@@ -643,22 +644,20 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
         );
         let inward = shared.join("inward");
         std::os::unix::fs::symlink(&private, &inward).unwrap();
-        assert_eq!(changeable_by_others(&inward), Some(shared));
+        assert_eq!(changeable_by_others(&inward), Some(shared.clone()));
+        assert_eq!(
+            changeable_by_others(&shared.join("gone").join("crazyagent")),
+            Some(shared.clone())
+        );
+        let leads = temp.path().join("private").join(format!("leads-{mode:o}"));
+        std::os::unix::fs::symlink(&shared, &leads).unwrap();
+        assert_eq!(
+            changeable_by_others(&leads.join("gone").join("bin")),
+            Some(std::fs::canonicalize(&shared).unwrap())
+        );
     }
-    let gone = temp
-        .path()
-        .join("private")
-        .join("missing")
-        .join("crazyagent");
-    assert_eq!(
-        changeable_by_others(&gone),
-        Some(
-            temp.path()
-                .join("private")
-                .join("missing")
-                .join("crazyagent")
-        )
-    );
+    let gone = temp.path().join("private").join("gone").join("crazyagent");
+    assert_eq!(changeable_by_others(&gone), None);
 }
 
 #[cfg(unix)]
@@ -802,6 +801,45 @@ fn link_cli_refuses_an_engine_other_users_can_change_and_links_the_private_copy(
         std::fs::read_link(&link).unwrap(),
         layout.root().join("bin").join("crazyagent")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn service_path_drops_the_appimage_mount_and_folders_other_users_can_change() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    std::fs::create_dir_all(mount.join("usr").join("bin")).unwrap();
+    let shared = shared_folder(&temp.path().join("shared"), 0o1777);
+    let home = temp.path().join("home");
+    let tools = temp.path().join("tools");
+    let current = std::env::join_paths([
+        mount.join("usr").join("bin"),
+        shared.join("bin"),
+        tools.clone(),
+        mount.join("usr").join("sbin"),
+        PathBuf::from("/usr/bin"),
+    ])
+    .unwrap();
+    let path = service_path(Some(&current), Some(&home), Some(&mount));
+    let kept: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(
+        kept[..3],
+        [
+            tools,
+            PathBuf::from("/usr/bin"),
+            home.join(".local").join("bin")
+        ]
+    );
+    assert!(
+        !kept
+            .iter()
+            .any(|folder| folder.starts_with(&mount) || folder.starts_with(&shared)),
+        "{kept:?}"
+    );
+    let unmounted = service_path(Some(&current), Some(&home), None);
+    let kept: Vec<PathBuf> = std::env::split_paths(&unmounted).collect();
+    assert_eq!(kept[0], mount.join("usr").join("bin"));
+    assert!(!kept.iter().any(|folder| folder.starts_with(&shared)));
 }
 
 #[test]
