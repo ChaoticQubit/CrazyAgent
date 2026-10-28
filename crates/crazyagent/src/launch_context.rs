@@ -68,30 +68,34 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 }
 
 /// What every agent the engine launches for one project receives: the approved skills and
-/// MCP servers with their secret values, and one bounded startup instruction holding the
-/// project brief, an index of its context files and the owner-approved memories.
+/// MCP servers with their secret values, one bounded startup instruction holding the
+/// project brief, an index of its context files and the owner-approved memories, and
+/// whether a headless Claude run keeps its transcript.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
     process: Option<Box<Process>>,
+    transcripts: bool,
 }
 
-/// The owner's app and project instructions one launch writes into the agent's home,
-/// with the project they belong to.
+/// The owner's app and project instructions and the instruction files one launch writes
+/// into the agent's home, with the project they belong to.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
-    text: String,
+    given: crate::agent_home::Given,
 }
 
-/// The files one launch wrote into its agent home, and the lock that keeps a second launch
-/// out of that home. Dropping it deletes every file holding a secret and the copied skills.
+/// The files one launch wrote into its agent home, whether a headless Claude run keeps its
+/// transcript, and the lock that keeps a second launch out of that home. Dropping it
+/// deletes every file holding a secret and the copied skills.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
     removals: Vec<PathBuf>,
     copies: Option<PathBuf>,
+    transcripts: bool,
     _lock: File,
 }
 
@@ -113,20 +117,25 @@ pub fn for_project(
         .map_err(|problem| LaunchError(problem.0))?;
     let instructions = project_instructions(&tx, project)?;
     let home_project = agent_project(&tx, project)?;
+    let transcripts = crate::instruction_files::load(&tx, project)
+        .map_err(failure)?
+        .transcripts;
     drop(tx);
-    let text = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
+    let given = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
         process: Some(Box::new(Process {
             project: home_project,
-            text,
+            given,
         })),
+        transcripts,
     })
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
-/// engine data folder (the folder of `engine.db`) and the project's recorded folder.
+/// engine data folder (the folder of `engine.db`), the project's recorded folder, the
+/// instruction files the owner chose for its agents and the owner's home.
 /// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
@@ -136,10 +145,15 @@ pub(crate) fn agent_project(
         .map_err(unavailable)?
         .map(|setup| setup.project_folder())
         .filter(|folder| folder.is_absolute());
+    let files = crate::instruction_files::load(tx, project)
+        .map_err(failure)?
+        .files;
     Ok(crate::agent_home::AgentProject {
         data: engine_root(tx)?,
         id: project.clone(),
         folder,
+        files,
+        owner_home: crate::instruction_files::owner_home(),
     })
 }
 
@@ -381,6 +395,7 @@ impl AgentContext {
             arguments: Vec::new(),
             removals: vec![state.clone()],
             copies: None,
+            transcripts: self.transcripts,
             _lock: lock,
         };
         remove(&state);
@@ -388,7 +403,7 @@ impl AgentContext {
         if let Some(process) = &self.process {
             let harness = crate::agent_home::Harness::from_id(id)
                 .ok_or_else(|| failure("launch_harness_unsupported"))?;
-            crate::agent_home::prepare(home, harness, &process.project, &process.text)
+            crate::agent_home::prepare(home, harness, &process.project, &process.given)
                 .map_err(|problem| LaunchError(problem.0))?;
         }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
@@ -425,10 +440,10 @@ impl AgentContext {
             if let Some(process) = self
                 .process
                 .as_ref()
-                .filter(|process| !process.text.is_empty())
+                .filter(|process| !process.given.text.is_empty())
             {
                 text.push('\n');
-                text.push_str(&process.text);
+                text.push_str(&process.given.text);
             }
             if skills {
                 let plugin = state.join("plugin");
@@ -490,6 +505,12 @@ impl Installed {
     /// <file>`. Codex: none, it reads `config.toml` and `skills/` from its CODEX_HOME.
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    /// Tells whether a headless Claude run of this launch keeps its transcript, as the
+    /// project's "Keep transcripts for headless Claude runs" setting says.
+    pub fn keeps_transcript(&self) -> bool {
+        self.transcripts
     }
 }
 
@@ -667,6 +688,7 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
 fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
+    document["project_doc_max_bytes"] = toml_edit::value(0);
     if !servers.is_empty() {
         let mut table = toml_edit::Table::new();
         table.set_implicit(true);

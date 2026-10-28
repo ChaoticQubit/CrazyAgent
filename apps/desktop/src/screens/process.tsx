@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess, savedMessage,
-  skillSegments, textBytes, type SkillEntry,
+  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadInstructionSettings,
+  loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments, textBytes,
+  type InstructionSettings, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
-import { Button, Dialog, LoadError, NotReady, Notice, Panel, Skeleton, TextArea } from "../ui";
+import { Button, Dialog, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, Switch, TextArea } from "../ui";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
@@ -95,6 +96,59 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   </div>;
 }
 
+/** A project's agent settings as a pure view: which instruction files its agents get and
+ * whether headless Claude runs keep their transcript, each saved on its own change. Settings
+ * that could not be read say why and show the defaults, so a change replaces them.
+ * Inputs: the read, whether a save runs, the last save failure and the save action. */
+export function AgentSettingsView({ settings, busy, failure, onSave }: {
+  settings: Loaded<InstructionSettings>;
+  busy: boolean;
+  failure: string;
+  onSave: (settings: InstructionSettings) => void;
+}) {
+  if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
+  if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
+  const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
+  const choice = INSTRUCTION_CHOICES.find((option) => option.value === current.files) ?? INSTRUCTION_CHOICES[0];
+  const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
+  return <Panel title="Agent settings">
+    <div className="stack-small">
+      {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
+      {failure && <Notice tone="danger" alert>{failure}</Notice>}
+      <span>Agent instruction files</span>
+      <Segmented label="Agent instruction files" value={current.files}
+        options={INSTRUCTION_CHOICES.map(({ value, label }) => ({ value, label }))}
+        onValue={(files) => save({ ...current, files })} />
+      <p className="secondary">{choice.note}</p>
+      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" checked={current.transcripts}
+        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
+      <p className="secondary">{current.transcripts
+        ? "Headless Claude runs keep their transcript in the agent's own home."
+        : "Headless Claude runs keep no transcript."}</p>
+    </div>
+  </Panel>;
+}
+
+/** A project's agent settings: reads them from the engine and saves each change at once.
+ * Input: the project id. */
+export function AgentSettings({ projectId }: { projectId: string }) {
+  const session = useAppSession();
+  const [settings, reload] = useLoad(() => loadInstructionSettings(projectId), [projectId]);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const store = async (next: InstructionSettings) => {
+    setFailure("");
+    setBusy(true);
+    const result = session.noteResult(await saveInstructionSettings(projectId, next));
+    setBusy(false);
+    if (result.kind === "ok") {
+      session.showToast("Agent settings saved. Agents started from now on follow them.");
+      reload();
+    } else setFailure(processMessage(result));
+  };
+  return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
+}
+
 /** The skill catalog the tags name, from the engine's skill list. Input: the read, whose
  * skills carry the engine's one-line description as `line` where the engine reports it.
  * Output: each skill's id, name and one-line description, empty while unread or failed. */
@@ -136,9 +190,14 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
       reload();
     } else fail(result);
   };
-  return <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview}
+  const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview}
     onDraft={setDraft} onSave={() => void save()} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload} />;
+  if (scope.kind === "app") return editor;
+  return <div className="stack">
+    <AgentSettings projectId={scope.id} />
+    {editor}
+  </div>;
 }
 
 /** Settings, Process: the app-wide instructions every agent gets. */

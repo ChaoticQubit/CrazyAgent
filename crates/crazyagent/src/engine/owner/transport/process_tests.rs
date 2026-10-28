@@ -285,6 +285,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            files: Vec::new(),
         }
     );
 
@@ -292,9 +293,15 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let text = |text: &str| crate::agent_home::Given {
+        text: text.into(),
+        files: Vec::new(),
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, "# Sub rules\n").unwrap();
+    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
     record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -304,11 +311,18 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: true,
             text: "# Sub rules\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            files: Vec::new(),
         }
     );
 
     let master_home = launched_home(&root, master);
-    prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();
+    prepare(
+        &master_home,
+        Harness::Claude,
+        &given,
+        &text("# Master rules\n"),
+    )
+    .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
     assert_eq!(
         shown.agent, master,

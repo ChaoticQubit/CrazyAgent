@@ -6,7 +6,8 @@ mod tests;
 
 /// One Process request the TUI sends.
 /// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
-/// or reads what one team agent received at its last launch (none for the newest master).
+/// reads what one team agent received at its last launch (none for the newest master), or
+/// reads or saves one project's agent instruction settings.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -23,15 +24,24 @@ pub(in crate::tui) enum ProcessQuery {
         project: ProjectId,
         agent: Option<i64>,
     },
+    Settings {
+        project: ProjectId,
+    },
+    SaveSettings {
+        project: ProjectId,
+        settings: crate::engine::owner::InstructionSettings,
+    },
 }
 
 /// What one Process request returned: the text read, what a save comes to beside what a
-/// Claude master takes, or what one team agent received at its last launch.
+/// Claude master takes, what one team agent received at its last launch, or one project's
+/// agent instruction settings as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
     Saved(crate::engine::owner::ProcessSaved),
     Agent(Box<crate::engine::owner::AgentInstructions>),
+    Settings(crate::engine::owner::InstructionSettings),
 }
 
 /// One Process reply for the screens.
@@ -113,6 +123,14 @@ impl NativeOwner {
                 .agent_instructions(project, agent)
                 .await
                 .map(|view| ProcessReply::Agent(Box::new(view))),
+            ProcessQuery::Settings { project } => controller
+                .instruction_settings(project)
+                .await
+                .map(ProcessReply::Settings),
+            ProcessQuery::SaveSettings { project, settings } => controller
+                .save_instruction_settings(project, settings)
+                .await
+                .map(ProcessReply::Settings),
         }
         .map_err(problem)
     }

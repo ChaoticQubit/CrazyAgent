@@ -1,5 +1,7 @@
 import { listSkills, type Result } from "../../api";
-import { agentOf, loadAgentInstructions, processMessage, textBytes, type AgentInstructions as Received, type SkillEntry } from "../../api-process";
+import {
+  agentOf, fileStateWords, loadAgentInstructions, processMessage, textBytes, type AgentInstructions as Received, type SkillEntry,
+} from "../../api-process";
 import type { GraphNode } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { TaggedText, byteSize, catalogOf } from "../process";
@@ -14,6 +16,10 @@ function Given({ value, skills }: { value: Received; skills: readonly SkillEntry
       {value.text ? ` ${byteSize(textBytes(value.text))}` : ""}</p>
     {value.text ? <TaggedText text={value.text} skills={skills} />
       : <p className="tg-instructions-note">No app or project instructions were given at its last launch.</p>}
+    <h4 className="tg-instructions-title">Instruction files</h4>
+    {value.files.length > 0 ? <ul className="tg-instructions-skills" aria-label="Instruction files found at its last launch">{value.files.map((file) =>
+      <li key={file.name}><span className="tg-instructions-file">{file.name}</span>{` ${byteSize(file.bytes)}, ${fileStateWords(file.state)}`}</li>)}</ul>
+      : <p className="tg-instructions-note">No instruction files were found at its last launch.</p>}
     <h4 className="tg-instructions-title">Skills</h4>
     {value.skills.length > 0 ? <ul className="tg-instructions-skills" aria-label="Skills installed at its last launch">{value.skills.map((name) =>
       <li key={name}><SkillTag name={name} skills={skills} /></li>)}</ul> : <p className="tg-instructions-note">No skills were installed at its last launch.</p>}

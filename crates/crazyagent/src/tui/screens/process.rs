@@ -2,6 +2,8 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
+use crate::engine::owner::InstructionSettings;
+use crate::instruction_files::Choice;
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -185,7 +187,42 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "agent_instructions_invalid" => "This agent's instructions file has characters CrazyAgent doesn't write, so it isn't shown.".into(),
         "agent_instructions_unreadable" => "This agent's instructions file couldn't be read. Try again.".into(),
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
+        "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
+        "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
+    }
+}
+
+/// The owner's words for one instruction files option. Input: the option. Output: its name.
+pub(in crate::tui) fn files_label(choice: Choice) -> &'static str {
+    match choice {
+        Choice::Project => "Project files",
+        Choice::ProjectAndUser => "Project and user files",
+        Choice::None => "None",
+    }
+}
+
+/// The option Ctrl-F moves to from one option, in the order the page lists them.
+/// Input: the option. Output: the next one, wrapping to the first.
+fn next_files(choice: Choice) -> Choice {
+    match choice {
+        Choice::Project => Choice::ProjectAndUser,
+        Choice::ProjectAndUser => Choice::None,
+        Choice::None => Choice::Project,
+    }
+}
+
+/// What one instruction files option hands the project's agents, in one sentence.
+/// Input: the option. Output: the sentence.
+fn files_note(choice: Choice) -> &'static str {
+    match choice {
+        Choice::Project => {
+            "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets."
+        }
+        Choice::ProjectAndUser => {
+            "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md."
+        }
+        Choice::None => "Agents get no instruction files, only the instructions on this page.",
     }
 }
 
@@ -379,10 +416,13 @@ impl Editor {
 /// The Process page: the owner's instructions every agent gets, app-wide in Settings or
 /// for one project. Reads the saved text on opening, edits it in place and saves it only on
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
-/// process, each into a preview first. One request runs at a time.
+/// process, each into a preview first. For one project it also shows the agent settings:
+/// Ctrl-F picks the instruction files its agents get and Ctrl-T whether headless Claude runs
+/// keep their transcript, each saved at once. One request runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
+    settings: Option<Result<InstructionSettings, String>>,
     editor: Editor,
     problem: Option<String>,
     pending: Option<ProcessQuery>,
@@ -398,6 +438,7 @@ impl ProcessPage {
         Self {
             scope,
             state: State::Loading,
+            settings: None,
             editor: Editor::new(""),
             problem: None,
             pending: None,
@@ -444,6 +485,21 @@ impl ProcessPage {
             text: self.editor.text(),
         };
         self.send(query, ctx);
+    }
+
+    /// Saves one change to the project's agent settings, starting from the stored settings,
+    /// or from the defaults when they could not be read so the owner can replace them.
+    /// Inputs: the change and the context. Output: unit.
+    fn change_settings(&mut self, change: fn(&mut InstructionSettings), ctx: &mut Ctx) {
+        let Some(project) = self.project() else {
+            return;
+        };
+        let Some(stored) = &self.settings else {
+            return;
+        };
+        let mut settings = stored.clone().unwrap_or_default();
+        change(&mut settings);
+        self.send(ProcessQuery::SaveSettings { project, settings }, ctx);
     }
 
     fn skill_at_cursor(&self) -> Option<&Skill> {
@@ -497,9 +553,34 @@ impl ProcessPage {
             });
             return;
         }
+        match (&event.query, &event.result) {
+            (ProcessQuery::Settings { .. }, Ok(ProcessReply::Settings(settings))) => {
+                self.settings = Some(Ok(*settings));
+                return;
+            }
+            (ProcessQuery::Settings { .. }, Err(code)) => {
+                self.settings = Some(Err(message(code)));
+                return;
+            }
+            (ProcessQuery::SaveSettings { .. }, Ok(ProcessReply::Settings(settings))) => {
+                self.settings = Some(Ok(*settings));
+                ctx.say(Message::success(
+                    "Agent settings saved.",
+                    "Agents started from now on follow them.",
+                ));
+                return;
+            }
+            (ProcessQuery::SaveSettings { .. }, Err(code)) => {
+                ctx.say(Message::error(&message(code), ""));
+                return;
+            }
+            _ => {}
+        }
         let result = match &event.result {
             Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Saved(_) | ProcessReply::Agent(_)) => return,
+            Ok(ProcessReply::Saved(_) | ProcessReply::Agent(_) | ProcessReply::Settings(_)) => {
+                return;
+            }
             Err(code) => Err(code),
         };
         match (&event.query, result) {
@@ -508,6 +589,9 @@ impl ProcessPage {
                 self.state = State::Ready {
                     saved: text.clone(),
                 };
+                if let (Some(project), None) = (self.project(), &self.settings) {
+                    self.send(ProcessQuery::Settings { project }, ctx);
+                }
             }
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
             (ProcessQuery::Save { .. }, Ok(_)) => {}
@@ -517,7 +601,12 @@ impl ProcessPage {
             (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
-            (ProcessQuery::Agent { .. }, _) => {}
+            (
+                ProcessQuery::Agent { .. }
+                | ProcessQuery::Settings { .. }
+                | ProcessQuery::SaveSettings { .. },
+                _,
+            ) => {}
         }
     }
 
@@ -583,6 +672,9 @@ impl ProcessPage {
                 return (lines, None);
             }
             State::Ready { .. } => {}
+        }
+        if let Scope::Project { .. } = self.scope {
+            self.settings_lines(width, &mut lines, ctx);
         }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
@@ -663,13 +755,66 @@ impl ProcessPage {
             lines.push(styled(problem.clone(), Role::Error, theme));
         } else if let Some(pending) = &self.pending {
             let doing = match pending {
-                ProcessQuery::Save { .. } => "Saving...",
+                ProcessQuery::Save { .. } | ProcessQuery::SaveSettings { .. } => "Saving...",
                 _ => "Reading...",
             };
             lines.push(styled(doing, Role::Muted, theme));
         }
         let cursor = Position::new((gutter + column) as u16, (first + line) as u16);
         (lines, Some(cursor))
+    }
+
+    /// Adds the project's agent settings above the editor: each setting with its option and
+    /// key, what the chosen instruction files option hands agents, or why they could not be
+    /// read. Inputs: the width, the lines so far and the context. Output: unit.
+    fn settings_lines(&self, width: usize, lines: &mut Vec<Line<'static>>, ctx: &Ctx) {
+        let theme = &ctx.theme;
+        let settings = match &self.settings {
+            None => {
+                lines.push(ctx.loading("Loading the agent settings"));
+                lines.push(Line::default());
+                return;
+            }
+            Some(Err(problem)) => {
+                lines.extend(
+                    wrap(problem, width)
+                        .into_iter()
+                        .map(|text| styled(text, Role::Error, theme)),
+                );
+                lines.push(Line::default());
+                return;
+            }
+            Some(Ok(settings)) => *settings,
+        };
+        let transcripts = if settings.transcripts { "On" } else { "Off" };
+        for (name, option, key) in [
+            (
+                "Agent instruction files",
+                files_label(settings.files),
+                "Ctrl-F",
+            ),
+            (
+                "Keep transcripts for headless Claude runs",
+                transcripts,
+                "Ctrl-T",
+            ),
+        ] {
+            lines.push(row(
+                width,
+                Line::from(vec![
+                    Span::raw(format!("{name}: ")),
+                    Span::styled(option.to_owned(), theme.accent),
+                ]),
+                styled(format!("{key} changes"), Role::Muted, theme),
+                ctx.glyphs,
+            ));
+        }
+        lines.extend(
+            wrap(files_note(settings.files), width)
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+        );
+        lines.push(Line::default());
     }
 }
 
@@ -701,6 +846,10 @@ impl Screen for ProcessPage {
         let mut hints = vec![hint("Ctrl-S", "Save")];
         if !self.skills.is_empty() {
             hints.push(hint("Ctrl-O", "Open skill"));
+        }
+        if matches!(self.scope, Scope::Project { .. }) && self.settings.is_some() {
+            hints.push(hint("Ctrl-F", "Instruction files"));
+            hints.push(hint("Ctrl-T", "Transcripts"));
         }
         if self.scope == Scope::App {
             hints.push(hint("Ctrl-G", "Import global"));
@@ -738,6 +887,14 @@ impl Screen for ProcessPage {
             }
             (State::Ready { .. }, Key::Ctrl('d')) if self.scope == Scope::App => {
                 self.send(ProcessQuery::Default, ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('f')) if self.settings.is_some() => {
+                self.change_settings(|settings| settings.files = next_files(settings.files), ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('t')) if self.settings.is_some() => {
+                self.change_settings(|settings| settings.transcripts = !settings.transcripts, ctx);
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),

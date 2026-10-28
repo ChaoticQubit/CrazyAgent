@@ -943,6 +943,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: true,
             text: "# Instructions from CrazyAgent\n\nUse tdd.\u{1b}[31m red\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
@@ -1012,6 +1013,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
@@ -1056,6 +1058,7 @@ fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
             launched: true,
             text,
             skills: Vec::new(),
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
@@ -1755,4 +1758,64 @@ fn the_master_view_names_its_way_back_as_the_earlier_conversation() {
         rows[23]
     );
     assert!(!rows[23].contains("Esc Back"), "{}", rows[23]);
+}
+
+#[test]
+fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
+    use crate::engine::owner::InstructionRecord;
+    use crate::instruction_files::State;
+    let ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    let record = |name: &str, bytes: u64, state: State| InstructionRecord {
+        name: name.into(),
+        bytes,
+        state,
+    };
+    let view = AgentInstructions {
+        agent: 5,
+        harness: "claude-code".into(),
+        launched: true,
+        text: "Use tdd.\n".into(),
+        skills: Vec::new(),
+        files: vec![
+            record("CLAUDE.md", 1_229, State::Given),
+            record("AGENTS.md", 300, State::Same),
+            record("CLAUDE.local.md", 0, State::Unsafe),
+            record("~/.claude/CLAUDE.md", 40_000, State::TooLarge),
+        ],
+    };
+    let text = |view: AgentInstructions| -> String {
+        super::instruction_lines(&Load::Ready(Box::new(view)), 120, &ctx)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let shown = text(view.clone());
+    for line in [
+        "Instruction files",
+        "CLAUDE.md  1.2 KB, given",
+        "AGENTS.md  300 bytes, left out: the same text as a file above",
+        "CLAUDE.local.md  0 bytes, left out: a link or not a plain file",
+        "~/.claude/CLAUDE.md  39.1 KB, left out: larger than CrazyAgent gives",
+    ] {
+        assert!(shown.contains(line), "{line} missing in\n{shown}");
+    }
+    assert!(
+        shown.find("Instruction files").unwrap() < shown.find("Skills").unwrap(),
+        "{shown}"
+    );
+    let none = text(AgentInstructions {
+        files: Vec::new(),
+        ..view
+    });
+    assert!(
+        none.contains("No instruction files were found at its last launch."),
+        "{none}"
+    );
 }

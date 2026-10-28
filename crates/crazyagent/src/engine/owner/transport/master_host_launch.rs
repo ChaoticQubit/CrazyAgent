@@ -51,7 +51,7 @@ const MASTER_PROFILE: &str = "sandbox.sb";
 const HTTPS_PORT: u16 = 443;
 #[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-const MASTER_CONFIG: [&str; 15] = [
+const MASTER_CONFIG: [&str; 16] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"read-only\"",
@@ -67,8 +67,9 @@ const MASTER_CONFIG: [&str; 15] = [
     "features.goals=false",
     "web_search=\"disabled\"",
     "mcp_servers={}",
+    PROJECT_DOCS_OFF,
 ];
-const MASTER_TOOLS_CONFIG: [&str; 9] = [
+const MASTER_TOOLS_CONFIG: [&str; 10] = [
     "model_provider=\"openai\"",
     "cli_auth_credentials_store=\"file\"",
     "sandbox_mode=\"danger-full-access\"",
@@ -78,7 +79,9 @@ const MASTER_TOOLS_CONFIG: [&str; 9] = [
     "features.goals=false",
     "features.multi_agent=false",
     "features.multi_agent_v2=false",
+    PROJECT_DOCS_OFF,
 ];
+const PROJECT_DOCS_OFF: &str = "project_doc_max_bytes=0";
 const DELEGATE_SERVERS: &str = "mcp_servers=";
 
 impl OwnerRuntimeHandle {
@@ -140,7 +143,7 @@ impl OwnerRuntimeHandle {
                 profile,
                 executable.verified_path()?,
                 &prepared.attempt.connection,
-                &master_prompt(&prepared.instructions, &process),
+                &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
             )?
@@ -188,16 +191,18 @@ impl OwnerRuntimeHandle {
 }
 
 /// The most bytes of the owner's app and project instructions a Claude master is sure to
-/// take: the Claude host's prompt file limit less the largest project context and the line
-/// `master_prompt` puts between them.
+/// take: the Claude host's prompt file limit less the largest project context, the largest
+/// instruction files section and the line `master_prompt` puts between them.
 pub(super) const CLAUDE_PROCESS_BYTES_MAX: usize =
     crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
         - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+        - crate::instruction_files::SECTION_BYTES_MAX
         - 1;
 
 /// Joins a Claude Code master's startup instruction with the owner's app and project
-/// instructions. Claude Code runs with setting sources off, which skips the `CLAUDE.md` in
-/// its home, so its prompt file carries the same text. Input: both texts. Output: the prompt.
+/// instructions and the instruction files the engine read. Claude Code runs with setting
+/// sources off, which skips every `CLAUDE.md`, so its prompt file carries the same text.
+/// Input: both texts. Output: the prompt.
 fn master_prompt(instructions: &str, process: &str) -> String {
     assert!(process.len() <= crate::agent_home::PROCESS_BYTES_MAX);
     if process.is_empty() {
@@ -455,6 +460,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "features.multi_agent=false",
             "features.multi_agent_v2=false",
+            PROJECT_DOCS_OFF,
         ]
     } else {
         &[
@@ -466,6 +472,7 @@ fn require_master_tool_policy(
             "features.goals=false",
             "web_search=\"disabled\"",
             "mcp_servers={}",
+            PROJECT_DOCS_OFF,
         ]
     };
     let fixed: &[&str] = if tools.is_some() {
@@ -1212,9 +1219,12 @@ mod tests {
         );
         assert_eq!(fits.len(), host_limit);
         assert_eq!(
-            host_limit - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX - 1,
+            host_limit
+                - crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX
+                - crate::instruction_files::SECTION_BYTES_MAX
+                - 1,
             CLAUDE_PROCESS_BYTES_MAX,
-            "the Process page warns at exactly the room the largest context leaves"
+            "the Process page warns at exactly the room the largest context and the largest instruction files leave"
         );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
     }

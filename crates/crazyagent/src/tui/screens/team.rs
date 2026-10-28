@@ -521,7 +521,9 @@ impl Team {
         };
         open.read = match &event.result {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
-            Ok(ProcessReply::Text(_) | ProcessReply::Saved(_)) => return,
+            Ok(ProcessReply::Text(_) | ProcessReply::Saved(_) | ProcessReply::Settings(_)) => {
+                return;
+            }
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),
         };
@@ -1292,6 +1294,25 @@ fn instruction_lines(
     if !view.text.is_empty() {
         lines.push(Line::default());
     }
+    lines.push(styled("Instruction files", Role::Heading, theme));
+    match view.files.is_empty() {
+        true => lines.extend(muted("No instruction files were found at its last launch.")),
+        false => lines.extend(view.files.iter().flat_map(|file| {
+            wrap(
+                &format!(
+                    "{} {}  {}, {}",
+                    ctx.glyphs.dot,
+                    plain(&file.name),
+                    size(file.bytes.try_into().unwrap_or(usize::MAX)),
+                    file_state(file.state)
+                ),
+                limit,
+            )
+            .into_iter()
+            .map(Line::raw)
+        })),
+    }
+    lines.push(Line::default());
     lines.push(styled("Skills", Role::Heading, theme));
     match view.skills.is_empty() {
         true => lines.extend(muted("No skills were installed at its last launch.")),
@@ -1302,6 +1323,20 @@ fn instruction_lines(
         ),
     }
     lines
+}
+
+/// What became of one instruction file at an agent's last launch, in the owner's words.
+/// Input: the engine's record of it. Output: the words.
+fn file_state(state: crate::instruction_files::State) -> &'static str {
+    use crate::instruction_files::State;
+    match state {
+        State::Given => "given",
+        State::Same => "left out: the same text as a file above",
+        State::TooLarge => "left out: larger than CrazyAgent gives",
+        State::Unsafe => "left out: a link or not a plain file",
+        State::Invalid => "left out: not plain text",
+        State::Unreadable => "left out: couldn't be read",
+    }
 }
 
 /// Task text safe to draw in a terminal cell grid: tabs become spaces and

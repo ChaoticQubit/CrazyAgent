@@ -12,9 +12,15 @@ pub const PROJECT_FILE: &str = "instructions.md";
 const TITLE: &str = "# Instructions from CrazyAgent\n";
 const APP_HEADING: &str = "\n## App instructions\n\n";
 const PROJECT_HEADING: &str = "\n## Project instructions\n\n";
-pub const PROCESS_BYTES_MAX: usize =
-    TITLE.len() + APP_HEADING.len() + PROJECT_HEADING.len() + 2 * (TEXT_BYTES_MAX + 1);
+pub const PROCESS_BYTES_MAX: usize = TITLE.len()
+    + APP_HEADING.len()
+    + PROJECT_HEADING.len()
+    + 2 * (TEXT_BYTES_MAX + 1)
+    + crate::instruction_files::SECTION_BYTES_MAX;
 pub const SKILLS_FILE: &str = "crazyagent-skills";
+pub const FILES_FILE: &str = "crazyagent-instruction-files";
+const FILES_RECORD_BYTES_MAX: usize =
+    crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
 const SKILLS_RECORD_BYTES_MAX: usize =
     SKILLS_RECORD_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 1);
@@ -111,14 +117,26 @@ impl Harness {
 }
 
 /// The project one agent launch serves: the engine data folder holding `engine.db` and
-/// the app-wide instructions, the project id, and the project folder whose
+/// the app-wide instructions, the project id, the project folder whose
 /// `.crazyagent/instructions.md` holds the project instructions, none when the project
-/// has no recorded folder.
+/// has no recorded folder, which instruction files the owner chose for its agents and the
+/// owner's home those files may be read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
     pub data: PathBuf,
     pub id: ProjectId,
     pub folder: Option<PathBuf>,
+    pub files: crate::instruction_files::Choice,
+    pub owner_home: Option<PathBuf>,
+}
+
+/// What every agent of one project receives at a launch: the owner's app and project
+/// instructions with the instruction files the engine read after them, and the engine's
+/// record of each instruction file it found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Given {
+    pub text: String,
+    pub files: Vec<crate::instruction_files::Record>,
 }
 
 /// Checks owner text before it is saved: at most `TEXT_BYTES_MAX` bytes with no NUL.
@@ -176,15 +194,28 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
 }
 
 /// Builds what every agent of the project receives: the app-wide instructions, then the
-/// project instructions, each under its heading; empty when both are blank.
-/// Input: the project. Output: at most `PROCESS_BYTES_MAX` bytes of markdown, or a code.
-pub fn text(project: &AgentProject) -> Result<String, AgentHomeError> {
+/// project instructions, each under its heading, then the instruction files the owner
+/// chose, read by the engine from the owner's checkout and home; empty when all are blank.
+/// Input: the project. Output: at most `PROCESS_BYTES_MAX` bytes of markdown with the
+/// record of each instruction file, or a code.
+pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
     let app = read_app(&project.data)?;
     let own = match &project.folder {
         Some(folder) => read_project(folder)?,
         None => String::new(),
     };
-    Ok(render(&app, &own))
+    let delivery = crate::instruction_files::read(
+        project.folder.as_deref(),
+        project.owner_home.as_deref(),
+        project.files,
+    );
+    let mut text = render(&app, &own);
+    text.push_str(&delivery.text);
+    assert!(text.len() <= PROCESS_BYTES_MAX);
+    Ok(Given {
+        text,
+        files: delivery.records,
+    })
 }
 
 /// Renders the app text then the project text under their headings, leaving out a blank
@@ -210,29 +241,83 @@ pub fn render(app: &str, project: &str) -> String {
 }
 
 /// Writes the owner's instructions into one agent's private home for one launch: the
-/// harness's global instruction file holds exactly `text`, and is removed when `text`
-/// is empty, so a stale copy never outlives a cleared page.
+/// harness's global instruction file holds exactly the given text, and is removed when it
+/// is empty, so a stale copy never outlives a cleared page; the record of the instruction
+/// files the engine found replaces the last launch's.
 /// Input: the agent's 0700 home (its CLAUDE_CONFIG_DIR or CODEX_HOME), the harness, the
-/// project and the text from `text`. Output: unit, or a plain code.
+/// project and what `text` built. Output: unit, or a plain code.
 pub fn prepare(
     home: &Path,
     harness: Harness,
     project: &AgentProject,
-    text: &str,
+    given: &Given,
 ) -> Result<(), AgentHomeError> {
     assert!(project.data.is_absolute());
     assert!(project.folder.as_deref().is_none_or(Path::is_absolute));
-    assert!(text.len() <= PROCESS_BYTES_MAX);
+    assert!(given.text.len() <= PROCESS_BYTES_MAX);
     if !home.is_absolute() {
         return Err(failure("agent_home_invalid"));
     }
     real_folder(home)?;
+    record_files(home, &given.files)?;
     let name = harness.instruction_file();
-    if text.is_empty() {
+    if given.text.is_empty() {
         return remove_entry(&home.join(name));
     }
     remove_folder(&home.join(name))?;
-    write_whole(home, name, text.as_bytes())
+    write_whole(home, name, given.text.as_bytes())
+}
+
+/// Records the instruction files one launch found, one `state<TAB>bytes<TAB>name` line
+/// each, replacing the last launch's record and any entry planted under its name.
+/// Inputs: the agent's 0700 home and the records. Output: unit, or `agent_files_invalid`
+/// for more records than the engine reads or a name it does not read.
+fn record_files(
+    home: &Path,
+    files: &[crate::instruction_files::Record],
+) -> Result<(), AgentHomeError> {
+    if files.len() > crate::instruction_files::FILES_MAX
+        || !files
+            .iter()
+            .all(|file| crate::instruction_files::known_name(&file.name))
+    {
+        return Err(failure("agent_files_invalid"));
+    }
+    remove_folder(&home.join(FILES_FILE))?;
+    let record: String = files
+        .iter()
+        .map(|file| format!("{}\t{}\t{}\n", file.state.as_str(), file.bytes, file.name))
+        .collect();
+    assert!(record.len() <= FILES_RECORD_BYTES_MAX);
+    write_whole(home, FILES_FILE, record.as_bytes())
+}
+
+/// Reads back the instruction files record one launch left. Input: the record text.
+/// Output: the records, or `agent_instructions_invalid` for a line the engine never writes.
+fn parse_files(record: &str) -> Result<Vec<crate::instruction_files::Record>, AgentHomeError> {
+    let files = record
+        .split_terminator('\n')
+        .map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let state = fields
+                .next()
+                .and_then(crate::instruction_files::State::parse)?;
+            let bytes = fields.next()?.parse::<u64>().ok()?;
+            let name = fields
+                .next()
+                .filter(|name| crate::instruction_files::known_name(name))?;
+            Some(crate::instruction_files::Record {
+                name: name.to_owned(),
+                bytes,
+                state,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| failure("agent_instructions_invalid"))?;
+    if files.len() > crate::instruction_files::FILES_MAX {
+        return Err(failure("agent_instructions_too_large"));
+    }
+    Ok(files)
 }
 
 /// Reads the owner's own global Claude Code instructions, `<home>/.claude/CLAUDE.md`, for
@@ -255,11 +340,13 @@ pub fn import_global(home: &Path) -> Result<String, AgentHomeError> {
 }
 
 /// What one agent was given at its last launch, read back from its private home: the
-/// text of its harness's instruction file and the names of the skills installed for it.
+/// text of its harness's instruction file, the names of the skills installed for it and
+/// the engine's record of the instruction files it found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Received {
     pub text: String,
     pub skills: Vec<String>,
+    pub files: Vec<crate::instruction_files::Record>,
 }
 
 /// Records the names of the skills one launch installed in the agent's home, one per
@@ -281,7 +368,8 @@ pub fn record_skills(home: &Path, names: &[&str]) -> Result<(), AgentHomeError> 
 }
 
 /// Reads back what one agent's last launch left in its home: its harness's instruction
-/// file and the recorded skill names. Each must be a plain single-link file of this user,
+/// file, the recorded skill names and the instruction files record, empty for a launch
+/// before the record existed. Each must be a plain single-link file of this user,
 /// opened without following a link or waiting on a pipe, and within its bound.
 /// Inputs: the agent's home and its harness. Output: none before the first launch made
 /// the home, else the text (empty when none was given) and the names, or a plain code.
@@ -301,7 +389,15 @@ pub fn received(home: &Path, harness: Harness) -> Result<Option<Received>, Agent
     if !skills.iter().all(|name| skill_name(name)) {
         return Err(failure("agent_instructions_invalid"));
     }
-    Ok(Some(Received { text, skills }))
+    let files = parse_files(&read_home_file(
+        &home.join(FILES_FILE),
+        FILES_RECORD_BYTES_MAX,
+    )?)?;
+    Ok(Some(Received {
+        text,
+        skills,
+        files,
+    }))
 }
 
 fn skill_name(name: &str) -> bool {

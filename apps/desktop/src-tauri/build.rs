@@ -158,6 +158,8 @@ fn main() {
         "desktop_import_global_instructions",
         "desktop_default_process",
         "desktop_agent_instructions",
+        "desktop_instruction_settings",
+        "desktop_save_instruction_settings",
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
