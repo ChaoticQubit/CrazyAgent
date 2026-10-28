@@ -1,6 +1,7 @@
 use super::{
-    LINUX_LIMITED_NETWORK_OFF, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, ProjectSandbox, Sandbox,
-    SandboxError, SandboxNetwork, SandboxRemote, agent_env, clean_absolute, invalid,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets,
+    ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
+    clean_absolute, invalid,
 };
 use landlock::{
     ABI, Access, AccessFs, AccessNet, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -45,6 +46,10 @@ const LIMITED_NETWORK_OFF: &str = "the Linux limited-network sockets setting is 
 const RESOLVER_NEEDS_UDP: &str = "this harness cannot look up names over TCP, which the Linux \
      limited-network sockets setting 'TCP only' needs; choose 'TCP ports only' or leave limited \
      network off";
+const HARNESS_UNCHECKED: &str = "this harness starts through a script CrazyAgent cannot check for \
+     the Linux limited-network sockets setting 'TCP only'; start it from a program, or a script \
+     whose first line names a program by its full path, or choose 'TCP ports only' in Settings, \
+     which lets UDP and other sockets reach any host";
 const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
@@ -571,6 +576,9 @@ impl Sandbox for LinuxSandbox {
             None => {}
             Some(LINUX_LIMITED_NETWORK_OFF) => {
                 return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
+            }
+            Some(LINUX_HARNESS_UNCHECKED) => {
+                return Err(SandboxError::Unavailable(HARNESS_UNCHECKED.into()));
             }
             Some(code) => {
                 assert_eq!(code, LINUX_RESOLVER_NEEDS_UDP);

@@ -51,7 +51,7 @@ pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'s
     match sockets {
         LinuxSockets::TcpOnly => (
             "TCP only, names looked up over TCP (recommended)",
-            "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start.",
+            "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start. Wrappers are judged by their first file, a script by its interpreter, so one that starts a musl program still starts, then cannot look names up.",
         ),
         LinuxSockets::Refuse => (
             "Do not start limited-network agents",

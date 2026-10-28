@@ -574,6 +574,11 @@ pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
 /// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
 pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
 
+/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is a script
+/// whose interpreter cannot be checked ([`elf::Lookup::Unjudged`]), such as a script that
+/// runs another script: the check follows a `#!` line one level only and never guesses.
+pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -1007,15 +1012,19 @@ impl ProjectSandbox {
     /// Why the Linux sockets setting refuses to start `program` in this sandbox:
     /// [`LINUX_LIMITED_NETWORK_OFF`] for any limited network under `Refuse`, and
     /// [`LINUX_RESOLVER_NEEDS_UDP`] under `TcpOnly` when the agent resolves names and the
-    /// program is not a glibc one ([`elf::glibc_program`]). The setting never changes
-    /// silently. Input: the harness program. Output: the refusal code, or None.
+    /// program, or the interpreter a script names, is not a glibc one, and
+    /// [`LINUX_HARNESS_UNCHECKED`] when that interpreter cannot be checked ([`elf::lookup`]).
+    /// The setting never changes silently. Input: the harness program. Output: the refusal
+    /// code, or None.
     pub fn linux_refusal(&self, program: &Path) -> Option<&'static str> {
         match (&self.network, self.linux_sockets) {
             (SandboxNetwork::Open, _) => None,
             (SandboxNetwork::Only(_), LinuxSockets::Refuse) => Some(LINUX_LIMITED_NETWORK_OFF),
-            _ if self.resolves_over_tcp() && !elf::glibc_program(program) => {
-                Some(LINUX_RESOLVER_NEEDS_UDP)
-            }
+            _ if self.resolves_over_tcp() => match elf::lookup(program) {
+                elf::Lookup::OverTcp => None,
+                elf::Lookup::NotOverTcp => Some(LINUX_RESOLVER_NEEDS_UDP),
+                elf::Lookup::Unjudged => Some(LINUX_HARNESS_UNCHECKED),
+            },
             _ => None,
         }
     }
@@ -2090,7 +2099,14 @@ mod linux_sockets_tests {
         )
         .unwrap();
         fs::write(root.join("static"), executable(true, false, None)).unwrap();
-        fs::write(root.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+        for (script, interpreter) in [
+            ("on_glibc", root.join("glibc")),
+            ("on_musl", root.join("musl")),
+            ("on_script", root.join("on_glibc")),
+            ("on_relative", PathBuf::from("node")),
+        ] {
+            fs::write(root.join(script), format!("#!{}\n", interpreter.display())).unwrap();
+        }
         Case { _temp: temp, root }
     }
 
@@ -2141,7 +2157,7 @@ mod linux_sockets_tests {
         let named = sandbox(&case, model(), LinuxSockets::TcpOnly);
         assert!(named.resolves_over_tcp());
         assert_eq!(named.linux_refusal(&case.root.join("glibc")), None);
-        for program in ["musl", "static", "codex.js", "absent"] {
+        for program in ["musl", "static", "on_musl", "absent"] {
             assert_eq!(
                 named.linux_refusal(&case.root.join(program)),
                 Some(LINUX_RESOLVER_NEEDS_UDP),
@@ -2156,6 +2172,37 @@ mod linux_sockets_tests {
             let quiet = sandbox(&case, network, LinuxSockets::TcpOnly);
             assert!(!quiet.resolves_over_tcp());
             assert_eq!(quiet.linux_refusal(&case.root.join("musl")), None);
+        }
+    }
+
+    #[test]
+    fn tcp_only_judges_a_script_by_its_interpreter_and_names_a_deeper_chain_plainly() {
+        let case = case();
+        let named = sandbox(&case, model(), LinuxSockets::TcpOnly);
+        assert_eq!(named.linux_refusal(&case.root.join("on_glibc")), None);
+        assert_eq!(
+            named.linux_refusal(&case.root.join("on_musl")),
+            Some(LINUX_RESOLVER_NEEDS_UDP)
+        );
+        for program in ["on_script", "on_relative"] {
+            assert_eq!(
+                named.linux_refusal(&case.root.join(program)),
+                Some(LINUX_HARNESS_UNCHECKED),
+                "{program}"
+            );
+        }
+        let quiet = sandbox(&case, local(), LinuxSockets::TcpOnly);
+        assert_eq!(quiet.linux_refusal(&case.root.join("on_script")), None);
+        let unchecked = crate::config::plain_problem(LINUX_HARNESS_UNCHECKED).unwrap();
+        for part in [
+            "cannot check",
+            "'TCP only'",
+            "does not start",
+            "'TCP ports only'",
+            "reach any host",
+            "Settings",
+        ] {
+            assert!(unchecked.contains(part), "{unchecked}");
         }
     }
 
@@ -2200,7 +2247,15 @@ mod linux_sockets_tests {
         let case = case();
         let ports = sandbox(&case, model(), LinuxSockets::TcpPorts);
         assert!(!ports.resolves_over_tcp());
-        for program in ["glibc", "musl", "static", "codex.js"] {
+        for program in [
+            "glibc",
+            "musl",
+            "static",
+            "on_glibc",
+            "on_musl",
+            "on_script",
+            "on_relative",
+        ] {
             assert_eq!(
                 ports.linux_refusal(&case.root.join(program)),
                 None,

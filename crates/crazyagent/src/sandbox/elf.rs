@@ -9,6 +9,49 @@ const PROGRAM_HEADERS_MAX: usize = 512;
 const INTERPRETER_BYTES_MAX: u64 = 4096;
 const GLIBC_LOADERS: &[&str] = &["ld64.so.1", "ld64.so.2"];
 const GLIBC_LOADER_PREFIX: &str = "ld-linux";
+const SHEBANG: &[u8] = b"#!";
+const SHEBANG_BYTES_MAX: usize = 256;
+
+/// How a harness looks host names up under the Linux sockets setting 'TCP only'.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lookup {
+    /// A glibc program, or a script whose interpreter is one: it asks over TCP.
+    OverTcp,
+    /// A program that cannot ask over TCP: a musl or static one, a script whose
+    /// interpreter is one, or a file that is no ELF executable.
+    NotOverTcp,
+    /// A script whose interpreter cannot be checked: one named by a relative path, a
+    /// missing one, a line Linux would not start, or another script, a deeper chain.
+    Unjudged,
+}
+
+/// Judges how `program` looks names up, the way Linux starts it: a script whose first line
+/// is `#!` counts as the interpreter it names, followed one level only; any other wrapper is
+/// judged by its own file, not by the programs it starts later. Input: the program path,
+/// followed through links. Output: the [`Lookup`].
+pub fn lookup(program: &Path) -> Lookup {
+    match start(program) {
+        Ok(Start::Program) | Err(_) => judged(program),
+        Ok(Start::Script(Some(interpreter))) => match start(&interpreter) {
+            Ok(Start::Program) => judged(&interpreter),
+            Ok(Start::Script(_)) | Err(_) => Lookup::Unjudged,
+        },
+        Ok(Start::Script(None)) => Lookup::Unjudged,
+    }
+}
+
+enum Start {
+    Program,
+    Script(Option<std::path::PathBuf>),
+}
+
+fn judged(program: &Path) -> Lookup {
+    if glibc_program(program) {
+        Lookup::OverTcp
+    } else {
+        Lookup::NotOverTcp
+    }
+}
 
 /// True when `program` is an ELF executable whose program loader (its `PT_INTERP`) is
 /// glibc's: `ld-linux*.so.*`, or `ld64.so.1`/`ld64.so.2` on PowerPC and s390x. Only glibc's
@@ -20,6 +63,53 @@ pub fn glibc_program(program: &Path) -> bool {
         .ok()
         .flatten()
         .is_some_and(|loader| glibc_loader(&loader))
+}
+
+/// Reads how Linux starts `path` from its first [`SHEBANG_BYTES_MAX`] bytes: as a program,
+/// or as a script with the interpreter its `#!` line names. Input: the file. Output: the
+/// start, a script's interpreter None when the line names no absolute one or is too long to
+/// read whole, or an error for a file that cannot be read.
+fn start(path: &Path) -> std::io::Result<Start> {
+    let mut head = Vec::with_capacity(SHEBANG_BYTES_MAX);
+    regular(path)?
+        .take(SHEBANG_BYTES_MAX as u64)
+        .read_to_end(&mut head)?;
+    assert!(head.len() <= SHEBANG_BYTES_MAX);
+    let Some(rest) = head.strip_prefix(SHEBANG) else {
+        return Ok(Start::Program);
+    };
+    let line = match rest.iter().position(|byte| *byte == b'\n') {
+        Some(end) => &rest[..end],
+        None if head.len() < SHEBANG_BYTES_MAX => rest,
+        None => return Ok(Start::Script(None)),
+    };
+    let blank = |byte: &u8| matches!(byte, b' ' | b'\t');
+    let name = line
+        .iter()
+        .position(|byte| !blank(byte))
+        .map_or(&[][..], |at| &line[at..]);
+    let name = &name[..name
+        .iter()
+        .position(|byte| blank(byte) || *byte == 0)
+        .unwrap_or(name.len())];
+    let interpreter = std::str::from_utf8(name)
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute());
+    Ok(Start::Script(interpreter))
+}
+
+/// Opens `path` for reading only when it is a regular file, so a pipe or device named by a
+/// harness or its `#!` line is never read. Input: the path, followed through links. Output:
+/// the open file, or an error.
+fn regular(path: &Path) -> std::io::Result<File> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    File::open(path)
 }
 
 fn glibc_loader(loader: &Path) -> bool {
@@ -36,7 +126,7 @@ fn glibc_loader(loader: &Path) -> bool {
 /// None for an ELF file without one, or an error for a file that is not a well formed ELF
 /// executable or cannot be read.
 fn interpreter(program: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
-    let mut file = File::open(program)?;
+    let mut file = regular(program)?;
     let mut header = [0u8; HEADER_BYTES];
     file.read_exact(&mut header)?;
     if header[..4] != MAGIC || header[6] != 1 {
@@ -276,5 +366,61 @@ pub(crate) mod tests {
         }
         #[cfg(target_os = "macos")]
         assert!(!glibc_program(Path::new("/bin/ls")), "a Mach-O program");
+    }
+
+    #[test]
+    fn a_script_is_judged_by_its_interpreter_one_level_deep() {
+        let folder = tempfile::tempdir().unwrap();
+        let node = written(
+            &folder,
+            "node",
+            &executable(true, false, Some("/lib64/ld-linux-x86-64.so.2")),
+        );
+        let bun = written(
+            &folder,
+            "bun",
+            &executable(true, false, Some("/lib/ld-musl-x86_64.so.1")),
+        );
+        let script = |name: &str, text: String| written(&folder, name, text.as_bytes());
+        let claude = script(
+            "claude",
+            format!("#!{}\nimport './cli.js';\n", node.display()),
+        );
+        assert_eq!(lookup(&node), Lookup::OverTcp);
+        assert_eq!(lookup(&claude), Lookup::OverTcp, "a script on glibc");
+        let spaced = script("spaced", format!("#! \t{} --no-warnings\n", node.display()));
+        assert_eq!(lookup(&spaced), Lookup::OverTcp, "blanks and an argument");
+        let unended = script("unended", format!("#!{}", node.display()));
+        assert_eq!(
+            lookup(&unended),
+            Lookup::OverTcp,
+            "a short file with no newline"
+        );
+        let codex = script("codex", format!("#!{}\n", bun.display()));
+        assert_eq!(lookup(&bun), Lookup::NotOverTcp);
+        assert_eq!(lookup(&codex), Lookup::NotOverTcp, "a script on musl");
+        let wrapper = script("wrapper", format!("#!{}\n", claude.display()));
+        assert_eq!(lookup(&wrapper), Lookup::Unjudged, "a script on a script");
+        let missing = folder.path().join("absent");
+        let long = format!("#!/{}\n", "a".repeat(SHEBANG_BYTES_MAX));
+        for (name, text) in [
+            ("relative", "#!node\n".to_owned()),
+            ("bare", "#!\n".to_owned()),
+            ("blank", "#! \t \n".to_owned()),
+            ("missing", format!("#!{}\n", missing.display())),
+            ("carriage", format!("#!{}\r\n", node.display())),
+            ("long", long),
+        ] {
+            assert_eq!(lookup(&script(name, text)), Lookup::Unjudged, "{name}");
+        }
+        assert_eq!(lookup(&missing), Lookup::NotOverTcp, "a missing program");
+        let to_folder = script("to_folder", format!("#!{}\n", folder.path().display()));
+        assert_eq!(lookup(&to_folder), Lookup::Unjudged, "a folder interpreter");
+        #[cfg(unix)]
+        {
+            let link = folder.path().join("link");
+            std::os::unix::fs::symlink(&claude, &link).unwrap();
+            assert_eq!(lookup(&link), Lookup::OverTcp, "a link to a script");
+        }
     }
 }

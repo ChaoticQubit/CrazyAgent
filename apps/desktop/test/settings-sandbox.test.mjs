@@ -29,6 +29,7 @@ test("Settings, Sandbox lists every Linux sockets option with what it allows and
   }
   assert.match(LINUX_SOCKETS[0].detail, /resolver ignores RES_OPTIONS/);
   assert.match(LINUX_SOCKETS[0].detail, /cannot look names up/);
+  assert.match(LINUX_SOCKETS[0].detail, /Wrappers are judged by their first file, a script by its interpreter/);
   assert.match(LINUX_SOCKETS[1].detail, /master is unavailable/);
   assert.match(LINUX_SOCKETS[2].detail, /Hosts and UDP are not limited/);
 });
@@ -69,8 +70,9 @@ test("loading, not ready and a failed read each say so", () => {
   assert.match(view({ kind: "error", code: "owner_read_failed", message: "The engine is busy." }), /Couldn&#x27;t load the sandbox settings\. The engine is busy\./);
 });
 
-test("both Linux launch refusals read plainly and name the setting", () => {
+test("each Linux launch refusal reads plainly and names the setting", () => {
   assert.match(knownError("linux_resolver_needs_udp"), /cannot look up names over TCP[\s\S]*'TCP only'[\s\S]*'TCP ports only'/);
+  assert.match(knownError("linux_harness_unchecked"), /cannot check[\s\S]*'TCP only'[\s\S]*does not start[\s\S]*'TCP ports only'[\s\S]*reach any host/);
   assert.match(knownError("linux_limited_network_off"), /Linux limited-network sockets[\s\S]*does not start/);
 });
 

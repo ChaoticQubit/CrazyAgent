@@ -9,7 +9,7 @@ export const LINUX_SOCKETS: { value: LinuxSockets; title: string; detail: string
   {
     value: "tcp_only",
     title: "TCP only, names looked up over TCP (recommended)",
-    detail: "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start.",
+    detail: "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start. Wrappers are judged by their first file, a script by its interpreter, so one that starts a musl program still starts, then cannot look names up.",
   },
   {
     value: "refuse",

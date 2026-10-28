@@ -731,6 +731,11 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
     let rows = render(&mut shell, 120, 60);
     assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
     find(&rows, "RES_OPTIONS");
+    assert!(
+        sockets_words(LinuxSockets::TcpOnly)
+            .1
+            .contains("Wrappers are judged by their first file, a script by its interpreter")
+    );
     assert!(rows.last().unwrap().contains("l Linux sockets"));
     shell.key(Key::Char('l'));
     let rows = render(&mut shell, 120, 60);
