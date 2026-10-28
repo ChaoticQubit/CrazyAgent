@@ -816,12 +816,7 @@ fn check_change(
             added.push(path);
         }
         if status != "D" {
-            let names: Vec<&str> = path.split('/').collect();
-            for (at, name) in names.iter().enumerate() {
-                if LAYOUT_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
-                    folders.insert(names[..at].join("/"));
-                }
-            }
+            layout_folders(&mut folders, path);
         }
     }
     assert!(paths <= bounds.files && blobs.len() <= paths && added.len() <= paths);
@@ -847,6 +842,66 @@ fn check_change(
     }
     if ignores_any(checkout, &added)? {
         return Err(failure("changes_ignored_files"));
+    }
+    Ok(())
+}
+
+/// Adds the folders above each component of a path named like a part of a git folder
+/// (`LAYOUT_NAMES`, any case): the folders `repository_layout` lists.
+/// Inputs: the set and one added or changed path.
+fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
+    let names: Vec<&str> = path.split('/').collect();
+    for (at, name) in names.iter().enumerate() {
+        if LAYOUT_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+            folders.insert(names[..at].join("/"));
+        }
+    }
+}
+
+/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1):
+/// Accept's merge can join a change set's half of a layout with the other half another
+/// change set already landed. A layout the merge makes holds a name the change added or
+/// changed, so the change's own kept paths name every folder to list.
+/// Inputs: the repository, the change's start and end commits and the merged tree.
+/// Output: Ok, else `changes_bare_repository` or the listing failure.
+pub(super) fn check_layout(
+    repo: &Repo,
+    from: &str,
+    to: &str,
+    tree: &str,
+) -> Result<(), EngineError> {
+    let output = repo.exec(
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=d",
+            from,
+            to,
+        ],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    let mut folders = BTreeSet::new();
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
+        layout_folders(&mut folders, path);
+    }
+    if repository_layout(repo, tree, &folders)? {
+        return Err(failure("changes_bare_repository"));
     }
     Ok(())
 }

@@ -391,6 +391,73 @@ fn a_bare_repository_layout_an_agent_leaves_is_refused_when_its_turn_is_committe
     );
 }
 
+/// Adds a second agent's linked worktree to a case's repository, from the owner's
+/// current branch tip, as the engine adds one for a sibling sub-agent. Input: the case.
+/// Output: the second agent's workspace.
+fn second_agent(case: &Case) -> Workspace {
+    let worktree = case.repo.parent().unwrap().join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    }
+}
+
+#[test]
+fn accepting_two_change_sets_that_each_hold_half_a_bare_layout_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    let head: Vec<(&str, &str, bool)> = vec![
+        ("HEAD", "ref: refs/heads/main\n", false),
+        ("config", "[core]\n\tbare = true\n", false),
+    ];
+    for (first, second) in [(&store, &head), (&head, &store)] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join("notes"), first);
+        plant_layout(&sibling.worktree.join("notes"), second);
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "the merge would complete the layout in the owner's project"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+        let landed = case.repo.join("notes").join(second[0].0);
+        assert!(!landed.exists(), "{}", landed.display());
+    }
+}
+
 #[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();
