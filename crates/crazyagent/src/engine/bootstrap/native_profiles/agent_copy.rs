@@ -38,6 +38,15 @@ fn unsafe_home() -> EngineError {
     failure("native_profile_agent_home_unsafe")
 }
 
+fn wide_scope() -> EngineError {
+    failure("native_profile_scope_too_wide")
+}
+
+/// The only Claude OAuth scopes an agent's copy may carry. A subscription sign-in holds
+/// these; a Console sign-in adds scopes that can create API keys or grant wider access,
+/// which an agent must never receive.
+const AGENT_CLAUDE_SCOPES: [&str; 2] = ["user:inference", "user:profile"];
+
 /// The harness whose credential record a managed account keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Harness {
@@ -419,17 +428,19 @@ fn token_expiry(token: &str) -> Result<u64, EngineError> {
         .ok_or_else(unavailable)
 }
 
-/// Builds the agent's Claude Code `.credentials.json`: the account's OAuth record alone,
-/// with no refresh token and none of the other records the account keeps. Claude Code
-/// empties both tokens when its provider refuses a refresh. Input: the account's record.
-/// Output: the copy with its access token's expiry, `native_profile_sign_in_revoked` for
-/// emptied tokens, or the unavailable refusal.
+/// Builds the agent's Claude Code `.credentials.json`: only the fields Claude Code reads
+/// from the account's OAuth record, with no refresh token and none of the other records
+/// the account keeps. Claude Code empties both tokens when its provider refuses a refresh.
+/// The record is refused when its scopes reach beyond [`AGENT_CLAUDE_SCOPES`], so an agent
+/// never receives a Console credential that can create API keys or grant wider access.
+/// Input: the account's record. Output: the copy with its access token's expiry,
+/// `native_profile_sign_in_revoked` for emptied tokens, `native_profile_scope_too_wide`
+/// for a wider sign-in, or the unavailable refusal.
 fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
-    let mut oauth: Map<String, Value> = record
+    let oauth: &Map<String, Value> = record
         .get("claudeAiOauth")
         .and_then(Value::as_object)
-        .cloned()
         .ok_or_else(unavailable)?;
     let token = |name: &str| oauth.get(name).and_then(Value::as_str);
     if token("accessToken") == Some("") && token("refreshToken") == Some("") {
@@ -438,16 +449,38 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     if !token("accessToken").is_some_and(|token| !token.is_empty()) {
         return Err(unavailable());
     }
-    let expires = Duration::from_millis(
-        oauth
-            .get("expiresAt")
-            .and_then(Value::as_u64)
-            .ok_or_else(unavailable)?,
+    let scopes = oauth
+        .get("scopes")
+        .and_then(Value::as_array)
+        .ok_or_else(unavailable)?;
+    if !scopes.iter().all(|scope| {
+        scope
+            .as_str()
+            .is_some_and(|scope| AGENT_CLAUDE_SCOPES.contains(&scope))
+    }) {
+        return Err(wide_scope());
+    }
+    let expires_ms = oauth
+        .get("expiresAt")
+        .and_then(Value::as_u64)
+        .ok_or_else(unavailable)?;
+    let mut kept = Map::new();
+    kept.insert(
+        "accessToken".to_owned(),
+        oauth.get("accessToken").cloned().unwrap_or(Value::Null),
     );
-    oauth.insert("refreshToken".to_owned(), Value::Null);
-    let copy = serde_json::to_vec(&json!({ "claudeAiOauth": oauth })).map_err(|_| unavailable())?;
+    kept.insert("refreshToken".to_owned(), Value::Null);
+    kept.insert("expiresAt".to_owned(), Value::from(expires_ms));
+    kept.insert("scopes".to_owned(), Value::Array(scopes.clone()));
+    if let Some(subscription) = oauth.get("subscriptionType") {
+        kept.insert("subscriptionType".to_owned(), subscription.clone());
+    }
+    let copy = serde_json::to_vec(&json!({ "claudeAiOauth": kept })).map_err(|_| unavailable())?;
     assert!(!copy.is_empty());
-    Ok(Record { copy, expires })
+    Ok(Record {
+        copy,
+        expires: Duration::from_millis(expires_ms),
+    })
 }
 
 /// Reads the account's Claude Code credential from the managed home's own keychain, where

@@ -524,4 +524,23 @@ fn a_claude_record_larger_than_a_pipe_buffer_is_read_whole_from_the_keychain() {
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_no_claude_copy_when_the_sign_in_can_create_api_keys() {
+    let mut case = UseCase::with_harness("claude-code");
+    let expires = (now() + 8 * 3600) * 1000;
+    let home = case.home();
+    let mut record = claude_record(expires);
+    record["claudeAiOauth"]["scopes"] =
+        json!(["user:inference", "user:profile", "org:create_api_key"]);
+    let (_keychain, _service) = claude_keychain(&home, &record);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    assert_eq!(
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+        "native_profile_scope_too_wide"
+    );
+    assert!(entries(&agent).is_empty());
+}
+
+#[cfg(target_os = "macos")]
 mod renewal_tests;
