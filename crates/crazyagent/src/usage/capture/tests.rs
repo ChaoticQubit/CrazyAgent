@@ -1145,18 +1145,15 @@ fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
 }
 
 /// CUT-L1: a record left out of a scan whose bytes past its counted lines hold no line a scan
-/// could count reads as complete: a last line torn by a stopped agent, or the rest of a line
-/// longer than one read that the next read would skip.
+/// could count reads as complete: a last line torn by a stopped agent, alone or after the
+/// rest of a line longer than one read that the next read would skip (CUTT-L1).
 #[test]
 fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete() {
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();
     let folder = home.path().join("projects").join("x");
     let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
-    let torn = folder.join("torn.jsonl");
-    append(&torn, &claude_assistant("t1", 1, 1, 0, 0, "end_turn"));
-    append(&torn, "{\"type\":\"assistant\",\"message\":{\"id\":\"t2\"");
-    pause();
+    let torn_line = "{\"type\":\"assistant\",\"message\":{\"id\":\"t2\"";
     let long = folder.join("long.jsonl");
     append(&long, &claude_assistant("l1", 1, 1, 0, 0, "end_turn"));
     append(
@@ -1166,6 +1163,11 @@ fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete
             "x".repeat(READ_BYTES_MAX + 10)
         ),
     );
+    append(&long, torn_line);
+    pause();
+    let torn = folder.join("torn.jsonl");
+    append(&torn, &claude_assistant("t1", 1, 1, 0, 0, "end_turn"));
+    append(&torn, torn_line);
     pause();
     for index in 2..FILES_PER_SCAN_MAX {
         append(
@@ -1201,7 +1203,7 @@ fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete
     assert_eq!(
         scan(NOW + 2),
         ((1, 1), Some(0)),
-        "the record left out holds only a torn line past its counted lines, so the reading is complete"
+        "the long record left out while skipping holds only the rest of its skipped line and a torn line, so the reading is complete"
     );
     append(
         &folder.join("n2.jsonl"),
@@ -1210,7 +1212,7 @@ fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete
     assert_eq!(
         scan(NOW + 3),
         ((1, 1), Some(0)),
-        "the long record left out holds only the rest of its skipped line, so the reading is complete"
+        "the record left out holds only a torn line past its counted lines, so the reading is complete"
     );
 }
 
