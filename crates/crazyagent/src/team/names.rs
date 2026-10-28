@@ -50,10 +50,31 @@ pub struct AgentName {
     pub handle: Option<String>,
 }
 
-/// Creates the tables that keep sub-agent names and the roles the master gave tasks.
+/// Creates the tables that keep sub-agent names and the roles the master gave tasks, and
+/// clears every kept handle in a numbered form ([`numbered`]), stored before such handles
+/// were refused, so no label shows a name that now reaches another agent.
 /// Takes the engine connection.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    create(connection)?;
+    let stored = connection
+        .prepare("SELECT agent,handle FROM team_names WHERE handle GLOB '*[0-9]'")
+        .map_err(error)?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    for (agent, _) in stored.iter().filter(|(_, handle)| numbered(handle)) {
+        connection
+            .execute("UPDATE team_names SET handle=NULL WHERE agent=?1", [agent])
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
+fn create(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS team_names (

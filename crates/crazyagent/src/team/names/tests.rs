@@ -234,6 +234,63 @@ fn a_handle_never_reads_as_an_agent_number() {
     assert_eq!(stored_name(&connection, second).unwrap().handle, None);
 }
 
+/// A handle kept in a numbered form from before such handles were refused (RV-DS-62) is
+/// cleared when the engine opens its database (PD-1): agent 3 kept as `Ada (@7)` would read
+/// that way in every roster while `@7` now reaches agent 7. Its label is then its persona
+/// alone; every other handle stays.
+#[test]
+fn a_numbered_handle_kept_from_before_is_cleared_when_the_engine_opens() {
+    let (directory, connection) = engine();
+    let mut legacy = Vec::new();
+    for (persona, handle) in [
+        ("Ada", "7"),
+        ("Grace", "codex-9"),
+        ("Alan", "team-4"),
+        ("Edsger", "sub-agent-5"),
+    ] {
+        let id = agent(&connection, "alpha", "sub", "working");
+        connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha',?2,?3)",
+                params![id, persona, handle],
+            )
+            .unwrap();
+        legacy.push((id, persona));
+    }
+    let kept = agent(&connection, "alpha", "sub", "working");
+    connection
+        .execute(
+            "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha','Barbara','onboarding-fix-2')",
+            [kept],
+        )
+        .unwrap();
+    drop(connection);
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    for (id, persona) in legacy {
+        assert_eq!(
+            stored_name(&connection, id),
+            Some(AgentName {
+                persona: persona.into(),
+                handle: None
+            }),
+            "{persona}"
+        );
+        assert_eq!(
+            label(AgentRole::Sub, id, name(&connection, id).unwrap().as_ref()),
+            persona
+        );
+    }
+    assert_eq!(
+        label(
+            AgentRole::Sub,
+            kept,
+            name(&connection, kept).unwrap().as_ref()
+        ),
+        "Barbara (@onboarding-fix-2)"
+    );
+}
+
 #[test]
 fn a_role_handle_is_unique_among_the_project_s_live_agents() {
     let (_directory, connection) = engine();
