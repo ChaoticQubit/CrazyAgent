@@ -543,6 +543,7 @@ fn mapping_step(
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
+    let _ = super::seal_draft(database, &claimed.repo, &base);
     if draft::overview_blocked(&layout) {
         return (Step::failed(OVERVIEW_BLOCKED), base);
     }
@@ -582,7 +583,11 @@ fn mapping_step(
     };
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]
-        Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
+        Ok(ReadOnlyEnding::Answered(text)) => {
+            let (step, kept) = answered(&layout, &base, &text, &found, &stack);
+            let _ = super::seal_draft(database, &claimed.repo, &kept);
+            (step, kept)
+        }
         Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
         #[cfg(unix)]
         Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),

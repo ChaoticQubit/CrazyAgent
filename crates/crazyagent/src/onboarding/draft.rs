@@ -4,6 +4,7 @@ use crate::project_setup::{
 };
 use crate::protocol::CredentialRef;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -705,9 +706,18 @@ pub(crate) fn merge(
     merged
 }
 
-/// The draft an earlier onboarding saved in `layout`/setup/draft.json, when
-/// it is a readable, valid draft; `None` otherwise, so onboarding starts
-/// fresh without touching the file.
+/// The seal of a draft the engine saved: the SHA-256 of its JSON, so a later onboarding
+/// takes a draft file as its own only when it holds a draft this engine saved for the
+/// folder. Takes the draft. Returns the lowercase hex digest, or None when it cannot be
+/// serialized.
+pub(crate) fn seal(drafted: &Drafted) -> Option<String> {
+    let bytes = serde_json::to_vec(drafted).ok()?;
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+/// The draft saved in `layout`/setup/draft.json, when it is a readable, valid draft;
+/// `None` otherwise, so onboarding starts fresh without touching the file. Whether this
+/// engine saved it is the caller's check against its seal.
 pub(crate) fn reused(layout: &Path) -> Option<Drafted> {
     let setup = setup_folder(layout, false).ok()?;
     let text = file_text(open_in(&setup, DRAFT_FILE)?, DRAFT_BYTES_MAX)?;
