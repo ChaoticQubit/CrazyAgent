@@ -808,6 +808,14 @@ fn custody_written_before_a_volume_renumber_stays_usable_without_a_rewrite() {
 }
 
 #[test]
+fn profile_made_after_an_earlier_renumber_stays_usable_after_the_next_one() {
+    let case = prepared_then_renumbered(1, 2);
+    let mut custody = case.custody();
+    custody.prepare(&case.host, &case.connection).unwrap();
+    case.usable(&mut custody, &case.connection);
+}
+
+#[test]
 fn custody_with_mixed_or_moved_pins_is_still_refused() {
     let mixed_root = NativeCase::new();
     mixed_root
@@ -822,8 +830,13 @@ fn custody_with_mixed_or_moved_pins_is_still_refused() {
         .prepare(&mixed_root.host, &mixed_root.connection);
     assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
 
-    let split = prepared_then_renumbered(1, 2);
-    let refused = split.custody().prepare(&split.host, &split.connection);
+    let mixed_profile = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&mixed_profile.slot().join(MANIFEST), |value| {
+        renumber(&mut value["home"], 1)
+    });
+    let refused = mixed_profile
+        .custody()
+        .prepare(&mixed_profile.host, &mixed_profile.connection);
     assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
 
     let moved = prepared_then_renumbered(1, 1);
