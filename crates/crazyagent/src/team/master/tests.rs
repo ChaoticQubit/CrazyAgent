@@ -409,6 +409,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
         access: &access,
         stored: &setup,
         landing: &landing,
+        agents: &landing,
         events: None,
         host: None,
     };
@@ -533,6 +534,7 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         access: &access,
         stored: &setup,
         landing: &landing,
+        agents: &landing,
         events: None,
         host: None,
     };

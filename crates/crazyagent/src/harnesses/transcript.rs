@@ -231,7 +231,7 @@ impl TranscriptReader {
 /// the open takes the reparse point rather than following it. Takes the path.
 /// Returns the file, or none for a link, a directory or an open failure.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -242,7 +242,7 @@ fn open_plain(path: &Path) -> Option<File> {
 }
 
 #[cfg(unix)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY
@@ -588,6 +588,19 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     }
     assert!(messages.len() <= EXCERPT_MESSAGES_MAX);
     messages.into()
+}
+
+/// Reads one line of a harness conversation record as `conversation_messages` reads it:
+/// a Codex rollout `message` item or Claude Code `user` and `assistant` text. Takes the
+/// catalog harness id and the line. Returns the speaker and text, or none for any other
+/// line, a harness without a reader or a line that is not JSON.
+pub fn record_message(harness: &str, line: &[u8]) -> Option<(Speaker, String)> {
+    let value = serde_json::from_slice::<Value>(line).ok()?;
+    match harness {
+        "codex" => codex_message(&value),
+        "claude-code" => claude_message(&value),
+        _ => None,
+    }
 }
 
 fn codex_message(value: &Value) -> Option<(Speaker, String)> {

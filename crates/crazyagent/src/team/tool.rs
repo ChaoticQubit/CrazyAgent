@@ -31,6 +31,14 @@ pub const STATUS_TOOL: &str = "status";
 pub const CHANGES_TOOL: &str = "changes";
 pub const ESCALATE_TOOL: &str = "escalate";
 pub const WAKE_TOOL: &str = "wake";
+pub const SESSIONS_TOOL: &str = "sessions";
+pub const SESSION_TOOL: &str = "session";
+/// The engine subcommand that serves a sub-agent's team tools, `AGENT_TOOLS`.
+pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
+/// The team tools a sub-agent gets; a live master gets them with its own.
+pub const AGENT_TOOLS: [&str; 2] = [SESSIONS_TOOL, SESSION_TOOL];
+/// The one instructions line that names the past-conversation tools.
+pub const HISTORY_LINE: &str = "Past conversations: sessions(query) in the crazyagent-team MCP server searches every earlier master and sub-agent conversation of this project, of any age, and session(id, offset) reads one page by page.\n";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -50,6 +58,10 @@ const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000
 const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
+const SESSIONS_INVALID: &str =
+    "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
+const SESSION_INVALID: &str =
+    "Not read: give a conversation id from sessions() and a message number from 0.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -63,8 +75,9 @@ const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
 /// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
-/// and `changes` read the team and its pending change sets, and `escalate` raises an app
-/// notification for a decision only the owner makes.
+/// and `changes` read the team and its pending change sets, `escalate` raises an app
+/// notification for a decision only the owner makes, and `sessions` and `session` search
+/// and read the project's past conversations, the only calls a sub-agent makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -89,6 +102,13 @@ pub enum Call {
     Changes,
     Escalate {
         text: String,
+    },
+    Sessions {
+        query: String,
+    },
+    Session {
+        id: String,
+        offset: u64,
     },
 }
 
@@ -126,6 +146,52 @@ pub fn serve_live(input: impl BufRead, output: impl Write, mailbox: &Path) -> st
         ));
     }
     rpc(input, output, |request| answer_live(request, mailbox))
+}
+
+/// Serves a sub-agent's team tools, `AGENT_TOOLS`, as an MCP server over stdio until its
+/// client closes input: each call goes into the mailbox folder in the agent's private
+/// temporary folder and its result is the engine's answer. Takes the client's input and
+/// output and the absolute mailbox folder the engine made. Returns an input or output
+/// failure, or a refusal when the mailbox is not a plain folder.
+pub fn serve_agent(input: impl BufRead, output: impl Write, mailbox: &Path) -> std::io::Result<()> {
+    let plain = std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir());
+    if !mailbox.is_absolute() || !plain {
+        return Err(std::io::Error::other(
+            "the mailbox must be an absolute plain folder",
+        ));
+    }
+    rpc(input, output, |request| answer_agent(request, mailbox))
+}
+
+fn agent_tools() -> Value {
+    let tools: Vec<Value> = live_tools()["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter(|tool| {
+                    tool["name"]
+                        .as_str()
+                        .is_some_and(|name| AGENT_TOOLS.contains(&name))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(tools.len(), AGENT_TOOLS.len());
+    json!({ "tools": tools })
+}
+
+fn answer_agent(request: &Value, mailbox: &Path) -> Option<Value> {
+    let id = request.get("id")?.clone();
+    let named = request["params"]["name"]
+        .as_str()
+        .is_some_and(|name| AGENT_TOOLS.contains(&name));
+    match request.get("method").and_then(Value::as_str) {
+        Some("tools/list") => Some(json!({"jsonrpc": "2.0", "id": id, "result": agent_tools()})),
+        Some("tools/call") if !named => Some(failure(id, -32602, "Unknown tool")),
+        _ => answer_live(request, mailbox),
+    }
 }
 
 fn rpc(
@@ -267,6 +333,16 @@ fn live_tools() -> Value {
             "inputSchema": none,
         },
         {
+            "name": SESSIONS_TOOL,
+            "description": "Search every past master and sub-agent conversation of this project, of any age: each hit gives the conversation id, the message number and an excerpt. With no query it lists the conversations, newest first.",
+            "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "Words that must all appear in one message; leave empty to list the conversations."}}, "additionalProperties": false},
+        },
+        {
+            "name": SESSION_TOOL,
+            "description": "Read one past conversation of this project from a message number on, one page at a time; the page ends with the number to read next.",
+            "inputSchema": {"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false},
+        },
+        {
             "name": ESCALATE_TOOL,
             "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
@@ -353,6 +429,36 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(ESCALATE_INVALID),
         },
+        SESSIONS_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= super::history::QUERY_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Sessions {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(SESSIONS_INVALID),
+        },
+        SESSION_TOOL => {
+            let offset = match arguments.and_then(|arguments| arguments.get("offset")) {
+                None | Some(Value::Null) => Some(0),
+                Some(value) => value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok())),
+            };
+            match (argument("id").map(str::trim), offset) {
+                (Some(id), Some(offset))
+                    if super::history::id_valid(id) && offset <= super::history::OFFSET_MAX =>
+                {
+                    Ok(Call::Session {
+                        id: id.to_owned(),
+                        offset,
+                    })
+                }
+                _ => Err(SESSION_INVALID),
+            }
+        }
         _ => return None,
     })
 }
@@ -375,6 +481,8 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
+        Call::Sessions { query } => (SESSIONS_TOOL, json!({"query": query})),
+        Call::Session { id, offset } => (SESSION_TOOL, json!({"id": id, "offset": offset})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {

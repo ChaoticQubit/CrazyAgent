@@ -365,6 +365,26 @@ impl AgentContext {
         self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)
     }
 
+    /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools,
+    /// `AGENT_TOOLS` of [`crate::team::tool`], answered by the engine through the mailbox
+    /// folder, and the instructions line that names them. Input: the absolute canonical
+    /// engine executable and the absolute mailbox in the agent's private temporary folder.
+    /// Output: the context, or a plain code as for [`Self::with_team_tool`].
+    pub fn with_agent_team_tool(
+        self,
+        executable: &Path,
+        mailbox: &Path,
+    ) -> Result<Self, LaunchError> {
+        let mut context =
+            self.with_team_server(executable, crate::team::tool::AGENT_SERVER_COMMAND, mailbox)?;
+        context.instructions.push('\n');
+        context
+            .instructions
+            .push_str(crate::team::tool::HISTORY_LINE);
+        assert!(context.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        Ok(context)
+    }
+
     fn with_team_server(
         mut self,
         executable: &Path,

@@ -241,6 +241,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         access: &access,
         stored: &stored,
         landing: &base,
+        agents: &base,
         events: Some(&EVENTS),
         host: Some(&host),
     };
