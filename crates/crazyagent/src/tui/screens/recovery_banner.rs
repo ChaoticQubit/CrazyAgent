@@ -1,3 +1,4 @@
+use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project::plain_problem;
 use crate::engine::owner::{BannerNotice, BannerRun, NoticeShown, RecoveryBanner, RunShown};
@@ -299,7 +300,9 @@ impl ProjectRecovery {
         }
         if !keys.is_empty() {
             let lead = if composer { "Tab first, then " } else { "" };
-            rows.push(Row::of(format!("{lead}{}", keys.join("   ")), look.accent));
+            for line in key_lines(lead, &keys, width) {
+                rows.push(Row::of(line, look.accent));
+            }
         }
         if let Some(note) = &self.note {
             rows.push(Row::of(note.clone(), look.muted));
@@ -307,6 +310,41 @@ impl ProjectRecovery {
         rows.push(Row::default());
         rows
     }
+}
+
+/// Lays the key hints out in lines no wider than the banner: the lead, then the hints three
+/// spaces apart, breaking only between hints so each key stays beside its action; a lead or
+/// hint wider than a whole line wraps by word. Inputs: the lead, the hints and the width in
+/// cells. Output: the lines.
+fn key_lines(lead: &str, keys: &[String], width: usize) -> Vec<String> {
+    let mut lines = wrap_words(lead, width);
+    let mut line = lines.pop().unwrap_or_default();
+    let mut gap = " ";
+    for key in keys {
+        let joined = if line.is_empty() {
+            cells(key)
+        } else {
+            cells(&line) + cells(gap) + cells(key)
+        };
+        if joined <= width {
+            if !line.is_empty() {
+                line.push_str(gap);
+            }
+            line.push_str(key);
+        } else {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let mut parts = wrap_words(key, width);
+            line = parts.pop().unwrap_or_default();
+            lines.extend(parts);
+        }
+        gap = "   ";
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Whether a banner holds anything for the owner to resolve.

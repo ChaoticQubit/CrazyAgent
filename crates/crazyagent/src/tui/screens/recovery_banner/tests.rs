@@ -154,6 +154,51 @@ fn while_the_composer_holds_the_keys_the_key_line_says_tab_first() {
     );
 }
 
+#[test]
+fn key_hints_wrap_between_hints_and_never_pass_the_banner_width() {
+    let recovery = shown(RecoveryBanner {
+        runs: vec![run(
+            3,
+            "Sub-agent 3",
+            RunShown::Failed,
+            Some("The account is unavailable."),
+        )],
+        notices: vec![notice(ActionKind::AgentSpawn, 7, NoticeShown::Unknown)],
+        more: 0,
+    });
+    let hints = [
+        "Ctrl-R Retry Sub-agent 3",
+        "Ctrl-D Dismiss Ada's start",
+        "Ctrl-N Next item",
+    ];
+    for width in [76, 60, 40, 30] {
+        for composer in [true, false] {
+            let lines: Vec<String> = recovery
+                .rows(width, &Look::plain(), composer)
+                .iter()
+                .map(|row| row.text().trim_end().to_owned())
+                .collect();
+            for line in &lines {
+                assert!(
+                    cells(line) <= width,
+                    "{width} cells, composer {composer}: {line:?} is wider than the banner"
+                );
+            }
+            for hint in hints {
+                assert!(
+                    lines.iter().any(|line| line.contains(hint)),
+                    "{width} cells, composer {composer}: {hint:?} stays on one line: {lines:#?}"
+                );
+            }
+            assert_eq!(
+                lines.iter().any(|line| line.starts_with("Tab first, then")),
+                composer,
+                "{width} cells: the lead shows only while the composer has the keys"
+            );
+        }
+    }
+}
+
 /// Answers the request in flight as done, then the read that follows with a banner.
 /// Inputs: the project banner and the banner the read returns.
 fn done_then_read(recovery: &mut ProjectRecovery, banner: RecoveryBanner) {
