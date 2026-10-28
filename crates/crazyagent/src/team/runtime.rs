@@ -296,6 +296,15 @@ struct Worker {
     seed: Option<String>,
     bound: Option<TurnBound>,
     spawned: Instant,
+    ran_before: Duration,
+}
+
+impl Worker {
+    /// How long the agent has run toward its session: since its terminal started, including
+    /// the time before an engine restart adopted it. Takes the worker. Returns the time.
+    fn ran(&self) -> Duration {
+        self.ran_before + self.spawned.elapsed()
+    }
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -1534,7 +1543,7 @@ impl TeamRuntime {
         }
         let bound = turn_bound(
             super::time_limits(&self.connection, project)?,
-            self.workers[&id].spawned.elapsed(),
+            self.workers[&id].ran(),
         );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker
@@ -2179,7 +2188,7 @@ impl TeamRuntime {
             );
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
-                self.workers[&agent].spawned.elapsed(),
+                self.workers[&agent].ran(),
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker
@@ -2263,7 +2272,7 @@ impl TeamRuntime {
             return Ok(false);
         }
         let session = super::time_limits(&self.connection, &worker.project)?.session_time();
-        if session.is_none_or(|limit| worker.spawned.elapsed() < limit) {
+        if session.is_none_or(|limit| worker.ran() < limit) {
             return Ok(false);
         }
         let worker = self.workers.get_mut(&id).expect("worker exists");
@@ -2304,7 +2313,7 @@ impl TeamRuntime {
             }
             let ended = limits
                 .session_time()
-                .is_some_and(|session| worker.spawned.elapsed() >= session);
+                .is_some_and(|session| worker.ran() >= session);
             if !ended {
                 let limit = match worker.role {
                     AgentRole::Master => self.limits.master_idle_stop,
@@ -2634,6 +2643,7 @@ impl TeamRuntime {
                 seed: None,
                 bound: None,
                 spawned: Instant::now(),
+                ran_before: Duration::ZERO,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -2982,6 +2992,13 @@ impl TeamRuntime {
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
+                if let Some(record) = &pane {
+                    let worker = self.workers.get_mut(&id).expect("ready worker exists");
+                    worker.ran_before = u64::try_from(now_ms()).map_or(Duration::ZERO, |now| {
+                        Duration::from_millis(now.saturating_sub(record.since_ms))
+                    });
+                    worker.spawned = Instant::now();
+                }
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(
