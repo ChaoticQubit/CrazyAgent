@@ -1143,3 +1143,73 @@ fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
         "the record left out was counted, so the reading is complete"
     );
 }
+
+/// CUT-L1: a record left out of a scan whose bytes past its counted lines hold no line a scan
+/// could count reads as complete: a last line torn by a stopped agent, or the rest of a line
+/// longer than one read that the next read would skip.
+#[test]
+fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete() {
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    let pause = || std::thread::sleep(std::time::Duration::from_millis(20));
+    let torn = folder.join("torn.jsonl");
+    append(&torn, &claude_assistant("t1", 1, 1, 0, 0, "end_turn"));
+    append(&torn, "{\"type\":\"assistant\",\"message\":{\"id\":\"t2\"");
+    pause();
+    let long = folder.join("long.jsonl");
+    append(&long, &claude_assistant("l1", 1, 1, 0, 0, "end_turn"));
+    append(
+        &long,
+        &format!(
+            "{{\"type\":\"assistant\",\"pad\":\"{}\"}}\n",
+            "x".repeat(READ_BYTES_MAX + 10)
+        ),
+    );
+    pause();
+    for index in 2..FILES_PER_SCAN_MAX {
+        append(
+            &folder.join(format!("s{index:03}.jsonl")),
+            &claude_assistant(&format!("m{index}"), 1, 1, 0, 0, "end_turn"),
+        );
+    }
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let scan = |at: i64| {
+        pause();
+        let added = scan_home(&db, home.path(), Format::Claude, &who, at).unwrap();
+        ((added.input, added.output), partial(&db))
+    };
+
+    assert_eq!(
+        scan(NOW),
+        ((256, 256), Some(0)),
+        "a home of exactly the bound is read whole"
+    );
+    assert_eq!(
+        scan(NOW + 1),
+        ((0, 0), Some(0)),
+        "the next read of the long record skips one read of its long line"
+    );
+    append(
+        &folder.join("n1.jsonl"),
+        &claude_assistant("n1", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 2),
+        ((1, 1), Some(0)),
+        "the record left out holds only a torn line past its counted lines, so the reading is complete"
+    );
+    append(
+        &folder.join("n2.jsonl"),
+        &claude_assistant("n2", 1, 1, 0, 0, "end_turn"),
+    );
+    assert_eq!(
+        scan(NOW + 3),
+        ((1, 1), Some(0)),
+        "the long record left out holds only the rest of its skipped line, so the reading is complete"
+    );
+}
