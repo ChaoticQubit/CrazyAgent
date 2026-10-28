@@ -3,6 +3,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 
+fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Delivery {
+    super::read(checkout, home, choice, &[], &mut |_, text| {
+        format!("{text}\n")
+    })
+}
+
 const PROJECT_CLAUDE: &str = "PROJECT-CLAUDE-RULE-71";
 const PROJECT_DOT_CLAUDE: &str = "PROJECT-DOT-CLAUDE-RULE-72";
 const PROJECT_AGENTS: &str = "PROJECT-AGENTS-RULE-73";

@@ -18,6 +18,12 @@ pub const PROCESS_BYTES_MAX: usize = TITLE.len()
     + PROJECT_HEADING.len()
     + 2 * (TEXT_BYTES_MAX + 1)
     + crate::instruction_files::SECTION_BYTES_MAX;
+/// The folder inside an agent's home where `prepare` writes the owner's long instruction
+/// parts, which the instructions then name instead of carrying whole.
+pub const CONTEXT_FOLDER: &str = "crazyagent-context";
+/// The most bytes of one owner instruction part given inline to an agent that can read
+/// files; a longer part goes to the context folder and the instructions name it.
+pub const INLINE_PART_BYTES_MAX: usize = 4 * 1024;
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
 const FILES_RECORD_BYTES_MAX: usize =
@@ -134,13 +140,15 @@ pub struct AgentProject {
 
 /// What every agent of one project receives at a launch: the owner's app and project
 /// instructions with the instruction files the engine read after them, the engine's record
-/// of each instruction file it found, and how many bytes at the end of the text are the
-/// instruction files section.
+/// of each instruction file it found, how many bytes at the end of the text are the
+/// instruction files section, and the long parts, by file name, that `prepare` writes into
+/// the agent's context folder for the text to name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Given {
     pub text: String,
     pub files: Vec<crate::instruction_files::Record>,
     pub section_bytes: usize,
+    pub context: Vec<(String, String)>,
 }
 
 /// Checks owner text before it is saved: at most `TEXT_BYTES_MAX` bytes with no NUL.
@@ -199,37 +207,95 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
 
 /// Builds what every agent of the project receives: the app-wide instructions, then the
 /// project instructions, each under its heading, then the instruction files the owner
-/// chose, read by the engine from the owner's checkout and home; empty when all are blank.
-/// Input: the project. Output: at most `PROCESS_BYTES_MAX` bytes of markdown with the
-/// record of each instruction file, or a code.
-pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
+/// chose, read by the engine from the owner's checkout and home, each identical text once;
+/// empty when all are blank. When the agent can read files, a part longer than
+/// `INLINE_PART_BYTES_MAX` is kept for `prepare` to write into `folder` and the text names
+/// that file instead. Input: the project and the agent's context folder, absolute, or none
+/// for an agent without file tools. Output: at most `PROCESS_BYTES_MAX` bytes of markdown
+/// with the record of each instruction file and the parts to write, or a code.
+pub fn text(project: &AgentProject, folder: Option<&Path>) -> Result<Given, AgentHomeError> {
+    assert!(folder.is_none_or(Path::is_absolute));
     let app = read_app(&project.data)?;
     let own = match &project.folder {
         Some(folder) => read_project(folder)?,
         None => String::new(),
     };
+    let mut context = Vec::new();
+    let mut text = render_parts(&app, &own, &mut |file, part| {
+        carry(folder, file, part, &mut context)
+    });
     let delivery = crate::instruction_files::read(
         project.folder.as_deref(),
         project.owner_home.as_deref(),
         project.files,
+        &[app.as_str(), own.as_str()],
+        &mut |name, part| carry(folder, &context_name(name), part, &mut context),
     );
-    let mut text = render(&app, &own);
     text.push_str(&delivery.text);
     assert!(text.len() <= PROCESS_BYTES_MAX);
+    assert!(folder.is_some() || context.is_empty());
     Ok(Given {
         text,
         files: delivery.records,
         section_bytes: delivery.text.len(),
+        context,
     })
+}
+
+/// Gives one owner part inline, or, for an agent that can read files, keeps a part longer
+/// than `INLINE_PART_BYTES_MAX` for the context folder and gives the line that names it.
+/// Inputs: the context folder, if any, the part's file name, its text and the parts kept so
+/// far. Output: the markdown the instructions carry for the part, never longer than it.
+fn carry(
+    folder: Option<&Path>,
+    file: &str,
+    part: &str,
+    context: &mut Vec<(String, String)>,
+) -> String {
+    assert!(!file.is_empty() && !file.contains('/'));
+    let inline = format!("{part}\n");
+    let Some(folder) = folder.filter(|_| part.len() > INLINE_PART_BYTES_MAX) else {
+        return inline;
+    };
+    let line = format!(
+        "This part is {} KB, so CrazyAgent wrote it to `{}`. Read that file before you start and follow it as if it were written here.\n",
+        part.len().div_ceil(1024),
+        folder.join(file).display()
+    );
+    if line.len() >= inline.len() {
+        return inline;
+    }
+    context.push((file.to_owned(), part.to_owned()));
+    line
+}
+
+/// Names the context folder file for one instruction file, keeping project and home files
+/// apart. Input: the instruction file's name. Output: a file name without a slash.
+fn context_name(name: &str) -> String {
+    let (kind, rest) = match name.strip_prefix("~/") {
+        Some(rest) => ("home", rest),
+        None => ("project", name),
+    };
+    format!("{kind}-{}", rest.replace('/', "-"))
 }
 
 /// Renders the app text then the project text under their headings, leaving out a blank
 /// part and returning empty when both are blank. Input: both texts, each at most
 /// `TEXT_BYTES_MAX` bytes. Output: at most `PROCESS_BYTES_MAX` bytes.
 pub fn render(app: &str, project: &str) -> String {
+    render_parts(app, project, &mut |_, part| format!("{part}\n"))
+}
+
+/// Puts the app and project instructions under their headings as `render` does, with each
+/// part's body from `give`, which takes the part's context file name and its trimmed text.
+/// Inputs: both texts and `give`. Output: the markdown, empty when both are blank.
+fn render_parts(app: &str, project: &str, give: &mut dyn FnMut(&str, &str) -> String) -> String {
     assert!(app.len() <= TEXT_BYTES_MAX && project.len() <= TEXT_BYTES_MAX);
     let mut text = String::new();
-    for (heading, part) in [(APP_HEADING, app), (PROJECT_HEADING, project)] {
+    for (heading, file, part) in [
+        (APP_HEADING, "app-instructions.md", app),
+        (PROJECT_HEADING, "project-instructions.md", project),
+    ] {
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -238,8 +304,9 @@ pub fn render(app: &str, project: &str) -> String {
             text.push_str(TITLE);
         }
         text.push_str(heading);
-        text.push_str(part);
-        text.push('\n');
+        let carried = give(file, part);
+        assert!(carried.len() <= part.len() + 1);
+        text.push_str(&carried);
     }
     assert!(text.len() <= PROCESS_BYTES_MAX);
     text
@@ -265,6 +332,15 @@ pub fn prepare(
     }
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
+    let context = home.join(CONTEXT_FOLDER);
+    remove_entry(&context)?;
+    if !given.context.is_empty() {
+        fs::create_dir(&context).map_err(|_| failure("agent_home_unwritable"))?;
+        for (file, part) in &given.context {
+            assert!(!file.contains('/'));
+            write_whole(&context, file, part.as_bytes())?;
+        }
+    }
     let name = harness.instruction_file();
     if given.text.is_empty() {
         return remove_entry(&home.join(name));
