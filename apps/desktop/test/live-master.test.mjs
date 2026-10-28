@@ -229,10 +229,20 @@ test("a closed terminal panel detaches only the view its own attach opened", () 
   assert.match(panel, /if \(serial !== null\) void detachTerminal\(name, serial\);/);
 });
 
-test("a terminal view that connects again drops the right-click menu the old view opened, so focus stays on the new terminal", () => {
-  const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /if \(!name \|\| !element\) return;\s*setView\(\{ kind: "connecting" \}\);\s*setMenu\(null\);/);
-  assert.match(panel, /\}, \[name, round\]\);/);
+test("a terminal view that connects again drops the right-click menu the old view opened, so focus never lands on it", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountPanel("team-1")');
+    await evaluate("Fixture.terminalsOpen(1)");
+    await evaluate("Fixture.rightClick()");
+    const open = await evaluate("Fixture.panelView()");
+    await evaluate('Fixture.retarget("team-2")');
+    await evaluate("Fixture.terminalsOpen(2)");
+    await evaluate('Fixture.retarget("team-2")');
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    return { open, after: await evaluate("Fixture.panelView()") };
+  });
+  assert.deepEqual(seen.open, { menu: true, menuFocus: true }, "the right-click opened the menu and focused it");
+  assert.deepEqual(seen.after, { menu: false, menuFocus: false }, "the new terminal's view has no menu from the old one");
 });
 
 test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {

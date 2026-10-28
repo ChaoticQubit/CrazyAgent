@@ -7,7 +7,7 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
-import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
+import { TerminalMenu, TerminalPanel, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 
 let root = null;
@@ -204,5 +204,43 @@ export function menuView() {
     panel: box(document.querySelector(".tg-terminal")),
     screen: box(document.querySelector("#screen .xterm-screen")),
     notes: [...notes],
+  };
+}
+
+/** Mounts the real agent terminal panel for a team node whose terminal has the given name,
+ * keyed by the node as the team page keys it. The page has no engine bridge, so the real
+ * xterm opens and the attach then fails. */
+export function mountPanel(name) {
+  root = createRoot(page());
+  retarget(name);
+}
+
+/** Renders the mounted panel again for the same node with this terminal, as a team poll
+ * does when the node's terminal changes or stays the same. */
+export function retarget(name) {
+  flushSync(() => root.render(createElement(TerminalPanel, { key: node.id, node: { ...node, terminal: name } })));
+}
+
+/** Waits until the panel's screen holds this many opened xterm terminals. */
+export async function terminalsOpen(count) {
+  const opened = () => document.querySelectorAll(".tg-terminal-screen .xterm").length;
+  for (let waited = 0; opened() < count; waited += 10) {
+    if (waited > 3000) throw new Error(`${opened()} of ${count} terminals opened`);
+    await new Promise((done) => setTimeout(done, 10));
+  }
+}
+
+/** Right-clicks the middle of the panel's terminal screen, as the owner does. */
+export function rightClick() {
+  const screen = document.querySelector(".tg-terminal-screen");
+  const box = screen.getBoundingClientRect();
+  flushSync(() => screen.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })));
+}
+
+/** Whether the panel's right-click menu is open and whether focus is on one of its items. */
+export function panelView() {
+  return {
+    menu: Boolean(document.querySelector(".tg-terminal-menu")),
+    menuFocus: Boolean(document.activeElement?.closest(".tg-terminal-menu")),
   };
 }
