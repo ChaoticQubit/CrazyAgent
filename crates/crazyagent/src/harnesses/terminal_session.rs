@@ -69,6 +69,7 @@ impl KeyFile {
     /// Guards the key file at `path` that holds `content`. Inputs: the path and the bytes.
     /// Output: the guard, which removes the file on drop only while it still holds them.
     pub(super) fn new(path: PathBuf, content: &[u8]) -> Self {
+        assert!(content.len() as u64 <= KEY_FILE_BYTES_MAX);
         Self {
             path,
             content: content.to_vec(),
@@ -77,8 +78,13 @@ impl KeyFile {
 }
 
 impl Drop for KeyFile {
+    /// Removes the key file only while it is still a regular file holding this guard's
+    /// bytes, read through one open that follows no link and waits on no FIFO, since the
+    /// path sits in the agent-writable account home. Input: the guard. Output: none.
     fn drop(&mut self) {
-        if std::fs::read(&self.path).is_ok_and(|current| current == self.content) {
+        if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
+            .is_some_and(|current| current.as_bytes() == self.content)
+        {
             let _ = std::fs::remove_file(&self.path);
         }
     }

@@ -118,6 +118,14 @@ fn dropping_a_key_file_whose_path_now_holds_a_fifo_keeps_it_and_never_blocks() {
 }
 
 #[test]
+#[should_panic(expected = "assertion failed: content.len() as u64 <= KEY_FILE_BYTES_MAX")]
+fn a_key_file_guard_never_holds_more_bytes_than_a_key_file_is_read_back_with() {
+    let folder = key_folder();
+    let longer = format!("{}a", longest_key());
+    let _ = KeyFile::new(folder.path().join(interactive::KEY_FILE), longer.as_bytes());
+}
+
+#[test]
 fn dropping_a_key_file_whose_path_now_holds_more_than_a_key_keeps_it() {
     let folder = key_folder();
     let path = folder.path().join(interactive::KEY_FILE);
