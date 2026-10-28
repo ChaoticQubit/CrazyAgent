@@ -36,6 +36,9 @@ const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 const NET_ABI: ABI = ABI::V4;
+const SOCKET_TYPE_MASK: u64 = 0xf;
+const DNS_PORT: u16 = 53;
+const DNS_OVER_TCP: &str = "use-vc";
 const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
@@ -219,17 +222,23 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
 }
 
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`. Landlock does not mediate a
+/// socket and a new io_uring ring both fail with `EACCES`, and on a limited network so does
+/// every socket but TCP over IPv4 or IPv6 and netlink, since Landlock limits TCP only and a
+/// datagram, raw or other family socket reaches any host. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
-/// `socketpair(2)` stays allowed since it reaches no path. Output: the installed filter, or
-/// the reason this kernel or architecture cannot hold it.
-fn refuse_unix_sockets() -> Result<(), String> {
+/// `socketpair(2)` stays allowed since it reaches no path. Input: whether the network is
+/// limited. Output: the installed filter, or the reason this kernel or architecture cannot
+/// hold it.
+fn refuse_sockets(limit_network: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    rules.insert(libc::SYS_socket, unix_domain()?);
+    rules.insert(libc::SYS_socket, refused_sockets(limit_network)?);
     rules.insert(libc::SYS_io_uring_setup, Vec::new());
     #[cfg(target_arch = "x86_64")]
     {
-        rules.insert(X32_SYSCALL_BIT | libc::SYS_socket, unix_domain()?);
+        rules.insert(
+            X32_SYSCALL_BIT | libc::SYS_socket,
+            refused_sockets(limit_network)?,
+        );
         rules.insert(X32_SYSCALL_BIT | libc::SYS_io_uring_setup, Vec::new());
     }
     let arch: TargetArch = std::env::consts::ARCH
@@ -249,16 +258,46 @@ fn refuse_unix_sockets() -> Result<(), String> {
     seccompiler::apply_filter(&program).map_err(|error| format!("seccomp: {error}"))
 }
 
-fn unix_domain() -> Result<Vec<SeccompRule>, String> {
-    let family = SeccompCondition::new(
-        0,
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::Eq,
-        libc::AF_UNIX as u64,
-    )
-    .map_err(|error| format!("seccomp: {error}"))?;
-    let rule = SeccompRule::new(vec![family]).map_err(|error| format!("seccomp: {error}"))?;
-    Ok(vec![rule])
+/// The `socket(2)` calls the filter refuses, any one rule refusing a call: a Unix-domain
+/// socket, and on a limited network a family other than IPv4, IPv6 and netlink, an IPv4 or
+/// IPv6 socket of a type other than stream, and one naming a protocol other than TCP.
+/// Input: whether the network is limited. Output: the rules, or the reason seccomp
+/// cannot express one.
+fn refused_sockets(limit_network: bool) -> Result<Vec<SeccompRule>, String> {
+    let seccomp = |error: seccompiler::BackendError| format!("seccomp: {error}");
+    let rule = |conditions: &[(u8, SeccompCmpOp, u64)]| {
+        let conditions = conditions
+            .iter()
+            .map(|(arg, op, value)| {
+                SeccompCondition::new(*arg, SeccompCmpArgLen::Dword, op.clone(), *value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(seccomp)?;
+        SeccompRule::new(conditions).map_err(seccomp)
+    };
+    let mut rules = vec![rule(&[(0, SeccompCmpOp::Eq, libc::AF_UNIX as u64)])?];
+    if limit_network {
+        rules.push(rule(&[
+            (0, SeccompCmpOp::Ne, libc::AF_INET as u64),
+            (0, SeccompCmpOp::Ne, libc::AF_INET6 as u64),
+            (0, SeccompCmpOp::Ne, libc::AF_NETLINK as u64),
+        ])?);
+        for family in [libc::AF_INET as u64, libc::AF_INET6 as u64] {
+            for kind in (0..=SOCKET_TYPE_MASK).filter(|kind| *kind != libc::SOCK_STREAM as u64) {
+                rules.push(rule(&[
+                    (0, SeccompCmpOp::Eq, family),
+                    (1, SeccompCmpOp::MaskedEq(SOCKET_TYPE_MASK), kind),
+                ])?);
+            }
+            rules.push(rule(&[
+                (0, SeccompCmpOp::Eq, family),
+                (2, SeccompCmpOp::Ne, 0),
+                (2, SeccompCmpOp::Ne, libc::IPPROTO_TCP as u64),
+            ])?);
+        }
+    }
+    assert!(!rules.is_empty());
+    Ok(rules)
 }
 
 /// Tells whether the ruleset the helper applied holds the boundary. Inputs: the status
@@ -292,9 +331,9 @@ fn own_session() -> Result<(), String> {
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
-/// A probe applies an empty ruleset, the scope layer and the Unix-socket filter to itself
-/// and exits 0 when this kernel holds them; a run applies the policy, the scope layer and
-/// the filter to itself, moves into a session of its own and then replaces itself with the
+/// A probe applies an empty ruleset, the scope layer and the socket filter to itself and
+/// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
+/// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
 /// the policy or the session, 126 when the harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
@@ -337,7 +376,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         eprintln!("crazyagent-landlock: {error}");
         return ExitCode::from(3);
     }
-    if let Err(reason) = refuse_unix_sockets() {
+    if let Err(reason) = refuse_sockets(policy.limit_network) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -368,8 +407,9 @@ pub enum LinuxBackend {
 /// backends: the project folder is read-only, its existing entries are writable except the
 /// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
 /// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
-/// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports;
-/// bubblewrap cannot, so a tools-off agent needs Landlock.
+/// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports
+/// and the socket filter refuses every other kind of network socket; bubblewrap cannot, so a
+/// tools-off agent needs Landlock.
 #[derive(Debug)]
 pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
@@ -497,16 +537,17 @@ impl Sandbox for LinuxSandbox {
             }
             LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
         };
-        let env = agent_env(
-            &[
-                ("HOME", self.sandbox.agent_home().as_os_str()),
-                ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
-                ("PATH", OsStr::new(AGENT_PATH)),
-                ("LANG", OsStr::new("C")),
-                ("LC_ALL", OsStr::new("C")),
-            ],
-            harness.get_envs(),
-        )?;
+        let mut base = vec![
+            ("HOME", self.sandbox.agent_home().as_os_str()),
+            ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
+            ("PATH", OsStr::new(AGENT_PATH)),
+            ("LANG", OsStr::new("C")),
+            ("LC_ALL", OsStr::new("C")),
+        ];
+        if resolves_names(self.sandbox.network()) {
+            base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
+        }
+        let env = agent_env(&base, harness.get_envs())?;
         command
             .arg("--")
             .arg(program)
@@ -618,10 +659,15 @@ fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy 
     read.extend(grants.read.iter().cloned());
     let mut write: Vec<PathBuf> = LANDLOCK_DEVICES.iter().map(PathBuf::from).collect();
     write.extend(grants.write.iter().cloned());
-    let (limit_network, connect) = match network {
+    let (limit_network, mut connect) = match network {
         SandboxNetwork::Open => (false, Vec::new()),
         SandboxNetwork::Only(remotes) => (true, ports(remotes)),
     };
+    if resolves_names(network) {
+        connect.push(DNS_PORT);
+        connect.sort_unstable();
+        connect.dedup();
+    }
     assert!(
         read.len() + write.len() <= HELPER_PATHS_MAX,
         "the helper accepts every policy the engine writes"
@@ -632,6 +678,15 @@ fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy 
         connect,
         limit_network,
     }
+}
+
+/// True when a limited network names a remote on any host, so the agent resolves that
+/// host's name. The socket filter refuses datagrams there, so the resolver asks over TCP:
+/// the helper may reach port 53 and the agent gets `RES_OPTIONS=use-vc`. A network with
+/// only loopback remotes, or none, gets neither. Input: the network. Output: the answer.
+fn resolves_names(network: &SandboxNetwork) -> bool {
+    matches!(network, SandboxNetwork::Only(remotes)
+        if remotes.iter().any(|remote| matches!(remote, SandboxRemote::AnyHost(_))))
 }
 
 fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {

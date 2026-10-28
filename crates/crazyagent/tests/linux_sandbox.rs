@@ -651,7 +651,12 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
     assert_eq!(program, Path::new("/bin/sh"));
     assert_eq!(args, ["-c", "true"].map(OsString::from));
     assert!(policy.limit_network);
-    assert_eq!(policy.connect, [443, 8080]);
+    assert_eq!(policy.connect, [53, 443, 8080]);
+    assert!(
+        wrapped
+            .get_envs()
+            .any(|(name, value)| name == "RES_OPTIONS" && value == Some(OsStr::new("use-vc")))
+    );
     assert!(policy.read.contains(&case.project));
     let git = case.project.join(".git");
     for granted in [
@@ -1039,5 +1044,115 @@ fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
     assert_eq!(
         fs::read_to_string(git.join("worktrees/agent-1/commondir")).unwrap(),
         "../..\n"
+    );
+}
+
+const DATAGRAM: &str = "import os, socket, sys
+port = int(sys.argv[1])
+def attempt(name, family, kind, proto, address):
+    try:
+        s = socket.socket(family, kind, proto)
+        if address is not None:
+            s.sendto(b'x', address)
+        s.close()
+        print(name + '=ok')
+    except PermissionError:
+        print(name + '=refused')
+    except OSError as error:
+        print(name + '=' + type(error).__name__)
+attempt('udp', socket.AF_INET, socket.SOCK_DGRAM, 0, ('127.0.0.1', port))
+attempt('udp6', socket.AF_INET6, socket.SOCK_DGRAM, 0, None)
+attempt('udp_nonblock', socket.AF_INET, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK, 0, None)
+attempt('ping', socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP, None)
+attempt('sctp', socket.AF_INET, socket.SOCK_STREAM, 132, None)
+attempt('vsock', 40, socket.SOCK_STREAM, 0, None)
+try:
+    socket.create_connection(('127.0.0.1', port), 5).close()
+    print('tcp=ok')
+except OSError:
+    print('tcp=refused')
+try:
+    socket.create_connection(('127.0.0.1', 53), 5).close()
+    print('dns_tcp=reachable')
+except ConnectionRefusedError:
+    print('dns_tcp=reachable')
+except OSError as error:
+    print('dns_tcp=' + type(error).__name__)
+print('resolver=' + os.environ.get('RES_OPTIONS', ''))
+";
+
+fn datagrams(sandbox: Option<&dyn Sandbox>, case: &Case, port: u16) -> Vec<String> {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", DATAGRAM])
+        .arg(port.to_string())
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_tools_off_agent_sends_no_datagram_and_resolves_names_over_tcp() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let open = datagrams(None, &case, port);
+    assert!(
+        open.contains(&"udp=ok".to_owned()) && open.contains(&"tcp=ok".to_owned()),
+        "the unsandboxed control must send a datagram: {open:?}"
+    );
+    let named = SandboxNetwork::Only(vec![
+        SandboxRemote::Loopback(port),
+        SandboxRemote::AnyHost(443),
+    ]);
+    let landlock = LinuxSandbox::detect(policy(&case, named), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        datagrams(Some(&landlock), &case, port),
+        [
+            "udp=refused",
+            "udp6=refused",
+            "udp_nonblock=refused",
+            "ping=refused",
+            "sctp=refused",
+            "vsock=refused",
+            "tcp=ok",
+            "dns_tcp=reachable",
+            "resolver=use-vc",
+        ]
+    );
+    let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let landlock = LinuxSandbox::detect(policy(&case, loopback), Path::new(HELPER)).unwrap();
+    assert_eq!(
+        datagrams(Some(&landlock), &case, port),
+        [
+            "udp=refused",
+            "udp6=refused",
+            "udp_nonblock=refused",
+            "ping=refused",
+            "sctp=refused",
+            "vsock=refused",
+            "tcp=ok",
+            "dns_tcp=PermissionError",
+            "resolver=",
+        ],
+        "an agent with no remote on another host gets no resolver port"
+    );
+    let unlimited =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let reached = datagrams(Some(&unlimited), &case, port);
+    assert!(
+        reached.contains(&"udp=ok".to_owned()) && reached.contains(&"resolver=".to_owned()),
+        "an open network keeps datagrams: {reached:?}"
     );
 }
