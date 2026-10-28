@@ -604,6 +604,83 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
 }
 
 #[test]
+fn recreating_a_project_clears_the_reused_ids_stale_skill_folder_at_once() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let project = ProjectId::new("reused").unwrap();
+
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('reused','{}')", [])
+        .unwrap();
+    let project_store = root
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("reused");
+    let stale = project_store.join("old-notes");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(
+        stale.join("SKILL.md"),
+        "---\nname: old-notes\ndescription: Old project notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-old".into(),
+            name: "old-notes".into(),
+            description: "Old project notes.".into(),
+            scope: Scope::Project {
+                project_id: project.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/old-notes".into(),
+            folder: Path::new("plugins")
+                .join("skills")
+                .join("project")
+                .join("reused")
+                .join("old-notes")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    connection
+        .execute("DELETE FROM projects WHERE id='reused'", [])
+        .unwrap();
+
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::storage::create_project(
+            &tx,
+            &project,
+            &crate::protocol::ProjectSpec {
+                name: "Reused".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+        tx.commit().unwrap();
+    }
+
+    assert!(
+        !project_store.exists(),
+        "the reused id's stale skill store is cleared at creation, before any trash sweep"
+    );
+}
+
+#[test]
 #[should_panic(expected = "assertion failed")]
 fn a_dot_folder_part_never_reaches_the_store() {
     let root = tempfile::tempdir().unwrap();
@@ -718,4 +795,102 @@ fn the_largest_server_the_checks_accept_fits_one_reply_frame() {
     let view = fits(&mut connection);
     assert_eq!(view.tools, tools, "the check kept every tool it accepted");
     assert_eq!(view.secrets.len(), SECRETS_PER_SERVER_MAX);
+}
+
+#[test]
+fn a_case_variant_project_id_is_refused_and_keeps_the_first_projects_skills() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let first = ProjectId::new("Proj-a").unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::storage::create_project(
+            &tx,
+            &first,
+            &crate::protocol::ProjectSpec {
+                name: "Proj A".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(outcome, crate::protocol::Outcome::Applied));
+        tx.commit().unwrap();
+    }
+    let store = root
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("Proj-a");
+    std::fs::create_dir_all(store.join("notes")).unwrap();
+    std::fs::write(
+        store.join("notes").join("SKILL.md"),
+        "---\nname: notes\ndescription: Live notes.\n---\n",
+    )
+    .unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let record = SkillRecord {
+            id: "skill-live".into(),
+            name: "notes".into(),
+            description: "Live notes.".into(),
+            scope: Scope::Project {
+                project_id: first.clone(),
+            },
+            enabled: true,
+            source: "/private/tmp/notes".into(),
+            folder: Path::new("plugins")
+                .join("skills")
+                .join("project")
+                .join("Proj-a")
+                .join("notes")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        save(
+            &tx,
+            "skill",
+            &record.id,
+            &record.scope,
+            &record.name,
+            &record,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    }
+
+    let variant = ProjectId::new("proj-a").unwrap();
+    {
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::storage::create_project(
+            &tx,
+            &variant,
+            &crate::protocol::ProjectSpec {
+                name: "proj a".into(),
+                repositories: vec![],
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome, crate::protocol::Outcome::Rejected { code } if code == "project_id_case_conflict"),
+            "{outcome:?}"
+        );
+        tx.commit().unwrap();
+    }
+
+    assert!(
+        store.join("notes").exists(),
+        "the first project's skill store survives a refused case variant"
+    );
+}
+
+#[test]
+fn removing_a_dot_skill_folder_is_refused_and_never_deletes_the_project_root() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().join("plugins").join("skills").join("project");
+    std::fs::create_dir_all(base.join("real")).unwrap();
+    assert!(remove_skill_project_folder(root.path(), ".").is_err());
+    assert!(
+        base.join("real").exists(),
+        "a dot id never reaches remove_dir_all on the shared project root"
+    );
 }

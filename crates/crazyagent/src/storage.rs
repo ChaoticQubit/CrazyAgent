@@ -1550,13 +1550,30 @@ fn execute(
 /// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
 /// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
-/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
-/// or Rejected when the id is already in use.
+/// project's plugins untouched. The reused id's old skill store folder is removed at once,
+/// not left for the next start's trash sweep, so the new project starts with a clean skill
+/// store and a same-name skill import is not refused by a stale folder. Creation is refused
+/// before any clearing when an existing project id equals the new one ignoring ASCII case,
+/// so a case-insensitive filesystem never lets one project's skill store delete another's.
+/// Inputs: the transaction, the id and the spec. Output: Applied, or Rejected when the id is
+/// already in use or clashes with one only by ASCII case.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
 ) -> Result<Outcome, EngineError> {
+    let case_clash: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1) AND id<>?1)",
+            params![project_id.as_str(), project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if case_clash {
+        return Ok(Outcome::Rejected {
+            code: "project_id_case_conflict".into(),
+        });
+    }
     let stored = StoredProject {
         project_id: project_id.clone(),
         spec: spec.clone(),
@@ -1578,6 +1595,9 @@ pub(crate) fn create_project(
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
     plugins::remove_project(tx, project_id)?;
+    if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
+        plugins::remove_skill_project_folder(root, project_id.as_str())?;
+    }
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
