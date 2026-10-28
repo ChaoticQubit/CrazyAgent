@@ -744,7 +744,7 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectCatalog { research, .. } => {
-                if research.len() > crate::project_setup::ResearchKind::ALL.len() {
+                if research.len() > crate::project_setup::ResearchKind::CHOICES.len() {
                     return Err(failure("research_duplicate"));
                 }
                 return Ok(None);

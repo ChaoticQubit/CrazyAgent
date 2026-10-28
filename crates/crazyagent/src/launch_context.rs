@@ -627,6 +627,7 @@ fn render(project: &ProjectId, setup: Option<&StoredSetup>, memories: &str) -> S
                         ContextKind::Brief => "brief",
                         ContextKind::Document => "document",
                         ContextKind::Research => "research",
+                        ContextKind::Plan => "agent-written plan",
                     };
                     let line = format!("- {} ({kind}, {})\n", item.path, size(item.bytes));
                     if left > 0 || index.len() + line.len() > INDEX_BYTES_MAX {

@@ -465,6 +465,7 @@ pub(in crate::tui) fn research_glyph(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "\u{25ec}",
         ResearchKind::FrontEndDesign => "\u{25ad}",
         ResearchKind::TechStackResearch => "\u{2263}",
+        ResearchKind::RoadmapPlanning => "\u{25a4}",
     }
 }
 
@@ -475,6 +476,7 @@ fn research_description(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "Patterns and references for the look",
         ResearchKind::FrontEndDesign => "A first UI for the platforms you picked",
         ResearchKind::TechStackResearch => "Libraries, hosting and architecture options",
+        ResearchKind::RoadmapPlanning => "Versions, time per version and how to release",
     }
 }
 
