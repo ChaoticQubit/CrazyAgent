@@ -818,6 +818,8 @@ fn finished_team() -> crate::team::TeamStatus {
         handle: None,
         register: None,
         finished,
+        wakeable: false,
+        wake_note: None,
     };
     TeamStatus {
         project_id: project(),
@@ -1032,6 +1034,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 handle: None,
                 register: None,
                 finished: false,
+                wakeable: false,
+                wake_note: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]

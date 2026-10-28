@@ -167,8 +167,12 @@ fn delegation_lines_are_read_from_a_master_reply() {
     assert!(parse_delegations(&long).is_empty());
 }
 
+/// Finished agents (DEC-102) are the stopped and failed sub-agents and the idle ones that ran
+/// a turn since they last started; each says whether the owner's Wake can wake it and, when
+/// not, why. A Wake of a finished agent with a kept worktree is recorded once for the team
+/// runtime to serve; a running agent, one without a worktree or an unknown one is refused.
 #[test]
-fn team_agents_name_their_newest_register_entry_and_finished_agents_hide_until_shown() {
+fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -185,72 +189,113 @@ fn team_agents_name_their_newest_register_entry_and_finished_agents_hide_until_s
             ],
         )
         .unwrap();
-    let agent = |status: &str| {
+    let agent = |status: &str, turns: i64, worktree: bool| {
         connection
             .execute(
-                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('team-finished','sub','codex',0,?1,1,1)",
-                [status],
+                "INSERT INTO team_agents(project,role,harness,tools,status,turns,created_ms,heartbeat_ms) VALUES ('team-finished','sub','codex',0,?1,?2,1,1)",
+                params![status, turns],
             )
             .unwrap();
-        connection.last_insert_rowid()
+        let id = connection.last_insert_rowid();
+        if worktree {
+            connection
+                .execute(
+                    "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,'team-finished','.',?2,'.git')",
+                    params![id, format!("worktrees/agent-{id}")],
+                )
+                .unwrap();
+        }
+        id
     };
-    let stopped = agent("stopped");
-    let idle = agent("idle");
-    let unhosted = agent("failed");
-    let busy = agent("working");
-    let before = status(&connection, &setup).unwrap();
-    assert!(!before.show_finished, "Hide is the default");
-    assert!(
-        before.agents.iter().all(|a| a.register.is_none()),
-        "no register yet: {before:#?}"
-    );
-
-    let agents = std::sync::Arc::new(crate::agents::Agents::open(&base).unwrap());
-    let host = |project: &ProjectId, reference: i64| {
-        agents
-            .host(
-                crate::agents::HostedAgent {
-                    project: project.clone(),
-                    role: crate::agents::AgentRole::SubAgent,
-                    label: format!("Team sub-agent {reference}"),
-                    harness: "codex".into(),
-                    host: runtime::TEAM_HOST,
-                    reference: reference.to_string(),
-                    account: None,
-                },
-                None,
-            )
-            .unwrap()
-    };
-    let other = ProjectId::new("team-elsewhere").unwrap();
-    let older = host(&setup.project_id, stopped);
-    let newer = host(&setup.project_id, stopped);
-    let waiting = host(&setup.project_id, idle);
-    let foreign = host(&other, unhosted);
-    assert_ne!(older.id(), newer.id());
+    let stopped = agent("stopped", 3, true);
+    let ready = agent("idle", 0, true);
+    let idle = agent("idle", 2, true);
+    let cleaned = agent("failed", 1, false);
+    let busy = agent("working", 1, true);
     let read = status(&connection, &setup).unwrap();
-    let register = |id: i64| {
-        read.agents
-            .iter()
-            .find(|a| a.id == id)
-            .and_then(|a| a.register.clone())
-    };
-    assert_eq!(register(stopped).as_deref(), Some(newer.id()), "{read:#?}");
-    assert_eq!(register(idle).as_deref(), Some(waiting.id()));
-    assert_eq!(
-        register(unhosted),
-        None,
-        "another project's entry {} is not this agent's",
-        foreign.id()
-    );
+    assert!(!read.show_finished, "Hide is the default");
     let finished: Vec<i64> = read
         .agents
         .iter()
         .filter(|a| a.finished)
         .map(|a| a.id)
         .collect();
-    assert_eq!(finished, [stopped, idle, unhosted], "{read:#?}");
-    assert!(read.agents.iter().any(|a| a.id == busy && !a.finished));
+    assert_eq!(finished, [stopped, idle, cleaned], "{read:#?}");
+    assert!(
+        read.agents
+            .iter()
+            .filter(|a| a.id == ready || a.id == busy)
+            .all(|a| !a.finished && !a.wakeable && a.wake_note.is_none())
+    );
+    let wake = |read: &TeamStatus, id: i64| {
+        let agent = read.agents.iter().find(|a| a.id == id).unwrap();
+        (agent.wakeable, agent.wake_note.clone())
+    };
+    let unavailable = crate::research::runner::confined_unavailable(std::env::consts::OS);
+    assert_eq!(
+        wake(&read, stopped),
+        (unavailable.is_none(), unavailable.map(str::to_owned))
+    );
+    assert_eq!(wake(&read, idle), (false, Some("Already running.".into())));
+    assert_eq!(
+        wake(&read, cleaned),
+        (
+            false,
+            Some(
+                "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                    .into()
+            )
+        )
+    );
+
+    let press = |connection: &mut Connection, agent: i64| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-finished", &["local-a"]),
+            &TeamAction::WakeAgent {
+                project_id: setup.project_id.clone(),
+                agent,
+            },
+        );
+        tx.commit().unwrap();
+        outcome.ok()
+    };
+    let refused = |code: &str| Some(Outcome::Rejected { code: code.into() });
+    assert_eq!(press(&mut connection, idle), refused("team_agent_running"));
+    assert_eq!(press(&mut connection, busy), refused("team_agent_running"));
+    assert_eq!(
+        press(&mut connection, cleaned),
+        refused("team_agent_no_worktree")
+    );
+    assert_eq!(
+        press(&mut connection, 9_999),
+        refused("team_agent_not_found")
+    );
+    assert_eq!(press(&mut connection, 0), None, "validated before storage");
+    let requests = |connection: &Connection| -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM team_wake_requests", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(requests(&connection), 0);
+    if unavailable.is_some() {
+        assert_eq!(
+            press(&mut connection, stopped),
+            refused("team_agents_unavailable")
+        );
+        assert_eq!(requests(&connection), 0);
+    } else {
+        assert_eq!(press(&mut connection, stopped), Some(Outcome::Applied));
+        assert_eq!(press(&mut connection, stopped), Some(Outcome::Applied));
+        assert_eq!(requests(&connection), 1, "a second Wake changes nothing");
+        assert_eq!(
+            wake(&status(&connection, &setup).unwrap(), stopped),
+            (false, Some("Waking.".into()))
+        );
+    }
 
     let show = |connection: &mut Connection, on: bool| {
         let tx = connection.transaction().unwrap();

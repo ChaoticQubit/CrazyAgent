@@ -706,6 +706,7 @@ impl TeamRuntime {
         self.owner_controls()?;
         let access = (self.access)().unwrap_or_default();
         self.owner_restarts(&access)?;
+        self.owner_wakes(&access)?;
         for project in self.active_projects()? {
             self.step(&project, &access)?;
         }
@@ -852,23 +853,53 @@ impl TeamRuntime {
             return Ok(());
         };
         for restart in agents.take_restarts(TEAM_HOST) {
-            self.restart_agent(&restart, access)?;
+            if let Ok(reference) = restart.reference.parse::<i64>() {
+                self.start_again(reference, Some(&restart), access)?;
+            }
         }
         Ok(())
     }
 
-    /// Starts a team agent the owner restarted again under the same register entry, when
-    /// the team plan and the pool still allow it; otherwise notes why not. A stopped
-    /// sub-agent whose worktree is still recorded wakes through [`TeamRuntime::wake`], under
-    /// its own name and worktree; any other agent starts as a fresh process.
-    fn restart_agent(
+    /// Serves the owner's Wake buttons (DEC-102), at most `OWNER_WAKES_PER_TICK_MAX` a tick,
+    /// oldest first: each request is taken once and the agent wakes through
+    /// [`TeamRuntime::wake`], never as a new agent. Returns any SQLite failure.
+    fn owner_wakes(&mut self, access: &ModelAccess) -> Result<(), EngineError> {
+        let requests: Vec<i64> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT agent FROM team_wake_requests ORDER BY requested_ms, agent LIMIT ?1",
+                )
+                .map_err(error)?;
+            statement
+                .query_map([OWNER_WAKES_PER_TICK_MAX as i64], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        assert!(requests.len() <= OWNER_WAKES_PER_TICK_MAX);
+        for agent in requests {
+            self.connection
+                .execute("DELETE FROM team_wake_requests WHERE agent=?1", [agent])
+                .map_err(error)?;
+            self.start_again(agent, None, access)?;
+        }
+        Ok(())
+    }
+
+    /// Starts a team agent the owner restarted or woke again, when the team plan and the
+    /// pool still allow it; otherwise notes why not. A stopped or failed sub-agent whose
+    /// worktree is still recorded wakes through [`TeamRuntime::wake`] under its own id, name,
+    /// worktree and register entry; no other sub-agent starts again, so a register entry
+    /// never moves to another agent. A restarted master starts as a fresh process under its
+    /// register entry. A Wake (no `again`) of an agent that is no longer finished does
+    /// nothing, so a stale Wake never stops or replaces a running agent.
+    fn start_again(
         &mut self,
-        restart: &HostedRestart,
+        reference: i64,
+        again: Option<&HostedRestart>,
         access: &ModelAccess,
     ) -> Result<(), EngineError> {
-        let Ok(reference) = restart.reference.parse::<i64>() else {
-            return Ok(());
-        };
         let row: Option<(String, String, String, bool)> = self
             .connection
             .query_row(
@@ -886,6 +917,16 @@ impl TeamRuntime {
         let (Ok(project), Some(role)) = (ProjectId::new(project), AgentRole::parse(&role)) else {
             return Ok(());
         };
+        match (role, wakes, again) {
+            (AgentRole::Sub, false, None) | (AgentRole::Master, _, None) => return Ok(()),
+            (AgentRole::Sub, false, Some(_)) => {
+                return self.note(
+                    &project,
+                    "That sub-agent was not restarted: only a stopped agent whose worktree is still kept starts again, under its own name.",
+                );
+            }
+            _ => {}
+        }
         let Some(stored) = self.stored(&project)? else {
             return Ok(());
         };
@@ -926,12 +967,10 @@ impl TeamRuntime {
         };
         let paused = self.paused()?;
         let started = match self.account_for(access, &project, &harness, &paused) {
-            Ok(account) if wakes && role == AgentRole::Sub => self
-                .wake(&stored, reference, &harness, tools, &account, Some(restart))?
+            Ok(account) if role == AgentRole::Sub => self
+                .wake(&stored, reference, &harness, tools, &account, again)?
                 .map(|(id, _)| id),
-            Ok(account) => {
-                self.spawn_run(&stored, role, &harness, tools, &account, Some(restart))?
-            }
+            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
             Err(reason) => Err(reason),
         };
         match started {
@@ -2339,8 +2378,9 @@ impl TeamRuntime {
     }
 
     /// Wakes a stopped sub-agent (DEC-102), the one way a task pinned to it, the master's
-    /// wake and the owner's restart start one again: the agent starts under its own id, name
-    /// and recorded worktree, continuing the harness conversation kept for it when
+    /// wake and the owner's Wake or restart start one again: the agent starts under its own
+    /// id, name and recorded worktree, and under its own newest register entry when no
+    /// restart names one, continuing the harness conversation kept for it when
     /// [`TeamRuntime::kept_conversation`] finds one that can continue. Takes the setup, the
     /// agent, its harness and tools switch, the account and the register restart if any.
     /// Returns the agent with whether its harness conversation continues, or the plain
@@ -2354,6 +2394,20 @@ impl TeamRuntime {
         account: &TeamAccount,
         again: Option<&HostedRestart>,
     ) -> Result<Result<(i64, bool), String>, EngineError> {
+        let own = match (again, &self.agents) {
+            (None, Some(_)) => {
+                crate::agents::hosted_entries(&self.connection, &stored.project_id, TEAM_HOST)
+                    .map_err(error)?
+                    .remove(&id.to_string())
+                    .map(|entry| HostedRestart {
+                        id: entry,
+                        host: TEAM_HOST.to_owned(),
+                        reference: id.to_string(),
+                    })
+            }
+            _ => None,
+        };
+        let again = again.or(own.as_ref());
         let resume = self.kept_conversation(id, harness, &account.connection)?;
         let resuming = resume.is_some();
         self.resuming = resume.map(|resume| (id, resume));
@@ -2438,7 +2492,7 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, heartbeat_ms=?4
+                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
                 params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
             )
@@ -4297,6 +4351,7 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
 const FINISHED_LISTED_MAX: usize = 20;
 const FINISHED_TASK_BYTES_MAX: usize = 120;

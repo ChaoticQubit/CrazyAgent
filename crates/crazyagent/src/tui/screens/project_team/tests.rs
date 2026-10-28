@@ -74,6 +74,8 @@ fn agent(
         handle: None,
         register: None,
         finished: false,
+        wakeable: false,
+        wake_note: None,
     }
 }
 
