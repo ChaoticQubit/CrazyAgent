@@ -1616,6 +1616,65 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     );
 }
 
+/// A launch that made an agent's own clone and then failed at a later step removes that
+/// clone again, so a failed launch leaves no checkout behind that no agent row would clean
+/// up, and another agent's worktree stays (GA-R2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_clone_launch_that_fails_after_making_the_clone_leaves_no_clone_behind() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex.clone())]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let prepare = |id: i64, layout: crate::agent_git::Layout| {
+        runtime.prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            layout,
+        )
+    };
+    assert!(prepare(1, crate::agent_git::Layout::Linked).is_ok());
+    let worktrees =
+        crate::projects_home::state_folder(&fixture.base.join("project").canonicalize().unwrap())
+            .join("worktrees");
+    assert!(worktrees.join("agent-1").is_dir());
+
+    let Err(refused) = prepare(2, crate::agent_git::Layout::Clone) else {
+        panic!("the clone launch did not fail at a later step");
+    };
+    assert!(
+        std::fs::symlink_metadata(worktrees.join("agent-2")).is_err(),
+        "the failed launch left its clone: {refused}"
+    );
+    assert!(
+        worktrees.join("agent-1").is_dir(),
+        "the cleanup touched another agent's worktree"
+    );
+}
+
 /// On Linux, which runs no agent confined to its own worktree in V1 (DEC-094), a team agent
 /// stops before any sandbox or repository step, and its row carries the owner's plain line.
 #[cfg(target_os = "linux")]
