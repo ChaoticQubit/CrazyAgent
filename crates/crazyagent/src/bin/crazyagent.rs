@@ -119,6 +119,28 @@ fn main() -> ExitCode {
     }
     if args
         .first()
+        .is_some_and(|arg| arg == crazyagent::team::tool::AGENT_SERVER_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent team-mcp-agent MAILBOX_DIR".to_owned())
+        } else {
+            crazyagent::team::tool::serve_agent(
+                io::stdin().lock(),
+                io::stdout().lock(),
+                Path::new(&args[1]),
+            )
+            .map_err(|e| e.to_string())
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::LIVE_SERVER_COMMAND)
     {
         let result = if args.len() != 2 {

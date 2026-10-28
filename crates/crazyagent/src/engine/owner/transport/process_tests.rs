@@ -348,6 +348,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         text: text.into(),
         files: Vec::new(),
         section_bytes: 0,
+        context: Vec::new(),
     };
     let sub_home = launched_home(&root, sub);
     prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
@@ -472,6 +473,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         text: "# Rules\n".into(),
         files: files.clone(),
         section_bytes: 0,
+        context: Vec::new(),
     };
     let launch = AgentProject {
         data: root.clone(),
@@ -528,6 +530,7 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         text: "# Rules\n".into(),
         files: Vec::new(),
         section_bytes: 0,
+        context: Vec::new(),
     };
     prepare(&home, Harness::Codex, &launch, &given).unwrap();
     record_skills(&root, &home, &["tdd", "code-review"]).unwrap();

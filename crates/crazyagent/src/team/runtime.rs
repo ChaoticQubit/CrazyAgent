@@ -1266,6 +1266,7 @@ impl TeamRuntime {
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
+        self.serve_agent_calls(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         let master_live = self.master(project).is_some();
@@ -2131,14 +2132,47 @@ impl TeamRuntime {
             return Ok(());
         }
         let mailbox = self.mailbox(id);
+        let agents = self.state.join("agents");
         let answering = super::master::Answering {
             access,
             stored,
             landing: &self.root,
+            agents: &agents,
             events: self.events.as_ref(),
             host: self.terminal.as_deref(),
         };
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+    }
+
+    /// Answers the past-conversation and saved-memory calls a project's sub-agents made
+    /// since the last tick, from each running sub-agent's own mailbox, with the sub-agent's
+    /// label as the origin of what it saves; any other call from a sub-agent is refused.
+    /// Takes the project.
+    fn serve_agent_calls(&mut self, project: &ProjectId) {
+        if self.delegation_tool.is_none() {
+            return;
+        }
+        let agents = self.state.join("agents");
+        let subs: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.role == AgentRole::Sub && worker.tools
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in subs {
+            let label = super::events::label(&self.connection, id)
+                .unwrap_or_else(|_| AgentRole::Sub.agent_label(id));
+            let mailbox = self.mailbox(id);
+            super::history::serve_agent_calls(
+                &mut self.connection,
+                project,
+                &label,
+                &agents,
+                &mailbox,
+            );
+        }
     }
 
     /// Types the oldest waiting team message into a project's live master once it is idle
@@ -3174,7 +3208,8 @@ impl TeamRuntime {
             }
         };
         let live = self.live_master(&stored.project_id, role, launch);
-        if live && tools {
+        let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
+        if (live && tools) || agent_tools {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
@@ -3412,6 +3447,14 @@ impl TeamRuntime {
             _ if master && !tools => context
                 .with_team_index(&self.connection, project)
                 .map_err(unread),
+            Some(engine) if role == AgentRole::Sub && tools => {
+                let engine = engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                context
+                    .with_agent_team_tool(engine, &self.mailbox(id))
+                    .map_err(unread)
+            }
             _ => Ok(context),
         }
     }
@@ -4360,6 +4403,11 @@ fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+    };
+    let how = if team_tool {
+        how + tool::HISTORY_LINE + tool::MEMORY_LINE
+    } else {
+        how
     };
     let text = format!(
         "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}",

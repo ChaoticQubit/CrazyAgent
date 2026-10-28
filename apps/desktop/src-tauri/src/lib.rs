@@ -5,7 +5,7 @@ mod updates;
 mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
-use bridge::memory::{MemoryList, MemoryNote};
+use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
@@ -537,6 +537,21 @@ async fn desktop_add_memory(
 }
 
 #[tauri::command]
+async fn desktop_import_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    folder: String,
+    generation: u64,
+) -> Result<MemoryImport, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .import_memory(&project, &folder, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_promote_memory(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -561,6 +576,31 @@ async fn desktop_delete_memory(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.delete_memory(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_approve_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.approve_memory(&id, generation).await
+}
+
+#[tauri::command]
+async fn desktop_set_agent_memory_writes(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    writes: crazyagent::memory::library::AgentWrites,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_agent_memory_writes(writes, generation)
+        .await
 }
 
 #[tauri::command]
@@ -2609,8 +2649,11 @@ pub fn run() {
             desktop_memory,
             desktop_approved_memories,
             desktop_add_memory,
+            desktop_import_memory,
             desktop_promote_memory,
             desktop_delete_memory,
+            desktop_approve_memory,
+            desktop_set_agent_memory_writes,
             desktop_forget_memory,
             desktop_remember_research,
             desktop_save_selection_to_memory,

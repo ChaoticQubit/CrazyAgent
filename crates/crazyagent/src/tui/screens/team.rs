@@ -1385,7 +1385,7 @@ fn file_state(state: crate::instruction_files::State) -> &'static str {
     use crate::instruction_files::State;
     match state {
         State::Given => "given",
-        State::Same => "left out: the same text as a file above",
+        State::Same => "left out: the same text as the instructions or a file above",
         State::TooLarge => "left out: larger than CrazyAgent gives",
         State::Unsafe => "left out: a link or not a plain file",
         State::Invalid => "left out: not plain text",

@@ -3646,6 +3646,7 @@ fn wake_call(
         access: &fixture.access,
         stored: &fixture.setup,
         landing: &fixture.base,
+        agents: &fixture.base,
         events: None,
         host: None,
     };
