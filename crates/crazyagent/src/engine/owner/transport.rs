@@ -50,6 +50,7 @@ pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
 pub(crate) mod process;
 mod projects_home;
+pub(crate) mod questions;
 pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
@@ -2009,6 +2010,7 @@ enum Protocol {
     Usage,
     IdeExtensions,
     Recovery,
+    Questions,
     NativeAuth,
     Process,
     Ide,
@@ -2040,6 +2042,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("usage", Protocol::Usage),
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
+        ("questions", Protocol::Questions),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
@@ -2118,6 +2121,7 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
+            Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2287,6 +2291,10 @@ async fn serve_admitted(
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
         }
+        Deferred::Questions(a) => {
+            let served = questions::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2333,9 +2341,10 @@ struct Tasks {
 /// clones, account checks that reach the network, agent controls, which wait for an
 /// agent's process group or its host to end it, Changes requests, which run git on the
 /// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
-/// requests, which wait for the action ledger under the owner barrier, and IDE tab
-/// requests, which wait for an IDE server to start. Each carries the admission, and the
-/// projects home its validated request; the others read the request frame.
+/// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
+/// which wait for an IDE server to start, and Questions requests, which wait for the
+/// database write lock and rewrite a project's questions page. Each carries the admission,
+/// and the projects home its validated request; the others read the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2346,6 +2355,7 @@ enum Deferred {
     Recovery(Admission),
     Ide(Admission),
     IdeTab(Admission),
+    Questions(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2386,6 +2396,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Usage => usage::refusal(code)?,
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
+        Protocol::Questions => questions::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,

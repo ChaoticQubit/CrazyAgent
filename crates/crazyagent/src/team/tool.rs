@@ -42,6 +42,8 @@ pub const CHANGES_TOOL: &str = "changes";
 pub const ESCALATE_TOOL: &str = "escalate";
 pub const MEMORIES_TOOL: &str = "memories";
 pub const REMEMBER_TOOL: &str = "remember";
+pub const ASK_TOOL: &str = "ask";
+pub const RECORD_TOOL: &str = "record_answer";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -60,6 +62,10 @@ const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60)
 const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
 const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
+const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
+const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
+const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
 const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -75,13 +81,22 @@ const MEMORIES_MORE_BYTES: usize = 64;
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
 const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
+const _: () = assert!(
+    2 * (crate::questions::QUESTION_BYTES_MAX
+        + crate::questions::OPTIONS_MAX * crate::questions::OPTION_BYTES_MAX
+        + crate::questions::RECOMMENDED_BYTES_MAX
+        + crate::questions::CONTEXT_BYTES_MAX)
+        + 256
+        <= CALL_BYTES_MAX as usize
+);
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
 /// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
 /// `escalate` raises an app notification for a decision only the owner makes, `memories`
-/// reads the project's memories with their versions and `remember` suggests one or changes
-/// a suggestion at the version it names.
+/// reads the project's memories with their versions, `remember` suggests one or changes
+/// a suggestion at the version it names, `ask` logs a question for the owner, and
+/// `record_answer` records the owner's chat message that answered one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -108,6 +123,17 @@ pub enum Call {
         text: String,
         memory: Option<String>,
         version: Option<u64>,
+    },
+    Ask {
+        question: String,
+        options: Vec<String>,
+        recommended: Option<String>,
+        context: Option<String>,
+    },
+    RecordAnswer {
+        question: u64,
+        version: u64,
+        owner_turn: i64,
     },
 }
 
@@ -304,7 +330,42 @@ fn live_tools() -> Value {
                 "additionalProperties": false,
             },
         },
+        ask_tool(),
+        {
+            "name": RECORD_TOOL,
+            "description": "Record that the owner answered one of your own questions in this chat instead of in the Questions view. Name the owner's message; the engine takes the answer from that message, never from your words, and takes the question off the owner's list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "integer", "description": "The question number the ask tool gave you."},
+                    "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
+                    "owner_turn": {"type": "integer", "description": "The number of the owner's chat message that answers it."},
+                },
+                "required": ["question", "version", "owner_turn"],
+                "additionalProperties": false,
+            },
+        },
     ]})
+}
+
+/// The MCP entry of the `ask` tool, the same for every master and agent that is given it.
+/// Output: the tool's name, description and input schema.
+pub fn ask_tool() -> Value {
+    json!({
+        "name": ASK_TOOL,
+        "description": "Ask the owner a question and log it in the project's questions. This is the only way to ask the owner anything, grill-me questions included: one question at a time, with the answer you recommend. The owner is notified and the tool replies with the question number. The owner's answer or dismissal comes to you once, as a message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "One plain question for the owner."},
+                "options": {"type": "array", "items": {"type": "string"}, "maxItems": crate::questions::OPTIONS_MAX, "description": "Up to 6 short one-line answers the owner can pick from."},
+                "recommended": {"type": "string", "description": "The answer you recommend: one of the options, or a short answer when there are none."},
+                "context": {"type": "string", "description": "What the owner needs to know to answer."},
+            },
+            "required": ["question"],
+            "additionalProperties": false,
+        },
+    })
 }
 
 fn answer_live(request: &Value, mailbox: &Path) -> Option<Value> {
@@ -386,6 +447,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         },
         MEMORIES_TOOL => Ok(Call::Memories),
         REMEMBER_TOOL => remember_call(arguments).ok_or(MEMORY_INVALID),
+        ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
+        RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         _ => return None,
     })
 }
@@ -422,6 +485,70 @@ fn remember_call(arguments: Option<&Value>) -> Option<Call> {
     })
 }
 
+/// Reads one `ask` call: a question with its options, recommendation and context, each
+/// checked as the questions log checks it. Takes the arguments. Returns the call, or none
+/// when a part is missing, unknown or outside its bounds.
+fn ask_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !ASK_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let text = |key: &str| match arguments.get(key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) => Some(Some(text.clone())),
+        Some(_) => None,
+    };
+    let options = match arguments.get("options") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) if items.len() <= crate::questions::OPTIONS_MAX => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?,
+        Some(_) => return None,
+    };
+    let ask = crate::questions::Ask {
+        question: text("question")??,
+        options,
+        recommended: text("recommended")?,
+        context: text("context")?,
+    }
+    .checked()
+    .ok()?;
+    Some(Call::Ask {
+        question: ask.question,
+        options: ask.options,
+        recommended: ask.recommended,
+        context: ask.context,
+    })
+}
+
+/// Reads one `record_answer` call: the question number, the version the master read and
+/// the owner's chat message number. Takes the arguments. Returns the call, or none when a
+/// part is missing, unknown or not a number in range.
+fn record_call(arguments: Option<&Value>) -> Option<Call> {
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !RECORD_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let question = number("question").filter(|id| *id > 0)?;
+    let version = number("version")?;
+    let owner_turn = number("owner_turn")
+        .and_then(|turn| i64::try_from(turn).ok())
+        .filter(|turn| *turn > 0)?;
+    Some(Call::RecordAnswer {
+        question,
+        version,
+        owner_turn,
+    })
+}
+
 /// Checks a call the engine read from a mailbox, which the agent's side could have written.
 /// Takes the call. Returns it, or the plain sentence it was refused with.
 pub fn checked(call: Call) -> Result<Call, &'static str> {
@@ -447,6 +574,23 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         } => (
             REMEMBER_TOOL,
             json!({"text": text, "memory": memory, "version": version}),
+        ),
+        Call::Ask {
+            question,
+            options,
+            recommended,
+            context,
+        } => (
+            ASK_TOOL,
+            json!({"question": question, "options": options, "recommended": recommended, "context": context}),
+        ),
+        Call::RecordAnswer {
+            question,
+            version,
+            owner_turn,
+        } => (
+            RECORD_TOOL,
+            json!({"question": question, "version": version, "owner_turn": owner_turn}),
         ),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;

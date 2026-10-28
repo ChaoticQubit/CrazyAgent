@@ -81,8 +81,9 @@ fn message(agent: &str, title: &str, path: &str, line: u32, text: &str) -> Strin
 }
 
 /// Sends an owner's diff comment to the agent that made the change set. A team master's
-/// set takes it as one owner message in the project's team conversation through the
-/// `team::execute` Message path; a sub-agent's set types it into that agent's live terminal
+/// set takes it as one owner message in the project's team conversation through the team
+/// Message path; its frame quotes the agent's own text, so it is never an owner turn a
+/// master may name as an answer. A sub-agent's set types it into that agent's live terminal
 /// as its master's messages are typed. An owner conversation's set is refused, since the IDE
 /// holds no owner admission to drive that conversation. Only an open set of the IDE's project
 /// and a file it changed that still exists take a comment. Inputs: the store, the terminal
@@ -161,7 +162,7 @@ fn to_conversation(db: &Connection, project: &ProjectId, text: String) -> Result
     };
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate)
         .map_err(|_| failure("changes_unavailable"))?;
-    match crate::team::execute(&tx, &ModelAccess::default(), &action)? {
+    match crate::team::execute_framed(&tx, &ModelAccess::default(), &action)? {
         Outcome::Applied => {}
         Outcome::Rejected { code } => return Err(EngineError(code)),
         _ => return Err(failure("changes_outcome_unknown")),

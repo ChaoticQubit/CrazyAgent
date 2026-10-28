@@ -785,7 +785,12 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 text TEXT NOT NULL,
                 created_ms INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
+            CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);
+            CREATE TABLE IF NOT EXISTS team_owner_turns (
+                message INTEGER PRIMARY KEY,
+                project TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS team_owner_turns_project ON team_owner_turns(project);",
         )
         .map_err(error)?;
     events::initialize(connection)?;
@@ -1288,6 +1293,25 @@ pub fn append_message(
     Ok(Ok(tx.last_insert_rowid()))
 }
 
+/// Records a message the owner typed in the team chat as an owner turn, the only kind of
+/// message a master may name as the owner's answer to a question, and forgets the turns of
+/// messages the conversation no longer keeps, so the records stay within its bound.
+/// Takes the transaction, the project and the message id.
+fn owner_turn(tx: &Transaction<'_>, project: &ProjectId, message: i64) -> Result<(), EngineError> {
+    tx.execute(
+        "DELETE FROM team_owner_turns WHERE project=?1
+         AND message NOT IN (SELECT id FROM team_messages WHERE project=?1)",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_owner_turns(message,project) VALUES (?1,?2)",
+        params![message, project.as_str()],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
 /// Cuts text to at most `max` bytes on a character boundary.
 /// Takes the text and the byte bound.
 /// Returns the bounded text.
@@ -1300,13 +1324,38 @@ pub fn bound_text(text: &str, max: usize) -> String {
     text[..end].to_owned()
 }
 
-/// Executes one owner team action inside the owner transaction.
+/// Executes one owner team action inside the owner transaction. A message is the owner's
+/// own chat turn, so it is recorded as one a master may name as the owner's answer.
 /// Takes the transaction, the engine configuration and the action.
 /// Returns Applied, or a plain rejection before any row is written.
 pub fn execute(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     action: &TeamAction,
+) -> Result<Outcome, EngineError> {
+    perform(tx, access, action, true)
+}
+
+/// Executes one owner team action whose message an engine surface framed around the
+/// owner's words with text the owner did not type, such as an IDE review comment, so the
+/// message is never an owner turn. Takes the transaction, the engine configuration and the
+/// action. Returns what `execute` returns.
+pub(crate) fn execute_framed(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    action: &TeamAction,
+) -> Result<Outcome, EngineError> {
+    perform(tx, access, action, false)
+}
+
+/// Executes one owner team action, recording its message as an owner turn only when the
+/// owner typed all of it. Takes the transaction, the engine configuration, the action and
+/// whether the owner typed it. Returns what `execute` returns.
+fn perform(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    action: &TeamAction,
+    typed: bool,
 ) -> Result<Outcome, EngineError> {
     action.validate()?;
     let Some(project) = action.project() else {
@@ -1331,7 +1380,12 @@ pub fn execute(
                 MessageState::Pending,
                 now,
             )? {
-                Ok(_) => Outcome::Applied,
+                Ok(message) => {
+                    if typed {
+                        owner_turn(tx, project, message)?;
+                    }
+                    Outcome::Applied
+                }
                 Err(code) => rejected(code),
             },
         ),

@@ -251,6 +251,16 @@ fn a_comment_on_the_team_master_s_changes_is_one_owner_message_in_the_team_conve
         text,
         "On Team master (codex)'s changes \"Say one in Italian\", README line 1:\n\nSay uno once.\nKeep the rest."
     );
+    let turns: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM team_owner_turns", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        turns, 0,
+        "an IDE comment quotes agent text, so it is never an owner turn"
+    );
     assert_eq!(
         comment(
             &case.db,
