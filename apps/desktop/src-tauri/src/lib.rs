@@ -1806,7 +1806,8 @@ async fn desktop_skill_import_scan(
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
     main_window(&window)?;
-    read(&state).await?.skill_import_scan().await
+    let call = read(&state).await?.skill_import_scan()?;
+    call.await
 }
 
 #[tauri::command]
@@ -1817,7 +1818,8 @@ async fn desktop_import_skill(
     replace: Option<String>,
 ) -> Result<crazyagent::skills::import::Imported, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.import_skill(folder, replace).await
+    let call = read(&state).await?.import_skill(folder, replace)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1840,10 +1842,10 @@ async fn desktop_add_mcp_server(
     secrets: Vec<(String, String)>,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)
+    let call = read(&state)
         .await?
-        .add_mcp_server(scope, name, spec, secrets)
-        .await
+        .add_mcp_server(scope, name, spec, secrets)?;
+    call.await
 }
 
 #[tauri::command]

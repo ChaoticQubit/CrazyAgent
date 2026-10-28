@@ -366,7 +366,8 @@ impl NativeBridge {
     }
 
     /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
-    /// path, the home folder, a credential location and the CrazyAgent data folder.
+    /// path, the home folder, a credential location and the CrazyAgent data folder. Reads the
+    /// folders first, so the change starts from the engine's current revision.
     /// Takes the project id, the folders and the client generation.
     /// Returns the actual commit receipt.
     pub async fn set_project_read_paths(
@@ -377,6 +378,10 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
         let project_id = project(id)?;
+        self.controller()?
+            .project_read_paths(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
         self.controller()?
             .begin_mutation(
                 OwnerMutation::SetProjectReadPaths { project_id, paths },

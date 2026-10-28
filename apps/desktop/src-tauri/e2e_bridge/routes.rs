@@ -1485,7 +1485,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             routed(result)
         }
         "desktop_skill_import_scan" => {
-            let result: Result<_, BridgeError> = async { read(state).await?.skill_import_scan().await }.await;
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.skill_import_scan()?; call.await }.await;
             routed(result)
         }
         "desktop_import_skill" => {
@@ -1499,7 +1499,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.import_skill(folder, replace).await }.await;
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.import_skill(folder, replace)?; call.await }.await;
             routed(result)
         }
         "desktop_remove_skill" => {
@@ -1528,7 +1528,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .add_mcp_server(scope, name, spec, secrets) .await }.await;
+            let result: Result<_, BridgeError> = async { let call = read(state) .await? .add_mcp_server(scope, name, spec, secrets)?; call.await }.await;
             routed(result)
         }
         "desktop_update_mcp_server" => {
