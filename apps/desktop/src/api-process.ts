@@ -203,7 +203,7 @@ export interface InstructionRecord {
 
 const FILE_STATES: Record<InstructionState, string> = {
   given: "given",
-  same: "left out: the same text as a file above",
+  same: "left out: the same text as the instructions or a file above",
   too_large: "left out: larger than CrazyAgent gives",
   unsafe: "left out: a link or not a plain file",
   invalid: "left out: not plain text",

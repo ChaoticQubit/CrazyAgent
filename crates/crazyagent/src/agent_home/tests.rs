@@ -25,6 +25,7 @@ fn given(text: &str) -> Given {
         text: text.into(),
         files: Vec::new(),
         section_bytes: 0,
+        context: Vec::new(),
     }
 }
 
@@ -35,7 +36,7 @@ fn both_texts_are_saved_and_read_back_and_a_missing_file_is_empty() {
     let folder = project.folder.clone().unwrap();
     assert_eq!(read_app(&project.data).unwrap(), "");
     assert_eq!(read_project(&folder).unwrap(), "");
-    assert_eq!(text(&project).unwrap().text, "");
+    assert_eq!(text(&project, None).unwrap().text, "");
 
     save_app(&project.data, "Use TDD.\n").unwrap();
     save_project(&folder, "Run make check.\n").unwrap();
@@ -85,7 +86,7 @@ fn the_size_bound_holds_on_save_and_on_read() {
     save_app(&project.data, &full).unwrap();
     save_project(&folder, &full).unwrap();
     assert_eq!(read_app(&project.data).unwrap().len(), TEXT_BYTES_MAX);
-    let rendered = text(&project).unwrap().text;
+    let rendered = text(&project, None).unwrap().text;
     assert!(rendered.len() <= PROCESS_BYTES_MAX);
 
     let over = "a".repeat(TEXT_BYTES_MAX + 1);
@@ -108,7 +109,10 @@ fn the_size_bound_holds_on_save_and_on_read() {
         read_project(&folder).unwrap_err().0,
         "process_text_too_large"
     );
-    assert_eq!(text(&project).unwrap_err().0, "process_text_too_large");
+    assert_eq!(
+        text(&project, None).unwrap_err().0,
+        "process_text_too_large"
+    );
 }
 
 #[test]
@@ -183,7 +187,7 @@ fn both_texts_are_written_in_order_into_each_harness_file() {
     let project = project(&root);
     save_app(&project.data, "App rule.\n").unwrap();
     save_project(project.folder.as_deref().unwrap(), "Project rule.\n").unwrap();
-    let rendered = text(&project).unwrap().text;
+    let rendered = text(&project, None).unwrap().text;
     let app = rendered.find("App rule.").unwrap();
     let own = rendered.find("Project rule.").unwrap();
     assert!(app < own, "project text goes last");

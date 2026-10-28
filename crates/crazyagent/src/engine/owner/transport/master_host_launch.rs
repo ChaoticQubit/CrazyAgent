@@ -138,7 +138,13 @@ impl OwnerRuntimeHandle {
         let wall_time =
             Duration::from_millis(prepared.attempt.request.route.resources.wall_time_ms);
         let delegate = engine.as_deref().map(delegate_engine).transpose()?;
-        let process = crate::agent_home::text(&prepared.agent_project)
+        let context = prepared.tools.then(|| {
+            folder
+                .path
+                .join(MASTER_HOME)
+                .join(crate::agent_home::CONTEXT_FOLDER)
+        });
+        let process = crate::agent_home::text(&prepared.agent_project, context.as_deref())
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
         let process = match claude {
@@ -166,6 +172,11 @@ impl OwnerRuntimeHandle {
             )?
         };
         require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
+        assert!(
+            context
+                .as_deref()
+                .is_none_or(|context| context == turn.home.join(crate::agent_home::CONTEXT_FOLDER))
+        );
         let harness = if claude {
             crate::agent_home::Harness::Claude
         } else {
@@ -243,6 +254,7 @@ fn claude_process(
         section_bytes: section.len(),
         text,
         files: process.files,
+        context: process.context,
     }
 }
 
@@ -1363,7 +1375,7 @@ mod tests {
             files: Choice::Project,
             owner_home: None,
         };
-        let given = crate::agent_home::text(&project).unwrap();
+        let given = crate::agent_home::text(&project, None).unwrap();
         let states: Vec<(&str, State)> = given
             .files
             .iter()
@@ -1423,6 +1435,7 @@ mod tests {
             text: "# Instructions from CrazyAgent\n\nShort.\n".into(),
             files: Vec::new(),
             section_bytes: 0,
+            context: Vec::new(),
         };
         assert_eq!(
             claude_process(&instructions, small.clone()),

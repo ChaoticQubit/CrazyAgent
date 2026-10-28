@@ -22,13 +22,13 @@ pub const HEADER_BYTES_MAX: usize = HEADER_TITLE.len()
     + "You are working on the project \"\".\n".len()
     + NAME_BYTES_MAX
     + 2 * ("Project folder: \n".len() + FOLDER_BYTES_MAX);
-pub const BRIEF_BYTES_MAX: usize = crate::project_setup::CONTEXT_CHUNK_BYTES;
+pub const BRIEF_BYTES_MAX: usize = 3 * 1024;
 pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
-pub const INDEX_BYTES_MAX: usize = 7 * 1024;
+pub const INDEX_BYTES_MAX: usize = 3 * 1024;
 pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 34 * 1024;
-pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
+pub const SKILLS_INDEX_BYTES_MAX: usize = 2 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
     INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
@@ -108,12 +108,11 @@ pub struct AgentContext {
     transcripts: bool,
 }
 
-/// The owner's app and project instructions and the instruction files one launch writes
-/// into the agent's home, with the project they belong to.
+/// The project whose app and project instructions and instruction files each launch reads
+/// and writes into the agent's home.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
-    given: crate::agent_home::Given,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
@@ -162,13 +161,12 @@ pub fn for_project(
         .map_err(failure)?
         .transcripts;
     drop(tx);
-    let given = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
+    crate::agent_home::text(&home_project, None).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
         process: Some(Box::new(Process {
             project: home_project,
-            given,
         })),
         transcripts,
     })
@@ -478,12 +476,19 @@ impl AgentContext {
         };
         remove(&state);
         directory(&state, true)?;
-        if let Some(process) = &self.process {
-            let harness = crate::agent_home::Harness::from_id(id)
-                .ok_or_else(|| failure("launch_harness_unsupported"))?;
-            crate::agent_home::prepare(home, harness, &process.project, &process.given)
-                .map_err(|problem| LaunchError(problem.0))?;
-        }
+        let context = tools.then(|| home.join(crate::agent_home::CONTEXT_FOLDER));
+        let given = match &self.process {
+            Some(process) => {
+                let harness = crate::agent_home::Harness::from_id(id)
+                    .ok_or_else(|| failure("launch_harness_unsupported"))?;
+                let given = crate::agent_home::text(&process.project, context.as_deref())
+                    .map_err(|problem| LaunchError(problem.0))?;
+                crate::agent_home::prepare(home, harness, &process.project, &given)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                given
+            }
+            None => crate::agent_home::Given::default(),
+        };
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
         let names: Vec<&str> = match skills {
@@ -516,13 +521,9 @@ impl AgentContext {
                 .arguments
                 .extend([OsString::from("--mcp-config"), mcp.into_os_string()]);
             let mut text = self.instructions.clone();
-            if let Some(process) = self
-                .process
-                .as_ref()
-                .filter(|process| !process.given.text.is_empty())
-            {
+            if !given.text.is_empty() {
                 text.push('\n');
-                text.push_str(&process.given.text);
+                text.push_str(&given.text);
             }
             if skills {
                 let plugin = state.join("plugin");
@@ -760,15 +761,18 @@ fn skill_description(path: &Path) -> String {
     crate::plugins::skill_folder::stored_description(path).unwrap_or_default()
 }
 
+/// Names the skills the owner approved for one launch and the one path pattern their
+/// files follow, so the agent reads a skill's `SKILL.md` only when it uses that skill.
+/// Inputs: the folder the skills were copied into and the skills. Output: at most
+/// `SKILLS_INDEX_BYTES_MAX` plus slack bytes of markdown.
 fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
-    let mut index = String::from(
-        "\n## Skills\n\nThe owner approved these skills for this project. Read a skill's SKILL.md before you use it.\n\n",
+    let mut index = format!(
+        "\n## Skills\n\nThe owner approved these skills for this project. Before you use one, read `{}`, with the skill's name in place of NAME.\n\n",
+        folder.join("NAME").join("SKILL.md").display()
     );
     let mut left = 0;
     for skill in skills {
-        let path = folder.join(&skill.name).join("SKILL.md");
-        let description = skill_description(&path);
-        let line = format!("- {}: {} ({})\n", skill.name, description, path.display());
+        let line = format!("- {}\n", clip(&skill.name, NAME_BYTES_MAX));
         if left > 0 || index.len() + line.len() > SKILLS_INDEX_BYTES_MAX {
             left += 1;
             continue;

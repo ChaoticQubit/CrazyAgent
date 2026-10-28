@@ -248,10 +248,19 @@ pub(crate) fn owner_home() -> Option<PathBuf> {
 /// and for "Project and user files" the owner's `~/.claude/CLAUDE.md` and
 /// `~/.codex/AGENTS.md`. Each file is at most `FILE_BYTES_MAX` bytes and all given files at
 /// most `FILES_BYTES_MAX`; hidden characters are shown as visible escapes; a file that
-/// cannot be given is recorded with the reason and never stops the launch.
-/// Inputs: the owner's checkout folder, the owner's home and the choice.
-/// Output: the section and the records.
-pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Delivery {
+/// cannot be given is recorded with the reason and never stops the launch. A file whose text
+/// is already given elsewhere, such as the app instructions, is recorded as the same and
+/// given once. `give` turns each given file into what the section carries for it: its text,
+/// or a shorter line naming where the agent reads it.
+/// Inputs: the owner's checkout folder, the owner's home, the choice, the texts already
+/// given and `give`. Output: the section and the records.
+pub fn read(
+    checkout: Option<&Path>,
+    home: Option<&Path>,
+    choice: Choice,
+    already: &[&str],
+    give: &mut dyn FnMut(&str, &str) -> String,
+) -> Delivery {
     let mut delivery = Delivery::default();
     let mut given: Vec<(&str, String)> = Vec::new();
     let mut total = 0;
@@ -284,7 +293,11 @@ pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Del
                 }
                 let state = if text.len() > FILE_BYTES_MAX || total + text.len() > FILES_BYTES_MAX {
                     State::TooLarge
-                } else if given.iter().any(|(_, earlier)| *earlier == text) {
+                } else if given.iter().any(|(_, earlier)| *earlier == text)
+                    || already
+                        .iter()
+                        .any(|earlier| !earlier.trim().is_empty() && earlier.trim() == text.trim())
+                {
                     State::Same
                 } else {
                     total += text.len();
@@ -306,8 +319,9 @@ pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Del
             delivery.text.push_str("\n### ");
             delivery.text.push_str(name);
             delivery.text.push_str("\n\n");
-            delivery.text.push_str(text);
-            delivery.text.push('\n');
+            let carried = give(name, text);
+            assert!(carried.len() <= text.len() + 1);
+            delivery.text.push_str(&carried);
         }
     }
     assert!(committed_found.next().is_none());
