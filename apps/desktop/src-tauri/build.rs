@@ -27,6 +27,8 @@ fn main() {
         "desktop_set_project_agent_policy",
         "desktop_project_files",
         "desktop_team_status",
+        "desktop_team_agent_messages",
+        "desktop_team_message_settings",
         "desktop_team_message",
         "desktop_team_delegate",
         "desktop_team_cancel",

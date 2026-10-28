@@ -2441,6 +2441,19 @@ fn owner_read(
                 &stored_setup(&tx, project_id)?,
             )?),
         },
+        OwnerRead::TeamAgentMessages {
+            project_id,
+            agent,
+            before,
+            limit,
+        } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::TeamAgentMessages {
+                messages: Box::new(crate::team::agent_messages::owner_read(
+                    &tx, project_id, *agent, *before, *limit,
+                )?),
+            }
+        }
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
             events: Box::new(crate::team::events::app(&tx)?),
         },

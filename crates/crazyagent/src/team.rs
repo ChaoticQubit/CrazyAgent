@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod agent_messages;
 pub mod cleanup;
 pub mod direct;
 pub mod events;
@@ -455,6 +456,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
     },
+    MessageSettings {
+        project_id: ProjectId,
+        settings: agent_messages::MessageSettings,
+    },
 }
 
 impl TeamAction {
@@ -535,6 +540,7 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::MessageSettings { settings, .. } => settings.validate(),
             Self::KeepWarm { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
@@ -556,6 +562,7 @@ impl TeamAction {
             | Self::TimeLimits { project_id, .. }
             | Self::OnHarnessSwitch { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
+            | Self::MessageSettings { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -978,6 +985,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         )
         .map_err(error)?;
     events::initialize(connection)?;
+    agent_messages::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
     direct::erase_typed_input(connection)
@@ -1665,6 +1673,10 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MessageSettings { settings, .. } => {
+            agent_messages::save_settings(tx, project, settings)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2018,6 +2030,8 @@ pub struct TeamStatus {
     pub on_harness_switch: SwitchMode,
     #[serde(default)]
     pub show_finished: bool,
+    #[serde(default)]
+    pub message_settings: agent_messages::MessageSettings,
     #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
@@ -2657,6 +2671,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
         show_finished: show_finished(connection, project)?,
+        message_settings: agent_messages::settings(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
