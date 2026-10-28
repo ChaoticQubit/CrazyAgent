@@ -320,6 +320,7 @@ pub struct TeamRuntime {
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
+    master_watch: super::screen_questions::MasterWatch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     settled: bool,
@@ -433,6 +434,7 @@ impl TeamRuntime {
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
+            master_watch: super::screen_questions::MasterWatch::default(),
             live_starts: BTreeMap::new(),
             resuming: None,
             settled: false,
@@ -722,7 +724,8 @@ impl TeamRuntime {
     /// stop cut short, applies agent reports and the owner's stop and restart from the agent
     /// register, sends pending messages to the master, delivers finished results, starts or
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
-    /// panes no agent owns and rewrites each followed IDE workspace whose sections changed.
+    /// panes no agent owns, rewrites each followed IDE workspace whose sections changed and
+    /// logs the questions masters' harnesses ask the owner in their own terminals.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -737,7 +740,88 @@ impl TeamRuntime {
         self.note_conversations()?;
         self.watch_questions()?;
         self.sweep()?;
-        crate::ide::workspace::follow(&self.connection, &self.root)
+        crate::ide::workspace::follow(&self.connection, &self.root)?;
+        self.watch_master_questions()
+    }
+
+    /// Logs each question a live master's harness asks the owner in its own terminal as
+    /// asked in terminal, and marks it answered once its box leaves the screen, at most once
+    /// each `events::SCAN_EVERY`. A master whose questions cannot be read is skipped this
+    /// scan. Every master is served before the first failure or log refusal is returned.
+    fn watch_master_questions(&mut self) -> Result<(), EngineError> {
+        use super::screen_questions::{Change, Pending};
+        use crate::questions::{Ask, Asker};
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        if !self.master_watch.due() {
+            return Ok(());
+        }
+        let live: Vec<super::events::Watched> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| worker.role == AgentRole::Master && !worker.stopping)
+            .map(|(id, worker)| super::events::Watched {
+                agent: *id,
+                project: worker.project.clone(),
+                task: None,
+            })
+            .collect();
+        let mut first = None;
+        let mut read = BTreeSet::new();
+        let mut pending = Vec::new();
+        for (project, agent) in self.master_watch.askers(&live) {
+            let asker = Asker::Terminal(agent).name();
+            match crate::questions::pending(&self.connection, &project) {
+                Ok(found) => {
+                    read.insert(agent);
+                    pending.extend(
+                        found
+                            .into_iter()
+                            .filter(|question| question.asker == asker)
+                            .map(|question| Pending {
+                                id: question.id,
+                                project: project.clone(),
+                                agent,
+                                text: question.question,
+                            }),
+                    );
+                }
+                Err(problem) => {
+                    first.get_or_insert(problem);
+                }
+            }
+        }
+        let masters: Vec<super::events::Watched> = live
+            .into_iter()
+            .filter(|master| read.contains(&master.agent))
+            .collect();
+        for change in self.master_watch.scan(host.as_ref(), &masters, &pending) {
+            let applied = match change {
+                Change::Asked {
+                    project,
+                    agent,
+                    text,
+                } => {
+                    let ask = Ask {
+                        question: text.clone(),
+                        options: Vec::new(),
+                        recommended: None,
+                        context: None,
+                    };
+                    let asker = Asker::Terminal(agent);
+                    crate::questions::ask(&self.connection, &project, &asker, &ask)
+                        .map(|_| self.master_watch.logged(agent, &text))
+                }
+                Change::Answered(id) => {
+                    crate::questions::terminal_settled(&self.connection, id).map(|_| ())
+                }
+            };
+            if let Err(problem) = applied {
+                first.get_or_insert(problem);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Settles the runs the last engine stop cut short once, on the first tick after the

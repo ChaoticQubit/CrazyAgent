@@ -3489,3 +3489,141 @@ fn a_team_master_s_questions_are_logged_as_its_own_and_a_refused_one_is_noted() 
         usize::try_from(crate::questions::PENDING_PER_ASKER_MAX).unwrap()
     );
 }
+
+const ASKING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+asked=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  [ "$line" = "/exit" ] && exit 0
+  if [ "$asked" = 1 ]; then
+    printf '\033[2J\033[HThanks, picked %s\n' "$line"
+    asked=2
+    continue
+  fi
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+  if [ "$asked" = 0 ]; then
+    asked=1
+    printf '\n  Which database should the service use?\n\n\342\200\272 1. Postgres\n  2. SQLite\n  3. None of the above\n\n  tab to add notes \302\267 enter to submit answer \302\267 esc to interrupt\n'
+  fi
+done
+"#;
+
+/// A question box a live master's own harness draws in its terminal is logged once in the
+/// owner questions log as asked in terminal, rendered into questions.md and never typed back
+/// to the master; once the owner answers on that screen it is marked answered there.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_s_question_box_is_logged_once_and_answered_in_its_terminal() {
+    let fixture = Fixture::new(1);
+    std::fs::create_dir_all(
+        fixture
+            .base
+            .join("project")
+            .join(crate::projects_home::CRAZYAGENT_DIRECTORY),
+    )
+    .unwrap();
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, ASKING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let line =
+        "Which database should the service use? | 1. Postgres | 2. SQLite | 3. None of the above";
+    let logged = |f: &Fixture| -> Vec<(u64, String)> {
+        masters(&f.connection)
+            .first()
+            .map(|master| {
+                let asker = crate::questions::Asker::Terminal(*master).name();
+                crate::questions::pending(&f.connection, &project)
+                    .unwrap()
+                    .into_iter()
+                    .filter(|question| question.asker == asker)
+                    .map(|question| (question.id, question.question))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    fixture.until(&mut team, "the master's question box is logged", |f| {
+        !logged(f).is_empty()
+    });
+    let master = masters(&fixture.connection)[0];
+    let pending = logged(&fixture);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1, line);
+    let id = i64::try_from(pending[0].0).unwrap();
+    for _ in 0..3 {
+        idle_ticks(&mut team);
+    }
+    let rows =
+        |f: &Fixture| -> Vec<(i64, String, String, Option<String>, String)> {
+            f.connection
+            .prepare(
+                "SELECT id,source,status,answered_by,asker FROM owner_questions WHERE project=?1",
+            )
+            .unwrap()
+            .query_map([PROJECT], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+    assert_eq!(
+        rows(&fixture),
+        vec![(
+            id,
+            "terminal".into(),
+            "pending".into(),
+            None,
+            format!("terminal:{master}")
+        )],
+        "a box still on screen is logged once"
+    );
+    let page = fixture
+        .base
+        .join("project")
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("questions.md");
+    assert!(
+        std::fs::read_to_string(&page)
+            .unwrap()
+            .contains("Which database should the service use?"),
+        "the logged question reaches questions.md"
+    );
+
+    host.input(&AgentId::team(master).unwrap(), b"2\r").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's answer in the terminal is noted",
+        |f| {
+            rows(f)
+                .first()
+                .is_some_and(|row| row.2 == "answered_in_terminal" && row.3.is_none())
+        },
+    );
+    assert!(logged(&fixture).is_empty());
+    let screen = String::from_utf8(host.screen(&AgentId::team(master).unwrap()).unwrap())
+        .unwrap_or_default();
+    assert!(screen.contains("Thanks, picked 2"), "{screen}");
+    idle_ticks(&mut team);
+    assert_eq!(
+        rows(&fixture).len(),
+        1,
+        "an answered box is not logged again"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
