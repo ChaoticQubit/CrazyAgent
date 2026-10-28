@@ -117,7 +117,7 @@ test("the live master area shows the switch divider under its header, above the 
     data: data(live_switch), harness: "codex", live: { kind: "running", node: null }, onSwitch() {},
   }));
   const shown = view({ harness: "Codex", mode: "fresh", note });
-  const head = shown.indexOf("pj-master-head");
+  const head = shown.indexOf("pj-console-head");
   const divider = shown.indexOf('data-testid="harness-switch"');
   const waiting = shown.indexOf("Waiting for the master");
   assert.ok(head >= 0 && head < divider && divider < waiting, shown);
