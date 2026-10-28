@@ -1295,6 +1295,7 @@ pub(super) fn record(
             prompt_line: line,
             message: String::new(),
             waiting: false,
+            outside: false,
             files: 0,
             added: 0,
             removed: 0,

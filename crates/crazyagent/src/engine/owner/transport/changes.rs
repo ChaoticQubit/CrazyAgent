@@ -408,6 +408,9 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
     let db = landing::open(root)?;
     Ok(match action {
         Action::List { project } => {
+            if let Err(error) = landing::observe(&db, Some(&project)) {
+                eprintln!("landing_observe_failed cause={}", error.0);
+            }
             let mut change_sets = landing::list(&db, &project)?;
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
@@ -444,9 +447,10 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
-/// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
-/// deletes discarded refs past their restore window, each step run on its own so a failing
-/// one never skips the other. Input: the authority, held weakly so a server dropped
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
+/// open change sets the owner landed or removed outside the app and deletes discarded refs
+/// past their restore window, each step run on its own so a failing one never skips the
+/// others. Input: the authority, held weakly so a server dropped
 /// without its stop path still releases it. Runs until the server aborts it or the
 /// authority is gone.
 pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
@@ -458,6 +462,7 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
             Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
                 Ok(db) => [
                     landing::reconcile(&db).err(),
+                    landing::observe(&db, None).err(),
                     now_ms().and_then(|now| landing::prune(&db, now)).err(),
                 ]
                 .into_iter()
