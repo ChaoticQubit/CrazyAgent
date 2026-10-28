@@ -42,10 +42,10 @@ export function limitOptions(current: number | null, listed: readonly number[] =
 }
 
 /** Keeps the session limit not below the task limit, as the engine requires, after the owner
- * changed one of them; Off counts as no bound. Inputs: both limits, which one changed and its
+ * changed one of them; Off on either bounds nothing, so a session limit needs no task limit. Inputs: both limits, which one changed and its
  * new value. Output: the pair to send. */
 export function limitPair(turn: number | null, session: number | null, changed: "turn" | "session", value: number | null): { turn: number | null; session: number | null } {
-  const below = (a: number | null, b: number | null) => a !== null && (b === null || a < b);
+  const below = (a: number | null, b: number | null) => a !== null && b !== null && a < b;
   if (changed === "turn") return { turn: value, session: below(session, value) ? value : session };
   return { turn: below(value, turn) ? value : turn, session: value };
 }

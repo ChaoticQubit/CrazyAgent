@@ -1383,10 +1383,21 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
         TeamReply::Change(TeamAction::TimeLimits {
             project_id: project(),
             turn_secs: None,
-            session_secs: None,
+            session_secs: Some(28_800),
             idle_secs: None
         }),
-        "a task limit turned Off turns the session limit Off with it"
+        "a task limit turned Off leaves the session limit"
+    );
+    let mut view = loaded();
+    assert_eq!(
+        view.key(press(KeyCode::Char('l'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: Some(1800),
+            idle_secs: None
+        }),
+        "a session limit needs no task limit"
     );
     let mut idle = team();
     idle.idle_stop_secs = Some(crate::team::IDLE_STOP_DEFAULT_SECS);

@@ -86,8 +86,8 @@ test("a changed limit keeps the session limit not below the task limit", () => {
   assert.deepEqual(controls.limitPair(null, null, "turn", 3600), { turn: 3600, session: null });
   assert.deepEqual(controls.limitPair(3600, 7200, "turn", 14_400), { turn: 14_400, session: 14_400 });
   assert.deepEqual(controls.limitPair(3600, 7200, "session", 1800), { turn: 1800, session: 1800 });
-  assert.deepEqual(controls.limitPair(null, null, "session", 7200), { turn: 7200, session: 7200 });
-  assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: null });
+  assert.deepEqual(controls.limitPair(null, null, "session", 7200), { turn: null, session: 7200 }, "a session limit needs no task limit");
+  assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: 7200 }, "a task limit turned Off leaves the session limit");
   assert.deepEqual(controls.limitPair(3600, 7200, "session", null), { turn: 3600, session: null });
 });
 

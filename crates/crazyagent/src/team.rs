@@ -468,8 +468,7 @@ impl TeamAction {
                 let idle = idle_secs.is_none_or(|secs| IDLE_CHOICES_SECS.contains(&secs));
                 let ordered = match (turn_secs, session_secs) {
                     (Some(turn), Some(session)) => session >= turn,
-                    (Some(_), None) | (None, None) => true,
-                    (None, Some(_)) => false,
+                    _ => true,
                 };
                 (choice(turn_secs) && choice(session_secs) && idle && ordered)
                     .then_some(())

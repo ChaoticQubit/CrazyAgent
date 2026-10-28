@@ -833,8 +833,9 @@ impl TeamView {
     }
 
     /// Moves one time limit to its next choice. The task and session limits go Off, then
-    /// 30 min up to 8 h, then Off again, and the other follows so a session is never shorter
-    /// than a task; the idle stop goes Off, 2 min, 10 min, 1 h. Takes which limit. Returns the
+    /// 30 min up to 8 h, then Off again; when both are set, the other follows so a session is
+    /// never shorter than a task, and Off on either bounds nothing. The idle stop goes Off,
+    /// 2 min, 10 min, 1 h. Takes which limit. Returns the
     /// change, or Handled while the team loads or saves.
     fn time_limit(&mut self, which: Limit) -> TeamReply {
         let Some(status) = &self.status else {
@@ -847,7 +848,7 @@ impl TeamView {
             ));
             return TeamReply::Handled;
         }
-        let below = |a: Option<u32>, b: Option<u32>| a.is_some_and(|a| b.is_none_or(|b| a < b));
+        let below = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if a < b);
         let limits = &crate::team::LIMIT_CHOICES_SECS;
         let (turn, kept, idle) = (
             status.turn_limit_secs,
