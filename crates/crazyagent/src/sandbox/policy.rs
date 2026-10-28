@@ -131,6 +131,25 @@ impl AgentPolicy {
             .collect()
     }
 
+    /// The same policy with every family decided as it is for the project now, so a launch
+    /// that reads it again grants exactly the toolchains this read gave. Input: the project
+    /// folder. Output: the pinned policy.
+    pub fn pinned(&self, project: &Path) -> Self {
+        let allowed = self.allowed(project);
+        let pinned = Self {
+            access: self.access,
+            toolchains: Toolchain::ALL
+                .into_iter()
+                .map(|toolchain| ToolchainChoice {
+                    toolchain,
+                    allowed: allowed.contains(&toolchain),
+                })
+                .collect(),
+        };
+        assert!(pinned.validate().is_ok());
+        pinned
+    }
+
     /// What a client shows: the level, every level with its availability, and each
     /// toolchain family the owner has installed, the project uses or the owner chose.
     /// Inputs: the project folder and the owner's tool homes. Output: the view.
@@ -168,6 +187,76 @@ impl AgentPolicy {
             .find(|choice| choice.toolchain == toolchain)
             .map(|choice| choice.allowed)
     }
+}
+
+/// Why a process that started under a project's agent policy holds more than the policy
+/// the owner saved now allows: a wider access level; a toolchain the owner turned off; a
+/// toolchain with no owner choice that the project no longer uses, which is also how
+/// turning off a family the project does not use is saved; or a policy, or a project folder
+/// that toolchain detection needs, that cannot be read, so nothing held can be confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Narrowing {
+    Access,
+    TurnedOff,
+    NotAllowed,
+    PolicyUnreadable,
+    FolderUnreadable,
+}
+
+impl Narrowing {
+    /// The refusal code a process stopped for this cause reports. Input: the cause.
+    /// Output: the code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Access => "agent_access_lowered",
+            Self::TurnedOff | Self::NotAllowed => "agent_toolchain_lowered",
+            Self::PolicyUnreadable => "agent_policy_unreadable",
+            Self::FolderUnreadable => "agent_project_unreadable",
+        }
+    }
+}
+
+/// Tells whether a process that started at an access level with some toolchains granted
+/// holds more than the saved policy allows now. Inputs: the saved policy, none when it
+/// cannot be read; the project folder, none when it cannot be resolved; the level the
+/// process runs at, none when it reads the level again before it next runs anything; and
+/// the toolchains its sandbox profile grants. Output: why it must stop, or none.
+pub fn narrowing(
+    saved: Option<&AgentPolicy>,
+    project: Option<&Path>,
+    access: Option<AgentAccess>,
+    granted: &[Toolchain],
+) -> Option<Narrowing> {
+    assert!(granted.len() <= Toolchain::ALL.len());
+    let Some(saved) = saved else {
+        let holds = !granted.is_empty()
+            || access.is_some_and(|access| access.wider_than(AgentAccess::Sandboxed));
+        return holds.then_some(Narrowing::PolicyUnreadable);
+    };
+    if access.is_some_and(|access| access.wider_than(saved.access)) {
+        return Some(Narrowing::Access);
+    }
+    if granted
+        .iter()
+        .any(|toolchain| saved.choice(*toolchain) == Some(false))
+    {
+        return Some(Narrowing::TurnedOff);
+    }
+    let detected: Vec<Toolchain> = granted
+        .iter()
+        .copied()
+        .filter(|toolchain| saved.choice(*toolchain).is_none())
+        .collect();
+    if detected.is_empty() {
+        return None;
+    }
+    let Some(project) = project else {
+        return Some(Narrowing::FolderUnreadable);
+    };
+    detected
+        .iter()
+        .any(|toolchain| !toolchain.used_by(project))
+        .then_some(Narrowing::NotAllowed)
 }
 
 /// One project's agent policy as a client shows it.
@@ -290,6 +379,73 @@ mod tests {
         assert!(!AgentAccess::Sandboxed.wider_than(AgentAccess::Full));
         assert!(!AgentAccess::Full.wider_than(AgentAccess::Full));
         assert_eq!(AgentAccess::NEW_PROJECT, AgentAccess::OwnBranch);
+    }
+
+    #[test]
+    fn a_running_process_is_narrowed_only_by_what_the_saved_policy_no_longer_allows() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let root = Some(project.path());
+        let rust = [Toolchain::Rust];
+        let chose = |access, choices: &[(Toolchain, bool)]| AgentPolicy {
+            access,
+            toolchains: choices
+                .iter()
+                .map(|(toolchain, allowed)| ToolchainChoice {
+                    toolchain: *toolchain,
+                    allowed: *allowed,
+                })
+                .collect(),
+        };
+        let sandboxed = chose(AgentAccess::Sandboxed, &[]);
+        let full = Some(AgentAccess::Full);
+        assert_eq!(narrowing(Some(&sandboxed), root, None, &rust), None);
+        assert_eq!(
+            narrowing(Some(&sandboxed), root, full, &rust),
+            Some(Narrowing::Access)
+        );
+        assert_eq!(
+            narrowing(Some(&chose(AgentAccess::Full, &[])), root, full, &rust),
+            None
+        );
+        let off = chose(AgentAccess::Sandboxed, &[(Toolchain::Rust, false)]);
+        assert_eq!(
+            narrowing(Some(&off), None, None, &rust),
+            Some(Narrowing::TurnedOff)
+        );
+        let node = [Toolchain::Node];
+        assert_eq!(
+            narrowing(Some(&sandboxed), root, None, &node),
+            Some(Narrowing::NotAllowed),
+            "an unused family turned off leaves no choice behind"
+        );
+        let on = chose(AgentAccess::Sandboxed, &[(Toolchain::Node, true)]);
+        assert_eq!(narrowing(Some(&on), None, None, &node), None);
+        assert_eq!(
+            narrowing(Some(&sandboxed), None, None, &rust),
+            Some(Narrowing::FolderUnreadable)
+        );
+        assert_eq!(narrowing(Some(&sandboxed), None, None, &[]), None);
+        assert_eq!(
+            narrowing(None, root, None, &rust),
+            Some(Narrowing::PolicyUnreadable)
+        );
+        assert_eq!(
+            narrowing(None, root, Some(AgentAccess::OwnBranch), &[]),
+            Some(Narrowing::PolicyUnreadable)
+        );
+        assert_eq!(
+            narrowing(None, root, Some(AgentAccess::Sandboxed), &[]),
+            None
+        );
+        assert_eq!(Narrowing::NotAllowed.code(), "agent_toolchain_lowered");
+
+        let pinned = sandboxed.pinned(project.path());
+        assert_eq!(pinned.allowed(project.path()), rust);
+        std::fs::remove_file(project.path().join("Cargo.toml")).unwrap();
+        assert_eq!(pinned.allowed(project.path()), rust);
+        assert!(sandboxed.allowed(project.path()).is_empty());
+        assert_eq!(narrowing(Some(&pinned), None, None, &rust), None);
     }
 
     #[test]

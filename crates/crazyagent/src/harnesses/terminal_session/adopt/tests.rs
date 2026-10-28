@@ -206,6 +206,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         resumed: None,
         access: None,
         context: None,
+        toolchains: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -217,6 +218,25 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let leveled = started.encode().unwrap();
     assert!(leveled.contains("\"access\":\"own_branch\""), "{leveled}");
     assert_eq!(PaneRecord::decode(&leveled), Some(started));
+    assert!(!text.contains("toolchains"), "{text}");
+    let granted = PaneRecord {
+        toolchains: Some(vec![
+            crate::sandbox::toolchains::Toolchain::Rust,
+            crate::sandbox::toolchains::Toolchain::Node,
+        ]),
+        ..record.clone()
+    };
+    let listed = granted.encode().unwrap();
+    assert!(
+        listed.contains("\"toolchains\":[\"rust\",\"node\"]"),
+        "{listed}"
+    );
+    assert_eq!(PaneRecord::decode(&listed), Some(granted));
+    let too_many = listed.replace(
+        "[\"rust\",\"node\"]",
+        "[\"rust\",\"node\",\"python\",\"rust\"]",
+    );
+    assert_eq!(PaneRecord::decode(&too_many), None);
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);

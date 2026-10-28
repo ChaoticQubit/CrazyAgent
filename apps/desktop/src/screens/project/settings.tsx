@@ -4,7 +4,7 @@ import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
-import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -339,6 +339,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
       onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
