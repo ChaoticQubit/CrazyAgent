@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(all(test, unix))]
 mod tests;
 
-const KEYS: usize = 11;
+const KEYS: usize = 14;
 
 /// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
 /// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
@@ -18,9 +18,11 @@ const KEYS: usize = 11;
 /// ssh command, the pager, credential helpers, the signing programs and, last so the shim
 /// can leave it out for the project folder alone ([`shim_text`]), the hooks folder. A gc
 /// never prunes a worktree, since the IDE cannot read an agent worktree's `.git` and so
-/// sees it as missing (IN1-FN1). The server's environment adds them after its allowlist.
+/// sees it as missing (IN1-FN1), and every signing switch is off, so a project that signs
+/// every commit or tag still commits and tags from the IDE, unsigned (INT1-3). The
+/// server's environment adds them after its allowlist.
 pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "11"),
+    ("GIT_CONFIG_COUNT", "14"),
     ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
     ("GIT_CONFIG_VALUE_0", "all"),
     ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
@@ -41,13 +43,19 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
     ("GIT_CONFIG_VALUE_8", "false"),
     ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
     ("GIT_CONFIG_VALUE_9", "never"),
-    ("GIT_CONFIG_KEY_10", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_10", "/dev/null"),
+    ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
+    ("GIT_CONFIG_VALUE_10", "false"),
+    ("GIT_CONFIG_KEY_11", "tag.gpgSign"),
+    ("GIT_CONFIG_VALUE_11", "false"),
+    ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
+    ("GIT_CONFIG_VALUE_12", "false"),
+    ("GIT_CONFIG_KEY_13", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_13", "/dev/null"),
 ];
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
-const PROJECT_HOOKS_COUNT: &str = "10";
+const PROJECT_HOOKS_COUNT: &str = "13";
 
 /// The variable that ends git's search for a repository at the agents roots (INT1-1): git in
 /// an agent folder, whose `.git` the IDE sandbox cannot read, then finds no repository
@@ -136,7 +144,7 @@ pub fn shim_text(project_hooks: Option<&Path>) -> Result<String, EngineError> {
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
         CONFIG_ENV[2 * KEYS - 1],
-        ("GIT_CONFIG_KEY_10", "core.hooksPath")
+        ("GIT_CONFIG_KEY_13", "core.hooksPath")
     );
     let Some(project) = project_hooks else {
         return Ok(SHIM_TEXT.to_owned());

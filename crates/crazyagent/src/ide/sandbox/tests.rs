@@ -620,6 +620,9 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         ],
     );
     setup(&root, &["config", "extensions.worktreeConfig", "true"]);
+    for key in ["commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated"] {
+        setup(&root, &["config", key, "true"]);
+    }
 
     let inner = root.join(".crazyagent").join("worktrees");
     let outer = root.join("worktrees");
@@ -767,6 +770,19 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         "Off: the IDE commits in the Project section: {said}"
     );
     assert!(!ran("project-hook"), "Off: the project's hook never runs");
+    let (tagged, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &root,
+        &["tag", "-a", "-m", "off", "off"],
+    );
+    assert!(
+        tagged,
+        "Off: a project that signs every tag still tags: {said}"
+    );
+    assert!(!setup(&root, &["cat-file", "tag", "off"]).contains("BEGIN PGP"));
     let (signed, said) = ide_git(
         &profile,
         &shim,
@@ -815,6 +831,12 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     assert!(!ran("project-sign"), "On: the IDE never signs");
     refuse_agents("On");
     assert_eq!(setup(&root, &["log", "--format=%s"]), "on\noff\nbase\n");
+    for commit in ["HEAD", "HEAD~1"] {
+        assert!(
+            !setup(&root, &["cat-file", "commit", commit]).contains("gpgsig"),
+            "IDE commits in a project that signs every commit go through unsigned"
+        );
+    }
 
     assert!(sh(
         &profile,

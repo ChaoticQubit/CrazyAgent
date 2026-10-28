@@ -465,3 +465,60 @@ fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
     );
     assert!(admin.join("agent-5").join("gitdir").is_file());
 }
+
+/// INT1-3: in a project that signs every commit and tag, git under the IDE's configuration
+/// still commits and tags, unsigned and without running the signing program, as the hooks
+/// setting's line says; git without it tries to sign and fails.
+#[test]
+fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    ok(&repo, &["init", "-q"]);
+    let marker = base.join("signed");
+    planted(&base.join("sign.sh"), &marker);
+    ok(
+        &repo,
+        &[
+            "config",
+            "gpg.program",
+            base.join("sign.sh").to_str().unwrap(),
+        ],
+    );
+    for key in ["commit.gpgSign", "tag.gpgSign", "tag.forceSignAnnotated"] {
+        ok(&repo, &["config", key, "true"]);
+    }
+
+    let committed = git(
+        &repo,
+        &CONFIG_ENV,
+        &["commit", "-q", "--allow-empty", "-m", "ide"],
+    );
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let tagged = git(&repo, &CONFIG_ENV, &["tag", "-a", "-m", "ide", "ide"]);
+    assert!(
+        tagged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&tagged.stderr)
+    );
+    assert!(!ok(&repo, &["cat-file", "commit", "HEAD"]).contains("gpgsig"));
+    assert!(!ok(&repo, &["cat-file", "tag", "ide"]).contains("BEGIN PGP"));
+    assert!(!marker.exists(), "the IDE never runs the signing program");
+
+    let open = git(&repo, &[], &["commit", "-q", "--allow-empty", "-m", "open"]);
+    assert!(!open.status.success());
+    assert!(
+        String::from_utf8_lossy(&open.stderr).contains("gpg failed to sign"),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    assert!(
+        marker.exists(),
+        "without it, git signs with the project's program"
+    );
+}
