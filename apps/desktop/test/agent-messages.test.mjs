@@ -101,6 +101,7 @@ test("a result shows its first line until opened, or all of it under Full text",
     entry(2, "event", "agent", "failed", "Failed the export", { task: 8, result: "The export folder is missing.\nCheck the path." , result_more: true }),
   ];
   const first = shown({ older: false, settings: api.DEFAULT_MESSAGE_SETTINGS, entries: ended });
+  assert.equal(rows(first).length, ended.length, "one row per entry");
   const [done, failed] = rows(first);
   assert.match(done.text, /Built the chart/u);
   assert.doesNotMatch(done.text, /three/u, "the rest waits for Show result");
