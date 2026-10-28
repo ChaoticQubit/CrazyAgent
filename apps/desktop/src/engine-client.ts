@@ -263,7 +263,7 @@ export function errorMessage(error: unknown): string {
     server_limit: "You can add up to 50 MCP servers here.",
     server_not_found: "This MCP server was removed.",
     server_command_invalid: "Enter the full path to the command, starting with /.",
-    server_args_invalid: "Use up to 32 arguments, each on one line.",
+    server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",

@@ -3,7 +3,7 @@ use crate::plugins::{
     EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
     LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
     SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
-    SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
+    SkillView, TOOL_NAME_BYTES_MAX, TOOL_NAMES_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -826,6 +826,7 @@ fn put_server(tx: &Transaction<'_>, record: &ServerRecord) -> Result<(), EngineE
 
 fn valid_tools(tools: Vec<String>) -> Result<Vec<String>, String> {
     if tools.len() > TOOLS_MAX
+        || tools.iter().map(String::len).sum::<usize>() > TOOL_NAMES_BYTES_MAX
         || tools.iter().any(|tool| {
             tool.is_empty()
                 || tool.len() > TOOL_NAME_BYTES_MAX

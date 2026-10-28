@@ -13,11 +13,13 @@ pub const SERVER_NAME_BYTES_MAX: usize = 64;
 pub const COMMAND_BYTES_MAX: usize = 1024;
 pub const ARGS_MAX: usize = 32;
 pub const ARG_BYTES_MAX: usize = 1024;
+pub const COMMAND_LINE_BYTES_MAX: usize = 4096;
 pub const URL_BYTES_MAX: usize = 2048;
 pub const SECRETS_PER_SERVER_MAX: usize = 16;
 pub const SECRET_NAME_BYTES_MAX: usize = 64;
 pub const TOOLS_MAX: usize = 256;
 pub const TOOL_NAME_BYTES_MAX: usize = 128;
+pub const TOOL_NAMES_BYTES_MAX: usize = 12 * 1024;
 
 /// Where a skill or MCP server applies: every project, or one project only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -55,7 +57,8 @@ fn printable(text: &str) -> bool {
 impl ServerSpec {
     /// Checks the command or URL before it is saved.
     /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
-    /// a relative or oversized command, too many or bad arguments, or a URL that is
+    /// a relative or oversized command, too many or bad arguments, a command and
+    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
     /// not https (plain http is allowed only for this Mac) or carries a password.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
@@ -71,6 +74,8 @@ impl ServerSpec {
                     || args
                         .iter()
                         .any(|arg| arg.len() > ARG_BYTES_MAX || !printable(arg))
+                    || command.len() + args.iter().map(String::len).sum::<usize>()
+                        > COMMAND_LINE_BYTES_MAX
                 {
                     return Err(error("server_args_invalid"));
                 }
@@ -419,7 +424,7 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_args_invalid",
-        "Use up to 32 arguments, each on one line.",
+        "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     ),
     (
         "server_url_invalid",
