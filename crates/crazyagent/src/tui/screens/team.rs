@@ -42,8 +42,9 @@ const MASTER_WAITING: &str =
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
-const MASTER_STOPPED: &str =
-    "The live master is stopped. Its terminal opens again once you start it.";
+const MASTER_STOPPED: &str = "The live master is stopped.";
+const MASTER_RESTART: &str =
+    "It starts again when you open this view again or press n for a new session.";
 const MASTER_HEAD_ROWS: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,9 +152,9 @@ impl Team {
         }
     }
 
-    /// The master view of one project: a header with the live master switch, then the
+    /// The master view of one project: a header with the live master's state, then the
     /// live master's own terminal filling the body, opened as soon as the team shows it.
-    /// The first open of a project whose switch was never set turns the master on.
+    /// Every open turns the master on; it stops only on the master idle stop or app quit.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
@@ -169,18 +170,15 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
-    fn turn_live(&mut self, on: bool, ctx: &mut Ctx) {
+    fn start_live(&mut self, ctx: &mut Ctx) {
         self.asked = true;
-        self.want = Some(on);
+        self.want = Some(true);
         self.refused = None;
-        if !on {
-            self.detach(ctx);
-        }
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
-                on,
+                on: true,
             },
             generation,
         }));
@@ -193,7 +191,8 @@ impl Team {
     }
 
     /// Takes a team status read or a live switch change of this master view: a good read
-    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// replaces the switch, and the first one of this open turns a switch that is not on
+    /// on; a failed read changes nothing;
     /// an accepted change is the switch until the next read, which is read at once.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
@@ -218,10 +217,10 @@ impl Team {
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
                 }
-                let never = switch.on.is_none();
+                let off = switch.on != Some(true);
                 self.switch = Some(switch);
-                if never && !self.asked {
-                    self.turn_live(true, ctx);
+                if off && !self.asked {
+                    self.start_live(ctx);
                 }
             }
             SetupQuery::TeamChange {
@@ -240,14 +239,7 @@ impl Team {
                 }
                 Err(code) => {
                     self.want = None;
-                    if *on {
-                        self.refused = Some(code.clone());
-                    } else {
-                        ctx.say(Message::warning(
-                            "The live master could not be stopped.",
-                            plain_problem(code).unwrap_or(code.as_str()),
-                        ));
-                    }
+                    self.refused = Some(code.clone());
                 }
             },
             _ => {}
@@ -287,10 +279,6 @@ impl Team {
             .is_some_and(|attached| attached.closed.is_none());
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
-            Key::Char('s') => {
-                let on = self.live_on() == Some(false);
-                self.turn_live(on, ctx);
-            }
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -691,16 +679,8 @@ impl Team {
         Some(lines)
     }
 
-    fn switch_control(&self) -> &'static str {
-        if self.live_on() == Some(false) {
-            "Start live master"
-        } else {
-            "Stop live master"
-        }
-    }
-
     /// The master view's header: whether the live master is on, where the live session's
-    /// master harness last switched, and the key that switches it at the right edge.
+    /// master harness last switched, and the session keys at the right edge.
     /// Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
         let switched = self
@@ -713,7 +693,7 @@ impl Team {
             (false, None) => MASTER_ON.to_owned(),
             (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
-        let control = format!("n New session  l Sessions  s {}", self.switch_control());
+        let control = "n New session  l Sessions".to_owned();
         let room = limit.saturating_sub(width(&control));
         if room < width(MASTER_OFF) + 2 {
             return styled(
@@ -776,7 +756,7 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap("Press s to start it.", limit)
+                wrap(MASTER_RESTART, limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -862,8 +842,7 @@ impl Screen for Team {
             }
             hints.push(hint("n", "New session"));
             hints.push(hint("l", "Sessions"));
-            hints.push(hint("s", self.switch_control()));
-            hints.push(hint("Esc", "Earlier conversation"));
+            hints.push(hint("Esc", "Back"));
             hints.push(hint("r", "Refresh"));
             return hints;
         }
