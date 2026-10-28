@@ -334,7 +334,7 @@ fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdi
             let mut merged: Vec<CredentialRef> = pool
                 .members
                 .iter()
-                .filter(|member| !removed(*member))
+                .filter(|member| !removed(member))
                 .cloned()
                 .collect();
             for member in &members {

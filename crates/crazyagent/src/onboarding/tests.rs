@@ -502,7 +502,8 @@ fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("notes.md");
     std::fs::write(&target, "# Notes\n\nKept outside.\n").unwrap();
-    let entries: [(&str, &dyn Fn(&Path)); 3] = [
+    type Make<'a> = &'a dyn Fn(&Path);
+    let entries: [(&str, Make); 3] = [
         ("an empty file", &|path| std::fs::write(path, "").unwrap()),
         ("a link", &|path| symlink(&target, path).unwrap()),
         ("a folder", &|path| std::fs::create_dir(path).unwrap()),

@@ -95,12 +95,13 @@ pub(super) async fn after_owner(
                 status.dependencies = dependency_rows(&root, deadline).await;
             }
         }
-        (OwnerOperation::Apply { mutation }, OwnerResponse::Applied { operation })
-            if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) =>
-        {
-            if let OwnerMutation::RunSetup { pack } = mutation {
-                start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
-            }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::RunSetup { pack },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
         }
         _ => {}
     }
