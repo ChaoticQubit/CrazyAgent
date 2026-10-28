@@ -259,14 +259,16 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * the latest output once scrolled up, and Copy and Copy output on right-click and in its
  * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
- * closed, `embedded` when a console around it owns the head, and where the owner types:
- * the terminal, the message box under it, or both. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both" }: {
+ * closed, `embedded` when a console around it owns the head, where the owner types (the
+ * terminal, the message box under it, or both) and the one-line report of what the agent's
+ * harness loaded and invoked, shown in the head. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", reported }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
   embedded?: boolean;
   input?: InputChoice;
+  reported?: string;
 }) {
   const mode = inputMode(input);
   const keys = useRef(mode.keys);
@@ -409,6 +411,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     {!embedded && <div className="tg-terminal-head">
       <span className="tg-terminal-title"><Icon name="square-terminal" size={15} />{displayText(nodeLine(node, harness))}</span>
       {node.account && <span className="tg-terminal-detail">{displayText(node.account)}</span>}
+      {reported && <span className="tg-terminal-detail" title={displayText(reported)}>{displayText(reported)}</span>}
       {onClose && <Button variant="quiet" size="small" icon="x" iconOnly="Close terminal" onClick={onClose} />}
     </div>}
     {!name && <p className="tg-terminal-state" role="status">This agent has no terminal yet. It opens once the agent starts.</p>}

@@ -887,6 +887,55 @@ fn finished_team() -> crate::team::TeamStatus {
     }
 }
 
+#[test]
+fn the_finished_box_keeps_the_picked_agent_drawn_when_the_list_is_longer_than_the_box() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::{AgentRole, TeamAction, TeamAgent};
+    let mut status = finished_team();
+    let stopped = status.agents[1].clone();
+    status.agents = (3..15)
+        .map(|id| TeamAgent {
+            id,
+            label: AgentRole::Sub.agent_label(id),
+            ..stopped.clone()
+        })
+        .collect();
+    let mut shell = fresh(120, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(status))),
+    ));
+    for _ in 0..8 {
+        shell.key(Key::Down);
+    }
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished (12)"), "{text}");
+    assert!(
+        text.contains("> Sub-agent 6"),
+        "the ninth agent, picked with eight Downs, is drawn: {text}"
+    );
+    assert!(text.contains("more above"), "{text}");
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            &sent[..],
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::WakeAgent { agent: 6, .. },
+                ..
+            })]
+        ),
+        "w wakes the agent drawn as picked: {sent:?}"
+    );
+}
+
 fn setup_reply(
     query: crate::project_setup::SetupQuery,
     result: Result<crate::project_setup::SetupView, &str>,
@@ -2281,6 +2330,70 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
 
 fn switch_off_unswitched() -> Arrival {
     switched(Some(false), None, None)
+}
+
+#[test]
+fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_reports_nothing() {
+    let ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    let view = AgentInstructions {
+        agent: 5,
+        harness: "claude-code".into(),
+        launched: true,
+        text: "Use tdd.\n".into(),
+        skills: Vec::new(),
+        sessions: 2,
+        loaded: Vec::new(),
+        skills_used: Vec::new(),
+        files: Vec::new(),
+    };
+    let text = |view: AgentInstructions| -> String {
+        super::instruction_lines(&Load::Ready(Box::new(view)), 120, &ctx)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let claude = text(view.clone());
+    assert!(
+        claude.contains(
+            "Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt"
+        ),
+        "{claude}"
+    );
+    let codex = text(AgentInstructions {
+        harness: "codex".into(),
+        ..view.clone()
+    });
+    assert!(
+        codex.contains("Instructions: none loaded by its harness"),
+        "{codex}"
+    );
+    let unreported = text(AgentInstructions {
+        sessions: 0,
+        ..view.clone()
+    });
+    assert!(
+        unreported.contains("Instructions: not reported yet")
+            && unreported.contains(
+                "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off."
+            ),
+        "{unreported}"
+    );
+    assert!(
+        !text(AgentInstructions {
+            harness: "codex".into(),
+            sessions: 0,
+            ..view
+        })
+        .contains("headless Claude"),
+        "a Codex run is never told about the Claude transcript setting"
+    );
 }
 
 #[test]

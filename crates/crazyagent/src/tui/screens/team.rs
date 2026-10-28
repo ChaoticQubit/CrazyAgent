@@ -1448,10 +1448,19 @@ fn instruction_lines(
     lines
 }
 
+const CLAUDE_GIVEN: &str =
+    "none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt";
+const CLAUDE_NO_RECORD: &str =
+    "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off.";
+
 /// The lines saying what an agent's harness reported in its own session records: the
 /// instruction file names it loaded and the skills it invoked, then each file's place.
+/// Claude loads no instruction file itself, since CrazyAgent gives it the instructions in
+/// its launch prompt, and a headless Claude run writes no session record while its project
+/// keeps no transcripts, so the lines say so.
 /// Inputs: the view, the box width and context. Output: the lines and a blank line.
 fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let claude = view.harness == "claude-code";
     let mut names: Vec<&str> = Vec::new();
     for file in &view.loaded {
         if !names.contains(&file.name.as_str()) {
@@ -1466,7 +1475,14 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     let (files, skills) = match view.sessions {
         0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
         _ => (
-            listed(&names, "none loaded by its harness"),
+            listed(
+                &names,
+                if claude {
+                    CLAUDE_GIVEN
+                } else {
+                    "none loaded by its harness"
+                },
+            ),
             listed(&used, "none"),
         ),
     };
@@ -1476,6 +1492,13 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
         format!("Skills used: {skills}"),
     ] {
         lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
+    }
+    if claude && view.sessions == 0 {
+        lines.extend(
+            wrap(CLAUDE_NO_RECORD, limit)
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, &ctx.theme)),
+        );
     }
     for file in &view.loaded {
         let place = plain(&format!("{} {}  {}", ctx.glyphs.dot, file.name, file.path));

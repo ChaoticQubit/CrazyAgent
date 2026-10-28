@@ -163,6 +163,9 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
   assert.match(html, /codex-2 \u00b7 codex \u00b7 working<\/span><span class="tg-terminal-detail">acct-work</);
+  const reported = renderToStaticMarkup(createElement(view.TerminalPanel, { node: team.nodes[0], onClose() {}, reported: "Instructions: AGENTS.md - Skills used: tdd" }));
+  assert.match(reported, /<span class="tg-terminal-detail" title="Instructions: AGENTS.md - Skills used: tdd">Instructions: AGENTS\.md - Skills used: tdd<\/span>/,
+    "the head says what the agent's harness reported, not only the Instructions panel");
   const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "agent"), onClose() {} }));
   assert.match(none, /This agent has no terminal yet/);
   assert.doesNotMatch(none, /Connecting/);

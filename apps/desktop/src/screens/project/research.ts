@@ -202,13 +202,15 @@ export function finishedLabel(count: number): string {
 
 /** Builds the Finished fold-out (DEC-102): every agent the engine marks finished, newest first.
  * It stays under Show too, where the list and graph also hold them, so Wake is always one
- * click away. Inputs: the team status, a harness namer and now in milliseconds.
- * Output: the rows. */
+ * click away. An idle agent is last active when its last task finished, or when it started
+ * if it ran none, never at its heartbeat, which a live idle agent keeps moving.
+ * Inputs: the team status, a harness namer and now in milliseconds. Output: the rows. */
 export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harnessLabel: (id: string) => string, now: number): FinishedRow[] {
   const rows = status.agents.filter((agent) => agent.finished === true).map((agent): FinishedRow => {
     const own = status.tasks.filter((item) => item.agent === agent.id);
     const last = own.reduce<(typeof own)[number] | undefined>((newest, item) => newest === undefined || item.id > newest.id ? item : newest, undefined);
-    const at = agent.stopped_ms ?? (agent.status === "idle" ? agent.heartbeat_ms : null);
+    const idle = own.reduce((since, item) => Math.max(since, item.finished_ms ?? since), agent.created_ms);
+    const at = agent.stopped_ms ?? (agent.status === "idle" ? idle : null);
     return {
       key: `finished-${agent.id}`,
       agent: agent.id,
