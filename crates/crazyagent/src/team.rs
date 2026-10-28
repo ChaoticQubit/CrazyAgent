@@ -415,6 +415,34 @@ impl ChildLanding {
     }
 }
 
+/// The owner's setting for where a new sub-agent commits: `Named` checks out the engine's
+/// branch `crazyagent/agent-<id>` in the agent's worktree, so each agent works on its own
+/// branch; `Detached` keeps the older detached HEAD. Named is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMode {
+    #[default]
+    Named,
+    Detached,
+}
+
+impl BranchMode {
+    /// The stored name of the mode. Output: `named` or `detached`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Detached => "detached",
+        }
+    }
+
+    /// Reads a stored mode name. Input: the name. Output: the mode, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Named, Self::Detached]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
 /// A project's nested sub-agent settings: how deep leads may start workers and where a
 /// worker's change set lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,6 +530,10 @@ pub enum TeamAction {
     FinishedAgents {
         project_id: ProjectId,
         show: bool,
+    },
+    AgentBranches {
+        project_id: ProjectId,
+        mode: BranchMode,
     },
     WakeAgent {
         project_id: ProjectId,
@@ -595,6 +627,7 @@ impl TeamAction {
             | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
+            | Self::AgentBranches { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -615,6 +648,7 @@ impl TeamAction {
             | Self::SubAgentDepth { project_id, .. }
             | Self::ChildLanding { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
+            | Self::AgentBranches { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -981,6 +1015,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_finished_view (
                 project TEXT PRIMARY KEY,
                 show INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_branches (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('named','detached'))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -1749,6 +1787,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::AgentBranches { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_agent_branches(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2149,6 +2196,8 @@ pub struct TeamStatus {
     #[serde(default)]
     pub show_finished: bool,
     #[serde(default)]
+    pub agent_branches: BranchMode,
+    #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
@@ -2459,6 +2508,27 @@ pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError
         }
     }
     Ok(())
+}
+
+/// Where the project's new sub-agents commit: on their own named branch, the default, or
+/// on a detached HEAD, the owner's other choice. Takes a connection and the project.
+/// Returns the mode.
+pub fn agent_branches(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BranchMode, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_agent_branches WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(BranchMode::default()),
+        Some(name) => BranchMode::named(name).ok_or_else(|| error("team_branch_mode_invalid")),
+    }
 }
 
 /// Tells whether the owner chose to show finished agents (idle, stopped and failed
@@ -2880,6 +2950,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         sub_agent_depth: nested.depth,
         child_landing: nested.lands,
         show_finished: show_finished(connection, project)?,
+        agent_branches: agent_branches(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,

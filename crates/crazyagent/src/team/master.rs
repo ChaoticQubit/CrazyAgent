@@ -32,7 +32,6 @@ const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right no
 const MASTER_ACCEPT: &str = "Not accepted: the owner accepts change sets in Changes.";
 const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
 const WORKERS_LISTED_MAX: i64 = 64;
-const LEAD_BRANCH_PREFIX: &str = "crazyagent/agent-";
 const AGENT_SHOWN_MAX: usize = 64;
 const ESCALATIONS_PER_HOUR_MAX: i64 = 10;
 const HOUR_MS: i64 = 3_600_000;
@@ -1245,30 +1244,66 @@ fn lead_accept(
             ));
         }
     };
-    match set {
-        Some((owner, view)) if &owner == project && worker_set(&view, &workers) => Ok(
-            land_on_lead(&db, &id, &format!("{LEAD_BRANCH_PREFIX}{lead}")),
-        ),
-        _ => Ok((not_yours, true)),
-    }
+    let view = match set {
+        Some((owner, view)) if &owner == project && worker_set(&view, &workers) => view,
+        _ => return Ok((not_yours, true)),
+    };
+    let worktree: Option<String> = connection
+        .query_row(
+            "SELECT worktree FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(state)?;
+    let branch =
+        worktree.and_then(|worktree| crate::agent_git::linked_branch(Path::new(&worktree)));
+    let Some(branch) = branch else {
+        return Ok((
+            "Not accepted: your worktree has no branch of its own to land on. The owner accepts this change set in Changes.".to_owned(),
+            true,
+        ));
+    };
+    Ok(land_on_lead(&db, &id, &view.head, &branch))
 }
 
-/// Lands a worker's change set on its lead's branch through landing's
-/// `accept_into(change_set, target_branch)` from the agent branches change (B2). This build
-/// does not have it yet, so until that change merges the lead hears in plain words that the
-/// owner accepts the set in Changes. Takes the store, the change set and the lead's branch.
-/// Returns the sentence the lead reads and whether it is a refusal.
+/// Lands a worker's change set on its lead's branch as one squash commit through landing's
+/// `accept_into`, authored with the owner's git identity as the owner's own Accept is. The
+/// engine runs every git step; the lead only asks. Takes the store, the change set, the head
+/// `changes` listed and the lead's branch. Returns the sentence the lead reads and whether
+/// it is a refusal.
 fn land_on_lead(
-    _db: &Connection,
-    _id: &crate::landing::ChangeSetId,
+    db: &Connection,
+    id: &crate::landing::ChangeSetId,
+    head: &str,
     branch: &str,
 ) -> (String, bool) {
-    (
-        format!(
-            "Not accepted yet: landing on your branch {branch} needs the agent branches update. The owner accepts it in Changes for now."
+    let landed = crate::projects_home::owner_home()
+        .and_then(|home| crate::landing::accept_into(db, &home, id, head, None, branch));
+    match landed {
+        Ok(crate::landing::AcceptOutcome::Landed { commit, branch }) => (
+            format!(
+                "Landed on your branch {} as {}.",
+                super::bound_text(&branch, 120),
+                super::bound_text(&commit, 12)
+            ),
+            false,
         ),
-        true,
-    )
+        Ok(crate::landing::AcceptOutcome::Conflict { files }) => (
+            format!(
+                "Not accepted: it conflicts with your branch in {}. Ask the worker to bring its work up to date, then accept again.",
+                super::bound_text(&files.join(", "), 400)
+            ),
+            true,
+        ),
+        Err(problem) => (
+            format!(
+                "Not accepted: the change set could not land ({}).",
+                super::bound_text(&problem.0, 120)
+            ),
+            true,
+        ),
+    }
 }
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's

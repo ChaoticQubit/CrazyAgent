@@ -1,6 +1,6 @@
 use super::AgentKind;
 use super::clone;
-use super::flow::{check_places, hold, holds_only, open_agent, shared};
+use super::flow::{check_places, drop_branch, hold, holds_only, open_agent, shared};
 use super::git::{Repo, failure};
 use super::store;
 use crate::agent_git::{self, Layout};
@@ -271,6 +271,11 @@ pub(super) fn remove(
             .map_err(unavailable)?;
         return Ok(removed.map_err(|_| "cleanup_worktree_leftover"));
     }
+    let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
+    let named = match agent.branch() {
+        Some(branch) => Some((branch.to_owned(), agent.head()?)),
+        None => None,
+    };
     let removed = shared(repository)?.exec(
         &["worktree", "remove", "--", path],
         None,
@@ -294,5 +299,10 @@ pub(super) fn remove(
     }
     db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
         .map_err(unavailable)?;
+    if let Some((branch, head)) = named
+        && !drop_branch(repository, &branch, &head)?
+    {
+        eprintln!("cleanup_branch_kept branch={branch}");
+    }
     Ok(Ok(()))
 }

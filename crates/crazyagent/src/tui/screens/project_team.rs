@@ -8,8 +8,9 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, ChildLanding, DelegationPath, SwitchMode, TASK_PROMPT_BYTES_MAX,
-    TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, BranchMode, ChildLanding, DelegationPath, SwitchMode,
+    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
+    TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -379,7 +380,8 @@ impl TeamView {
             KeyCode::Char('i') => self.time_limit(Limit::Idle),
             KeyCode::Char('h') => self.harness_switch(),
             KeyCode::Char('d') => self.sub_agent_depth(),
-            KeyCode::Char('b') => self.child_landing(),
+            KeyCode::Char('k') => self.child_landing(),
+            KeyCode::Char('b') => self.agent_branches(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -1002,6 +1004,36 @@ impl TeamView {
         })
     }
 
+    /// Flips the Agent branches setting between Named branch and Detached.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn agent_branches(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.agent_branches {
+            BranchMode::Named => BranchMode::Detached,
+            BranchMode::Detached => BranchMode::Named,
+        };
+        self.changing = Some(
+            match mode {
+                BranchMode::Named => "Each new agent now works on its own branch.",
+                BranchMode::Detached => "New agents now work on a detached HEAD.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -1171,8 +1203,10 @@ impl TeamView {
     }
 
     /// The Team rows: the agent counts and alerts, then every team setting in order (Keep
-    /// warm, Task, Session, Idle stop, On harness switch), each whole. A setting that does
-    /// not fit on the row starts the next one, right-aligned under the first. Counts wider
+    /// warm, Task, Session, Idle stop, On harness switch, Sub-agent depth, Worker lands, Agent
+    /// branches), each whole. A
+    /// setting that does not fit on the row starts the next one, right-aligned under the
+    /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
     /// the look. Output: one row, or more when the settings wrap.
     fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
@@ -1241,6 +1275,10 @@ impl TeamView {
             setting(
                 "Worker lands",
                 landing_words(status.child_landing).to_owned(),
+            ),
+            setting(
+                "Agent branches",
+                branch_words(status.agent_branches).to_owned(),
             ),
         ];
         let mut rows = Vec::new();
@@ -1453,7 +1491,8 @@ impl TeamView {
             ("i", "Idle stop"),
             ("h", "On harness switch"),
             ("d", "Sub-agent depth"),
-            ("b", "Worker lands"),
+            ("k", "Worker lands"),
+            ("b", "Agent branches"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1702,6 +1741,15 @@ fn switch_words(mode: SwitchMode) -> &'static str {
     match mode {
         SwitchMode::Carry => "Carry over",
         SwitchMode::Fresh => "Start fresh",
+    }
+}
+
+/// The short words for the Agent branches setting on the team summary row.
+/// Takes the mode. Returns its choice name.
+fn branch_words(mode: BranchMode) -> &'static str {
+    match mode {
+        BranchMode::Named => "Named branch",
+        BranchMode::Detached => "Detached",
     }
 }
 

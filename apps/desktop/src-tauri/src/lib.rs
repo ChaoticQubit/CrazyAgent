@@ -24,7 +24,7 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
 use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
@@ -855,6 +855,21 @@ async fn desktop_team_child_landing(
     lock(&state)
         .await?
         .team_child_landing(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_agent_branches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_agent_branches(&id, &mode, generation)
         .await
 }
 
@@ -2232,11 +2247,23 @@ async fn desktop_accept_change(
     id: String,
     expected_head: String,
     message: Option<String>,
+    target: Option<String>,
 ) -> Result<AcceptOutcome, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?
-        .accept_change(id, expected_head, message)?;
+        .accept_change(id, expected_head, message, target)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_change_branches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<TargetBranches, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.change_branches(id)?;
     call.await
 }
 
@@ -2636,6 +2663,7 @@ pub fn run() {
             desktop_team_sub_agent_depth,
             desktop_team_child_landing,
             desktop_team_finished_agents,
+            desktop_team_agent_branches,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
@@ -2766,6 +2794,7 @@ pub fn run() {
             desktop_changes,
             desktop_change_diff,
             desktop_accept_change,
+            desktop_change_branches,
             desktop_discard_change,
             desktop_restore_change,
             desktop_update_change,

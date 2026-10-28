@@ -2,7 +2,7 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{ChildLanding, SwitchMode, TeamAction, TeamStatus};
+use crazyagent::team::{BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -213,6 +213,22 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::FinishedAgents { project_id, show }, generation)
+            .await
+    }
+
+    /// Sets where the project's new sub-agents commit: `named`, each on its own branch
+    /// `crazyagent/agent-<id>`, or `detached`, the older detached HEAD. Takes the project
+    /// id, the mode and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_agent_branches(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = BranchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::AgentBranches { project_id, mode }, generation)
             .await
     }
 

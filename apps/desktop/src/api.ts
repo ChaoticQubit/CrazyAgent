@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
+import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1102,6 +1102,13 @@ export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<
  * receipt, not ready, or a plain error. */
 export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+}
+
+/** Sets where the project's new sub-agents commit: each on its own branch crazyagent/agent-<id>
+ * (named) or on a detached HEAD (detached). Inputs: the project id and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setAgentBranches(id: string, mode: BranchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_agent_branches", { id, mode, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running

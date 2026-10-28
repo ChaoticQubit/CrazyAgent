@@ -73,6 +73,7 @@ fn status() -> TeamStatus {
         sub_agent_depth: crate::team::DEPTH_DEFAULT,
         child_landing: crate::team::ChildLanding::Lead,
         show_finished: false,
+        agent_branches: crate::team::BranchMode::Named,
         live_switch: None,
         paused: false,
         live_master: None,

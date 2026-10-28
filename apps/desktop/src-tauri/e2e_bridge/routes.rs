@@ -670,6 +670,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_child_landing(&id, &mode, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_agent_branches" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: String,
+                generation: u64,
+            }
+            let Args { id, mode, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_agent_branches(&id, &mode, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_finished_agents" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1959,12 +1974,26 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 id: String,
                 expected_head: String,
                 message: Option<String>,
+                target: Option<String>,
             }
-            let Args { id, expected_head, message } = match parse(args) {
+            let Args { id, expected_head, message, target } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .accept_change(id, expected_head, message)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .accept_change(id, expected_head, message, target)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_change_branches" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.change_branches(id)?; call.await }.await;
             routed(result)
         }
         "desktop_discard_change" => {

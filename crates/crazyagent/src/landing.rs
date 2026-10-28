@@ -229,6 +229,22 @@ pub enum AcceptOutcome {
     Conflict { files: Vec<String> },
 }
 
+/// The local branches of a change set's repository that an Accept can land on, at most
+/// `BRANCHES_MAX`, and the checked-out one, the default target; None when the owner's
+/// checkout is on a detached HEAD.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetBranches {
+    pub branches: Vec<String>,
+    pub current: Option<String>,
+}
+
+/// The most local branches a target listing carries.
+pub const BRANCHES_MAX: usize = 256;
+
+/// The longest branch name an Accept target may have, in bytes.
+pub const BRANCH_BYTES_MAX: usize = 255;
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -303,6 +319,27 @@ pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = worktree;
+        Err(unavailable())
+    }
+}
+
+/// Puts a newly added linked agent worktree on its own branch `crazyagent/agent-<id>`,
+/// created at the worktree's HEAD and checked out there, so the agent's turns commit on
+/// it. Call it once, right after the worktree is added and before any agent runs in it.
+/// Inputs: the store, the owner's checkout root, the worktree and its git metadata
+/// folder. Output: the branch, or `changes_agent_branch_exists` when a branch of that
+/// name is already there.
+pub fn name_agent_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::name_branch(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
         Err(unavailable())
     }
 }
@@ -569,6 +606,50 @@ pub fn accept(
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message);
+        Err(unavailable())
+    }
+}
+
+/// Lands a change set as one squash commit on a chosen local branch: the owner's
+/// checked-out branch through the owner's checkout as [`accept`] does, a branch checked
+/// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
+/// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
+/// the store, the owner's home folder, the change set, the head the owner reviewed, the
+/// edited message, None for the proposed one, and the target branch. Output: the landed
+/// commit and branch, or the conflicting files.
+pub fn accept_into(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target_branch: &str,
+) -> Result<AcceptOutcome, EngineError> {
+    #[cfg(unix)]
+    return owner::accept_to(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        message,
+        Some(target_branch),
+        &|_| false,
+    );
+    #[cfg(not(unix))]
+    {
+        let _ = (db, owner_home, id, expected_head, message, target_branch);
+        Err(unavailable())
+    }
+}
+
+/// Lists the local branches an Accept of a change set can land on and the owner's
+/// checked-out branch. Inputs: the store and the change set. Output: the branches.
+pub fn target_branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
+    #[cfg(unix)]
+    return owner::branches(db, id);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, id);
         Err(unavailable())
     }
 }

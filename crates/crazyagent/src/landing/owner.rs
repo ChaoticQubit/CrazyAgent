@@ -3,7 +3,10 @@ use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
-use super::{AcceptOutcome, ChangeSetId, ChangeState, MESSAGE_BYTES_MAX};
+use super::{
+    AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
+    MESSAGE_BYTES_MAX, TargetBranches,
+};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
@@ -173,9 +176,10 @@ fn merge(
     Ok((tree, conflicts))
 }
 
-/// The owner's checked-out branch and its commit, refusing a detached HEAD or an
-/// unfinished git operation. Input: the owner checkout. Output: the ref and commit.
-fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), EngineError> {
+/// Refuses an owner repository in the middle of a merge, rebase, cherry-pick, revert or
+/// bisect, or holding git's index or HEAD lock. Input: the owner checkout root. Output:
+/// Ok, or `changes_git_busy`.
+fn idle(repository: &Path) -> Result<(), EngineError> {
     let metadata = repository.join(".git");
     if BUSY_STATE
         .iter()
@@ -183,20 +187,139 @@ fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), Eng
     {
         return Err(failure("changes_git_busy"));
     }
+    Ok(())
+}
+
+/// The ref the owner's checkout has checked out. Input: the owner checkout. Output: the
+/// `refs/heads/` ref, or None for a detached HEAD.
+fn current_branch(owner: &Repo) -> Result<Option<String>, EngineError> {
     let output = owner.exec(&["symbolic-ref", "-q", "HEAD"], None, &[], 1024)?;
     let reference = match output.code {
         0 => String::from_utf8(output.stdout).map_err(|_| failure("changes_git_unsupported"))?,
-        1 => return Err(failure("changes_detached_head")),
+        1 => return Ok(None),
         _ => return Err(failure("changes_git_failed")),
     };
     let reference = reference.trim_end_matches('\n').to_owned();
-    if !reference.starts_with("refs/heads/") {
-        return Err(failure("changes_detached_head"));
-    }
+    Ok(reference.starts_with("refs/heads/").then_some(reference))
+}
+
+/// The owner's checked-out branch and its commit, refusing a detached HEAD or an
+/// unfinished git operation. Input: the owner checkout. Output: the ref and commit.
+fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), EngineError> {
+    idle(repository)?;
+    let reference = current_branch(owner)?.ok_or_else(|| failure("changes_detached_head"))?;
     let tip = owner
         .commit_of(&reference)?
         .ok_or_else(|| failure("changes_git_unsupported"))?;
     Ok((reference, tip))
+}
+
+/// Where an Accept writes: the owner's checked-out branch through the owner's checkout, a
+/// branch checked out nowhere as its ref alone, or an agent's own branch through that
+/// agent's linked worktree.
+enum Target {
+    Checkout,
+    Ref,
+    Agent(flow::Agent),
+}
+
+/// Finds the worktree, other than the owner's checkout, that has a branch checked out.
+/// Inputs: the owner checkout and the branch ref. Output: the worktree, or None when no
+/// other worktree has it checked out.
+fn checked_out_elsewhere(
+    owner: &Repo,
+    repository: &Path,
+    reference: &str,
+) -> Result<Option<PathBuf>, EngineError> {
+    let listing = owner.capture(
+        &["worktree", "list", "--porcelain", "-z"],
+        super::git::OUTPUT_BYTES_MAX,
+    )?;
+    let wanted = format!("branch {reference}");
+    let mut current: Option<PathBuf> = None;
+    for field in listing.split(|byte| *byte == 0) {
+        let field = std::str::from_utf8(field).map_err(|_| failure("changes_git_unsupported"))?;
+        if let Some(path) = field.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path));
+        } else if field == wanted {
+            return Ok(current.filter(|path| path != repository));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolves the branch an Accept lands on: the owner's checked-out branch when none is
+/// named, else the named local branch, refusing one that is not a plain local branch or
+/// that another worktree than an engine agent worktree on its own branch has checked out.
+/// Inputs: the store, the owner checkout, its root and the named branch. Output: the ref,
+/// its commit and where to write, or `changes_git_busy`, `changes_detached_head`,
+/// `changes_target_invalid` or `changes_target_checked_out`.
+fn landing_target(
+    db: &Connection,
+    owner: &Repo,
+    repository: &Path,
+    target: Option<&str>,
+) -> Result<(String, String, Target), EngineError> {
+    let Some(name) = target else {
+        let (reference, tip) = owner_branch(owner, repository)?;
+        return Ok((reference, tip, Target::Checkout));
+    };
+    idle(repository)?;
+    let reference = format!("refs/heads/{name}");
+    if name.is_empty()
+        || name.len() > BRANCH_BYTES_MAX
+        || name.starts_with('-')
+        || !owner.test(&["check-ref-format", &reference])?
+        || owner.test(&["symbolic-ref", "-q", &reference])?
+    {
+        return Err(failure("changes_target_invalid"));
+    }
+    let tip = owner
+        .commit_of(&reference)?
+        .ok_or_else(|| failure("changes_target_invalid"))?;
+    if current_branch(owner)?.as_deref() == Some(reference.as_str()) {
+        return Ok((reference, tip, Target::Checkout));
+    }
+    let Some(worktree) = checked_out_elsewhere(owner, repository, &reference)? else {
+        return Ok((reference, tip, Target::Ref));
+    };
+    let agents = crate::projects_home::state_folder(repository).join("worktrees");
+    if worktree.parent() != Some(agents.as_path())
+        && worktree.parent() != Some(repository.join("worktrees").as_path())
+    {
+        return Err(failure("changes_target_checked_out"));
+    }
+    let agent = flow::linked_git_dir(&worktree)
+        .and_then(|git_dir| flow::open_agent(db, AgentKind::Sub, repository, &worktree, &git_dir))
+        .map_err(|_| failure("changes_target_checked_out"))?;
+    if agent.branch() != Some(name) {
+        return Err(failure("changes_target_checked_out"));
+    }
+    Ok((reference, tip, Target::Agent(agent)))
+}
+
+/// Lists the local branches of a change set's repository, in git's order and at most
+/// `BRANCHES_MAX`, with the owner's checked-out one. Inputs: the store and the change
+/// set. Output: the branches.
+pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let owner = Repo::open(&repository, &repository.join(".git"), Some(&repository))?;
+    let listing = owner.capture(
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        super::git::OUTPUT_BYTES_MAX,
+    )?;
+    let branches: Vec<String> = String::from_utf8_lossy(&listing)
+        .lines()
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .filter(|name| !name.is_empty() && name.len() <= BRANCH_BYTES_MAX)
+        .take(BRANCHES_MAX)
+        .map(str::to_owned)
+        .collect();
+    let current = current_branch(&owner)?
+        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned));
+    assert!(branches.len() <= BRANCHES_MAX);
+    Ok(TargetBranches { branches, current })
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
@@ -287,6 +410,23 @@ pub(super) fn accept(
     message: Option<&str>,
     stopped: &dyn Fn(Step) -> bool,
 ) -> Result<AcceptOutcome, EngineError> {
+    accept_to(db, home, id, expected_head, message, None, stopped)
+}
+
+/// Lands a change set as one squash commit on a target branch, the owner's checked-out
+/// branch when none is named: as [`accept`] through the owner's checkout, by moving the
+/// ref alone for a branch checked out nowhere, or through an agent's worktree for that
+/// agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
+/// commit and branch, or the conflicts.
+pub(super) fn accept_to(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    message: Option<&str>,
+    target: Option<&str>,
+    stopped: &dyn Fn(Step) -> bool,
+) -> Result<AcceptOutcome, EngineError> {
     let edited = message.map(edited).transpose()?;
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -301,7 +441,7 @@ pub(super) fn accept(
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
-    let (reference, tip) = owner_branch(&owner, &repository)?;
+    let (reference, tip, target) = landing_target(db, &owner, &repository, target)?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
@@ -320,7 +460,15 @@ pub(super) fn accept(
         return Err(failure("changes_git_unsupported"));
     }
     flow::check_layout(&owner, &record.base, &record.head, &tree)?;
-    check_clean(&owner, &repository, &tip, &tree)?;
+    match &target {
+        Target::Checkout => check_clean(&owner, &repository, &tip, &tree)?,
+        Target::Ref => {}
+        Target::Agent(agent) => {
+            if agent.head()? != tip || !flow::holds_only(&agent.repo, &tip)? {
+                return Err(failure("changes_agent_busy"));
+            }
+        }
+    }
     if tree == owner.tree_of(&tip)? {
         finish(db, &mut record, &tip)?;
         return Ok(AcceptOutcome::Landed {
@@ -342,11 +490,20 @@ pub(super) fn accept(
     if stopped(Step::Recorded) {
         return Err(failure("changes_git_failed"));
     }
-    let written = owner.exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?;
-    if written.code != 0 {
+    let written = match &target {
+        Target::Checkout => Some((&owner, "changes_owner_dirty")),
+        Target::Ref => None,
+        Target::Agent(agent) => Some((&agent.repo, "changes_agent_busy")),
+    };
+    if let Some((checkout, refused)) = written
+        && checkout
+            .exec(&["read-tree", "-u", "-m", &tip, &commit], None, &[], 4096)?
+            .code
+            != 0
+    {
         record.intent = None;
         store::save(db, &record)?;
-        return Err(failure("changes_owner_dirty"));
+        return Err(failure(refused));
     }
     if stopped(Step::FilesWritten) {
         return Err(failure("changes_git_failed"));
@@ -356,15 +513,32 @@ pub(super) fn accept(
         ("GIT_COMMITTER_EMAIL", identity.1),
     ];
     let message = format!("CrazyAgent: accept {}", id.as_str());
-    let moved = owner.exec(
-        &["update-ref", "-m", &message, &reference, &commit, &tip],
-        None,
-        &env,
-        256,
-    )?;
-    if moved.code != 0 {
-        if owner.test(&["diff-index", "--cached", "--quiet", &commit, "--"])? {
-            let _ = owner.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
+    let moved = match &target {
+        Target::Checkout | Target::Ref => {
+            owner
+                .exec(
+                    &["update-ref", "-m", &message, &reference, &commit, &tip],
+                    None,
+                    &env,
+                    256,
+                )?
+                .code
+                == 0
+        }
+        Target::Agent(agent) => agent
+            .move_head(Some(tip.as_str()), &commit, &message)
+            .is_ok(),
+    };
+    if !moved {
+        let checkout = match &target {
+            Target::Checkout => Some(&owner),
+            Target::Ref => None,
+            Target::Agent(agent) => Some(&agent.repo),
+        };
+        if let Some(checkout) = checkout
+            && checkout.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
+        {
+            let _ = checkout.exec(&["read-tree", "-u", "-m", &commit, &tip], None, &[], 4096);
         }
         record.intent = None;
         store::save(db, &record)?;

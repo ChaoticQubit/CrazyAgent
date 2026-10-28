@@ -780,6 +780,9 @@ export type SwitchMode = "carry" | "fresh";
  * or only when the owner accepts it. */
 export type ChildLanding = "lead" | "owner";
 
+/** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
+export type BranchMode = "named" | "detached";
+
 export interface SessionSwitch {
   harness: string;
   mode: SwitchMode;
@@ -796,6 +799,7 @@ export interface TeamStatus {
   sub_agent_depth?: number;
   child_landing?: ChildLanding;
   show_finished?: boolean;
+  agent_branches?: BranchMode;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
