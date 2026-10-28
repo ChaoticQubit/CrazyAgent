@@ -2,6 +2,7 @@ use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
+use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -25,8 +26,10 @@ pub enum RecordSource {
 
 /// What the engine keeps about one agent's live pane, so a later engine can adopt it
 /// without starting the harness again: the session record, the working folder, when the
-/// harness started, the pane's first process, the key file the harness reads, if any, and
-/// for a resumed conversation its record and the offset where this pane's turns begin.
+/// harness started, the pane's first process, the key file the harness reads, if any, for a
+/// resumed conversation its record and the offset where this pane's turns begin, and the
+/// project access level the agent started at. A record from an engine that did not keep
+/// the level has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -38,6 +41,8 @@ pub struct PaneRecord {
     pub key: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed: Option<(PathBuf, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<AgentAccess>,
 }
 
 impl PaneRecord {
@@ -68,6 +73,7 @@ impl PaneRecord {
             pid,
             key: key.map(Path::to_path_buf),
             resumed: None,
+            access: None,
         })
     }
 

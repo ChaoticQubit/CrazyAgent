@@ -2812,16 +2812,22 @@ const REDIRECTS: [Redirect; 21] = [
     Redirect {
         name: "#8 fanout folders as links",
         plant: |case, foreign, commit| {
+            let mut linked = 0;
             for (folder, _) in foreign_files(case, foreign, false) {
                 let target = case
                     .workspace
                     .git_dir
                     .join("objects")
                     .join(folder.file_name().unwrap());
+                if std::fs::read_dir(&target).is_ok_and(|mut entries| entries.next().is_none()) {
+                    std::fs::remove_dir(&target).unwrap();
+                }
                 if std::fs::symlink_metadata(&target).is_err() {
                     std::os::unix::fs::symlink(&folder, target).unwrap();
+                    linked += 1;
                 }
             }
+            assert!(linked > 0, "no fan-out folder was linked");
             branch_at(case, commit);
         },
     },
@@ -2966,6 +2972,137 @@ fn a_clone_that_redirects_its_repository_is_refused_and_imports_nothing() {
         }
     }
     assert!(held.is_empty(), "{held:#?}");
+}
+
+/// Git serves the clone's git folder itself even when the agent changes its clone after
+/// the engine checked it: a `.git.git` made between the checks and the fetch, beside a
+/// git folder git cannot read, is never served (upload-pack `--strict`, RL-1).
+#[test]
+fn a_redirect_made_after_the_checks_is_never_served() {
+    let case = Case::own_branch();
+    let text = "not for the agent: after the checks\n";
+    let (foreign, _) = case.foreign("foreign", text);
+    git_in(&case.home, &foreign, &["branch", "agent/agent-own"]);
+    let secret = case.blob_id(text);
+    let heads = case.owner_refs("refs/heads");
+    super::clone::BETWEEN_CHECK_AND_FETCH.set(Some(|git_dir: &Path| {
+        let worktree = git_dir.parent().unwrap();
+        let foreign = worktree.parent().unwrap().join("foreign/.git");
+        std::fs::write(git_dir.join("HEAD"), "not a head\n").unwrap();
+        std::fs::write(
+            worktree.join(".git.git"),
+            format!("gitdir: {}\n", foreign.display()),
+        )
+        .unwrap();
+    }));
+    let code = refused(record_turn_end(
+        &case.db,
+        &case.workspace,
+        &own_branch_turn(),
+    ));
+    super::clone::BETWEEN_CHECK_AND_FETCH.set(None);
+    assert_eq!(code, "changes_agent_branch_invalid");
+    assert!(
+        !case.owner_has(&secret),
+        "the fallback repository was served"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+}
+
+/// Temp files an interrupted git command leaves in the clone's pack folder do not stop
+/// the agent's turn end, since git never serves them; any other name there still does.
+#[test]
+fn git_temp_files_left_in_a_clone_s_pack_folder_let_the_turn_end() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let packs = case.workspace.git_dir.join("objects/pack");
+    write(&packs.join("tmp_pack_x.idx"), "partial");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    std::fs::remove_file(packs.join("tmp_pack_x.idx")).unwrap();
+    for name in ["tmp_pack_Ab3dE9", "tmp_idx_zZ09aq", "tmp_rev_000000"] {
+        write(&packs.join(name), "partial");
+    }
+    let id = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+        .unwrap()
+        .expect("the turn's commit makes a change set");
+    let listed = list(&case.db, &case.workspace.project).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
+    assert_eq!(listed[0].files, 1);
+}
+
+/// The store folders of a clone, `pack` and the 256 loose-object folders, that the Own
+/// branch sandbox keeps the agent from making, moving or replacing (RL-3).
+/// Input: the clone's git folder. Output: each folder.
+fn store_folder_paths(git_dir: &Path) -> Vec<PathBuf> {
+    let objects = git_dir.join("objects");
+    std::iter::once(objects.join("pack"))
+        .chain((0..=u8::MAX).map(|byte| objects.join(format!("{byte:02x}"))))
+        .collect()
+}
+
+/// A new clone already holds its pack folder and all 256 loose-object folders, so the
+/// Own branch sandbox can deny making, moving or replacing them, and the agent's git still
+/// commits, repacks, collects garbage and prunes, and its turn end lands (RL-3).
+#[test]
+fn a_new_clone_holds_its_store_folders_and_its_git_still_commits_repacks_and_prunes() {
+    let case = Case::own_branch();
+    let missing: Vec<PathBuf> = store_folder_paths(&case.workspace.git_dir)
+        .into_iter()
+        .filter(|folder| !std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir()))
+        .collect();
+    assert!(missing.is_empty(), "{} missing: {missing:?}", missing.len());
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.agent(&["repack", "-a", "-d", "-q"]);
+    case.agent(&["gc", "-q"]);
+    case.agent(&["prune", "--expire=now"]);
+    case.edit("NEW", "new\n");
+    case.agent_commit("Add a file");
+    case.agent(&["fsck", "--no-progress"]);
+    let id = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+        .unwrap()
+        .expect("the agent's commits make a change set");
+    let listed = list(&case.db, &case.workspace.project).unwrap();
+    assert_eq!((listed.len(), &listed[0].id, listed[0].files), (1, &id, 2));
+}
+
+/// A clone launched again gets back any store folder its git removed, and the engine
+/// never follows a link the agent put in place of its object folder (RL-3).
+#[test]
+fn a_reused_clone_gets_its_store_folders_back_and_a_linked_object_folder_is_refused() {
+    let case = Case::own_branch();
+    let git_dir = case.workspace.git_dir.clone();
+    for name in ["00", "ab", "ff"] {
+        std::fs::remove_dir(git_dir.join("objects").join(name)).unwrap();
+    }
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert!(
+        store_folder_paths(&git_dir)
+            .iter()
+            .all(|folder| std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir()))
+    );
+
+    let elsewhere = case.repo.parent().unwrap().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let objects = git_dir.join("objects");
+    std::fs::rename(&objects, git_dir.join("objects-aside")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &objects).unwrap();
+    assert_eq!(
+        refused(ready_agent_clone(&case.workspace.worktree)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
 /// A clone holding more object bytes than the change bounds allow is refused before the

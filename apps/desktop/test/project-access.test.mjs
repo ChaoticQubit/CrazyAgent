@@ -57,3 +57,12 @@ test("every engine refusal for agent access has its own sentence", () => {
     for (const code of engine.matchAll(/"(agent_(?:access|policy)_[a-z_]+)"/g)) assert.ok(api.KNOWN_ERROR_CODES.includes(code[1]), code[1]);
   }
 });
+
+test("Settings says beside the level choice that lowering it stops agents running above it, in both UIs", () => {
+  assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level.");
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<AccessLevels name="ps-access"[^\n]*\/>}\n\s*{view && <p className="pj-help">{LOWERING_STOPS_AGENTS}<\/p>}/);
+  assert.ok(!page.includes("keep the access they started with"));
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
+});

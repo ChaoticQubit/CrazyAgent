@@ -6,6 +6,11 @@ use crossterm::event::{KeyCode, KeyEvent};
 pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
     "Agents run with your user's permissions: they can read your keys and change any file.";
 
+/// What a lower saved level does to agents already running: the engine stops each one that
+/// started above it.
+pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
+    "Lowering the level stops agents running above it; they restart at the new level.";
+
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
@@ -108,8 +113,9 @@ impl AccessEdit {
         policy
     }
 
-    /// The box's lines: what the setting does, the level row, the toolchain rows, the
-    /// warning or the refusal, and the save line. Input: the look. Output: the rows.
+    /// The box's lines: what the setting does, the level row, what lowering the level does
+    /// to running agents, the toolchain rows, the warning or the refusal, and the save line.
+    /// Input: the look. Output: the rows.
     pub fn body(&self, look: &Look) -> Vec<Row> {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
@@ -149,6 +155,11 @@ impl AccessEdit {
                     .map(|line| Row::of(line, look.warning)),
             );
         }
+        body.extend(
+            wrap_words(LOWERING_STOPS_AGENTS, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
         body.push(Row::default());
         body.push(Row::of("Toolchains agents may use", look.accent));
         if self.view.toolchains.is_empty() {

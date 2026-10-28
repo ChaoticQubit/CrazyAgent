@@ -259,6 +259,20 @@ pub fn add_agent_clone(repository: &Path, worktree: &Path) -> Result<(), EngineE
     }
 }
 
+/// Readies an agent's own clone for another launch: makes any of its pack and
+/// loose-object folders that are missing, as `add_agent_clone` does for a new one, since
+/// the Own branch sandbox keeps the agent from making them itself (RL-3). Input: the
+/// clone's worktree. Output: Ok, else `changes_workspace_invalid`.
+pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::store_folders(worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = worktree;
+        Err(unavailable())
+    }
+}
+
 /// Records the commit a newly added agent worktree starts from, so the change sets it
 /// opens later hold every commit the agent makes above it. Call it once, right after the
 /// worktree is added and before any agent runs in it. Inputs: the store, the owner's

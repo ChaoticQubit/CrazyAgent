@@ -1,6 +1,6 @@
-use super::project_access::summary;
+use super::project_access::{AccessEdit, LOWERING_STOPS_AGENTS, summary};
 #[cfg(target_os = "macos")]
-use super::project_access::{AccessEdit, AccessKey, FULL_ACCESS_WARNING};
+use super::project_access::{AccessKey, FULL_ACCESS_WARNING};
 use crate::sandbox::policy::{AgentAccess, LevelView, PolicyView, ToolchainView};
 use crate::sandbox::toolchains::Toolchain;
 #[cfg(target_os = "macos")]
@@ -93,4 +93,26 @@ fn the_settings_line_names_the_level_and_the_allowed_toolchains() {
         ..view()
     };
     assert_eq!(summary(Some(&none)), "Own branch · no toolchains");
+}
+
+#[test]
+fn the_access_box_says_beside_the_level_that_lowering_it_stops_agents_running_above_it() {
+    let edit = AccessEdit::of(&view());
+    let look = super::new_project_view::Look::plain();
+    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let level = rows
+        .iter()
+        .position(|row| row.contains("Access      "))
+        .expect("the level row");
+    let toolchains = rows
+        .iter()
+        .position(|row| row.contains("Toolchains agents may use"))
+        .expect("the toolchain heading");
+    let beside = rows[level..toolchains].join(" ");
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words(&beside).contains(LOWERING_STOPS_AGENTS), "{beside}");
+    assert_eq!(
+        LOWERING_STOPS_AGENTS,
+        "Lowering the level stops agents running above it; they restart at the new level."
+    );
 }
