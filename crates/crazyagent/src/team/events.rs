@@ -294,7 +294,7 @@ impl EventsStatus {
                 text.push_str(&format!(", task {task}: {prompt}"));
             }
             if let Some(question) = &agent.waiting {
-                text.push_str(&format!(", waiting on: {}", plain_brackets(question)));
+                text.push_str(&format!(", waiting on: {}", plain_agent_text(question)));
             }
             text.push('\n');
         }
@@ -1390,7 +1390,7 @@ fn line(event: &TeamEvent) -> String {
         "[team] {} {}: {}{task}",
         event.label,
         event.kind.verb(),
-        plain_brackets(&event.text)
+        plain_agent_text(&event.text)
     )
 }
 
@@ -1403,12 +1403,14 @@ const CLOSE_BRACKETS: [char; 16] = [
     '\u{2046}', '\u{2773}', '\u{298C}', '\u{298E}', '\u{2990}', '\u{27ED}', '\u{FE5E}', '\u{FE48}',
 ];
 
-/// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
-/// and tortoise shell ones among them, into parentheses, so agent text can never show a
-/// `[owner]` or `[team]` tag to the master; sub-agent results use it too. Takes the text.
-/// Returns it with them replaced.
-pub(super) fn plain_brackets(text: &str) -> String {
+/// Makes agent text plain for the master: square brackets and the brackets that look like
+/// them, fullwidth, white, lenticular and tortoise shell ones among them, become parentheses,
+/// so agent text can never show a `[owner]` or `[team]` tag, and control characters other
+/// than line feed and tab are dropped, so one escape or carriage return never makes the
+/// master refuse a whole message; sub-agent results use it too. Takes the text. Returns it.
+pub(super) fn plain_agent_text(text: &str) -> String {
     text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
                 '('

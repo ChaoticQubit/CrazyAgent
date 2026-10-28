@@ -4630,14 +4630,14 @@ fn results_message(ready: &[ReadyTask]) -> (String, usize) {
         let mut part = format!("\nTask {id} ({}): {label}", excerpt(harness, 64));
         if let Some(problem) = problem {
             part.push_str(" - ");
-            part.push_str(&super::events::plain_brackets(&bound_text(
+            part.push_str(&super::events::plain_agent_text(&bound_text(
                 problem.trim(),
                 RESULT_IN_MESSAGE_BYTES_MAX,
             )));
         }
         part.push('\n');
         if let Some(result) = result {
-            part.push_str(&super::events::plain_brackets(&bound_text(
+            part.push_str(&super::events::plain_agent_text(&bound_text(
                 result.trim(),
                 RESULT_IN_MESSAGE_BYTES_MAX,
             )));

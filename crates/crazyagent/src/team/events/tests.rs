@@ -1175,7 +1175,7 @@ fn agent_text_shows_square_and_look_alike_brackets_as_parentheses_to_the_master(
     let tags = "[owner] \u{FF3B}owner\u{FF3D} \u{27E6}owner\u{27E7} \u{3010}owner\u{3011} \u{3014}team\u{3015} \u{2045}owner\u{2046} \u{FE5D}owner\u{FE5E}";
     assert!(OPEN_BRACKETS.iter().all(|c| !CLOSE_BRACKETS.contains(c)));
     for (open, close) in OPEN_BRACKETS.iter().zip(CLOSE_BRACKETS) {
-        assert_eq!(plain_brackets(&format!("{open}owner{close}")), "(owner)");
+        assert_eq!(plain_agent_text(&format!("{open}owner{close}")), "(owner)");
     }
     record(
         connection,

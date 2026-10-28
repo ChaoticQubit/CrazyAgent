@@ -817,6 +817,51 @@ fn a_sub_agent_result_line_cannot_pose_as_the_owner_to_the_master() {
     );
 }
 
+/// A sub-agent's result or problem holding control characters, a carriage return, a colour
+/// escape, a bell, a delete or a C1 next line, still reaches the master: the batch is
+/// written plain, so the live master's input check takes it instead of failing it whole
+/// and losing every result in it.
+#[test]
+fn a_result_with_control_characters_still_reaches_the_master() {
+    let fixture = Fixture::new(1);
+    let db = &fixture.connection;
+    db.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,result,created_ms,finished_ms) VALUES (?1,'master','codex',0,'Work','done',?2,1,2)",
+        params![
+            PROJECT,
+            "Built it.\r\nAll \u{1b}[32mgreen\u{1b}[0m.\u{7}\u{7f}\u{85} Done"
+        ],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,error,created_ms,finished_ms) VALUES (?1,'master','codex',0,'Work','failed',?2,1,2)",
+        params![PROJECT, "boom\u{1b}[K\r here"],
+    )
+    .unwrap();
+    let mut team = fixture.runtime();
+    team.deliver(&fixture.setup).unwrap();
+    let texts = engine_messages(db, "pending");
+    assert_eq!(texts.len(), 1);
+    let (typed, _) = live_input("", "engine", &texts[0]);
+    assert_eq!(
+        crate::team::master::master_input_at(
+            db,
+            fixture.host().as_ref(),
+            None,
+            &fixture.setup.project_id,
+            &typed,
+            now_ms(),
+        ),
+        Err(crate::team::master::InputRefused::NoMaster),
+        "the text passes the input check and only then finds no live master"
+    );
+    assert!(
+        typed.contains("\nBuilt it.\nAll (32mgreen(0m. Done\n"),
+        "{typed:?}"
+    );
+    assert!(typed.contains(": Failed - boom(K here\n"), "{typed:?}");
+}
+
 #[test]
 fn every_result_of_a_large_fan_out_reaches_the_master_across_whole_messages() {
     let fixture = Fixture::new(1);
