@@ -398,20 +398,25 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form.
+    /// Builds the engine edit from the form. The stack field lists entries split by commas;
+    /// while it still shows the saved stack, the saved entries are kept as they are, so an
+    /// entry holding a comma is not split.
     /// Takes the form and the setup it edits.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
         let about = self.about.value().trim().to_owned();
-        let tech_stack: Vec<String> = self
-            .stack
-            .value()
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let stack = self.stack.value();
+        let tech_stack: Vec<String> = if stack == setup.tech_stack.join(", ") {
+            setup.tech_stack.clone()
+        } else {
+            stack
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
         let platforms: Vec<Platform> = Platform::ALL
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))

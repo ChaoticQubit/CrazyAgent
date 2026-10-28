@@ -2405,3 +2405,35 @@ fn a_project_sets_its_own_account_order_or_follows_its_pool() {
         ProjectReply::AccountOrder(None)
     );
 }
+
+/// A stack entry may hold a comma, which the engine allows: saving the General form after
+/// changing only the name keeps every stack entry as it was.
+#[test]
+fn the_general_form_keeps_stack_entries_holding_commas_when_the_stack_is_untouched() {
+    let project = ProjectId::new("commas").unwrap();
+    let mut setup = stored(&project);
+    setup.tech_stack = vec!["C, C++ interop".into(), "rust".into()];
+    let mut screen = ProjectScreen::new(project.clone(), "loading".into(), None);
+    let first = screen.next_query(10).unwrap();
+    screen.apply(&first, Ok(SetupView::Setup(Some(Box::new(setup.clone())))));
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('g'))), ProjectReply::Handled);
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    assert_eq!(screen.key(control_u), ProjectReply::Handled);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+
+    let reply = screen.key(key(KeyCode::Enter));
+
+    let ProjectReply::Change(action) = reply else {
+        panic!("the name change is sent: {reply:?}");
+    };
+    match *action {
+        SetupAction::Update {
+            name, setup: sent, ..
+        } => {
+            assert_eq!(name.as_deref(), Some("Notes Pro"));
+            assert_eq!(sent.tech_stack, setup.tech_stack);
+        }
+        other => panic!("the form sends an update: {other:?}"),
+    }
+}
