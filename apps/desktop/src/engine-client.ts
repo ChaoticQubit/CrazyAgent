@@ -1811,6 +1811,11 @@ export function resumeMasterSession(ticket: string, sessionId: string, cancelRun
   return invoke<IntentReceipt>("desktop_resume_master_session", { ticket, sessionId, cancelRunning, generation });
 }
 
+/** Deletes a session that is not live: its stored turns and its transcript in the master's private home. */
+export function deleteMasterSession(ticket: string, sessionId: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_delete_master_session", { ticket, sessionId, generation });
+}
+
 export interface MasterTurns {
   ticket: string;
   page: { turns: MasterTurn[]; next: unknown };

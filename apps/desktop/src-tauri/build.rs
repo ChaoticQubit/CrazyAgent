@@ -117,6 +117,7 @@ fn main() {
         "desktop_master_inputs",
         "desktop_new_master_session",
         "desktop_resume_master_session",
+        "desktop_delete_master_session",
         "desktop_owner_profile",
         "desktop_save_owner_profile",
         "desktop_pool_summaries",

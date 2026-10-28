@@ -122,6 +122,7 @@
     "allow-desktop-master-inputs",
     "allow-desktop-new-master-session",
     "allow-desktop-resume-master-session",
+    "allow-desktop-delete-master-session",
     "allow-desktop-owner-profile",
     "allow-desktop-save-owner-profile",
     "allow-desktop-pool-summaries",
