@@ -4,6 +4,7 @@ mod e2e_support;
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResult};
+use crazyagent::paths::find_in_path;
 use crazyagent::protocol::ProjectId;
 use crazyagent::usage::capture::Tokens;
 use crazyagent::usage::report::{UsageReport, UsageRow};
@@ -20,7 +21,9 @@ const FIRST_TOTAL: (u64, u64, u64) = (1_200, 200, 300);
 const SECOND_TOTAL: (u64, u64, u64) = (2_000, 500, 450);
 const PROBE_BEFORE: [(u64, u64, u64); 3] = [(100, 0, 10), (200, 0, 20), (300, 0, 30)];
 const PROBE_AFTER: [(u64, u64, u64); 3] = [(400, 0, 40), (500, 0, 50), (600, 0, 60)];
-const COUNTED_WHEN: &str = "the engine counts usage while its team runtime runs: a writable engine with Codex or Claude Code installed";
+const COUNTED_WHEN: &str =
+    "the engine counts usage while its team runtime runs, on the registered harness";
+const HARNESS_UNAVAILABLE: &str = "UNAVAILABLE: Codex or Claude Code (the engine counts usage only while its team runtime runs, which needs one registered harness)";
 
 fn now_ms() -> i64 {
     i64::try_from(
@@ -30,6 +33,30 @@ fn now_ms() -> i64 {
             .as_millis(),
     )
     .unwrap()
+}
+
+/// The real harness the engine registers so its team runtime and usage upkeep run:
+/// `CRAZYAGENT_CODEX` or `CRAZYAGENT_CLAUDE` when set, else `codex` or `claude` on PATH.
+/// Input: the environment. Output: the engine flag and the resolved executable; panics
+/// as UNAVAILABLE when neither is installed.
+fn harness() -> (&'static str, PathBuf) {
+    let path = std::env::var_os("PATH");
+    [
+        ("CRAZYAGENT_CODEX", "codex", "--codex-executable"),
+        ("CRAZYAGENT_CLAUDE", "claude", "--claude-executable"),
+    ]
+    .into_iter()
+    .find_map(|(variable, name, flag)| {
+        let found = match std::env::var_os(variable) {
+            Some(named) => Some(
+                std::fs::canonicalize(named)
+                    .unwrap_or_else(|_| panic!("{HARNESS_UNAVAILABLE}: {variable} names no file")),
+            ),
+            None => find_in_path(name, path.as_deref()),
+        };
+        found.map(|found| (flag, found))
+    })
+    .unwrap_or_else(|| panic!("{HARNESS_UNAVAILABLE}"))
 }
 
 fn report_wait() -> Duration {
@@ -154,7 +181,9 @@ async fn rescanned(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_reports_none() {
-    let mut engine = Engine::start("ca-av2-usage-");
+    let mut engine = Engine::new("ca-av2-usage-");
+    engine.harness = Some(harness());
+    engine.launch();
     let mut tui = Owner::attach(&engine).await;
     assert_eq!(tui.save_profile(profile()).await, OwnerResult::Applied);
     let disk = scratch("ca-av2-usage-home-");
@@ -184,6 +213,13 @@ async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_repor
     let desk = OwnerController::attach(engine.path(), OwnerClientKind::Desktop, ATTACH_TIME)
         .await
         .unwrap();
+    report_until(
+        &desk,
+        &project,
+        "the usage upkeep runs and marks the Gemini CLI agent",
+        |report| row(report, &gemini_key).is_some_and(|row| row.not_reported_by.is_some()),
+    )
+    .await;
     let report = report_until(
         &desk,
         &project,
