@@ -2385,22 +2385,29 @@ impl TeamRuntime {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
-            let idle = self
-                .workers
-                .iter()
-                .find(|(id, w)| {
-                    &w.project == project
-                        && w.role == AgentRole::Sub
-                        && w.harness == harness
-                        && w.busy.is_none()
-                        && !w.stopping
-                        && !paused.contains(&w.connection)
-                        && pin.is_none_or(|pin| pin == **id)
-                })
-                .map(|(id, _)| *id);
+            let mut ended = 0;
+            let idle = loop {
+                let found = self
+                    .workers
+                    .iter()
+                    .find(|(id, w)| {
+                        &w.project == project
+                            && w.role == AgentRole::Sub
+                            && w.harness == harness
+                            && w.busy.is_none()
+                            && !w.stopping
+                            && !paused.contains(&w.connection)
+                            && pin.is_none_or(|pin| pin == **id)
+                    })
+                    .map(|(id, _)| *id);
+                match found {
+                    Some(agent) if self.end_session(agent)? => ended += 1,
+                    found => break found,
+                }
+                assert!(ended <= self.workers.len());
+            };
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
-                (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
                 (None, Some(pinned))

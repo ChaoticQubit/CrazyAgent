@@ -5899,3 +5899,73 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
         "a linked .git pointer was followed: {linked:?}"
     );
 }
+
+/// A task never waits a tick behind an idle sub-agent past its session: dispatch ends that
+/// agent and gives the task to another idle sub-agent of the harness in the same tick
+/// (TLC-2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_at_once() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: fixture.setup.project_id.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: None,
+            },
+            hand_off(&fixture, "Write a.md"),
+            hand_off(&fixture, "Write b.md"),
+        ],
+    );
+    let idle_subs = |f: &Fixture| -> Vec<i64> {
+        f.status()
+            .agents
+            .iter()
+            .filter(|agent| agent.role == AgentRole::Sub && agent.status == AgentStatus::Idle)
+            .map(|agent| agent.id)
+            .collect()
+    };
+    fixture.until(&mut team, "two sub-agents finished and are idle", |f| {
+        task_of(f, "Write a.md").0 == "done"
+            && task_of(f, "Write b.md").0 == "done"
+            && idle_subs(f).len() == 2
+    });
+    let mut subs = idle_subs(&fixture);
+    subs.sort_unstable();
+    let (ended, fresh) = (subs[0], subs[1]);
+    team.workers.get_mut(&ended).unwrap().ran_before = Duration::from_secs(3600);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET session_secs=600 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write notes.md")]);
+    team.tick().unwrap();
+    let taken: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT agent FROM team_tasks WHERE prompt='Write notes.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        taken,
+        Some(fresh),
+        "the idle agent within its session takes the task in the same tick"
+    );
+    fixture.until(&mut team, "the agent past its session stops", |f| {
+        f.agent_status(ended).0 == AgentStatus::Stopped
+    });
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Write notes.md").0 == "done"
+    });
+    team.shutdown().unwrap();
+}
