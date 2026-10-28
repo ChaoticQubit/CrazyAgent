@@ -467,3 +467,31 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     }
     assert!(engine.join("probe.py").is_file());
 }
+
+#[test]
+fn a_crazyagent_folder_swapped_for_a_link_is_never_read_or_written_through() {
+    let dir = rust_repo();
+    let outside = tempfile::tempdir().unwrap();
+    let elsewhere = outside.path().join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("setup")).unwrap();
+    let planted = Drafted::new("Planted".into(), &pool());
+    let planted_bytes = serde_json::to_vec_pretty(&planted).unwrap();
+    std::fs::write(elsewhere.join("setup/draft.json"), &planted_bytes).unwrap();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    symlink(&elsewhere, &layout).unwrap();
+    assert!(draft::reused(&layout).is_none());
+    let mut changed = planted.clone();
+    changed.draft.about = "Written by the engine.".into();
+    assert!(draft::save(&layout, &changed).is_err());
+    assert_eq!(
+        std::fs::read(elsewhere.join("setup/draft.json")).unwrap(),
+        planted_bytes
+    );
+
+    let empty = outside.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::remove_file(&layout).unwrap();
+    symlink(&empty, &layout).unwrap();
+    assert!(draft::save(&layout, &changed).is_err());
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+}
