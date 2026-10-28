@@ -18,8 +18,8 @@ const encoder = new TextEncoder();
 export const PARTIAL_LINE = "Older team history is hidden so the team fits in one view. Queued and running work stays listed.";
 
 /** What the team controls say after a save refused because the team settings changed since
- * the controls read them, once they show the saved settings again. */
-export const TEAM_SETTINGS_STALE = "Team settings changed in another window, so your change was not saved. The controls now show the saved settings; make your change again.";
+ * the controls read them, here or in another window, once they show the saved settings again. */
+export const TEAM_SETTINGS_STALE = "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.";
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
  * "Any sub-agent" first. Inputs: the team status and a harness name lookup. Output: options. */
@@ -90,13 +90,13 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
-/** The team settings version a team change must name: the newer of the last team read and
- * the version this screen's own last applied save made, so a second change before the team
- * read returns is not refused as stale. Inputs: the team status and the screen's last saved
- * version for its project, if any. Output: the version. */
-export function settingsVersion(status: Pick<TeamStatus, "project_id" | "settings_version">, saved: { project: string; version: number } | null): number {
-  const read = status.settings_version ?? 0;
-  return saved !== null && saved.project === status.project_id ? Math.max(read, saved.version) : read;
+/** The team settings version a team change must name: the version of the team read whose
+ * values the controls show and build the change from, never one an earlier save made, so a
+ * second change before the team read returns is refused as stale instead of sending values
+ * it did not read. Input: the team status shown. Output: the version, 0 when an older engine
+ * sends none. */
+export function settingsVersion(status: Pick<TeamStatus, "settings_version">): number {
+  return status.settings_version ?? 0;
 }
 
 /** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
@@ -121,7 +121,6 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [sent, setSent] = useState("");
-  const [saved, setSaved] = useState<{ project: string; version: number } | null>(null);
   const options = delegateOptions(status, harness);
   const checked = warm ?? status.keep_warm;
   const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
@@ -129,12 +128,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const subs = options.length > 1;
 
   async function save(send: (version: number) => Promise<Result<IntentReceipt>>, missing: string): Promise<string> {
-    const version = settingsVersion(status, saved);
-    const result = await send(version);
-    if (savedStale(result)) return TEAM_SETTINGS_STALE;
-    const message = changeNote(result, missing);
-    if (!message) setSaved({ project: status.project_id, version: version + 1 });
-    return message;
+    const result = await send(settingsVersion(status));
+    return savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, missing);
   }
 
   async function toggle(on: boolean) {

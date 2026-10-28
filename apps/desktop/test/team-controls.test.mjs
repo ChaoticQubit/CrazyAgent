@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
@@ -116,12 +116,27 @@ test("the idle stop says when an idle master stops, which no setting changes", (
   assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
 });
 
-test("a team setting change names the newer of the team read and this screen's own last save", () => {
-  assert.equal(controls.settingsVersion(status(), null), 0, "an engine without the field names 0");
-  assert.equal(controls.settingsVersion(status({ settings_version: 4 }), null), 4);
-  assert.equal(controls.settingsVersion(status({ settings_version: 4 }), { project: "chores", version: 5 }), 5, "a second change before the team read returns is not stale");
-  assert.equal(controls.settingsVersion(status({ settings_version: 6 }), { project: "chores", version: 5 }), 6, "a newer read wins over an older save");
-  assert.equal(controls.settingsVersion(status({ settings_version: 2 }), { project: "other", version: 9 }), 2, "another project's save is not this team's version");
+test("two saves from one view both name the version that view read, so the second is refused instead of undoing the first", () => {
+  assert.equal(controls.settingsVersion(status()), 0, "an engine without the field names 0");
+  const view = status({ settings_version: 3, turn_limit_secs: 3600, session_limit_secs: null, idle_stop_secs: null });
+  assert.equal(controls.settingsVersion(view), 3, "the first save, a 2 h task limit, names the read");
+  assert.equal(controls.settingsVersion(view), 3, "the second save, an idle stop built from the same view's 1 h task limit before the team read returns, names the same read, which the engine now refuses as stale");
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /setSaved|Math\.max/, "no version from an earlier save is ever named with values the view did not read");
+  assert.match(source, /const shown = limits \?\? \{ turn: status\.turn_limit_secs \?\? null, session: status\.session_limit_secs \?\? null, idle: status\.idle_stop_secs \?\? null \};/, "the limits a change starts from are the shown status's");
+});
+
+test("every native flow that changes a team setting names the settings version it read", () => {
+  const folder = new URL("./native/", import.meta.url);
+  let calls = 0;
+  for (const file of readdirSync(folder).filter((name) => name.endsWith(".mjs"))) {
+    const source = readFileSync(new URL(file, folder), "utf8");
+    for (const call of source.matchAll(/"desktop_team_(?:keep_warm|time_limits|on_harness_switch|finished_agents|live_master)", \{[^}]*\}/g)) {
+      calls += 1;
+      assert.match(call[0], /\bversion: /, `${file}: ${call[0]}`);
+    }
+  }
+  assert.ok(calls > 0, "the native flows change a team setting");
 });
 
 test("each team setting sends the version it read, and a stale save says so and reads the team again", () => {
@@ -132,12 +147,12 @@ test("each team setting sends the version it read, and a stale save says so and 
     "setOnHarnessSwitch(projectId, mode, version)",
     'showFinishedAgents(projectId, choice === "show", version)',
   ]) assert.ok(source.includes(`await save((version) => ${call}`), call);
-  assert.match(source, /const version = settingsVersion\(status, saved\);\s*const result = await send\(version\);\s*if \(savedStale\(result\)\) return TEAM_SETTINGS_STALE;\s*const message = changeNote\(result, missing\);\s*if \(!message\) setSaved\(\{ project: status\.project_id, version: version \+ 1 \}\);/);
+  assert.match(source, /const result = await send\(settingsVersion\(status\)\);\s*return savedStale\(result\) \? TEAM_SETTINGS_STALE : changeNote\(result, missing\);/);
   for (const handler of ["toggle", "limit", "chooseSwitch", "view"]) {
     const body = source.slice(source.indexOf(`async function ${handler}(`), source.indexOf("\n  }\n", source.indexOf(`async function ${handler}(`)));
     assert.match(body, /setNote\(message\);\s*reload\(\);$/, `${handler} reads the team again after every save, stale or not`);
   }
-  assert.equal(controls.TEAM_SETTINGS_STALE, "Team settings changed in another window, so your change was not saved. The controls now show the saved settings; make your change again.");
+  assert.equal(controls.TEAM_SETTINGS_STALE, "Team settings changed since the controls read them, so your change was not saved. The controls now show the saved settings; make your change again.");
   const api = readFileSync(new URL("../src/api.ts", import.meta.url), "utf8");
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   for (const [command, fields] of [

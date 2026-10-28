@@ -251,10 +251,21 @@ test("a live master switch from an older team read is not saved; the area says s
   assert.ok(!live.liveStaleNote("shop\u202eevil").includes("\u202e"), "the name is shown through displayText");
   const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
   assert.match(source, /const version = Math\.max\(engine\?\.version \?\? 0, saved\.current\);/, "the switch names the newer of the team read and this area's own last save");
-  assert.match(source, /if \(savedStale\(turned\)\) \{\s*data\.notify\(liveStaleNote\(data\.name\)\);\s*if \(!mounted\.current\) return;\s*asked\.current = false;\s*setWant\(null\);\s*setLive\(\{ kind: "starting" \}\);\s*data\.reloadTeam\(\);\s*return;\s*\}/, "a stale switch drops the owner's change and reads the team again");
+  assert.match(source, /if \(savedStale\(turned\)\) \{\s*if \(clicked\) data\.notify\(liveStaleNote\(data\.name\)\);\s*if \(!mounted\.current\) return;\s*asked\.current = false;\s*refused\.current = version;\s*setWant\(null\);\s*setLive\(\{ kind: "starting" \}\);\s*data\.reloadTeam\(\);\s*return;\s*\}/, "a stale switch drops the change, toasts only an owner's click, remembers the refused version and reads the team again");
   assert.ok(source.indexOf("savedStale(turned)") < source.indexOf("stopFailedNote(data.name, failed)"), "a stale stop is not reported as a failed stop");
   assert.match(source, /\} else \{\s*saved\.current = version \+ 1;/, "an applied switch moves the version this area names next");
-  assert.match(source, /if \(on === null && !asked\.current\) void turn\(true\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read");
+  assert.match(source, /if \(autoStart\(on, asked\.current, engine\?\.version \?\? 0, refused\.current\)\) void turn\(true, false\);\s*\}, \[on, data\.team\.at\]\);/, "a first open refused as stale turns the master on again from the fresh read, without a toast");
+  assert.match(source, /onSwitch=\{\(next\) => void turn\(next\)\}/, "a header click is the owner's, so its stale refusal toasts");
+});
+
+test("a first open refused as stale starts the live master once from the fresh read, not again from the read it was refused on", () => {
+  assert.equal(live.autoStart(null, false, 0, -1), true, "a switch never set starts on the first open");
+  assert.equal(live.autoStart(null, false, 0, 0), false, "the old read the engine refused does not start it again");
+  assert.equal(live.autoStart(null, false, 1, 0), true, "the fresh read after another window's change starts it");
+  assert.equal(live.autoStart(true, false, 1, -1), false, "a switch the owner set is not overridden");
+  assert.equal(live.autoStart(false, false, 1, -1), false, "a stopped master stays stopped");
+  assert.equal(live.autoStart(undefined, false, 0, -1), false, "no start before a team read arrives");
+  assert.equal(live.autoStart(null, true, 1, -1), false, "a start already asked is not sent twice");
 });
 
 test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {

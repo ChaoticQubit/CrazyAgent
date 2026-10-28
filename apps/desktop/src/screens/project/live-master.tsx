@@ -54,6 +54,15 @@ export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: stri
   return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null, version: team.value.settings_version ?? 0 };
 }
 
+/** Whether opening the area turns the live master on now: only while the switch was never
+ * set, nothing was asked and the team read is newer than a start the engine refused as
+ * stale, so a refused start waits for the fresh read instead of retrying the old one.
+ * Inputs: the switch shown, whether a change was asked, the read's settings version and the
+ * version last refused, -1 when none. Output: true to start. */
+export function autoStart(on: boolean | null | undefined, asked: boolean, read: number, refused: number): boolean {
+  return on === null && !asked && read > refused;
+}
+
 /** The owner's switch change while it is the switch the area shows: from the click until a
  * team read made after the engine accepted it. `after` is Infinity while the change waits. */
 export type Want = { on: boolean; after: number };
@@ -99,10 +108,11 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const asked = useRef(false);
   const mounted = useRef(true);
   const saved = useRef(0);
+  const refused = useRef(-1);
   const engine = liveSwitch(data.team.result, data.id);
   const on = want?.on ?? engine?.on;
 
-  const turn = async (next: boolean) => {
+  const turn = async (next: boolean, clicked = true) => {
     const id = data.id;
     const version = Math.max(engine?.version ?? 0, saved.current);
     asked.current = true;
@@ -110,9 +120,10 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     setLive(next ? { kind: "starting" } : { kind: "stopped", problem: null });
     const turned = await setLiveMaster(id, next, version);
     if (savedStale(turned)) {
-      data.notify(liveStaleNote(data.name));
+      if (clicked) data.notify(liveStaleNote(data.name));
       if (!mounted.current) return;
       asked.current = false;
+      refused.current = version;
       setWant(null);
       setLive({ kind: "starting" });
       data.reloadTeam();
@@ -145,7 +156,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [data.team.at, want]);
 
   useEffect(() => {
-    if (on === null && !asked.current) void turn(true);
+    if (autoStart(on, asked.current, engine?.version ?? 0, refused.current)) void turn(true, false);
   }, [on, data.team.at]);
 
   useEffect(() => {
