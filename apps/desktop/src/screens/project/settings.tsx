@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
-import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, fieldValue, messageSettingsOf, saveMessageSettings, withField } from "../../api-messages";
+import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import type { MessageSettings } from "../../engine-client";
 import { Button, ConfirmDialog, Segmented } from "../../ui";
 import { displayText } from "../conversation";
@@ -354,9 +354,10 @@ function AccessSection({ data }: { data: ProjectData }) {
 }
 
 /** The Messages section: the six settings of the sub-agents' Messages timelines, each with every
- * choice and the proposed default named. A choice saves the settings whole at once; the section
- * shows it until the next team read, then what the engine stored. Input: the project data.
- * Output: the section. */
+ * choice and the proposed default named. A choice changes its one setting against what the
+ * engine stores now; when another client changed the settings since this view was read, it
+ * saves nothing and shows the stored ones. The section shows the outcome until the next team
+ * read, then what the engine stored. Input: the project data. Output: the section. */
 function MessagesSection({ data }: { data: ProjectData }) {
   const [pending, setPending] = useState<{ settings: MessageSettings; at: number } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -367,13 +368,17 @@ function MessagesSection({ data }: { data: ProjectData }) {
 
   async function choose(key: keyof MessageSettings, value: string) {
     if (busy || shown === null) return;
-    const next = withField(shown, key, value);
     setBusy(true);
-    setPending({ settings: next, at: Number.POSITIVE_INFINITY });
-    const message = changeNote(await saveMessageSettings(data.id, next), "Messages settings");
+    const change = await changeMessageSetting(data.id, shown, key, value);
     setBusy(false);
-    setPending(message ? null : { settings: next, at: Date.now() });
-    setNote(message);
+    if (change.kind === "elsewhere") {
+      setPending({ settings: change.settings, at: Date.now() });
+      setNote("Messages settings changed elsewhere, so nothing was saved. This shows what's saved now; choose again.");
+    } else {
+      const message = changeNote(change.result, "Messages settings");
+      setPending(message || change.kind === "unread" ? null : { settings: change.settings, at: Date.now() });
+      setNote(message);
+    }
     data.reloadTeam();
   }
 

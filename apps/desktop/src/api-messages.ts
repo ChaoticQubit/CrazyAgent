@@ -1,6 +1,6 @@
 import { call, nextGeneration } from "./api";
 import type { Failure, Result } from "./api";
-import { failureCopy } from "./api-projects";
+import { failureCopy, loadTeamStatus } from "./api-projects";
 import type { AgentMessage, AgentMessages, IntentReceipt, MessageCursor, MessageKind, MessageSettings, MessageSource, MessageSpeaker, TeamStatus } from "./engine-client";
 
 /** The kept-message counts a project may choose; the engine refuses any other. */
@@ -46,6 +46,28 @@ export function saveMessageSettings(projectId: string, settings: MessageSettings
   return call<IntentReceipt>("desktop_team_message_settings", {
     id: projectId, settings: { keep_master_messages, kept_per_project, progress_shown, results, owner_items_shown, page_size }, generation: nextGeneration(),
   });
+}
+
+/** What changing one Messages setting came to: sent with the settings built from the engine's
+ * stored ones, refused because another client changed them since the owner's view was read, or
+ * a team read that failed. */
+export type SettingChange =
+  | { kind: "sent"; settings: MessageSettings; result: Result<IntentReceipt> }
+  | { kind: "elsewhere"; settings: MessageSettings }
+  | { kind: "unread"; result: Failure };
+
+/** Changes one Messages setting against what the engine stores now. It reads the team first;
+ * when the stored settings differ from the ones the owner saw, it saves nothing and returns
+ * them, so a view one poll old never undoes another client's change. Inputs: the project id,
+ * the settings shown, the setting and its choice. Output: what the change came to. */
+export async function changeMessageSetting(projectId: string, seen: MessageSettings, key: keyof MessageSettings, value: string): Promise<SettingChange> {
+  const read = await loadTeamStatus(projectId);
+  if (read.kind !== "ok") return { kind: "unread", result: read };
+  const stored = messageSettingsOf(read.value);
+  if (stored === null) return { kind: "unread", result: { kind: "not_ready" } };
+  if (MESSAGE_SETTING_FIELDS.some((field) => fieldValue(stored, field.key) !== fieldValue(seen, field.key))) return { kind: "elsewhere", settings: stored };
+  const settings = withField(stored, key, value);
+  return { kind: "sent", settings, result: await saveMessageSettings(projectId, settings) };
 }
 
 /** A project's stored Messages settings from its team status. Input: the status. Output: the
