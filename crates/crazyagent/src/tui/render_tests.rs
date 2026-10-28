@@ -206,6 +206,9 @@ fn card(
         about: about.into(),
         platforms: platforms.to_vec(),
         pool: pool.map(Into::into),
+        pool_id: pool.map(|name| {
+            CredentialRef::new(format!("pool-{}", name.replace(' ', "-").to_lowercase())).unwrap()
+        }),
         research,
         created_ms: Some(clock::now_ms() - age_ms),
         activity: Default::default(),

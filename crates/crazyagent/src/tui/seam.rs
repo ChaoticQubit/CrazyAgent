@@ -313,7 +313,8 @@ pub fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
 
 /// One project as Home shows it, built only from engine data.
 /// Input: the stored project, its setup and research jobs, and pool names.
-/// Output: the card fields in plain words.
+/// Output: the card fields in plain words, and the assigned pool's id, by which the
+/// pool screens find the projects of one pool, as two pools may share a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectCard {
     pub id: ProjectId,
@@ -321,6 +322,7 @@ pub struct ProjectCard {
     pub about: String,
     pub platforms: Vec<Platform>,
     pub pool: Option<String>,
+    pub pool_id: Option<CredentialRef>,
     pub research: ResearchCounts,
     pub created_ms: Option<i64>,
     pub activity: Activity,
@@ -353,6 +355,7 @@ impl ProjectCard {
                 .map(|setup| setup.platforms.clone())
                 .unwrap_or_default(),
             pool,
+            pool_id: setup.and_then(|setup| setup.pool.clone()),
             research: ResearchCounts::of(jobs),
             created_ms: setup.map(|setup| setup.created_ms),
             activity: Activity::default(),
