@@ -1043,6 +1043,80 @@ fn live(
         .transpose()
 }
 
+/// Deletes a project's master session that is not live, for the owner's Delete: first the
+/// harness transcript it kept is removed from its master's private home, then a parked
+/// session closes so it can no longer be resumed, and its stored turns, their owner
+/// messages, its marks and its kept conversation go, so it leaves the Sessions list.
+/// Takes the transaction, the project, the session and the revision read at.
+/// Returns Applied, or a plain rejection before any write.
+fn delete_session(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    id: &SessionId,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let Some(mut session) =
+        load_session(tx, id, revision)?.filter(|session| &session.project_id == project)
+    else {
+        return Ok(reject("master_session_missing"));
+    };
+    if session.phase == MasterSessionPhase::Configured {
+        return Ok(reject("master_session_live"));
+    }
+    if let Some(kept) = crate::team::master::session_conversation(tx, project, id.as_str())? {
+        let Some(runtime) = tx.path().map(Path::new).and_then(Path::parent) else {
+            return Ok(reject("master_session_files_kept"));
+        };
+        let home = crate::team::runtime::agent_home(&runtime.join("team"), kept.agent);
+        if !remove_transcript(&home, &kept.resume) {
+            return Ok(reject("master_session_files_kept"));
+        }
+    }
+    if session.phase == MasterSessionPhase::Parked {
+        end_session(tx, &mut session, revision, MasterSessionPhase::Closed)?;
+        save_session(tx, &session)?;
+    }
+    for statement in [
+        "DELETE FROM master_preparations WHERE session=?1",
+        "DELETE FROM conversation_entries WHERE kind='message' AND event_cursor IN (SELECT input FROM master_turns WHERE session=?1)",
+        "DELETE FROM master_turns WHERE session=?1",
+        "DELETE FROM team_master_conversations WHERE session=?1",
+        "DELETE FROM session_owner_turns WHERE session=?1",
+        "DELETE FROM session_marks WHERE session=?1",
+    ] {
+        tx.execute(statement, [id.as_str()]).map_err(error)?;
+    }
+    assert!(!crate::master_sessions::has_owner_turn(tx, id)?);
+    Ok(Outcome::Applied)
+}
+
+/// Removes a deleted session's harness transcript from its master's private home: the
+/// record and the folder Claude Code keeps beside it under the conversation id. Nothing
+/// outside the home, nothing that is a link and nothing reached through a link is removed.
+/// Takes the master's home and the kept conversation. Returns true once neither is left,
+/// false when one lies outside the home or could not be removed.
+fn remove_transcript(home: &Path, kept: &crate::harnesses::terminal_session::Resume) -> bool {
+    let record = kept.record.as_path();
+    if !crate::harnesses::transcript::plain_below(home, record) {
+        return false;
+    }
+    let removed_record = match std::fs::symlink_metadata(record) {
+        Ok(metadata) if metadata.is_file() => std::fs::remove_file(record).is_ok(),
+        Ok(_) => false,
+        Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
+    };
+    let Some(folder) = record.parent().map(|parent| parent.join(&kept.id)) else {
+        return false;
+    };
+    let removed_folder = !crate::harnesses::transcript::plain_below(home, &folder)
+        || match std::fs::symlink_metadata(&folder) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&folder).is_ok(),
+            Ok(_) => true,
+            Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
+        };
+    removed_record && removed_folder
+}
+
 /// Closes every master session of a project as the project is removed: the live one ends
 /// as the owner's End conversation does, and parked ones can no longer be resumed. Runs
 /// in the removal's own transaction and at its revision. Takes the transaction, the
@@ -4361,6 +4435,7 @@ fn touched(action: &MasterOwnerAction) -> Option<&ProjectId> {
         MasterOwnerAction::Cancel { .. }
         | MasterOwnerAction::Close { .. }
         | MasterOwnerAction::Resolve { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => None,
     }
 }
@@ -4389,6 +4464,13 @@ fn execute(
             session_id,
             *cancel_running,
         );
+    }
+    if let MasterOwnerAction::DeleteSession {
+        project_id,
+        session_id,
+    } = action
+    {
+        return delete_session(tx, project_id, session_id, revision);
     }
     let opening = match action {
         MasterOwnerAction::Open {
@@ -4440,6 +4522,9 @@ fn execute(
         if let Some(current) = &current {
             match renew {
                 None => return Ok(reject("master_session_active")),
+                Some(_) if !crate::master_sessions::has_owner_turn(tx, &current.session_id)? => {
+                    return Ok(reject("master_session_unused"));
+                }
                 Some(false) if current.current_turn.is_some() => {
                     return Ok(reject("master_turn_running"));
                 }
@@ -4495,6 +4580,7 @@ fn execute(
         MasterOwnerAction::Open { .. }
         | MasterOwnerAction::NewSession { .. }
         | MasterOwnerAction::Resume { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }
@@ -4602,6 +4688,7 @@ fn execute(
         MasterOwnerAction::Open { .. }
         | MasterOwnerAction::NewSession { .. }
         | MasterOwnerAction::Resume { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }

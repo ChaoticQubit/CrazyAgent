@@ -491,6 +491,13 @@ impl ProjectPage {
         {
             return;
         }
+        if code == "master_session_unused" {
+            ctx.say(Message::warning(
+                "This session has no messages yet, so it already is a new session.",
+                "",
+            ));
+            return;
+        }
         let lead = match &submission.action {
             MasterOwnerAction::Submit { text, .. } => {
                 if self.screen.input.value().is_empty() {
@@ -505,6 +512,7 @@ impl ProjectPage {
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
             MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
+            MasterOwnerAction::DeleteSession { .. } => "The session was not deleted.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {

@@ -1451,6 +1451,21 @@ async fn desktop_resume_master_session(
 }
 
 #[tauri::command]
+async fn desktop_delete_master_session(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    ticket: String,
+    session_id: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .delete_master_session(&ticket, &session_id, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_cancel_master_turn(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2581,6 +2596,7 @@ pub fn run() {
             desktop_master_inputs,
             desktop_new_master_session,
             desktop_resume_master_session,
+            desktop_delete_master_session,
             desktop_cancel_master_turn,
             desktop_pending_intent,
             desktop_reconcile_intent,

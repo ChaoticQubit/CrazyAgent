@@ -352,7 +352,7 @@ fn newest(folder: &Path, keep: usize) -> Vec<PathBuf> {
 /// Tells whether a record lies inside a folder through plain folders only: no `..`, no
 /// link between the folder and the record. Takes the folder and the record. Returns true
 /// when every step is a plain name and every folder on the way is a real folder.
-fn plain_below(folder: &Path, record: &Path) -> bool {
+pub(crate) fn plain_below(folder: &Path, record: &Path) -> bool {
     let Ok(rest) = record.strip_prefix(folder) else {
         return false;
     };

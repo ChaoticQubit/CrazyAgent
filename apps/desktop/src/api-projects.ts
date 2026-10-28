@@ -1,6 +1,6 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
@@ -240,6 +240,8 @@ const copy: Record<string, string> = {
   master_turn_running: "The master is still answering. Stop that reply to switch sessions.",
   master_session_live: "That session is already the live one.",
   master_session_closed: "That session ended with its project and can't be resumed.",
+  master_session_unused: "This session has no messages yet, so it already is a new session.",
+  master_session_files_kept: "Its transcript couldn't be removed from the master's home, so nothing was deleted.",
   master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
   master_turn_not_current: "That reply already finished.",
   master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
@@ -621,6 +623,13 @@ export function startNewSession(ticket: string, cancelRunning: boolean, generati
  * owner confirmed stopping a running reply, and a draft generation. Output: the receipt. */
 export function resumeSession(ticket: string, session: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => resumeMasterSession(ticket, session, cancelRunning, generation));
+}
+
+/** Deletes a session that is not live: the engine removes its stored turns and its
+ * transcript in the master's private home. Inputs: the master ticket, the session id and a
+ * draft generation. Output: the receipt. */
+export function deleteSession(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => deleteMasterSession(ticket, session, generation));
 }
 
 /** Asks the engine to stop the master's reply in progress.

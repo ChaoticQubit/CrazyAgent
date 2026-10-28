@@ -3670,7 +3670,15 @@ impl TeamRuntime {
                 if let Some(hosted) = &worker.hosted {
                     hosted.set_busy(true);
                 }
+                let live_session = worker
+                    .session
+                    .clone()
+                    .filter(|_| worker.live)
+                    .map(|session| (worker.project.clone(), session));
                 super::master::turn_started(&self.connection, id)?;
+                if let Some((project, session)) = live_session {
+                    crate::master_sessions::mark_owner_turn(&self.connection, &project, &session)?;
+                }
                 self.mark_agent(id, AgentStatus::Working, None)?;
                 Ok(false)
             }
