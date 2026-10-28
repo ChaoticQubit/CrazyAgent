@@ -944,7 +944,9 @@ pub(super) fn start(
 /// commits the same tree again.
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending, or
-/// `changes_branch_not_above_base` for a clone branch that dropped the base.
+/// `changes_branch_not_above_base` for a clone branch that dropped the base; an updating
+/// set refused so waits for its agent again, so the owner's next Update hands the agent
+/// the merge it skipped (GA-R3).
 pub(super) fn record(
     db: &Connection,
     workspace: &Workspace,
@@ -996,6 +998,12 @@ pub(super) fn record(
         .as_ref()
         .map_or(base.as_str(), |record| record.head.as_str());
     if agent.is_none() && !shared.test(&["merge-base", "--is-ancestor", above, &head])? {
+        if let Some(mut record) =
+            open.filter(|record| record.state == ChangeState::Updating && !record.waiting)
+        {
+            record.waiting = true;
+            store::save(db, &record)?;
+        }
         return Err(failure("changes_branch_not_above_base"));
     }
     if above != head {
@@ -1104,7 +1112,7 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
     let clone = in_clone(&record);
     let mut prompt = if clone {
         format!(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge --ff-only {}` in your worktree.\n",
+            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
             record.head, record.head
         )
     } else {

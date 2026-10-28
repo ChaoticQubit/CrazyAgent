@@ -2230,7 +2230,7 @@ fn an_own_branch_agent_resolves_an_update_on_its_branch_and_accept_lands_it() {
     assert_eq!(case.agent_head(), head, "update moved the agent's branch");
     let prompt = resolve_task_prompt(&case.db, &id).unwrap();
     assert!(
-        prompt.contains(&format!("git merge --ff-only {merged}")),
+        prompt.contains(&format!("git merge {merged}")) && !prompt.contains("--ff-only"),
         "{prompt}"
     );
     case.agent(&["merge", "-q", "--ff-only", &merged]);
@@ -2323,5 +2323,75 @@ fn objects_planted_in_an_own_branch_clone_never_reach_a_change_set() {
         case.checkout(),
         before,
         "a refused fetch changed the checkout"
+    );
+}
+
+/// An agent in its own clone that commits on its old head instead of merging the update
+/// is refused at its turn end, and the set shows as waiting for its agent again with a
+/// prompt that merges without `--ff-only`, so one more resolve lands its work (GA-R3).
+#[test]
+fn an_own_branch_agent_that_skips_the_update_merge_is_asked_again_and_its_merge_lands() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    update(&case.db, &id).unwrap();
+    resolve_handed_over(&case.db, &id).unwrap();
+    let merged = case.view(&id).head;
+    assert!(!case.view(&id).waiting);
+    case.edit("src/new.rs", "fn main() {}\n");
+    case.agent_commit("Add main on the old head");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_branch_not_above_base"
+    );
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.waiting, view.head.as_str()),
+        (ChangeState::Updating, true, merged.as_str()),
+        "the refused set does not wait for its agent"
+    );
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.contains(&format!("git merge {merged}")) && !prompt.contains("--ff-only"),
+        "{prompt}"
+    );
+    case.agent(&[
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        &merged,
+    ]);
+    case.edit("README", "one\ntwo\nTHREE\nfour\n");
+    case.agent_commit("Resolve the owner's edit");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Pending, tip.as_str())
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the resolved accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nTHREE\nfour\n"
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\nsrc/new.rs\n"
     );
 }
