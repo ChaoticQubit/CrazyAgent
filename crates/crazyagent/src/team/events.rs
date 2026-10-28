@@ -26,6 +26,7 @@ pub const SEND_BYTES_MAX: usize = crate::terminal::PROMPT_BYTES_MAX;
 pub const ESCALATION_BYTES_MAX: usize = 2000;
 pub const NOTIFICATIONS_PER_PROJECT_MAX: i64 = 200;
 pub const STATUS_EVENTS_MAX: i64 = 50;
+const LEFT_OUT_LINE_BYTES_MAX: usize = 64;
 pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
@@ -277,9 +278,10 @@ pub struct EventsStatus {
 }
 
 impl EventsStatus {
-    /// Writes the status as plain lines for the master's tool reply. Takes the status.
-    /// Returns one line per running agent, the finished agents it can wake, newest first,
-    /// then the newest events, oldest first.
+    /// Writes the status as plain lines for the master's tool reply, within
+    /// `REPLY_TEXT_MAX`. Takes the status. Returns one line per running agent, the finished
+    /// agents it can wake, newest first, then the newest events that fit, oldest first,
+    /// after one line saying how many older events were left out to fit (WKC-3).
     pub fn text(&self) -> String {
         let mut text = String::new();
         if self.agents.is_empty() {
@@ -311,10 +313,29 @@ impl EventsStatus {
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
         }
-        for event in &self.events {
-            text.push_str(&line(event));
+        let budget =
+            super::tool::REPLY_TEXT_MAX.saturating_sub(text.len() + LEFT_OUT_LINE_BYTES_MAX);
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for event in self.events.iter().rev() {
+            let line = line(event);
+            if used + line.len() + 1 > budget {
+                break;
+            }
+            used += line.len() + 1;
+            kept.push(line);
+        }
+        let left = self.events.len() - kept.len();
+        if left > 0 {
+            text.push_str(&format!(
+                "{left} older events left out to fit this reply.\n"
+            ));
+        }
+        for line in kept.iter().rev() {
+            text.push_str(line);
             text.push('\n');
         }
+        assert!(kept.is_empty() || text.len() <= super::tool::REPLY_TEXT_MAX);
         text
     }
 }
