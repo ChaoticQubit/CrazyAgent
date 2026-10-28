@@ -1060,6 +1060,12 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_owner_identity_missing" => {
             "Git doesn't know your name and email yet. Set user.name and user.email, then accept again."
         }
+        "changes_embedded_repository" => {
+            "These changes add a folder Git would treat as a repository of its own inside the project, such as a submodule. Ask the agent to remove it."
+        }
+        "changes_agent_branch_invalid" => {
+            "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard."
+        }
         "changes_master_tools_off" => {
             "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard."
         }

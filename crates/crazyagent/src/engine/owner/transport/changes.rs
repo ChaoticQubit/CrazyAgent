@@ -13,6 +13,7 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// refusals, this protocol's own, the owner connection's it travels on, and the team's
 /// refusals of the resolve work an Update hands a team agent.
 pub const CHANGES_CODES: &[&str] = &[
+    "changes_agent_branch_invalid",
     "changes_agent_busy",
     "changes_agent_has_pending",
     "changes_bare_repository",
@@ -20,6 +21,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_branch_not_above_base",
     "changes_conflict",
     "changes_detached_head",
+    "changes_embedded_repository",
     "changes_git_busy",
     "changes_git_failed",
     "changes_git_unsupported",
@@ -657,10 +659,12 @@ mod tests {
     fn changes_codes_cover_every_refusal_of_the_landing_engine_and_protocol() {
         let engine: std::collections::BTreeSet<&str> = [
             include_str!("../../../landing.rs"),
+            include_str!("../../../landing/clone.rs"),
             include_str!("../../../landing/diff.rs"),
             include_str!("../../../landing/flow.rs"),
             include_str!("../../../landing/git.rs"),
             include_str!("../../../landing/owner.rs"),
+            include_str!("../../../landing/retire.rs"),
             include_str!("../../../landing/store.rs"),
         ]
         .into_iter()
