@@ -76,23 +76,27 @@ impl OwnerController {
     }
 
     /// Reads one project's agent instruction settings. Input: the project.
-    /// Output: the settings, the defaults when the owner never changed them.
+    /// Output: the settings, the defaults when the owner never changed them, with their
+    /// version.
     pub async fn instruction_settings(
         &self,
         project: ProjectId,
-    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+    ) -> Result<crate::engine::owner::InstructionView, EngineError> {
         self.process_client()?.instruction_settings(project).await
     }
 
-    /// Stores one project's agent instruction settings whole. Inputs: the project and the
-    /// settings. Output: the settings as stored.
+    /// Stores one project's agent instruction settings whole. Inputs: the project, the
+    /// settings and the version the screen read, none when it could not read the stored
+    /// settings and replaces them. Output: the settings as stored with their new version, or
+    /// `stale_revision` when they changed since that version.
     pub async fn save_instruction_settings(
         &self,
         project: ProjectId,
         settings: crate::engine::owner::InstructionSettings,
-    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        version: Option<u64>,
+    ) -> Result<crate::engine::owner::InstructionView, EngineError> {
         self.process_client()?
-            .save_instruction_settings(project, settings)
+            .save_instruction_settings(project, settings, version)
             .await
     }
 

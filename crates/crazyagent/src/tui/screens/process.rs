@@ -2,7 +2,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
-use crate::engine::owner::{InstructionSettings, ProcessText, SavedText};
+use crate::engine::owner::{InstructionSettings, InstructionView, ProcessText, SavedText};
 use crate::instruction_files::Choice;
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
@@ -442,13 +442,14 @@ impl Editor {
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
 /// process, each into a preview first. For one project it also shows the agent settings:
 /// Ctrl-F picks the instruction files its agents get and Ctrl-T whether headless Claude runs
-/// keep their transcript, each saved at once. A stale save shows the conflict and keeps the
+/// keep their transcript, each saved at once at the version read; one refused because the
+/// settings changed since reads them again. A stale save shows the conflict and keeps the
 /// draft until the owner reloads the saved text (Ctrl-R) or keeps their own (Ctrl-Y). One
 /// request runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
-    settings: Option<Result<InstructionSettings, String>>,
+    settings: Option<Result<InstructionView, String>>,
     editor: Editor,
     problem: Option<String>,
     conflict: Option<Conflict>,
@@ -558,9 +559,9 @@ impl ProcessPage {
         self.problem = self.invalid();
     }
 
-    /// Saves one change to the project's agent settings, starting from the stored settings,
-    /// or from the defaults when they could not be read so the owner can replace them.
-    /// Inputs: the change and the context. Output: unit.
+    /// Saves one change to the project's agent settings at the version read, starting from
+    /// the stored settings, or from the defaults with no version when they could not be read,
+    /// so the owner can replace them. Inputs: the change and the context. Output: unit.
     fn change_settings(&mut self, change: fn(&mut InstructionSettings), ctx: &mut Ctx) {
         let Some(project) = self.project() else {
             return;
@@ -568,9 +569,19 @@ impl ProcessPage {
         let Some(stored) = &self.settings else {
             return;
         };
-        let mut settings = stored.clone().unwrap_or_default();
+        let (mut settings, version) = match stored {
+            Ok(view) => (view.settings, Some(view.version)),
+            Err(_) => (InstructionSettings::default(), None),
+        };
         change(&mut settings);
-        self.send(ProcessQuery::SaveSettings { project, settings }, ctx);
+        self.send(
+            ProcessQuery::SaveSettings {
+                project,
+                settings,
+                version,
+            },
+            ctx,
+        );
     }
 
     fn skill_at_cursor(&self) -> Option<&Skill> {
@@ -680,6 +691,21 @@ impl ProcessPage {
                 ctx.say(Message::success(
                     "Agent settings saved.",
                     "Agents started from now on follow them.",
+                ));
+            }
+            (ProcessQuery::SaveSettings { project, .. }, Err(code))
+                if code == crate::storage::versioned::STALE_CODE =>
+            {
+                self.settings = None;
+                self.send(
+                    ProcessQuery::Settings {
+                        project: project.clone(),
+                    },
+                    ctx,
+                );
+                ctx.say(Message::warning(
+                    "These agent settings changed since you opened them.",
+                    "The page now shows the saved ones; make your change again.",
                 ));
             }
             (ProcessQuery::SaveSettings { .. }, Err(code)) => {
@@ -877,7 +903,7 @@ impl ProcessPage {
                 lines.push(Line::default());
                 return;
             }
-            Some(Ok(settings)) => *settings,
+            Some(Ok(view)) => view.settings,
         };
         let transcripts = if settings.transcripts { "On" } else { "Off" };
         for (name, option, key) in [

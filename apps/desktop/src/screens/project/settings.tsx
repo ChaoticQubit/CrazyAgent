@@ -237,10 +237,14 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
  * them, once it shows the saved folders again. */
 export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
 
-/** Whether a read-only folders save was refused because the folders changed since the screen
- * read them, so the screen reads them again instead of resending the same old version.
- * Input: the save's result. Output: true for that refusal. */
-export function readPathsStale(result: Result<IntentReceipt>): boolean {
+/** What Agent access says after a save refused because the policy changed since the page read
+ * it, once it shows the saved access again. */
+export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
+
+/** Whether a versioned save, such as read-only folders or agent access, was refused because
+ * the value changed since the screen read it, so the screen reads it again instead of
+ * resending the same old version. Input: the save's result. Output: true for that refusal. */
+export function savedStale(result: Result<IntentReceipt>): boolean {
   if (result.kind !== "ok") return result.kind === "error" && result.code === "stale_revision";
   const state = receiptState(result.value);
   return state.kind === "rejected" && state.code === "stale_revision";
@@ -282,7 +286,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
     if (saved === null) return;
     setBusy(true);
     const result = await saveReadPaths(data.id, paths, saved.version, nextGeneration());
-    if (readPathsStale(result)) {
+    if (savedStale(result)) {
       const shown = await reread();
       setBusy(false);
       return setNote(shown ? READ_PATHS_STALE : "These folders changed since you opened them. Reopen this page to see them.");
@@ -344,7 +348,14 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed), nextGeneration());
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed), view.version, nextGeneration());
+    if (savedStale(result)) {
+      const fresh = await loadAgentPolicy(data.id);
+      setBusy(false);
+      if (fresh.kind !== "ok") return setNote("Agent access changed since you opened it. Reopen this page to see it.");
+      seed(fresh.value);
+      return setNote(ACCESS_STALE);
+    }
     if (result.kind !== "ok") {
       setBusy(false);
       return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));

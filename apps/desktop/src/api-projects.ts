@@ -134,6 +134,7 @@ export interface PolicyView {
   access: AgentAccess;
   levels: { access: AgentAccess; label: string; unavailable: string | null }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+  version: number;
 }
 
 export interface PoolChoice {
@@ -506,10 +507,11 @@ export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
 }
 
 /** Replaces this project's agent access level and toolchain switches; the engine refuses a
- * level this computer can't enforce. Inputs: project id, the policy and a generation.
- * Output: the receipt. */
-export function saveAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
+ * level this computer can't enforce, and a policy changed since the screen read it as
+ * `stale_revision`. Inputs: project id, the policy, the version the screen read and a
+ * generation. Output: the receipt. */
+export function saveAgentPolicy(id: string, policy: AgentPolicy, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_agent_policy", { id, version, policy, generation });
 }
 
 /** Deletes one document or research report from the project folder.

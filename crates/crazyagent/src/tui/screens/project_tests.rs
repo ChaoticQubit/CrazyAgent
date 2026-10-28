@@ -15,6 +15,7 @@ use crate::project_setup::{
     SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
 
@@ -2157,6 +2158,107 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
 
 /// Answers the screen's reads as unavailable until it asks for the read-only folders.
 /// Inputs: the screen and the time of the first read. Output: the folders read.
+fn access_view(access: AgentAccess, version: u64) -> PolicyView {
+    PolicyView {
+        access,
+        levels: AgentAccess::ALL
+            .into_iter()
+            .map(|level| LevelView {
+                access: level,
+                label: level.label().to_owned(),
+                unavailable: None,
+            })
+            .collect(),
+        toolchains: Vec::new(),
+        version,
+    }
+}
+
+fn next_access_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::AgentPolicy { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the agent access");
+}
+
+/// An Agent access save names the version the box opened at; refused as stale it keeps the
+/// owner's level, reads the saved policy again and shows it, and Enter then saves the
+/// owner's level at the version just read (Q35).
+#[test]
+fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("access-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::OwnBranch,
+            3,
+        ))),
+    );
+    screen.key(key(KeyCode::Char('c')));
+    assert_eq!(screen.key(key(KeyCode::Left)), ProjectReply::Handled);
+    let save_at = |version: u64| SetupAction::SetAgentPolicy {
+        project_id: project.clone(),
+        version,
+        policy: AgentPolicy {
+            access: AgentAccess::Sandboxed,
+            toolchains: Vec::new(),
+        },
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3)))
+    );
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(3),
+            generation: 2,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert!(!access.busy);
+    assert_eq!(
+        access.access,
+        AgentAccess::Sandboxed,
+        "the owner's level is kept"
+    );
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.agent_policy, None);
+
+    let read = next_access_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(AgentAccess::Full, 4))),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert_eq!(access.access, AgentAccess::Sandboxed);
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "Saved now: Full access · no toolchains. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's level over the saved one"
+    );
+}
+
 fn next_folders_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
     for now in from..from + 6 {
         let query = screen.next_query(now).expect("a read is due");

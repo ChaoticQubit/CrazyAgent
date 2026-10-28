@@ -2424,7 +2424,11 @@ fn owner_read(
                 project_id: project_id.clone(),
                 policy: crate::sandbox::policy::load(&tx, project_id.as_str())
                     .map_err(error)?
-                    .view(&setup.project_folder(), &homes),
+                    .view(
+                        &setup.project_folder(),
+                        &homes,
+                        versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    ),
             }
         }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {

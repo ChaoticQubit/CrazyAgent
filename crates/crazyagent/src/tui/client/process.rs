@@ -34,20 +34,21 @@ pub(in crate::tui) enum ProcessQuery {
     SaveSettings {
         project: ProjectId,
         settings: crate::engine::owner::InstructionSettings,
+        version: Option<u64>,
     },
 }
 
 /// What one Process request returned: a seed text, the saved text with its version, what a
 /// save did (saved with what it comes to beside what a Claude master takes, or stale with
 /// the newer text), what one team agent received at its last launch, or one project's
-/// agent instruction settings as stored.
+/// agent instruction settings as stored with their version.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
     Current(ProcessText),
     Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
-    Settings(crate::engine::owner::InstructionSettings),
+    Settings(crate::engine::owner::InstructionView),
 }
 
 /// One Process reply for the screens.
@@ -138,8 +139,12 @@ impl NativeOwner {
                 .instruction_settings(project)
                 .await
                 .map(ProcessReply::Settings),
-            ProcessQuery::SaveSettings { project, settings } => controller
-                .save_instruction_settings(project, settings)
+            ProcessQuery::SaveSettings {
+                project,
+                settings,
+                version,
+            } => controller
+                .save_instruction_settings(project, settings, version)
                 .await
                 .map(ProcessReply::Settings),
         }

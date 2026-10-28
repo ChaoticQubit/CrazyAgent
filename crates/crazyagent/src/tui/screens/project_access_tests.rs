@@ -38,6 +38,7 @@ fn view() -> PolicyView {
                 allowed: false,
             },
         ],
+        version: 0,
     }
 }
 

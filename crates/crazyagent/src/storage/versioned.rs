@@ -84,6 +84,19 @@ pub fn read_paths_item(project: &ProjectId) -> Item {
     named(format!("read-paths:{}", project.as_str()))
 }
 
+/// Names the versioned item of one project's agent instruction settings: which instruction
+/// files its agents get and whether headless Claude runs keep their transcript. Input: the
+/// project. Output: the item.
+pub fn instruction_settings_item(project: &ProjectId) -> Item {
+    named(format!("instruction-settings:{}", project.as_str()))
+}
+
+/// Names the versioned item of one project's agent policy: its access level and toolchain
+/// switches. Input: the project. Output: the item.
+pub fn agent_policy_item(project: &ProjectId) -> Item {
+    named(format!("agent-policy:{}", project.as_str()))
+}
+
 /// Names the versioned item of one wake-rule level. Inputs: the project, none for the app
 /// level, and the sub-agent id, 0 for the app or project level; team agent ids are never
 /// reused, so an agent's level needs no project. Output: the item.

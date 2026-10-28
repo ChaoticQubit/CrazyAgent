@@ -189,6 +189,12 @@ export interface InstructionSettings {
   transcripts: boolean;
 }
 
+/** One project's agent settings and the version they were read at, which a save names. */
+export interface InstructionView {
+  settings: InstructionSettings;
+  version: number;
+}
+
 /** The settings of a project the owner never changed. */
 export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { files: "project", transcripts: true };
 
@@ -200,15 +206,27 @@ export const INSTRUCTION_CHOICES: readonly { value: InstructionChoice; label: st
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the
- * defaults when the owner never changed them. */
-export function loadInstructionSettings(projectId: string): Promise<Result<InstructionSettings>> {
-  return call<InstructionSettings>("desktop_instruction_settings", { projectId });
+ * defaults when the owner never changed them, with their version. */
+export function loadInstructionSettings(projectId: string): Promise<Result<InstructionView>> {
+  return call<InstructionView>("desktop_instruction_settings", { projectId });
 }
 
 /** Stores one project's agent settings whole; agents launched after this follow them.
- * Inputs: the project id and the settings. Output: the settings as stored. */
-export function saveInstructionSettings(projectId: string, settings: InstructionSettings): Promise<Result<InstructionSettings>> {
-  return call<InstructionSettings>("desktop_save_instruction_settings", { projectId, settings });
+ * Inputs: the project id, the settings and the version the page read, null when it could
+ * not read the stored settings and replaces them. Output: the settings as stored with their
+ * new version, or `stale_revision` when they changed since that version. */
+export function saveInstructionSettings(projectId: string, settings: InstructionSettings, version: number | null): Promise<Result<InstructionView>> {
+  return call<InstructionView>("desktop_save_instruction_settings", { projectId, settings, version });
+}
+
+/** What the agent settings say after a save refused because they changed since the page
+ * read them, once it shows the saved ones again. */
+export const AGENT_SETTINGS_STALE = "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.";
+
+/** The version an agent settings save names: the one read, or null when the stored settings
+ * could not be read and the save replaces them. Input: the read. Output: the version. */
+export function settingsSaveVersion(settings: { kind: string; value?: InstructionView }): number | null {
+  return settings.kind === "ok" && settings.value ? settings.value.version : null;
 }
 
 /** What became of one instruction file at a launch, as the engine recorded it. */

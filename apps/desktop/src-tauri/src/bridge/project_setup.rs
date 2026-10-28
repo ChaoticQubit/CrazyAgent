@@ -431,11 +431,13 @@ impl NativeBridge {
 
     /// Replaces a project's agent access level and toolchain choices; the engine refuses a
     /// level this platform cannot enforce and a malformed policy.
-    /// Takes the project id, the policy and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the version the screen showed, the policy and the client
+    /// generation. Returns the actual commit receipt; a policy changed since the screen read
+    /// it is the plain rejection `stale_revision`.
     pub async fn set_project_agent_policy(
         &mut self,
         id: &str,
+        version: u64,
         policy: crazyagent::sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
@@ -443,7 +445,11 @@ impl NativeBridge {
         let project_id = project(id)?;
         self.controller()?
             .begin_mutation(
-                OwnerMutation::SetProjectAgentPolicy { project_id, policy },
+                OwnerMutation::SetProjectAgentPolicy {
+                    project_id,
+                    version,
+                    policy,
+                },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

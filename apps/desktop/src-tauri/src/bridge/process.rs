@@ -1,7 +1,8 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessText, SavedText,
+    AgentInstructions, InstructionSettings, InstructionView, OwnerClient, PROCESS_CODES,
+    ProcessText, SavedText,
 };
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
@@ -115,11 +116,12 @@ impl NativeBridge {
     }
 
     /// Reads one project's agent instruction settings, run without the bridge lock.
-    /// Input: the project id. Output: the settings, the defaults when never changed.
+    /// Input: the project id. Output: the settings, the defaults when never changed, with
+    /// their version.
     pub fn instruction_settings(
         &self,
         project_id: String,
-    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
         let client = self.process_client()?;
@@ -132,18 +134,21 @@ impl NativeBridge {
     }
 
     /// Stores one project's agent instruction settings whole, run without the bridge lock.
-    /// Inputs: the project id and the settings. Output: the settings as stored.
+    /// Inputs: the project id, the settings and the version the page read, none when it
+    /// could not read the stored settings and replaces them. Output: the settings as stored
+    /// with their new version, or `stale_revision` when they changed since that version.
     pub fn save_instruction_settings(
         &self,
         project_id: String,
         settings: InstructionSettings,
-    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        version: Option<u64>,
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .save_instruction_settings(project, settings)
+                .save_instruction_settings(project, settings, version)
                 .await
                 .map_err(process_error)
         }))

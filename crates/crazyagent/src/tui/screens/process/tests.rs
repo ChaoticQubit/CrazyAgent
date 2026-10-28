@@ -70,12 +70,16 @@ fn opened(scope: Scope, saved: &str) -> Shell {
     if let Some(project) = project {
         let query = ProcessQuery::Settings { project };
         assert_eq!(requests(&mut shell), vec![query.clone()]);
-        shell.arrive(settings(query, Ok(InstructionSettings::default())));
+        shell.arrive(settings(query, Ok(at(InstructionSettings::default(), 0))));
     }
     shell
 }
 
-fn settings(query: ProcessQuery, result: Result<InstructionSettings, &str>) -> Arrival {
+fn at(settings: InstructionSettings, version: u64) -> InstructionView {
+    InstructionView { settings, version }
+}
+
+fn settings(query: ProcessQuery, result: Result<InstructionView, &str>) -> Arrival {
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
         result: result.map(ProcessReply::Settings).map_err(str::to_owned),
@@ -613,6 +617,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
     assert!(shown.contains("committed in your checkout"), "{shown}");
     let mut stored = InstructionSettings::default();
+    let mut version = 0;
     for (files, words) in [
         (Choice::ProjectAndUser, "Project and user files"),
         (Choice::None, "Agent instruction files: None"),
@@ -623,11 +628,13 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         let save = ProcessQuery::SaveSettings {
             project: project.clone(),
             settings: stored,
+            version: Some(version),
         };
         assert_eq!(requests(&mut shell), vec![save.clone()]);
         shell.key(Key::Ctrl('f'));
         assert_eq!(requests(&mut shell), vec![], "one request at a time");
-        shell.arrive(settings(save, Ok(stored)));
+        version += 1;
+        shell.arrive(settings(save, Ok(at(stored, version))));
         let shown = screen(&mut shell);
         assert!(shown.contains(words), "{shown}");
         assert!(shown.contains("Agent settings saved."), "{shown}");
@@ -638,9 +645,11 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         let save = ProcessQuery::SaveSettings {
             project: project.clone(),
             settings: stored,
+            version: Some(version),
         };
         assert_eq!(requests(&mut shell), vec![save.clone()]);
-        shell.arrive(settings(save, Ok(stored)));
+        version += 1;
+        shell.arrive(settings(save, Ok(at(stored, version))));
         let words = if transcripts { ": On" } else { ": Off" };
         assert!(
             screen(&mut shell)
@@ -654,6 +663,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
             files: Choice::Project,
             transcripts: false,
         },
+        version: Some(version),
     };
     assert_eq!(requests(&mut shell), vec![refused.clone()]);
     shell.arrive(settings(refused, Err("instruction_settings_unavailable")));
@@ -696,6 +706,63 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
                 files: Choice::ProjectAndUser,
                 transcripts: true,
             },
+            version: None,
+        }],
+        "settings no screen could read are replaced with no version"
+    );
+}
+
+/// An agent setting saved at a version another window replaced is refused; the page reads
+/// the settings again, says so, shows the saved ones and saves the next change at the
+/// version just read (Q35).
+#[test]
+fn a_stale_agent_setting_reads_the_saved_settings_again_and_the_next_change_names_them() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened(
+        Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        },
+        "",
+    );
+    shell.key(Key::Ctrl('t'));
+    let stale = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            files: Choice::Project,
+            transcripts: false,
+        },
+        version: Some(0),
+    };
+    assert_eq!(requests(&mut shell), vec![stale.clone()]);
+    shell.arrive(settings(stale, Err("stale_revision")));
+    let read = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    let shown = screen(&mut shell);
+    assert!(shown.contains("changed since you opened them"), "{shown}");
+    let saved = InstructionSettings {
+        files: Choice::None,
+        transcripts: false,
+    };
+    shell.arrive(settings(read, Ok(at(saved, 3))));
+    let shown = screen(&mut shell);
+    assert!(shown.contains("Agent instruction files: None"), "{shown}");
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: Off"),
+        "{shown}"
+    );
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                files: Choice::None,
+                transcripts: true,
+            },
+            version: Some(3),
         }]
     );
 }
