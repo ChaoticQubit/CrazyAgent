@@ -1289,6 +1289,93 @@ async fn the_ide_pushes_its_project_folder_through_the_engine_and_nothing_else()
     drop(daemon);
     case.stop().await;
 }
+
+/// While git waits on a remote that never answers, each `ide.git` call keeps its place: a
+/// project's call past `PROJECT_GIT_CALLS_MAX` and any call past `GIT_CALLS_MAX` in all are
+/// refused at once, and once the remote lets go the places are given back.
+#[tokio::test]
+async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
+    use super::remote_git::tests::ok;
+    use super::remote_git::{GIT_CALLS_MAX, PROJECT_GIT_CALLS_MAX};
+    const LISTEN: Duration = Duration::from_secs(30);
+    const REFUSED: Duration = Duration::from_secs(10);
+    assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX);
+    let mut case = Case::start().await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!(
+        "git://127.0.0.1:{}/slow.git",
+        listener.local_addr().unwrap().port()
+    );
+    let (accepted, mut held) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            if accepted.send(stream).is_err() {
+                return;
+            }
+        }
+    });
+    let mut ides = Vec::new();
+    for name in ["alpha", "beta"] {
+        let folder = case.root.path().join("projects").join(name);
+        ok(&folder, &["init", "-q", "-b", "main"]);
+        ok(&folder, &["remote", "add", "slow", &url]);
+        let capability = issue(&case.runtime, &ProjectId::new(name).unwrap()).unwrap();
+        let socket = case.socket(&capability);
+        let ide = packet(MAGIC, 0, &session(&socket, &capability).await);
+        let body = request(
+            name,
+            json!({ "name": "ide.git", "args": { "args": ["fetch", "slow"], "folder": folder } }),
+        );
+        ides.push((socket, ide, body));
+    }
+    let start = |at: usize| {
+        let (socket, ide, body) = ides[at].clone();
+        tokio::spawn(async move { exchange(&socket, ide, &body).await })
+    };
+    let mut running = Vec::new();
+    let mut streams = Vec::new();
+    for at in std::iter::repeat_n(0, PROJECT_GIT_CALLS_MAX).chain(std::iter::repeat_n(
+        1,
+        GIT_CALLS_MAX - PROJECT_GIT_CALLS_MAX,
+    )) {
+        running.push(start(at));
+        let stream = tokio::time::timeout(LISTEN, held.recv()).await;
+        streams.push(stream.expect("git reached the remote").unwrap());
+        if at == 0 && running.len() == PROJECT_GIT_CALLS_MAX {
+            let (socket, ide, body) = &ides[0];
+            let refused = tokio::time::timeout(REFUSED, exchange(socket, *ide, body)).await;
+            assert_eq!(
+                refused.expect("refused at once"),
+                rejected("ide_git_busy"),
+                "a project's call past its own cap"
+            );
+        }
+    }
+    let (socket, ide, body) = &ides[1];
+    let refused = tokio::time::timeout(REFUSED, exchange(socket, *ide, body)).await;
+    assert_eq!(
+        refused.expect("refused at once"),
+        rejected("ide_git_busy"),
+        "a call past the cap of the owner server"
+    );
+    drop(streams);
+    drop(held);
+    for call in running {
+        let answered = call.await.unwrap();
+        let Some(IdeReply::Ok { data }) = answered else {
+            panic!("{answered:?}");
+        };
+        assert_ne!(data["code"], json!(0), "{data}");
+    }
+    for (socket, ide, body) in &ides {
+        let answered = exchange(socket, *ide, body).await;
+        assert!(
+            matches!(answered, Some(IdeReply::Ok { .. })),
+            "a place given back admits the next call: {answered:?}"
+        );
+    }
+    case.stop().await;
+}
 /// Reads one frame of any kind as JSON, or none once the engine closed the connection.
 #[cfg(target_os = "macos")]
 async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {

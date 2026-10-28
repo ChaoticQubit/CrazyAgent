@@ -1,9 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.GIT_ARGS_MAX = exports.GIT_REQUEST_MS = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
+exports.GIT_ARGS_MAX = exports.GIT_OUTCOME_UNKNOWN = exports.GIT_REQUEST_MS = exports.GIT_FORWARD_ENV = exports.GIT_NODE_ENV = exports.GIT_SOCKET_ENV = void 0;
 exports.gitCall = gitCall;
 exports.gitOutcome = gitOutcome;
 exports.startRelay = startRelay;
+exports.gitFailure = gitFailure;
 exports.remoteGit = remoteGit;
 const node_crypto_1 = require("node:crypto");
 const node_net_1 = require("node:net");
@@ -14,11 +15,14 @@ exports.GIT_SOCKET_ENV = "CRAZYAGENT_IDE_GIT_SOCKET";
 exports.GIT_NODE_ENV = "CRAZYAGENT_IDE_GIT_NODE";
 exports.GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
 exports.GIT_REQUEST_MS = 700_000;
+exports.GIT_OUTCOME_UNKNOWN = "ide_git_outcome_unknown";
 exports.GIT_ARGS_MAX = 16;
 const ARG_BYTES_MAX = 1024;
 const FOLDER_BYTES_MAX = 4096;
 const CONNECTIONS_MAX = 4;
 const PLAIN_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const ENGINE_LOST = new Set(["ide_request_timeout", "ide_engine_closed"]);
+const NEVER_CONNECTED = new Set(["ENOENT", "ECONNREFUSED"]);
 function gitCall(value) {
     if (typeof value !== "object" || value === null)
         return undefined;
@@ -90,11 +94,16 @@ function relay(engine, connection) {
             answer(connection, { kind: "rejected", code: "ide_git_refused" });
             return;
         }
-        engine.request("ide.git", { args: call.args, folder: call.folder }, exports.GIT_REQUEST_MS).then((reply) => answer(connection, reply.kind === "ok" ? reply : { kind: "rejected", code: reply.code }), (error) => {
-            const code = error instanceof Error && PLAIN_CODE.test(error.message) ? error.message : "ide_git_bridge_failed";
-            answer(connection, { kind: "rejected", code });
-        });
+        engine.request("ide.git", { args: call.args, folder: call.folder }, exports.GIT_REQUEST_MS).then((reply) => answer(connection, reply.kind === "ok" ? reply : { kind: "rejected", code: reply.code }), (error) => answer(connection, { kind: "rejected", code: gitFailure(error) }));
     });
+}
+function gitFailure(error) {
+    if (!(error instanceof Error) || ENGINE_LOST.has(error.message))
+        return exports.GIT_OUTCOME_UNKNOWN;
+    if (PLAIN_CODE.test(error.message))
+        return error.message;
+    const code = error.code;
+    return code !== undefined && NEVER_CONNECTED.has(code) ? "ide_git_bridge_failed" : exports.GIT_OUTCOME_UNKNOWN;
 }
 function answer(connection, reply) {
     if (!connection.destroyed)

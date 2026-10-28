@@ -174,10 +174,13 @@ impl Project {
 
     /// The owner environment the engine builds, from a home and path the test controls.
     fn env(&self) -> Vec<(OsString, OsString)> {
-        owner_env([
-            (OsString::from("HOME"), self.home.clone().into_os_string()),
-            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
-        ])
+        owner_env(
+            [
+                (OsString::from("HOME"), self.home.clone().into_os_string()),
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            ],
+            &[self.folder.as_path()],
+        )
     }
 
     /// Plans and runs one IDE git command in the project folder as the engine does.
@@ -460,6 +463,7 @@ fn the_owner_environment_passes_only_the_basics_and_turns_every_prompt_off() {
             ("GIT_ALLOW_PROTOCOL", "ext:file"),
         ]
         .map(|(name, value)| (OsString::from(name), OsString::from(value))),
+        &[],
     );
     let value = |name: &str| {
         let found: Vec<&OsString> = env
@@ -491,6 +495,106 @@ fn the_owner_environment_passes_only_the_basics_and_turns_every_prompt_off() {
     assert_eq!(value("GIT_ASKPASS").as_deref(), Some(""));
     assert_eq!(value("SSH_ASKPASS_REQUIRE").as_deref(), Some("never"));
     assert_eq!(value("LC_ALL").as_deref(), Some("en_US.UTF-8"));
+}
+
+#[test]
+fn the_owner_path_keeps_only_real_folders_the_ide_and_agents_cannot_write() {
+    let project = Project::new();
+    let engine = project.root.join("engine");
+    for folder in [
+        project.folder.join("bin"),
+        engine.join("ide").join("home").join("bin"),
+    ] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let linked = project.root.join("linked");
+    std::os::unix::fs::symlink("/usr/bin", &linked).unwrap();
+    let path = std::env::join_paths([
+        PathBuf::from("."),
+        PathBuf::from("bin"),
+        PathBuf::new(),
+        project.folder.join("bin"),
+        project.folder.join("bin").join(".."),
+        engine.join("ide").join("home").join("bin"),
+        project.root.clone(),
+        PathBuf::from("/private/var/folders"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/nowhere/ca-missing"),
+        linked,
+        PathBuf::from("/bin"),
+    ])
+    .unwrap();
+    assert_eq!(
+        owner_path(&path, &[project.folder.as_path(), engine.as_path()]),
+        OsString::from("/usr/bin:/usr/bin:/bin")
+    );
+    assert_eq!(
+        owner_path(&path, &[Path::new("/usr")]),
+        OsString::from("/bin"),
+        "a denied folder is left out by its real path, through a link too"
+    );
+    let env = owner_env(
+        [(OsString::from("PATH"), path)],
+        &[project.folder.as_path(), engine.as_path()],
+    );
+    assert_eq!(
+        env.iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone()),
+        Some(OsString::from("/usr/bin:/usr/bin:/bin"))
+    );
+    assert_eq!(owner_path(OsStr::new(".:bin"), &[]), OsString::new());
+}
+
+#[test]
+fn a_pull_runs_only_its_fetch_and_a_command_naming_no_remote_names_the_checked_one() {
+    let planned = |args: &[&str], default: Option<&str>| {
+        let args = strings(args);
+        engine_args(&plan(&args).unwrap(), &args, default)
+    };
+    assert_eq!(
+        planned(
+            &[
+                "pull",
+                "--tags",
+                "--unshallow",
+                "--autostash",
+                "-r",
+                "origin",
+                "main"
+            ],
+            None
+        ),
+        strings(&["fetch", "--tags", "--unshallow", "origin", "main"])
+    );
+    assert_eq!(
+        planned(&["pull"], Some("upstream")),
+        strings(&["fetch", "upstream"])
+    );
+    assert_eq!(
+        planned(&["pull", "-r"], Some("origin")),
+        strings(&["fetch", "origin"])
+    );
+    assert_eq!(
+        planned(&["fetch", "--prune"], Some("upstream")),
+        strings(&["fetch", "--prune", "upstream"])
+    );
+    assert_eq!(
+        planned(&["push", "-u", "--follow-tags"], Some("mirror")),
+        strings(&["push", "-u", "--follow-tags", "mirror"])
+    );
+    assert_eq!(
+        planned(&["fetch", "--all", "--prune"], None),
+        strings(&["fetch", "--all", "--prune"])
+    );
+    assert_eq!(
+        planned(&["push", "--force", "origin", "main:main"], None),
+        strings(&["push", "--force", "origin", "main:main"])
+    );
+    assert_eq!(
+        planned(&["ls-remote", "--heads", "origin"], None),
+        strings(&["ls-remote", "--heads", "origin"])
+    );
 }
 
 #[test]
@@ -561,8 +665,11 @@ fn a_push_from_the_project_folder_reaches_the_daemon_with_no_hook_running() {
 }
 
 #[test]
-fn fetch_pull_and_ls_remote_bring_the_daemon_commits_into_the_project_folder() {
+fn fetch_pull_and_ls_remote_bring_the_daemon_commits_and_never_write_the_working_tree() {
     let project = Project::new();
+    std::fs::create_dir(project.folder.join("context")).unwrap();
+    let mine = project.commit("context/x", "Mine.\n");
+    ok(&project.folder, &["push", "-q", "origin", "main"]);
     let other = project.root.join("other");
     ok(
         &project.root,
@@ -573,8 +680,9 @@ fn fetch_pull_and_ls_remote_bring_the_daemon_commits_into_the_project_folder() {
             other.to_str().unwrap(),
         ],
     );
+    std::fs::write(other.join("context").join("x"), "Theirs.\n").unwrap();
     std::fs::write(other.join("beds.md"), "Six beds.\n").unwrap();
-    ok(&other, &["add", "beds.md"]);
+    ok(&other, &["add", "context/x", "beds.md"]);
     ok(&other, &["commit", "-q", "-m", "Plan the beds"]);
     ok(&other, &["push", "-q", "origin", "main"]);
     let theirs = ok(&other, &["rev-parse", "HEAD"]);
@@ -592,22 +700,32 @@ fn fetch_pull_and_ls_remote_bring_the_daemon_commits_into_the_project_folder() {
         theirs
     );
     landed(project.git(&["fetch", "--all", "--prune"]));
-    let pulled = landed(project.git(&["pull", "origin", "main"]));
-    assert_eq!(
-        ok(&project.folder, &["rev-parse", "HEAD"]),
-        theirs,
-        "{pulled:?}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(project.folder.join("beds.md")).unwrap(),
-        "Six beds.\n"
-    );
-    assert_eq!(ok(&project.folder, &["status", "--porcelain"]), "");
-    let again = landed(project.git(&["pull", "--tags", "--autostash", "-r", "origin", "main"]));
-    assert!(
-        format!("{}{}", again.stdout, again.stderr).contains("up to date"),
-        "{again:?}"
-    );
+    let fetched =
+        || std::fs::read_to_string(project.folder.join(".git").join("FETCH_HEAD")).unwrap();
+    for pull in [
+        &["pull", "--tags", "--autostash", "-r", "origin", "main"][..],
+        &["pull"],
+    ] {
+        std::fs::remove_file(project.folder.join(".git").join("FETCH_HEAD")).unwrap();
+        let pulled = landed(project.git(pull));
+        assert!(
+            fetched().starts_with(&format!("{theirs}\t\tbranch 'main' of ")),
+            "{pull:?} fetched {:?}: {pulled:?}",
+            fetched()
+        );
+        assert_eq!(
+            ok(&project.folder, &["rev-parse", "HEAD"]),
+            mine,
+            "{pull:?} moved HEAD in the engine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(project.folder.join("context").join("x")).unwrap(),
+            "Mine.\n",
+            "{pull:?} wrote the working tree in the engine"
+        );
+        assert!(!project.folder.join("beds.md").exists(), "{pull:?}");
+        assert_eq!(ok(&project.folder, &["status", "--porcelain"]), "");
+    }
 }
 
 #[test]
