@@ -11,6 +11,7 @@ import "../team/team-graph.css";
 import { readMasterInput } from "../../state";
 import { ConversationTab } from "./conversation";
 import { SwitchDivider } from "./sessions";
+import { savedStale } from "./settings";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -46,10 +47,20 @@ const STARTS_ON_OPEN = "Live master starts when you open this tab.";
 /** The live master switch as the engine last told it. Inputs: the latest team status read
  * and the project shown. Output: undefined until a good read of this project arrives, since
  * a failed read says nothing; on null when the switch was never set, which opening the area
- * turns on; else the switch and why the master last could not start. */
-export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: string): { on: boolean | null; problem: string | null } | undefined {
+ * turns on; else the switch, why the master last could not start and the team settings
+ * version a switch change must name. */
+export function liveSwitch(team: Result<TeamStatus> | undefined, projectId: string): { on: boolean | null; problem: string | null; version: number } | undefined {
   if (team?.kind !== "ok" || team.value.project_id !== projectId) return undefined;
-  return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null };
+  return { on: team.value.live_master ?? null, problem: team.value.live_problem ?? null, version: team.value.settings_version ?? 0 };
+}
+
+/** Whether opening the area turns the live master on now: only while the switch was never
+ * set, nothing was asked and the team read is newer than a start the engine refused as
+ * stale, so a refused start waits for the fresh read instead of retrying the old one.
+ * Inputs: the switch shown, whether a change was asked, the read's settings version and the
+ * version last refused, -1 when none. Output: true to start. */
+export function autoStart(on: boolean | null | undefined, asked: boolean, read: number, refused: number): boolean {
+  return on === null && !asked && read > refused;
 }
 
 /** The owner's switch change while it is the switch the area shows: from the click until a
@@ -71,6 +82,13 @@ export function stopFailedNote(name: string, failed: Live): string {
   return `Couldn't stop the live master of ${displayText(name || "this project")}. ${why}`;
 }
 
+/** The toast for a live master switch refused because the team settings changed in another
+ * window since the area read them; the area then shows the saved switch again. Input: the
+ * project name. Output: the text. */
+export function liveStaleNote(name: string): string {
+  return `The team settings of ${displayText(name || "this project")} changed in another window, so your live master switch was not saved. The master area now shows the saved switch.`;
+}
+
 /** The project's master area. A Codex or Claude Code master is its own app in a live
  * terminal filling the area, where Enter sends and Shift+Enter starts a new line; the first
  * open of a project whose switch was never set turns it on, and the header stops and starts
@@ -89,15 +107,28 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const [want, setWant] = useState<Want | null>(null);
   const asked = useRef(false);
   const mounted = useRef(true);
+  const saved = useRef(0);
+  const refused = useRef(-1);
   const engine = liveSwitch(data.team.result, data.id);
   const on = want?.on ?? engine?.on;
 
-  const turn = async (next: boolean) => {
+  const turn = async (next: boolean, clicked = true) => {
     const id = data.id;
+    const version = Math.max(engine?.version ?? 0, saved.current);
     asked.current = true;
     setWant({ on: next, after: Infinity });
     setLive(next ? { kind: "starting" } : { kind: "stopped", problem: null });
-    const turned = await setLiveMaster(id, next);
+    const turned = await setLiveMaster(id, next, version);
+    if (savedStale(turned)) {
+      if (clicked) data.notify(liveStaleNote(data.name));
+      if (!mounted.current) return;
+      asked.current = false;
+      refused.current = version;
+      setWant(null);
+      setLive({ kind: "starting" });
+      data.reloadTeam();
+      return;
+    }
     const state = turned.kind === "ok" ? receiptState(turned.value) : null;
     const failed: Live | null = turned.kind === "not_ready" ? { kind: "not_ready" }
       : turned.kind !== "ok" ? { kind: "refused", code: turned.code, copy: failureCopy(turned) }
@@ -108,7 +139,10 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     if (failed) {
       setWant(null);
       if (next) setLive(failed);
-    } else setWant({ on: next, after: Date.now() });
+    } else {
+      saved.current = version + 1;
+      setWant({ on: next, after: Date.now() });
+    }
     data.reloadTeam();
   };
 
@@ -122,8 +156,8 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [data.team.at, want]);
 
   useEffect(() => {
-    if (on === null && !asked.current) void turn(true);
-  }, [on]);
+    if (autoStart(on, asked.current, engine?.version ?? 0, refused.current)) void turn(true, false);
+  }, [on, data.team.at]);
 
   useEffect(() => {
     if (on !== true) return;

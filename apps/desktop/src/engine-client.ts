@@ -782,6 +782,7 @@ export interface TeamStatus {
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
+  settings_version?: number;
   min_agents: number;
   max_agents: number;
   harnesses: TeamHarness[];
@@ -887,30 +888,39 @@ export function teamCancel(id: string, task: number | null, generation: number):
   return invoke<IntentReceipt>("desktop_team_cancel", { id, task, generation });
 }
 
-export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+/** Turns keeping the team's minimum sub-agents running on or off. Inputs: the project id, the
+ * switch, the team settings version the screen read and a generation. Output: the engine
+ * receipt; a save from an older read is rejected as `stale_revision`. */
+export function teamKeepWarm(id: string, on: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, version, generation });
 }
 
 /** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
- * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
-export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
+ * limits in seconds or null for no limit, the team settings version the screen read and a
+ * generation. Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, version, generation });
 }
 
-export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id, the mode, the team settings version the screen read and a
+ * generation. Output: the engine receipt. */
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation });
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
- * agents list and team graph) or false for Hide (the Finished fold-out only) and a generation. */
-export function teamFinishedAgents(id: string, show: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, generation });
+ * agents list and team graph) or false for Hide (the Finished fold-out only), the team
+ * settings version the screen read and a generation. */
+export function teamFinishedAgents(id: string, show: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, version, generation });
 }
 
-/** Turns the project's live master on or off. Inputs: the project id, the switch and a
- * generation. Output: the commit receipt; a master with no terminal app is rejected. */
-export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, generation });
+/** Turns the project's live master on or off. Inputs: the project id, the switch, the team
+ * settings version the screen read and a generation. Output: the commit receipt; a master
+ * with no terminal app is rejected. */
+export function teamLiveMaster(id: string, on: boolean, version: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_live_master", { id, on, version, generation });
 }
 
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {

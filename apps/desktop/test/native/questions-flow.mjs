@@ -506,7 +506,8 @@ async function main() {
       await assignPool(project, pool);
       await saveSetup(project, { about: ABOUT, research: [], pool, team: { master: "claude-code", master_tools: true, sub_harnesses: [], min_agents: 0, max_agents: 1 } });
       state.project = project;
-      applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, generation: generation() }));
+      const team = await value("desktop_team_status", { id: project });
+      applied("team_live_master", await value("desktop_team_live_master", { id: project, on: true, version: team.settings_version, generation: generation() }));
       const control = await until("live_master_launch", LAUNCH_MS, () => findControl(crazyHome) ?? findControl(userHome));
       const [launch] = await until("launch_record", LAUNCH_MS, () => {
         const launched = lines(control, "launches.jsonl");

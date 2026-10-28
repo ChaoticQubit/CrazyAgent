@@ -74,6 +74,7 @@ fn status() -> TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
+        settings_version: 0,
         min_agents: 1,
         max_agents: 4,
         harnesses: vec![

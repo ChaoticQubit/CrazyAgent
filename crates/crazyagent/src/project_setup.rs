@@ -2407,11 +2407,11 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
 /// running one stops; its read folders, agent access, agent settings and its agents' own
-/// instructions go too. The versions of its read folders, agent access, agent settings and
-/// project instructions move on once more, so a project added again under the same id
-/// refuses a save from a screen read before the removal (V2V-1); agent ids are never reused,
-/// so its agents' instruction versions are dropped. Returns `invalid_project` for an unknown
-/// project.
+/// instructions go too. The versions of its read folders, agent access, agent settings,
+/// project instructions and team settings move on once more, so a project added again under
+/// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
+/// ids are never reused, so its agents' instruction versions are dropped. Returns
+/// `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2444,6 +2444,7 @@ fn remove(
         crate::storage::versioned::agent_policy_item(project_id),
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),
+        crate::storage::versioned::team_settings_item(project_id),
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }

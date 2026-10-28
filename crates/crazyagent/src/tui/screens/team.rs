@@ -1,6 +1,6 @@
 use crate::agent_home::Harness;
 use crate::config::plain_problem;
-use crate::engine::owner::AgentInstructions;
+use crate::engine::owner::{AgentInstructions, OwnerResult};
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
@@ -81,6 +81,7 @@ struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
     switched: Option<String>,
+    version: u64,
 }
 
 struct Attached {
@@ -181,6 +182,7 @@ impl Team {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
                 on,
+                version: self.switch.as_ref().map_or(0, |switch| switch.version),
             },
             generation,
         }));
@@ -194,7 +196,8 @@ impl Team {
 
     /// Takes a team status read or a live switch change of this master view: a good read
     /// replaces the switch and turns a never set one on once; a failed read changes nothing;
-    /// an accepted change is the switch until the next read, which is read at once.
+    /// an accepted change is the switch until the next read, which is read at once; a change
+    /// refused as stale reads the switch again, and any other refusal keeps the switch.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -214,6 +217,7 @@ impl Team {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
                     switched: status.live_switch.as_ref().map(switched_words),
+                    version: status.settings_version,
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
@@ -225,20 +229,25 @@ impl Team {
                 }
             }
             SetupQuery::TeamChange {
-                action: TeamAction::LiveMaster { project_id, on },
+                action:
+                    TeamAction::LiveMaster {
+                        project_id,
+                        on,
+                        version,
+                    },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => {
+                Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code)
+                    if code == crate::storage::versioned::STALE_CODE =>
+                {
                     self.want = None;
-                    let switched = self.switch.take().and_then(|switch| switch.switched);
-                    self.switch = Some(LiveSwitch {
-                        on: Some(*on),
-                        problem: None,
-                        switched,
-                    });
+                    ctx.say(Message::warning(
+                        "The live master switch changed in another window.",
+                        plain_problem(code).unwrap_or(code.as_str()),
+                    ));
                     self.read_switch(ctx);
                 }
-                Err(code) => {
+                Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
                     self.want = None;
                     if *on {
                         self.refused = Some(code.clone());
@@ -248,6 +257,17 @@ impl Team {
                             plain_problem(code).unwrap_or(code.as_str()),
                         ));
                     }
+                }
+                Ok(_) => {
+                    self.want = None;
+                    let switched = self.switch.take().and_then(|switch| switch.switched);
+                    self.switch = Some(LiveSwitch {
+                        on: Some(*on),
+                        problem: None,
+                        switched,
+                        version: version + 1,
+                    });
+                    self.read_switch(ctx);
                 }
             },
             _ => {}

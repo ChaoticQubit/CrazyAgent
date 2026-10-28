@@ -330,12 +330,14 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
     database.busy_timeout(Duration::from_secs(5)).unwrap();
     let setup = project(&database, &root);
     let project = setup.project_id.clone();
+    let version = crazyagent::team::settings_version(&database, &project).unwrap();
     act(
         &mut database,
         &root,
         TeamAction::LiveMaster {
             project_id: project.clone(),
             on: true,
+            version,
         },
     );
     until("the live master's briefing turn ends", || {
