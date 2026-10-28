@@ -3330,3 +3330,155 @@ fn the_owners_wake_brings_back_the_same_agent_and_session_and_a_stale_wake_stops
     assert_eq!(team.shutdown().unwrap(), names(&[member]));
     host.close(&[]).unwrap();
 }
+
+/// A Codex sign-in record of a managed profile whose access token stays valid for a day,
+/// so a per-turn handoff copies it without a renewal. Output: the record's bytes.
+#[cfg(target_os = "macos")]
+fn signed_in_codex_record() -> Vec<u8> {
+    use base64::Engine;
+    let expires = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 86_400;
+    let part = |value: serde_json::Value| {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+    };
+    let token = format!(
+        "{}.{}.c2ln",
+        part(serde_json::json!({"alg": "RS256", "typ": "JWT"})),
+        part(serde_json::json!({
+            "exp": expires,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-unit"}
+        }))
+    );
+    serde_json::json!({
+        "tokens": {
+            "id_token": token,
+            "access_token": token,
+            "refresh_token": "unit-refresh",
+            "account_id": "acct-unit"
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The conversations a worker reported, in order. Takes its reports. Returns their ids.
+#[cfg(target_os = "macos")]
+fn reported_conversations(reports: &[Report]) -> Vec<String> {
+    reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Conversation(resume) => Some(resume.id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An agent on a signed-in account (per turn, the owner's account kind) keeps its harness
+/// conversation (WK-R1): its second turn's harness resumes the conversation the first
+/// recorded, the conversation is reported once so a wake can continue it, a woken agent's
+/// first turn resumes it, and a kept conversation whose record is gone is reported refused
+/// and ends the agent so the next wake starts fresh.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_signed_in_agent_continues_its_conversation_across_turns_and_after_a_wake() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut agent = super::managed_agent::ManagedAgent::in_pane("codex", &codex, fixture.host());
+    let record = agent.profile_home.join("auth.json");
+    std::fs::write(&record, signed_in_codex_record()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let home = agent.home.clone();
+    let launched = || -> Vec<String> {
+        std::fs::read_to_string(home.join("launches"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    let turns = vec![
+        ("Write the page", agent.acquire("wk-r1-turn-1")),
+        ("Now fix the title", agent.acquire("wk-r1-turn-2")),
+    ];
+    let (reports, problem) = agent.run_turns(None, turns, WAIT);
+    assert_eq!(problem, None);
+    let ends: Vec<TurnEnd> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Finished { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [TurnEnd::Success, TurnEnd::Success]);
+    let conversations = reported_conversations(&reports);
+    let conversation = conversations
+        .first()
+        .cloned()
+        .expect("the first turn's conversation is reported");
+    assert!(
+        conversations
+            .iter()
+            .all(|reported| *reported == conversation),
+        "the second turn continues the same conversation: {conversations:?}"
+    );
+    let lines = launched();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(!lines[0].contains(" resume "), "{lines:?}");
+    assert!(
+        lines[1].ends_with(&format!(" resume {conversation}")),
+        "the second turn's harness continues the first turn's conversation: {lines:?}"
+    );
+    let kept = reports
+        .iter()
+        .find_map(|report| match report {
+            Report::Conversation(resume) => Some(resume.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(kept.record.is_file(), "{}", kept.record.display());
+
+    let turns = vec![("Pick up the review", agent.acquire("wk-r1-wake"))];
+    let (reports, problem) = agent.run_turns(Some(kept.clone()), turns, WAIT);
+    assert_eq!(problem, None);
+    let lines = launched();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(
+        lines[2].ends_with(&format!(" resume {conversation}")),
+        "a woken signed-in agent continues its kept conversation: {lines:?}"
+    );
+    assert!(
+        reported_conversations(&reports)
+            .iter()
+            .all(|reported| *reported == conversation),
+        "the continued conversation is the kept one"
+    );
+    assert!(
+        !reports
+            .iter()
+            .any(|report| matches!(report, Report::ResumeRefused))
+    );
+
+    let gone = Resume {
+        id: "00000000-0000-4000-8000-00000000dead".into(),
+        record: kept.record.with_file_name(
+            "rollout-2026-10-27T00-00-00-00000000-0000-4000-8000-00000000dead.jsonl",
+        ),
+    };
+    let turns = vec![("Try again", agent.acquire("wk-r1-gone"))];
+    let (reports, problem) = agent.run_turns(Some(gone), turns, WAIT);
+    assert!(problem.is_some(), "a refused resume ends the agent");
+    assert!(
+        reports
+            .iter()
+            .any(|report| matches!(report, Report::ResumeRefused)),
+        "the refusal is reported so the kept row is dropped"
+    );
+    assert_eq!(launched().len(), 3, "nothing started for a gone record");
+}

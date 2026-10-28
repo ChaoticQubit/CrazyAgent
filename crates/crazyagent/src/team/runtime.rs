@@ -2415,8 +2415,7 @@ impl TeamRuntime {
         self.resuming = None;
         Ok(revived?.map(|agent| {
             assert_eq!(agent, id);
-            let kept = self.workers.get(&id).is_some_and(|worker| !worker.managed);
-            (id, resuming && kept)
+            (id, resuming)
         }))
     }
 
@@ -4270,6 +4269,9 @@ fn serve(
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
 /// stop its warden did not confirm keeps both for the engine's life and ends the agent.
+/// Each turn's harness continues the conversation the previous turn recorded, or the one
+/// the plan resumes for a woken agent, and a new conversation is reported so a later wake
+/// continues it; a refused resume is reported and ends the agent as a kept one does.
 fn per_turn(
     plan: &Plan,
     home: &Path,
@@ -4279,6 +4281,7 @@ fn per_turn(
     interrupt: &AtomicBool,
     turn_time: Duration,
 ) -> Option<String> {
+    let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
@@ -4306,9 +4309,14 @@ fn per_turn(
         let request = plan.request(AccountBinding::Subscription {
             home: home.to_path_buf(),
         });
-        let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
+        let started =
+            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.as_ref());
+        let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
+                if resume.is_some() && problem.0 == RESUME_REFUSED {
+                    let _ = reports.send(Report::ResumeRefused);
+                }
                 let _ = reports.send(Report::Finished {
                     text: String::new(),
                     end: TurnEnd::Closed,
@@ -4322,6 +4330,13 @@ fn per_turn(
             pane: None,
         });
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, turn_time);
+        if let Some(recorded) = session
+            .conversation()
+            .filter(|c| resume.as_ref() != Some(c))
+        {
+            let _ = reports.send(Report::Conversation(recorded.clone()));
+            resume = Some(recorded);
+        }
         let stopped = session.stop();
         let reusable = stopped.is_ok()
             && matches!(
