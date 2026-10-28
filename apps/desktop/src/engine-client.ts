@@ -775,6 +775,9 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
+export type BranchMode = "named" | "detached";
+
 export interface SessionSwitch {
   harness: string;
   mode: SwitchMode;
@@ -789,6 +792,7 @@ export interface TeamStatus {
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
+  agent_branches?: BranchMode;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;

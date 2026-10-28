@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setOnHarnessSwitch, setTeamTimeLimits, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setOnHarnessSwitch, setTeamTimeLimits, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BranchMode, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -101,6 +101,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
   const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
   const [finished, setFinished] = useState<"hide" | "show" | null>(null);
+  const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -155,6 +156,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function branches(choice: BranchMode) {
+    setBranchMode(choice);
+    setBusy(true);
+    const message = changeNote(await setAgentBranches(projectId, choice), "choosing where new agents commit");
+    setBusy(false);
+    setBranchMode(null);
+    setNote(message);
+    reload();
+  }
+
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
@@ -189,6 +200,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
         options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
       <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Agent branches</span>
+      <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
+        options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
+      <span className="tg-terminal-note">Named branch gives each new agent its own branch, crazyagent/agent-N. Detached keeps the older detached HEAD.</span>
     </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
