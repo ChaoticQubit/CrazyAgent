@@ -566,14 +566,7 @@ WantedBy=default.target\n",
             )));
         }
         self.checked()?;
-        if let Some(entry) = changeable_by_others(&self.executable) {
-            return Err(failure(format!(
-                "{}: other users can change {}, so a login service must not run the engine \
-                 from there; install CrazyAgent in a folder only you and the system can change",
-                self.executable.display(),
-                entry.display()
-            )));
-        }
+        persisted(&self.executable)?;
         self.layout()?.prepare()?;
         let text = self.definition_text()?;
         if self.platform == Platform::MacOs && self.loaded()? {
@@ -679,17 +672,33 @@ pub fn changeable_by_others(_executable: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The engine executable a login service may run for this app: the bundled `executable`
-/// itself unless it is inside the running AppImage's mount folder `appdir`, else a copy in
-/// `<data root>/bin/<version>`, private to this user, of the release executables beside it
-/// ([`crate::update::BINARIES`]), refreshed whenever a copied file differs. Nothing is copied
-/// from another folder, so an engine other users can change is returned as it is and
-/// [`Service::install`] refuses it. Inputs: the bundled engine, the layout, the app version
-/// and the AppImage mount folder when there is one. Output: the executable to run.
-pub fn installable(
+/// Refuses an engine that a login service or the command line link would keep running
+/// after this app exits when another user can change its path ([`changeable_by_others`]).
+/// Input: the executable. Output: Ok, or an error naming the entry and the fix.
+fn persisted(executable: &Path) -> Result<(), ServiceError> {
+    match changeable_by_others(executable) {
+        Some(entry) => Err(failure(format!(
+            "{}: other users can change {}, so neither a login service nor the command line \
+             link may run the engine from there; install CrazyAgent in a folder only you and \
+             the system can change",
+            executable.display(),
+            entry.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The engine executable a login service or the command line link may keep naming: the
+/// bundled `executable` itself, unless it sits inside the running AppImage's mount folder
+/// `appdir`, which goes away when the app exits. Then it is a copy, private to this user,
+/// of the release executables beside it ([`crate::update::BINARIES`]) in `<data root>/bin`,
+/// one stable path across versions, each file refreshed by an atomic rename whenever it
+/// differs. Nothing is ever copied from another folder, so an engine other users can change
+/// is returned as it is and refused where it would be kept. Inputs: the bundled engine, the
+/// layout and the AppImage mount folder when there is one. Output: the executable to keep.
+pub fn persistable(
     executable: &Path,
     layout: &Layout,
-    version: &str,
     appdir: Option<&Path>,
 ) -> Result<PathBuf, ServiceError> {
     let mounted = appdir
@@ -698,26 +707,15 @@ pub fn installable(
     if !mounted || !executable.is_file() {
         return Ok(executable.to_path_buf());
     }
-    let named = !version.is_empty()
-        && !version.starts_with('.')
-        && version
-            .chars()
-            .all(|part| part.is_ascii_alphanumeric() || matches!(part, '.' | '-' | '+'));
-    if !named {
-        return Err(failure(format!(
-            "{version}: the app version cannot name a folder"
-        )));
-    }
-    let (source, main) = match (executable.parent(), executable.file_name()) {
-        (Some(source), Some(main)) => (source, main.to_os_string()),
-        _ => return Err(failure("the engine executable has no folder")),
+    let (Some(source), Some(main)) = (executable.parent(), executable.file_name()) else {
+        return Err(failure("the engine executable has no folder"));
     };
-    let names: Vec<OsString> = crate::update::BINARIES
+    let names: Vec<String> = crate::update::BINARIES
         .iter()
-        .map(|name| OsString::from(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        .map(|name| format!("{name}{}", std::env::consts::EXE_SUFFIX))
         .filter(|name| source.join(name).is_file())
         .collect();
-    if !names.contains(&main) {
+    if !names.iter().any(|name| OsStr::new(name) == main) {
         return Err(failure(format!(
             "{}: not a CrazyAgent engine executable",
             executable.display()
@@ -726,57 +724,22 @@ pub fn installable(
     layout.prepare()?;
     let copies = layout.root().join("bin");
     crate::paths::private_folder(&copies)?;
-    let target = copies.join(version);
-    if !names
-        .iter()
-        .all(|name| kept(&source.join(name), &target.join(name)))
-    {
-        let fail = |error: std::io::Error| failure(format!("{}: {error}", target.display()));
-        let staging = copies.join(format!(".staging-{}", std::process::id()));
-        if std::fs::symlink_metadata(&staging).is_ok() {
-            std::fs::remove_dir_all(&staging).map_err(fail)?;
-        }
-        crate::paths::private_folder(&staging)?;
-        for name in &names {
-            copy_private(&source.join(name), &staging.join(name)).map_err(fail)?;
-        }
-        if std::fs::symlink_metadata(&target).is_ok() {
-            std::fs::remove_dir_all(&target).map_err(fail)?;
-        }
-        std::fs::rename(&staging, &target).map_err(fail)?;
-    }
-    let installed = target.join(main);
-    assert!(installed.starts_with(&copies) && installed.is_file());
-    Ok(installed)
-}
-
-/// Removes every engine copy in `<data root>/bin` but the folder holding `installed`, once a
-/// service that runs `installed` is in place, so copies of earlier versions do not pile up.
-/// An `installed` engine outside that folder removes nothing, and a failure leaves that
-/// entry for the next install. Inputs: the layout and the installed executable.
-pub fn prune_copies(layout: &Layout, installed: &Path) {
-    let copies = layout.root().join("bin");
-    let Some(keep) = installed
-        .parent()
-        .filter(|folder| folder.parent() == Some(copies.as_path()))
-        .and_then(Path::file_name)
-    else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&copies) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry.file_name() == keep {
+    for name in &names {
+        let copy = copies.join(name);
+        if kept(&source.join(name), &copy) {
             continue;
         }
-        let path = entry.path();
-        let _ = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&path),
-            Ok(_) => std::fs::remove_file(&path),
-            Err(error) => Err(error),
-        };
+        let fail = |error: std::io::Error| failure(format!("{}: {error}", copy.display()));
+        let staged = copies.join(format!(".{name}.{}", std::process::id()));
+        if std::fs::symlink_metadata(&staged).is_ok() {
+            std::fs::remove_file(&staged).map_err(fail)?;
+        }
+        copy_private(&source.join(name), &staged).map_err(fail)?;
+        std::fs::rename(&staged, &copy).map_err(fail)?;
     }
+    let installed = copies.join(main);
+    assert!(installed.starts_with(&copies) && installed.is_file());
+    Ok(installed)
 }
 
 /// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
@@ -793,6 +756,10 @@ fn kept(source: &Path, copy: &Path) -> bool {
         metadata.is_file() && private
     });
     private
+        && std::fs::metadata(source)
+            .map(|metadata| metadata.len())
+            .ok()
+            == std::fs::metadata(copy).map(|metadata| metadata.len()).ok()
         && match (std::fs::read(source), std::fs::read(copy)) {
             (Ok(bundled), Ok(copied)) => bundled == copied,
             _ => false,
@@ -1211,6 +1178,7 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             executable.display()
         )));
     }
+    persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
     let link = bin.join("crazyagent");
     if let Ok(metadata) = std::fs::symlink_metadata(&link)

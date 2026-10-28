@@ -125,10 +125,9 @@ async fn start_engine(
         .installed;
     let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
     let service = crazyagent::service::Service {
-        executable: crazyagent::service::installable(
+        executable: crazyagent::service::persistable(
             &service.executable,
             layout,
-            crazyagent::version::VERSION,
             appdir.as_deref(),
         )
         .map_err(|_| engine_failure("engine_service_failed"))?,
@@ -146,7 +145,6 @@ async fn start_engine(
         service
             .install()
             .map_err(|_| engine_failure("engine_service_failed"))?;
-        crazyagent::service::prune_copies(layout, &service.executable);
     } else {
         service
             .start()
