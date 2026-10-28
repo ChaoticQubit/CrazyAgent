@@ -388,7 +388,8 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
 /// MCP servers, brief, context index and approved memories into the agent home, then
 /// points the harness at them. Input: the launch request and the project's context from
 /// `launch_context::for_project`. Output: the command and the guard that removes the
-/// generated files when dropped; no MCP secret is ever in an argument or the environment.
+/// generated files when dropped, or `launch_secret_in_command` when an MCP secret would be
+/// in an argument or the environment.
 pub fn command_with_context(
     request: &LaunchRequest,
     context: &AgentContext,
@@ -396,15 +397,11 @@ pub fn command_with_context(
     validate(request)?;
     let installed = context.install(&request.harness, request.account.home(), request.tools)?;
     let command = build(request, Some(&installed))?;
-    assert!(
-        command
-            .get_args()
-            .all(|argument| !context.exposes_secret(argument.as_encoded_bytes()))
-    );
-    assert!(command.get_envs().all(|(name, value)| {
-        !context.exposes_secret(name.as_encoded_bytes())
-            && value.is_none_or(|value| !context.exposes_secret(value.as_encoded_bytes()))
-    }));
+    context.refuse_exposed(command.get_args().map(OsStr::as_encoded_bytes).chain(
+        command.get_envs().flat_map(|(name, value)| {
+            std::iter::once(name.as_encoded_bytes()).chain(value.map(OsStr::as_encoded_bytes))
+        }),
+    ))?;
     Ok((command, installed))
 }
 

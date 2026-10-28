@@ -359,6 +359,20 @@ impl AgentContext {
         })
     }
 
+    /// Refuses a launch whose command line or environment would hold an MCP secret of this
+    /// context, as when the owner saves a secret that is also part of a path or flag the
+    /// launch uses: that is the owner's input, not an engine fault. Input: every argument,
+    /// environment name and value of the command. Output: Ok, or `launch_secret_in_command`.
+    pub fn refuse_exposed<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<(), LaunchError> {
+        if parts.into_iter().any(|part| self.exposes_secret(part)) {
+            return Err(failure("launch_secret_in_command"));
+        }
+        Ok(())
+    }
+
     /// Writes this context into one agent's private home for one launch of `harness`.
     /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
     /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or

@@ -554,3 +554,76 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
     assert!(!codex.join("CLAUDE.md").exists());
     drop(installed);
 }
+
+#[test]
+fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_code() {
+    let directory = tempfile::Builder::new()
+        .prefix("ca-exposed-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let work = root.join("work");
+    for folder in [&home, &work] {
+        fs::DirBuilder::new().mode(0o700).create(folder).unwrap();
+    }
+    let profile = root.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![LaunchServer {
+                name: "tools".into(),
+                spec: ServerSpec::Stdio {
+                    command: "/usr/bin/true".into(),
+                    args: Vec::new(),
+                },
+                secrets: vec![LaunchSecret {
+                    name: "TOKEN".into(),
+                    value: crate::plugins::SecretValue::new(
+                        home.as_os_str().as_encoded_bytes().to_vec(),
+                    ),
+                }],
+            }],
+        },
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+    };
+    let request = || crate::harnesses::launch::LaunchRequest {
+        harness: "codex".into(),
+        executable: fs::canonicalize("/usr/bin/true").unwrap(),
+        working_dir: work.clone(),
+        account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile.clone()),
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    };
+    assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
+
+    let headless = crate::harnesses::launch::command_with_context(&request(), &context());
+    assert_eq!(
+        headless.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    let tmux =
+        crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
+    let host: std::sync::Arc<dyn crate::terminal::Host> = std::sync::Arc::new(
+        crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
+    );
+    let pane = crate::harnesses::terminal_session::TerminalSession::start(
+        host,
+        crate::terminal::AgentId::team(1).unwrap(),
+        request(),
+        Some(context()),
+    );
+    assert_eq!(
+        pane.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    assert!(
+        !home.join("config.toml").exists(),
+        "a refused launch leaves no generated file holding the secret"
+    );
+}
