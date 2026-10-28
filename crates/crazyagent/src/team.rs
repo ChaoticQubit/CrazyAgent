@@ -1725,8 +1725,6 @@ pub struct TeamAgent {
     #[serde(default)]
     pub handle: Option<String>,
     #[serde(default)]
-    pub register: Option<String>,
-    #[serde(default)]
     pub finished: bool,
     #[serde(default)]
     pub wakeable: bool,
@@ -1864,7 +1862,6 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         stopped_ms: row.get(13)?,
         persona,
         handle,
-        register: None,
         finished: false,
         wakeable: false,
         wake_note: None,
@@ -2087,11 +2084,6 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let entries =
-        crate::agents::hosted_entries(connection, project, runtime::TEAM_HOST).map_err(error)?;
-    for agent in &mut agents {
-        agent.register = entries.get(&agent.id.to_string()).cloned();
-    }
     let mut statement = connection
         .prepare(&recent(
             &format!("SELECT {TASK_COLUMNS} FROM team_tasks WHERE project=?1"),

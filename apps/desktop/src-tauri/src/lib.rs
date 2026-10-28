@@ -818,6 +818,21 @@ async fn desktop_team_rename(
 }
 
 #[tauri::command]
+async fn desktop_team_wake_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_wake_agent(&id, agent, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_seen(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2394,6 +2409,7 @@ pub fn run() {
             desktop_team_pause,
             desktop_team_hand_off,
             desktop_team_rename,
+            desktop_team_wake_agent,
             desktop_team_graph,
             desktop_team_events,
             desktop_team_wake_rule,

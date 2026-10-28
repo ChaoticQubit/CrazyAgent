@@ -816,7 +816,6 @@ fn finished_team() -> crate::team::TeamStatus {
         stopped_ms: None,
         persona: None,
         handle: None,
-        register: None,
         finished,
         wakeable: false,
         wake_note: None,
@@ -834,11 +833,15 @@ fn finished_team() -> crate::team::TeamStatus {
         agents: vec![
             agent(2, AgentStatus::Working, false),
             TeamAgent {
-                register: Some("r".repeat(32)),
+                wakeable: true,
                 ..agent(3, AgentStatus::Stopped, true)
             },
             TeamAgent {
                 problem: Some("The agent process closed.".into()),
+                wake_note: Some(
+                    "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                        .into(),
+                ),
                 ..agent(4, AgentStatus::Failed, true)
             },
         ],
@@ -879,7 +882,7 @@ fn setup_reply(
 }
 
 #[test]
-fn f_lists_finished_agents_w_wakes_one_through_the_register_and_h_switches_the_setting() {
+fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting() {
     use crate::project_setup::{SetupQuery, SetupView};
     use crate::team::TeamAction;
     let mut shell = fresh(120, 30);
@@ -920,34 +923,46 @@ fn f_lists_finished_agents_w_wakes_one_through_the_register_and_h_switches_the_s
         "a working agent is not finished: {text}"
     );
 
+    assert!(
+        text.contains("Its worktree was cleaned up"),
+        "the engine's reason shows on the row: {text}"
+    );
     shell.key(Key::Char('w'));
     assert!(
         requests(&mut shell).is_empty(),
-        "no register entry, nothing to wake"
+        "an agent that cannot wake sends nothing"
     );
-    assert!(
-        render(&mut shell)
-            .join("\n")
-            .contains("Sub-agent 4 cannot be woken.")
-    );
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Sub-agent 4 cannot be woken."), "{text}");
     shell.key(Key::Down);
     shell.key(Key::Char('w'));
     let sent = requests(&mut shell);
-    assert!(
-        matches!(&sent[..], [Request::Setup(SetupQuery::WakeAgent { register })] if *register == "r".repeat(32)),
-        "{sent:?}"
-    );
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::WakeAgent { project_id, agent },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    assert_eq!((project_id, *agent), (&project(), 3));
+    let woke = *generation;
     shell.key(Key::Char('w'));
     assert!(requests(&mut shell).is_empty(), "one wake at a time");
     shell.arrive(setup_reply(
-        SetupQuery::WakeAgent {
-            register: "r".repeat(32),
+        SetupQuery::TeamChange {
+            action: TeamAction::WakeAgent {
+                project_id: project(),
+                agent: 3,
+            },
+            generation: woke,
         },
-        Err("agent_restart_conflict"),
+        Err("team_agent_running"),
     ));
     let text = render(&mut shell).join("\n");
     assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
-    assert!(text.contains("It is already running again."), "{text}");
+    assert!(text.contains("It is already running."), "{text}");
 
     shell.key(Key::Char('h'));
     let sent = requests(&mut shell);
@@ -1032,7 +1047,6 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 stopped_ms: Some(2),
                 persona: None,
                 handle: None,
-                register: None,
                 finished: false,
                 wakeable: false,
                 wake_note: None,

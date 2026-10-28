@@ -21,7 +21,6 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         stopped_ms: None,
         persona: None,
         handle: None,
-        register: None,
         finished: false,
         wakeable: false,
         wake_note: None,

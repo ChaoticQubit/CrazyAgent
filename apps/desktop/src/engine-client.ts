@@ -718,7 +718,8 @@ export interface TeamAgent {
   persona?: string | null;
   handle?: string | null;
   finished?: boolean;
-  register?: string | null;
+  wakeable?: boolean;
+  wake_note?: string | null;
 }
 
 export interface TeamTask {
@@ -884,6 +885,13 @@ export function teamHandOff(id: string, reply: number, step: number, generation:
  * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
 export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
+}
+
+/** Wakes a finished sub-agent by its team id; the team runtime brings the same agent back in
+ * its own worktree and session. Inputs: project id, team agent id and a generation. Output: the
+ * commit receipt; an agent that cannot wake is rejected with a plain code. */
+export function teamWakeAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.

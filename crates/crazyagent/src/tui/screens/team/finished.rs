@@ -13,7 +13,7 @@ use crate::tui::theme::Role;
 use ratatui::text::Line;
 
 /// One agent of the Finished box: its id, plain name, harness, status words, what it last
-/// worked on and the agent register entry `w` wakes, none when the engine names no entry.
+/// worked on, whether `w` can wake it and the engine's reason when it cannot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct FinishedRow {
     pub agent: i64,
@@ -21,7 +21,8 @@ pub(super) struct FinishedRow {
     pub harness: String,
     pub status: String,
     pub task: String,
-    pub register: Option<String>,
+    pub wakeable: bool,
+    pub note: Option<String>,
 }
 
 /// Lists the agents the engine marks finished (DEC-102), newest first, as the desktop's
@@ -48,7 +49,8 @@ pub(super) fn finished_rows(status: &TeamStatus) -> Vec<FinishedRow> {
                 harness: harness_name(&agent.harness, None),
                 status: agent.status_label.clone(),
                 task,
-                register: agent.register.clone(),
+                wakeable: agent.wakeable,
+                note: agent.wake_note.as_deref().map(super::plain),
             }
         })
         .collect();
@@ -66,15 +68,14 @@ pub(super) fn finished_label(count: usize) -> String {
 /// sentence.
 fn words(code: &str) -> &'static str {
     match code {
-        "agent_restart_conflict" => "It is already running again.",
-        "agent_restart_limit" => {
-            "It was restarted too many times. Start it again from its project."
+        "team_agent_running" => "It is already running.",
+        "team_agent_no_worktree" => "Its worktree was cleaned up. Hand its work to a new agent.",
+        "team_agent_not_found" => "That agent is no longer part of this team.",
+        "team_agents_unavailable" => {
+            crate::research::runner::confined_unavailable(std::env::consts::OS)
+                .unwrap_or("Team agents cannot run on this system.")
         }
-        "agent_restart_needs_key" => "CrazyAgent no longer holds its API key since it restarted.",
-        "agent_not_found" | "agent_spec_invalid" => "CrazyAgent has no record to wake it from.",
-        "agent_registry_unavailable" | "engine_support_not_ready" => {
-            "Waking agents is not available in this engine yet."
-        }
+        "engine_support_not_ready" => "Waking agents is not available in this engine yet.",
         "trusted_connection_unavailable" | "controller_disconnected" => {
             "The engine connection is not ready yet."
         }
@@ -82,9 +83,9 @@ fn words(code: &str) -> &'static str {
     }
 }
 
-/// The Team screen's Finished box (DEC-102): `f` reads the team and lists its idle, stopped
-/// and failed sub-agents, newest first; the arrows pick one, `w` wakes it through the agent
-/// register's restart, `h` switches the project's Finished agents setting between Hide and
+/// The Team screen's Finished box (DEC-102): `f` reads the team and lists its finished
+/// sub-agents, newest first; the arrows pick one, `w` wakes it as a team action by its id,
+/// which the team runtime serves wherever team agents run, `h` switches the project's Finished agents setting between Hide and
 /// Show, and `f` or Esc closes it. Input: keys and setup replies. Output: Setup requests and
 /// one message per outcome.
 pub(super) struct Finished {
@@ -137,7 +138,7 @@ impl Finished {
         match key {
             Key::Up => self.cursor = self.cursor.saturating_sub(1),
             Key::Down => self.cursor = (self.cursor + 1).min(count.saturating_sub(1)),
-            Key::Char('w') => self.wake(ctx),
+            Key::Char('w') => self.wake(project, ctx),
             Key::Char('h') => self.switch(project, ctx),
             Key::Char('f') | Key::Esc => self.open = false,
             _ => {}
@@ -146,22 +147,33 @@ impl Finished {
         Some(Flow::Handled)
     }
 
-    fn wake(&mut self, ctx: &mut Ctx) {
+    fn wake(&mut self, project: &ProjectId, ctx: &mut Ctx) {
         if self.waking.is_some() {
             return;
         }
         let Some(row) = self.rows.as_ref().and_then(|rows| rows.get(self.cursor)) else {
             return;
         };
-        let Some(register) = row.register.clone() else {
+        if !row.wakeable {
+            let why = row
+                .note
+                .clone()
+                .unwrap_or_else(|| words("team_agent_not_found").to_owned());
             ctx.say(Message::warning(
                 &format!("{} cannot be woken.", row.label),
-                words("agent_not_found"),
+                &why,
             ));
             return;
-        };
+        }
         self.waking = Some(row.label.clone());
-        ctx.request(Request::Setup(SetupQuery::WakeAgent { register }));
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::WakeAgent {
+                project_id: project.clone(),
+                agent: row.agent,
+            },
+            generation,
+        }));
     }
 
     fn switch(&mut self, project: &ProjectId, ctx: &mut Ctx) {
@@ -236,7 +248,13 @@ impl Finished {
                     )),
                 }
             }
-            (SetupQuery::WakeAgent { .. }, result) => {
+            (
+                SetupQuery::TeamChange {
+                    action: TeamAction::WakeAgent { project_id, .. },
+                    ..
+                },
+                result,
+            ) if project_id == project => {
                 let Some(label) = self.waking.take() else {
                     return;
                 };
@@ -327,8 +345,13 @@ impl Finished {
                 .as_ref()
                 .filter(|_| index == self.cursor)
                 .map_or("", |_| "  waking...");
+            let note = row
+                .note
+                .as_ref()
+                .filter(|_| !row.wakeable)
+                .map_or(String::new(), |note| format!("  {note}"));
             let head = format!(
-                "{mark}{}  {}  {}{waking}",
+                "{mark}{}  {}  {}{waking}{note}",
                 row.label, row.harness, row.status
             );
             lines.push(if index == self.cursor {

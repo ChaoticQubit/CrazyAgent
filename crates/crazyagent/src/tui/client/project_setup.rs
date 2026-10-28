@@ -104,9 +104,6 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             )?,
-            SetupQuery::WakeAgent { register } => SetupView::Woke(Box::new(
-                controller.restart_agent(register).await.map_err(problem)?,
-            )),
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,
