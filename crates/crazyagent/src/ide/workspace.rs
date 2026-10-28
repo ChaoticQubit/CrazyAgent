@@ -153,8 +153,9 @@ pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineErr
 /// Whether an engine-made worktree of the project is inside the older agents root
 /// `<folder>/worktrees`, where agents and research jobs that ran before the project gained a
 /// `.crazyagent` folder stay: a team worktree the engine records there, live or kept
-/// (INT1-R3-1), or a research job's worktree ([`older_research`], INT1R3-L1). Inputs: the
-/// engine root, the project and its canonical folder. Output: the answer, or
+/// (INT1-R3-1) or waiting in `team_retiring` after a cleanup cut off between its claim and
+/// the removal (CEIL-L1), or a research job's worktree ([`older_research`], INT1R3-L1).
+/// Inputs: the engine root, the project and its canonical folder. Output: the answer, or
 /// `ide_project_folder_invalid` for a folder that is not absolute text, or
 /// `ide_workspace_unavailable` when the records or the folder cannot be read.
 pub fn older_agents(root: &Path, project: &ProjectId, folder: &Path) -> Result<bool, EngineError> {
@@ -171,9 +172,12 @@ pub fn older_agents(root: &Path, project: &ProjectId, folder: &Path) -> Result<b
     assert!(prefix.starts_with('/') && prefix.ends_with("/worktrees/"));
     let db = open(root)?;
     crate::team::initialize(&db).map_err(unavailable)?;
+    crate::team::cleanup::initialize(&db).map_err(unavailable)?;
     let team: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM team_worktrees
+                           WHERE project=?1 AND substr(worktree,1,length(?2))=?2)
+                 OR EXISTS(SELECT 1 FROM team_retiring
                            WHERE project=?1 AND substr(worktree,1,length(?2))=?2)",
             params![project.as_str(), prefix],
             |row| row.get(0),
