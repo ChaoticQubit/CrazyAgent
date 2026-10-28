@@ -935,3 +935,32 @@ fn one_scan_keeps_the_limits_of_the_most_recently_changed_codex_record() {
         "the newer record's reading is kept"
     );
 }
+
+/// The record walk examines a bounded number of entries in one home in all, not per folder:
+/// in a home an agent filled with 20 folders of 1,000 records, whose newest records are
+/// spread over every folder, the scan stops before it has seen every folder.
+#[test]
+fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
+    const FOLDERS: usize = 20;
+    const FILES: usize = 1000;
+    let home = tempfile::tempdir().unwrap();
+    for folder in 0..FOLDERS {
+        let dir = home.path().join("projects").join(format!("f{folder:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..FILES {
+            let changed = 1_700_000_000 + u64::try_from(file * FOLDERS + folder).unwrap();
+            std::fs::File::create(dir.join(format!("s{file:04}.jsonl")))
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(changed))
+                .unwrap();
+        }
+    }
+    let found = records(home.path(), Format::Claude);
+    assert_eq!(found.len(), FILES_PER_SCAN_MAX);
+    let folders: std::collections::BTreeSet<&Path> =
+        found.iter().map(|path| path.parent().unwrap()).collect();
+    assert!(
+        folders.len() < FOLDERS,
+        "the walk read all {FOLDERS} folders of 1,000 records"
+    );
+}

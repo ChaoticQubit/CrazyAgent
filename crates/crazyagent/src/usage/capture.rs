@@ -16,6 +16,7 @@ const WEEK_MINUTES: u64 = 7 * 24 * 60;
 const NAME_BYTES_MAX: usize = 128;
 const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
+const ENTRIES_PER_SCAN_MAX: usize = FILES_PER_SCAN_MAX * 64;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 const FINISHED_RUNS_PER_SCAN: i64 = 64;
 const LINE_TOKENS_MAX: u64 = 1_000_000_000;
@@ -291,17 +292,20 @@ fn codex_line(
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
-/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`.
+/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
+/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all and keeps only the
+/// newest records it saw, so a home an agent filled costs a bounded scan.
 /// Inputs: the home and the format. Output: the paths.
 fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let root = match format {
         Format::Claude => home.join("projects"),
         Format::Codex => home.join("sessions"),
     };
-    let mut found = Vec::new();
+    let mut newest = std::collections::BinaryHeap::with_capacity(FILES_PER_SCAN_MAX + 1);
     let mut folders = vec![(root, 0)];
     let mut visited = 0;
-    while let Some((folder, level)) = folders.pop() {
+    let mut examined = 0;
+    'walk: while let Some((folder, level)) = folders.pop() {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
             break;
@@ -310,6 +314,10 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
             continue;
         };
         for entry in entries.flatten().take(FILES_PER_SCAN_MAX * 4) {
+            if examined == ENTRIES_PER_SCAN_MAX {
+                break 'walk;
+            }
+            examined += 1;
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
@@ -325,13 +333,19 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
                     .metadata()
                     .and_then(|metadata| metadata.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                found.push((std::cmp::Reverse(changed), entry.path()));
+                newest.push((std::cmp::Reverse(changed), entry.path()));
+                if newest.len() > FILES_PER_SCAN_MAX {
+                    newest.pop();
+                }
             }
         }
     }
-    found.sort();
-    found.truncate(FILES_PER_SCAN_MAX);
-    found.into_iter().map(|(_, path)| path).collect()
+    assert!(examined <= ENTRIES_PER_SCAN_MAX && newest.len() <= FILES_PER_SCAN_MAX);
+    newest
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
 }
 
 #[cfg(unix)]
