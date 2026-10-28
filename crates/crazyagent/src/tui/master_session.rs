@@ -698,12 +698,12 @@ impl State {
     /// running reply may be stopped, set only after the owner confirms a
     /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
     pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
-        let session = self
-            .view
-            .as_ref()
-            .filter(|_| self.ready)
-            .and_then(|view| view.session.as_ref())
-            .ok_or("No master session yet; send a message to start one")?;
+        if !self.ready {
+            return Err("Waiting for actual master state; Ctrl-R reconnects".into());
+        }
+        let Some(session) = self.view.as_ref().and_then(|view| view.session.as_ref()) else {
+            return self.open();
+        };
         let (config_id, source_hash) = match &self.catalog {
             Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
             None => {

@@ -983,10 +983,11 @@ fn resume(
         return Ok(reject(&reason.0));
     }
     let current = live(tx, project, revision)?;
-    if current
-        .as_ref()
-        .is_some_and(|session| session.current_turn.is_some())
-        && !cancel_running
+    if !cancel_running
+        && (current
+            .as_ref()
+            .is_some_and(|session| session.current_turn.is_some())
+            || crate::team::master::turn_running(tx, project)?)
     {
         return Ok(reject("master_turn_running"));
     }
@@ -4441,6 +4442,9 @@ fn execute(
                 }
                 Some(_) => {}
             }
+        }
+        if renew == Some(false) && crate::team::master::turn_running(tx, project_id)? {
+            return Ok(reject("master_turn_running"));
         }
         if !live_capacity(tx, current.is_some())? {
             return Ok(reject("master_session_capacity"));
