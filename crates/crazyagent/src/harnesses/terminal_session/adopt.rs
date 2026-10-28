@@ -116,9 +116,16 @@ impl PaneRecord {
 
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
-        std::fs::symlink_metadata(path)
+        if !std::fs::symlink_metadata(path)
             .is_ok_and(|metadata| metadata.file_type().is_file())
-            .then(|| KeyFile(path.clone()))
+        {
+            return None;
+        }
+        let content = std::fs::read(path).ok()?;
+        Some(KeyFile {
+            path: path.clone(),
+            content,
+        })
     }
 }
 
