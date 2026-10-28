@@ -533,7 +533,7 @@ async fn an_open_cut_while_its_server_starts_still_stops_when_idle() {
     let checkout = scratch();
     let data = scratch();
     let idle = Duration::from_secs(3);
-    let servers = Servers::new(data.path(), idle);
+    let servers = servers_in(data.path(), idle);
     let project = project("cut-idle");
     let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
     let issued = servers.project_folder(&project).unwrap().join(token::FILE);
@@ -556,7 +556,7 @@ async fn an_open_cut_while_its_server_starts_still_stops_when_idle() {
 async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("cut-reuse");
     let build = cached_build();
     let cut = cut_open(&servers, &project, checkout.path(), &build).await;

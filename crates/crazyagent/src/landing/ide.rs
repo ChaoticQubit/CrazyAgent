@@ -174,7 +174,7 @@ fn text_at(repository: &Path, commit: &str, path: &str) -> Result<Arc<str>, Engi
     if size > BASE_BYTES_MAX {
         return Err(failure("changes_too_large"));
     }
-    let bytes = repo.capture(&["cat-file", "blob", object], BASE_BYTES_MAX)?;
+    let bytes = repo.capture(&["cat-file", "blob", &object], BASE_BYTES_MAX)?;
     if bytes.len() != size {
         return Err(failure("changes_git_failed"));
     }
