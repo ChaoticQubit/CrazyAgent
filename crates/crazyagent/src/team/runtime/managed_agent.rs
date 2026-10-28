@@ -396,12 +396,19 @@ impl ManagedAgent {
         for (prompt, profile) in turns {
             let context = self
                 .runtime
-                .context(&project, AGENT, AgentRole::Sub, true)
+                .context(
+                    &project,
+                    AGENT,
+                    AgentRole::Sub,
+                    true,
+                    crate::agent_git::Layout::Linked,
+                )
                 .unwrap();
             orders
                 .send(Order::Turn(
                     prompt.to_owned(),
                     Some(Box::new(Grant { profile, context })),
+                    Some(turn_time),
                 ))
                 .unwrap();
         }
@@ -410,7 +417,7 @@ impl ManagedAgent {
         let cancel = AtomicBool::new(false);
         let interrupt = AtomicBool::new(false);
         let problem = per_turn(
-            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt, turn_time,
+            &self.plan, &self.home, &ordered, &reports, &cancel, &interrupt,
         );
         drop(reports);
         (reported.iter().collect(), problem)
