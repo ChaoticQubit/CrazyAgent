@@ -49,6 +49,7 @@ pub struct TerminalSession {
     exited: bool,
     stopped: bool,
     group_ended: bool,
+    uncertain: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -223,6 +224,7 @@ impl TerminalSession {
             exited: false,
             stopped: false,
             group_ended: false,
+            uncertain: false,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -370,10 +372,15 @@ impl TerminalSession {
 
     /// Ends the pane, then every process its harness left in the pane's process group, as a
     /// dev server started in the background, then removes the key file and the generated
-    /// context. Output: none, since a pane reports no exit code.
-    pub fn stop(mut self) -> Option<i32> {
+    /// context. A process that left the group is not found: a pane has no warden. Output:
+    /// none, since a pane reports no exit code, or `harness_cleanup_uncertain` when the group
+    /// outlived the wait or was found by an id no longer proven to be this pane's.
+    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
         self.halt();
-        None
+        if self.uncertain {
+            return Err(failure("harness_cleanup_uncertain"));
+        }
+        Ok(None)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -506,17 +513,25 @@ impl TerminalSession {
     }
 
     /// Kills what the harness left in the pane's process group once the pane is gone, as a
-    /// dev server started in the background. `seen` tells the pane was alive within
-    /// `GROUP_FRESH`: its id then still names this pane's group, which keeps the id while
-    /// any member lives. An id unseen for longer may name a reused group and is left alone.
+    /// dev server started in the background, and records whether the group outlived the
+    /// wait. `seen` tells the pane was alive within `GROUP_FRESH`: its id then still names
+    /// this pane's group, which keeps the id while any member lives. An id unseen for longer
+    /// may name a reused group: it is left alone, and a group found by it is uncertain.
     fn end_group(&mut self, seen: bool) {
-        if std::mem::replace(&mut self.group_ended, true) || !seen {
+        if std::mem::replace(&mut self.group_ended, true) {
+            return;
+        }
+        if !seen {
+            #[cfg(unix)]
+            {
+                self.uncertain = super::launch::group_alive(self.pid);
+            }
             return;
         }
         #[cfg(unix)]
         {
             super::launch::kill_group(self.pid);
-            super::launch::await_group_exit(self.pid);
+            self.uncertain = !super::launch::await_group_exit(self.pid);
         }
     }
 }
@@ -635,11 +650,12 @@ impl AgentSession {
     }
 
     /// Stops the agent and every process it started. Output: the exit code when known, or
-    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it.
+    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it or a
+    /// pane's process group was not confirmed gone.
     pub fn stop(self) -> Result<Option<i32>, LaunchError> {
         match self {
             Self::Piped(session) => session.stop(),
-            Self::Terminal(session) => Ok(session.stop()),
+            Self::Terminal(session) => session.stop(),
         }
     }
 }

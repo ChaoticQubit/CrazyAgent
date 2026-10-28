@@ -357,14 +357,15 @@ pub(crate) fn kill_group(group: u32) {
 /// Waits until no process of a killed agent's group is left, killing again
 /// any member that is still there. Takes the group id; returns once the group
 /// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
-/// stopped while one of its processes still lingers unnoticed.
+/// stopped while one of its processes still lingers unnoticed. Output: whether
+/// the group is empty.
 #[cfg(unix)]
-pub(crate) fn await_group_exit(group: u32) {
+pub(crate) fn await_group_exit(group: u32) -> bool {
     let Some(pid) = i32::try_from(group)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     else {
-        return;
+        return true;
     };
     let started = Instant::now();
     while rustix::process::test_kill_process_group(pid).is_ok()
@@ -373,6 +374,17 @@ pub(crate) fn await_group_exit(group: u32) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         std::thread::sleep(Duration::from_millis(10));
     }
+    !group_alive(group)
+}
+
+/// Tells whether a process of a group is still there, without signalling it. Takes the
+/// group id. Output: false for an id that names no process.
+#[cfg(unix)]
+pub(crate) fn group_alive(group: u32) -> bool {
+    i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on

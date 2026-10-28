@@ -206,6 +206,7 @@ impl TerminalSession {
             exited: false,
             stopped: false,
             group_ended: false,
+            uncertain: false,
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: None,

@@ -862,9 +862,16 @@ impl ResearchRunner {
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
             let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
-            let _ = session.stop();
+            let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            if stopped.is_err() {
+                if let Some(credential) = credential {
+                    credential.retain();
+                }
+                std::mem::forget(lease);
+                return Err(RunError::Uncertain("harness_cleanup_uncertain"));
+            }
             drop(credential);
             drop(lease);
             return Ok((ending?, group, output));

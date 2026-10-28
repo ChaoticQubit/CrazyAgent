@@ -3756,6 +3756,7 @@ fn work(
     let problem = match started {
         Ok(AgentSession::Terminal(session)) if adopted_live => {
             live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
+                .unwrap_or_else(Some)
         }
         Ok(session) => serve(
             session, &orders, &reports, &cancel, &interrupt, &leave, turn_time,
@@ -3781,7 +3782,7 @@ fn live(
         return None;
     };
     let resume = plan.resume.as_ref();
-    let (started, held, keep) = match mode {
+    let (started, mut held, keep) = match mode {
         Mode::Kept { account, context } => (
             AgentSession::start_resuming(plan.request(account), context, plan.pane.clone(), resume),
             None,
@@ -3811,7 +3812,7 @@ fn live(
         }
     };
     let problem = match started {
-        Ok(AgentSession::Terminal(session)) => live_serve(
+        Ok(AgentSession::Terminal(session)) => match live_serve(
             *session,
             resume.is_none().then_some(framing.as_str()),
             orders,
@@ -3819,7 +3820,16 @@ fn live(
             cancel,
             leave,
             keep,
-        ),
+        ) {
+            Ok(problem) => problem,
+            Err(uncertain) => {
+                if let Some((credential, profile)) = held.take() {
+                    credential.retain();
+                    std::mem::forget(profile);
+                }
+                Some(uncertain)
+            }
+        },
         Ok(other) => {
             let _ = other.stop();
             Some(with_code(
@@ -3887,7 +3897,14 @@ fn live_adopted(
         };
     let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, None, orders, reports, cancel, leave, true)
+            match live_serve(*session, None, orders, reports, cancel, leave, true) {
+                Ok(problem) => problem,
+                Err(uncertain) => {
+                    credential.retain();
+                    std::mem::forget(profile);
+                    return Some(uncertain);
+                }
+            }
         }
         Ok(other) => {
             let _ = other.stop();
@@ -3914,7 +3931,9 @@ fn live_adopted(
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Takes the session, the briefing to
 /// type first, the worker's channels and flags, and whether a later engine may take the
-/// pane over. Returns the problem that ended it, if any.
+/// pane over. Returns the problem that ended it, if any, or `Err` with the cleanup problem
+/// when the pane's stop did not confirm its processes gone, so the caller keeps the
+/// account's credential copy and custody use.
 fn live_serve(
     mut session: TerminalSession,
     framing: Option<&str>,
@@ -3923,7 +3942,7 @@ fn live_serve(
     cancel: &AtomicBool,
     leave: &AtomicBool,
     keep: bool,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
@@ -3932,9 +3951,14 @@ fn live_serve(
     if let Some(framing) = framing
         && let Err(problem) = session.send_or_cancel(framing, cancel)
     {
-        session.stop();
-        return (problem.0 != "launch_cancelled")
-            .then(|| with_code("The master could not be briefed", Some(&problem.0)));
+        if let Err(uncertain) = session.stop() {
+            return Err(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(&uncertain.0),
+            ));
+        }
+        return Ok((problem.0 != "launch_cancelled")
+            .then(|| with_code("The master could not be briefed", Some(&problem.0))));
     }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
@@ -3989,10 +4013,13 @@ fn live_serve(
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
     if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
         session.leave();
-    } else {
-        session.stop();
+    } else if let Err(uncertain) = session.stop() {
+        return Err(with_code(
+            crate::sandbox::warden::CLEANUP_UNCERTAIN,
+            Some(&uncertain.0),
+        ));
     }
-    problem
+    Ok(problem)
 }
 
 enum Next {
