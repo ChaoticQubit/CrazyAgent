@@ -6,7 +6,7 @@ use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::model_access::{BOUNDED_QUOTA, STRICT_QUOTA, provider_quota_policy_name};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
-use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request};
+use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request, new_pool_id};
 use crate::tui::text::{cells, join, list_row, restyle, row, status, styled, thumb, with_bar};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox};
@@ -48,6 +48,8 @@ pub struct PoolEditor {
     selected_only: bool,
     saving: bool,
     start: (String, BTreeSet<CredentialRef>, ProviderQuotaPolicy),
+    create_id: Option<CredentialRef>,
+    creates_sent: u32,
 }
 
 impl PoolEditor {
@@ -86,6 +88,8 @@ impl PoolEditor {
             selected_only: false,
             saving: false,
             start,
+            create_id: None,
+            creates_sent: 0,
         }
     }
 
@@ -223,11 +227,30 @@ impl PoolEditor {
                 members,
                 quota: self.quota,
             },
-            None => PoolChange::Create {
-                name,
-                members,
-                quota: self.quota,
-            },
+            None => {
+                let id = match self
+                    .create_id
+                    .clone()
+                    .map_or_else(|| new_pool_id(&name), Ok)
+                {
+                    Ok(id) => id,
+                    Err(code) => {
+                        ctx.say(Message::error(
+                            plain_problem(&code).unwrap_or("Could not save the pool."),
+                            "Press Enter to try again.",
+                        ));
+                        return;
+                    }
+                };
+                self.create_id = Some(id.clone());
+                self.creates_sent = self.creates_sent.saturating_add(1);
+                PoolChange::Create {
+                    id,
+                    name,
+                    members,
+                    quota: self.quota,
+                }
+            }
         };
         self.saving = true;
         ctx.request(Request::EditPool { change });
@@ -379,6 +402,14 @@ impl PoolEditor {
     }
 }
 
+/// Says the pool was saved, rereads the pools and leaves the editor. A new pool whose
+/// earlier try landed without its reply counts too. Takes the context. Returns Back.
+fn saved(ctx: &mut Ctx) -> Flow {
+    ctx.say(Message::success("Pool saved.", ""));
+    ctx.request(Request::Pools);
+    Flow::Back
+}
+
 impl Screen for PoolEditor {
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Pools".into(), self.title().into()]
@@ -480,18 +511,20 @@ impl Screen for PoolEditor {
         match arrival {
             Arrival::PoolEdited(result) if self.saving => {
                 self.saving = false;
+                let landed =
+                    self.creates_sent > 1 && matches!(result, Err(code) if code == "pool_exists");
                 match result {
-                    Ok(()) => {
-                        ctx.say(Message::success("Pool saved.", ""));
-                        ctx.request(Request::Pools);
-                        Flow::Back
-                    }
+                    Ok(()) => saved(ctx),
+                    Err(_) if landed => saved(ctx),
                     Err(code) if code == "pool_name_bounds" => {
                         self.name.error = plain_problem(code).map(Into::into);
                         self.focus = Focus::Name;
                         Flow::Handled
                     }
                     Err(code) => {
+                        if code == "pool_exists" {
+                            self.create_id = None;
+                        }
                         ctx.say(Message::error(
                             plain_problem(code).unwrap_or("Could not save the pool."),
                             "Press Enter to try again.",
@@ -753,6 +786,7 @@ mod tests {
                         name,
                         members,
                         quota,
+                        ..
                     },
             }) => {
                 assert_eq!(name, "Build team");
@@ -852,6 +886,7 @@ mod tests {
                         name,
                         members,
                         quota,
+                        ..
                     },
             }) => {
                 assert_eq!(name, "Review team");

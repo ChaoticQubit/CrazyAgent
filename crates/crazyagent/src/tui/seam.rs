@@ -13,10 +13,12 @@ use crate::terminal::{AgentId, TerminalFrame};
 /// builds the exact pool records, keeping an existing pool's projects and roles.
 /// Input: built by the pool list, the pool editor and the Project screen.
 /// Output: one model access edit; `Assign` gives the project exactly the chosen
-/// pool, or none, and `Remove` also takes the pool off every project using it.
+/// pool, or none, and `Remove` also takes the pool off every project using it. `Create`
+/// carries the id its form drew once, so a retry of the same form never adds a second pool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
+        id: CredentialRef,
         name: String,
         members: Vec<CredentialRef>,
         quota: ProviderQuotaPolicy,
@@ -294,6 +296,19 @@ pub struct Activity {
     pub working: Option<usize>,
     pub suggestions: usize,
     pub notifications: usize,
+}
+
+/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
+/// Input: the pool name. Output: the id, or `pool_id_unavailable`.
+pub fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
+    let stem: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .flat_map(|character| character.to_lowercase())
+        .collect();
+    let nonce = crate::engine::owner::random_id().map_err(|_| "pool_id_unavailable".to_owned())?;
+    CredentialRef::new(format!("pool-{stem}-{nonce}")).map_err(|_| "pool_id_unavailable".into())
 }
 
 /// One project as Home shows it, built only from engine data.

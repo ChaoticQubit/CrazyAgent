@@ -293,3 +293,58 @@ async fn the_settings_pool_editor_chooses_strict_quota_and_editing_keeps_it() {
     expected.provider_quota_policy = ProviderQuotaPolicy::BoundedAttempt;
     assert_eq!(edited[0], expected, "only the policy changed");
 }
+
+/// A new pool's save lands in the engine but its reply is lost, so the shell reports
+/// `pool_outcome_unknown` and the owner presses Enter again: the engine keeps one pool and
+/// the editor reports it saved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_pool_saved_again_after_a_lost_reply_is_saved_once() {
+    let engine = Engine::start().await;
+    let project = engine.root.path().join("project.toml");
+    let mut connection = engine.connect();
+    let mut ctx = ctx();
+    let pools = open(&Place::Settings(SettingsSection::Pools), &mut ctx);
+    let mut shell = Shell::with(ctx, pools);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('a'));
+    pump(&mut shell, &mut connection).await;
+    for character in "Build team".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Tab);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Tab);
+    shell.key(Key::Enter);
+    let Some(Request::EditPool { change }) = shell.ctx.next_request() else {
+        panic!("Save sends the new pool");
+    };
+    let generation = shell.ctx.next_generation();
+    connection
+        .shell(ShellRequest::EditPool { change, generation })
+        .unwrap();
+    let deadline = Instant::now() + SETTLE_TIME;
+    while connection.poll_owner().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "the engine answered the save");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        saved_pools(&engine.global(), &project).len(),
+        1,
+        "the first save landed"
+    );
+
+    shell.arrive(crate::tui::seam::Arrival::PoolEdited(Err(
+        "pool_outcome_unknown".into(),
+    )));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+
+    assert_eq!(sent.first(), Some(&"edit pool"), "{sent:?}");
+    let saved = saved_pools(&engine.global(), &project);
+    assert_eq!(saved.len(), 1, "the retry adds no second pool: {saved:?}");
+    assert_eq!(saved[0].name.as_deref(), Some("Build team"));
+    assert_eq!(
+        shell.ctx.message().map(|m| m.lead.as_str()),
+        Some("Pool saved.")
+    );
+}
