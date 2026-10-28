@@ -7,7 +7,7 @@ use std::path::Path;
 #[cfg(all(test, unix))]
 mod tests;
 
-const KEYS: usize = 10;
+const KEYS: usize = 11;
 
 /// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
 /// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
@@ -16,10 +16,11 @@ const KEYS: usize = 10;
 /// refuses a folder an agent made look like a bare repository; and every key that names a
 /// program git runs and that git lets the environment force is forced off: fsmonitor, the
 /// ssh command, the pager, credential helpers, the signing programs and, last so the shim
-/// can leave it out for the project folder alone ([`shim_text`]), the hooks folder. The
-/// server's environment adds them after its allowlist.
+/// can leave it out for the project folder alone ([`shim_text`]), the hooks folder. A gc
+/// never prunes a worktree, since the IDE cannot read an agent worktree's `.git` and so
+/// sees it as missing (IN1-FN1). The server's environment adds them after its allowlist.
 pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "10"),
+    ("GIT_CONFIG_COUNT", "11"),
     ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
     ("GIT_CONFIG_VALUE_0", "all"),
     ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
@@ -38,13 +39,15 @@ pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
     ("GIT_CONFIG_VALUE_7", "false"),
     ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
     ("GIT_CONFIG_VALUE_8", "false"),
-    ("GIT_CONFIG_KEY_9", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_9", "/dev/null"),
+    ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
+    ("GIT_CONFIG_VALUE_9", "never"),
+    ("GIT_CONFIG_KEY_10", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_10", "/dev/null"),
 ];
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
 /// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
-const PROJECT_HOOKS_COUNT: &str = "9";
+const PROJECT_HOOKS_COUNT: &str = "10";
 
 /// The variable that ends git's search for a repository at the agents roots (INT1-1): git in
 /// an agent folder, whose `.git` the IDE sandbox cannot read, then finds no repository
@@ -96,8 +99,9 @@ pub const SHIM: &str = "git";
 /// `ls-remote` go to the built-in extension's forwarder, which the extension names in
 /// `CRAZYAGENT_IDE_GIT_NODE` and `CRAZYAGENT_IDE_GIT_FORWARD` and which hands them to the
 /// engine as `ide.git` (DEC-098 addendum 13); before the extension starts they fail with a
-/// plain message. Every other command runs the `git` on the server's PATH, as stock VS Code
-/// does.
+/// plain message. `worktree prune` and `worktree remove` are refused, since the IDE sees an
+/// agent worktree as missing and would drop it (IN1-FN1). Every other command runs the
+/// `git` on the server's PATH, as stock VS Code does.
 pub const SHIM_TEXT: &str = "#!/bin/sh\n\
 case \"$1\" in\n\
 push|pull|fetch|ls-remote)\n  \
@@ -106,6 +110,14 @@ exec \"$CRAZYAGENT_IDE_GIT_NODE\" \"$CRAZYAGENT_IDE_GIT_FORWARD\" \"$@\"\n  \
 fi\n  \
 echo \"fatal: CrazyAgent runs git $1 in its engine, and the IDE has not connected to it yet\" >&2\n  \
 exit 128\n  \
+;;\n\
+worktree)\n  \
+case \"$2\" in\n  \
+prune|remove)\n    \
+echo \"fatal: CrazyAgent keeps its agents' worktrees, so the IDE does not run git worktree $2\" >&2\n    \
+exit 128\n    \
+;;\n  \
+esac\n  \
 ;;\n\
 esac\n\
 exec git \"$@\"\n";
@@ -124,7 +136,7 @@ pub fn shim_text(project_hooks: Option<&Path>) -> Result<String, EngineError> {
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
         CONFIG_ENV[2 * KEYS - 1],
-        ("GIT_CONFIG_KEY_9", "core.hooksPath")
+        ("GIT_CONFIG_KEY_10", "core.hooksPath")
     );
     let Some(project) = project_hooks else {
         return Ok(SHIM_TEXT.to_owned());

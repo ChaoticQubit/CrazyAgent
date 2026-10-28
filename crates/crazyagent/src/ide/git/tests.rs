@@ -350,3 +350,118 @@ fn the_ceiling_stops_git_at_the_agents_roots_and_keeps_the_project() {
         );
     }
 }
+
+/// Makes a file look a year old. Input: the file. Output: none.
+fn age(path: &Path) {
+    let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - year)
+        .unwrap();
+}
+
+/// IN1-FN1: the IDE cannot read an agent worktree's `.git`, so its git sees the worktree as
+/// missing. Through the shim and the IDE's git configuration, `worktree prune` and
+/// `worktree remove` are refused and a gc keeps the worktree's registration, while git
+/// without them prunes it.
+#[test]
+fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    std::fs::create_dir(&project).unwrap();
+    ok(&project, &["init", "-q"]);
+    ok(&project, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let agents = project.join(".crazyagent").join("worktrees");
+    let (gone, kept) = (agents.join("agent-4"), agents.join("agent-5"));
+    for (agent, branch) in [(&gone, "agent-4"), (&kept, "agent-5")] {
+        ok(
+            &project,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                agent.to_str().unwrap(),
+            ],
+        );
+    }
+    let admin = project.join(".git").join("worktrees");
+    std::fs::remove_file(gone.join(".git")).unwrap();
+    age(&admin.join("agent-4").join("index"));
+    let shim = base.join("git");
+    std::fs::write(&shim, SHIM_TEXT).unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ide = |args: &[&str]| {
+        crate::spawn_gate::output(
+            Command::new(&shim)
+                .current_dir(&project)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &project)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let said = |output: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let dry = git(
+        &project,
+        &[],
+        &["worktree", "prune", "-n", "-v", "--expire=3.months.ago"],
+    );
+    assert!(said(&dry).contains("agent-4"), "{}", said(&dry));
+    for args in [
+        &["worktree", "prune"][..],
+        &["worktree", "prune", "-v", "--expire=now"],
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            "--force",
+            kept.to_str().unwrap(),
+        ],
+    ] {
+        let refused = ide(args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            said(&refused).contains("the IDE does not run git worktree"),
+            "{}",
+            said(&refused)
+        );
+    }
+    assert!(kept.join(".git").is_file());
+    let listed = ide(&["worktree", "list"]);
+    assert!(listed.status.success(), "{}", said(&listed));
+    assert_eq!(
+        String::from_utf8_lossy(&ide(&["config", "--get", "gc.worktreePruneExpire"]).stdout),
+        "never\n"
+    );
+    let collected = ide(&["gc", "-q"]);
+    assert!(collected.status.success(), "{}", said(&collected));
+    assert!(admin.join("agent-4").join("gitdir").is_file());
+    assert!(admin.join("agent-5").join("gitdir").is_file());
+
+    let open = git(&project, &[], &["gc", "-q"]);
+    assert!(open.status.success(), "{}", said(&open));
+    assert!(
+        !admin.join("agent-4").exists(),
+        "without it, gc prunes the worktree it sees as missing"
+    );
+    assert!(admin.join("agent-5").join("gitdir").is_file());
+}

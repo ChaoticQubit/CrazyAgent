@@ -945,3 +945,112 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     assert_eq!(setup(&agent, &["status", "--porcelain"]), "?? work.txt\n");
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }
+
+/// IN1-FN1 under the installed IDE profile: the IDE cannot read an agent worktree's `.git`,
+/// so git in the Project section sees the worktree as missing and a prune would drop its
+/// registration. Through the IDE's git, `worktree prune` and `worktree remove` are refused
+/// and a gc keeps the registration, while a dry-run prune by real git under the same
+/// profile lists the worktree for removal.
+#[test]
+fn ide_git_never_prunes_an_agent_worktree() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("project");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let agent = root.join(".crazyagent").join("worktrees").join("agent-4");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-4",
+            agent.to_str().unwrap(),
+        ],
+    );
+    let admin = root.join(".git").join("worktrees").join("agent-4");
+    let year = std::time::Duration::from_secs(365 * 24 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(admin.join("index"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - year)
+        .unwrap();
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+    let said = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let registered = || admin.join("gitdir").is_file() && agent.join(".git").is_file();
+
+    let dry = ide_git_output(
+        &profile,
+        Path::new(REAL_GIT),
+        &home,
+        &root,
+        &root,
+        &["worktree", "prune", "-n", "-v", "--expire=3.months.ago"],
+    );
+    assert!(
+        said(&dry).contains("agent-4"),
+        "the IDE sees the agent worktree as missing: {}",
+        said(&dry)
+    );
+    for args in [
+        &["worktree", "prune"][..],
+        &["worktree", "prune", "-v", "--expire=now"],
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            "--force",
+            agent.to_str().unwrap(),
+        ],
+    ] {
+        let refused = ide_git_output(&profile, &shim, &home, &root, &root, args);
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            said(&refused).contains("the IDE does not run git worktree"),
+            "{}",
+            said(&refused)
+        );
+        assert!(registered(), "{args:?}");
+    }
+    let collected = ide_git_output(&profile, &shim, &home, &root, &root, &["gc", "-q"]);
+    assert!(collected.status.success(), "{}", said(&collected));
+    assert!(registered(), "a gc in the IDE keeps the agent worktree");
+    assert_eq!(setup(&agent, &["status", "--porcelain"]), "");
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
