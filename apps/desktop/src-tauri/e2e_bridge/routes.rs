@@ -573,13 +573,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 turn_secs: Option<u32>,
                 session_secs: Option<u32>,
                 idle_secs: Option<u32>,
+                revision: u64,
                 generation: u64,
             }
-            let Args { id, turn_secs, session_secs, idle_secs, generation } = match parse(args) {
+            let Args { id, turn_secs, session_secs, idle_secs, revision, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_time_limits( &id, turn_secs, session_secs, idle_secs, revision, generation, ) .await }.await;
             routed(result)
         }
         "desktop_team_on_harness_switch" => {
@@ -588,13 +589,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: String,
                 mode: String,
+                revision: u64,
                 generation: u64,
             }
-            let Args { id, mode, generation } = match parse(args) {
+            let Args { id, mode, revision, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .team_on_harness_switch(&id, &mode, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_on_harness_switch(&id, &mode, revision, generation) .await }.await;
             routed(result)
         }
         "desktop_team_finished_agents" => {

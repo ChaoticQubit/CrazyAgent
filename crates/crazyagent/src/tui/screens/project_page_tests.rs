@@ -2049,3 +2049,82 @@ async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
     let line = header(&mut shell);
     assert!(!line.contains("in Changes"), "{line}");
 }
+
+async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs: u32) {
+    let client = Client::new(
+        engine.root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut desktop) = OwnerController::attach_configured(client, OwnerClientKind::Desktop)
+        .await
+        .unwrap();
+    let read = desktop.team_status(project.clone()).await.unwrap();
+    let action = crate::team::TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs: read.turn_limit_secs,
+        session_secs: Some(session_secs),
+        idle_secs: read.idle_stop_secs,
+        revision: read.settings_revision,
+    };
+    match desktop.team_action(action, 1).await.unwrap() {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            assert_eq!(
+                operation.result,
+                crate::engine::owner::OwnerResult::Applied,
+                "the desktop change from its own read applies"
+            )
+        }
+        other => panic!("desktop team change not applied: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desktop_value_stays() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::TeamSettings {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("t Task limit"), "{shown}");
+
+    desktop_time_limits(&engine, &notes, 7200).await;
+
+    shell.key(Key::Char('t'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"team change"), "{sent:?}");
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (None, Some(7200)),
+        "the TUI change from the old read must not revert the desktop session limit"
+    );
+    assert!(
+        sent.contains(&"team"),
+        "a refused change reads the team again: {sent:?}"
+    );
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("These settings changed elsewhere."),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('t'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"team change"), "{sent:?}");
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (Some(1800), Some(7200)),
+        "a change from the fresh read applies and keeps the desktop session limit"
+    );
+}

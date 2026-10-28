@@ -3408,6 +3408,7 @@ fn with_the_task_limit_off_a_turn_runs_past_where_a_limit_would_stop_it() {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: Some(crate::team::IDLE_STOP_DEFAULT_SECS),
+                revision: 0,
             },
             hand_off(&fixture, "Write page.md"),
         ],
@@ -3567,6 +3568,7 @@ fn an_idle_sub_agent_is_stopped_by_the_idle_setting_and_never_while_it_is_off() 
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
+                revision: 0,
             },
             hand_off(&fixture, "Write page.md"),
         ],
@@ -4308,6 +4310,7 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
             &crate::team::TeamAction::OnHarnessSwitch {
                 project_id: project.clone(),
                 mode: crate::team::SwitchMode::Fresh,
+                revision: 0,
             },
         )
         .unwrap(),
@@ -5138,6 +5141,7 @@ fn idle_sub_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
+                revision: 0,
             },
             hand_off(fixture, "Write page.md"),
         ],
