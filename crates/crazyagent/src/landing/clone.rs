@@ -1,5 +1,5 @@
 use super::flow::{bounded_read, set_engine_ref};
-use super::git::{Repo, failure};
+use super::git::{LISTING_BYTES_MAX, Repo, failure};
 use crate::agent_git;
 use crate::engine::EngineError;
 use crate::worktrees::TreeBounds;
@@ -9,6 +9,8 @@ use std::path::Path;
 const FETCH_OUTPUT_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: u64 = 512;
 const ALTERNATES_BYTES_MAX: usize = 4096;
+const REDIRECTS: [&str; 5] = [".git", "commondir", "shallow", "info/grafts", "../.git.git"];
+const PACK_EXTENSIONS: [&str; 7] = ["pack", "idx", "rev", "keep", "promisor", "mtimes", "bitmap"];
 
 fn invalid() -> EngineError {
     failure("changes_workspace_invalid")
@@ -108,12 +110,19 @@ fn alternate_line(repository: &Path) -> Option<String> {
 /// files and the project's store (DEC102-F1, AL-1): its git, object, info and pack folders
 /// are real folders, its alternates file is a plain file with one link holding exactly the
 /// line `add` wrote, it has no HTTP alternates, and every pack file and loose object is a
-/// plain file with one link, never a link into another store. The Own branch sandbox keeps
-/// the agent from changing these while the fetch runs. Those files also bound what the
-/// fetch can carry into the project (DEC102-F2): at most `bounds.files` of them, of at most
-/// `bounds.bytes` together, objects the project already has included until the agent's git
-/// repacks them away. Inputs: the owner checkout root, the clone's git folder and the
-/// bounds. Output: Ok, else `changes_workspace_invalid` or `changes_too_large`.
+/// plain file with one link, never a link into another store. Nothing in its git folder
+/// names another repository, store or history (`REDIRECTS`): no nested `.git`, which git
+/// would serve in its place, no `.git.git` beside it, which git serves when the git folder
+/// fails its repository test, no `commondir`, which moves its objects and refs elsewhere,
+/// and no `shallow` or `info/grafts` file, which rewrite the history it serves. Its pack
+/// folder holds only git's own `pack-<id>` files (`pack_file`), never a `multi-pack-index`
+/// that could name a pack outside it (RL-2). The Own
+/// branch sandbox keeps the agent from changing these while the fetch runs. Those files also
+/// bound what the fetch can carry into the project (DEC102-F2): at most `bounds.files` of
+/// them, of at most `bounds.bytes` together, objects the project already has included until
+/// the agent's git repacks them away. Inputs: the owner checkout root, the clone's git
+/// folder and the bounds. Output: Ok, else `changes_workspace_invalid` or
+/// `changes_too_large`.
 fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
     let objects = git_dir.join("objects");
     let info = objects.join("info");
@@ -129,10 +138,16 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
         || std::fs::symlink_metadata(info.join("http-alternates")).is_ok()
         || !single
         || bounded_read(&alternates, ALTERNATES_BYTES_MAX)? != line.as_bytes()
+        || REDIRECTS.iter().any(|name| {
+            !matches!(
+                std::fs::symlink_metadata(git_dir.join(name)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound
+            )
+        })
     {
         return Err(invalid());
     }
-    let mut stored = vec![pack];
+    let mut stored = vec![pack.clone()];
     for entry in std::fs::read_dir(&objects).map_err(|_| invalid())? {
         let entry = entry.map_err(|_| invalid())?;
         let fanout = entry.file_name().to_str().is_some_and(|name| {
@@ -148,10 +163,12 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
             return Err(invalid());
         }
         for entry in std::fs::read_dir(held).map_err(|_| invalid())? {
-            let found = entry
-                .and_then(|entry| std::fs::symlink_metadata(entry.path()))
-                .map_err(|_| invalid())?;
-            if !found.is_file() || found.nlink() != 1 {
+            let entry = entry.map_err(|_| invalid())?;
+            let found = std::fs::symlink_metadata(entry.path()).map_err(|_| invalid())?;
+            if !found.is_file()
+                || found.nlink() != 1
+                || (*held == pack && !pack_file(&entry.file_name()))
+            {
                 return Err(invalid());
             }
             files += 1;
@@ -164,6 +181,62 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
     Ok(())
 }
 
+/// Tells whether a name in the clone's pack folder is one of git's own pack files:
+/// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`. Input: the
+/// file name. Output: the answer; a `multi-pack-index` or any other name is not one.
+fn pack_file(name: &std::ffi::OsStr) -> bool {
+    let Some((id, extension)) = name
+        .to_str()
+        .and_then(|name| name.strip_prefix("pack-"))
+        .and_then(|rest| rest.split_once('.'))
+    else {
+        return false;
+    };
+    matches!(id.len(), 40 | 64)
+        && id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        && PACK_EXTENSIONS.contains(&extension)
+}
+
+/// Checks that the clone's own config reads nothing from outside the clone (DEC102-F1): no
+/// `include` or `includeIf` path, no `extensions.*` key, such as `worktreeConfig`,
+/// `refStorage` or `partialClone`, and no promisor remote, from which git would fetch an
+/// object the clone lacks. Git lists the key names of the config file alone, never
+/// following its includes. Inputs: the owner repository and the clone's git folder.
+/// Output: Ok, else `changes_workspace_invalid`.
+fn check_config(shared: &Repo, git_dir: &Path) -> Result<(), EngineError> {
+    let config = git_dir.join("config");
+    let path = config.to_str().ok_or_else(invalid)?;
+    if !std::fs::symlink_metadata(&config).is_ok_and(|found| found.is_file()) {
+        return Err(invalid());
+    }
+    let listed = shared.exec(
+        &[
+            "config",
+            "--file",
+            path,
+            "--no-includes",
+            "--list",
+            "--name-only",
+            "-z",
+        ],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    let reaches_out = listed.stdout.split(|byte| *byte == 0).any(|key| {
+        key.starts_with(b"include.")
+            || key.starts_with(b"includeif.")
+            || key.starts_with(b"extensions.")
+            || (key.starts_with(b"remote.") && key.ends_with(b".promisor"))
+    });
+    if listed.code != 0 || listed.overflow || reaches_out {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// Copies an agent's branch from its own clone into the owner repository under an
 /// incoming ref of this fetch alone and reads its tip, then drops that ref, so fetches of
 /// one clone never meet on a ref and need no repository hold. Git's upload-pack serves the
@@ -171,8 +244,12 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
 /// repository's fetch hashes every object it receives again and checks it with fsck, so a
 /// planted or mislabelled object in the clone is refused rather than stored. Nothing in
 /// the clone is written and no owner branch moves. The clone's object store is checked
-/// and measured first (`check_store`), so git never reads objects from a store the agent
-/// named or linked in, nor carries more than the bounds allow. Inputs: the owner
+/// and measured first (`check_store`) and its config listed (`check_config`), so git never
+/// reads objects from a store the agent named or linked in, nor carries more than the bounds
+/// allow. Upload-pack runs `--strict`, so it serves that git folder itself and never a
+/// `.git` inside it or a `.git.git` beside it, even one made after the checks (RL-1), and
+/// with lazy fetching off, so it never asks
+/// a promisor remote for an object. Inputs: the owner
 /// repository opened for object work, its root, the agent's worktree and the bounds.
 /// Output: the tip, else `changes_workspace_invalid` for a clone that is not a real folder
 /// or whose store reaches elsewhere, `changes_too_large` past the bounds or
@@ -193,6 +270,7 @@ pub(super) fn fetch(
         return Err(invalid());
     }
     check_store(repository, &source, bounds)?;
+    check_config(shared, &source)?;
     let source = source.to_str().ok_or_else(invalid)?;
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| failure("changes_unavailable"))?;
@@ -213,6 +291,7 @@ pub(super) fn fetch(
             "--no-recurse-submodules",
             "--no-write-fetch-head",
             "--no-auto-maintenance",
+            "--upload-pack=git-upload-pack --strict",
             "--end-of-options",
             source,
             &refspec,
