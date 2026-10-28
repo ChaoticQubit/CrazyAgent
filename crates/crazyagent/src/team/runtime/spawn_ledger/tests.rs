@@ -314,6 +314,47 @@ fn worktree_create_interrupted_is_completed_or_cleaned_never_duplicated() {
     assert!(case.worktree(foreign).join("notes.txt").is_file());
 }
 
+/// A worktree `.git` pointer or a `.git/worktrees` entry `gitdir` that is a link is never
+/// read through (VS-1): a pointer link that names the agent's own entry leaves the
+/// worktree as foreign, and an entry whose `gitdir` link points back is never taken for the
+/// worktree's entry, so neither the folder, the entry nor the link targets are removed.
+#[test]
+fn a_worktree_pointer_reached_through_a_link_is_never_read() {
+    let case = Case::new();
+    let id = case.agent();
+    let worktree = case.worktree(id);
+    let entry = case
+        .repo
+        .join(".git")
+        .join("worktrees")
+        .join(format!("agent-{id}"));
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::create_dir_all(&entry).unwrap();
+    let back = case.base.join("gitdir");
+    std::fs::write(&back, format!("{}\n", worktree.join(".git").display())).unwrap();
+    let pointer = case.base.join("pointer");
+    std::fs::write(&pointer, format!("gitdir: {}\n", entry.display())).unwrap();
+    std::os::unix::fs::symlink(&pointer, worktree.join(".git")).unwrap();
+    std::os::unix::fs::symlink(&back, entry.join("gitdir")).unwrap();
+    let intent = WorktreeIntent {
+        team_agent: id,
+        repository: case.repo.clone(),
+        worktree: worktree.clone(),
+        unknown: false,
+    };
+    assert_eq!(remove(&intent), Err("team_worktree_foreign"));
+    assert!(worktree.join(".git").is_symlink());
+    assert!(pointer.is_file());
+
+    std::fs::remove_dir_all(&worktree).unwrap();
+    assert_eq!(remove(&intent), Ok(()));
+    assert!(
+        entry.join("gitdir").is_symlink(),
+        "an entry whose gitdir is a link is never taken as the worktree's own"
+    );
+    assert!(back.is_file());
+}
+
 #[test]
 #[should_panic(expected = "an agent worktree sits at worktrees/agent-<id> in its checkout")]
 fn a_worktree_outside_its_agent_folder_is_never_recorded() {
