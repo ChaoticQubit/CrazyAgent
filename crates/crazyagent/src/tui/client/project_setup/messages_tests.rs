@@ -18,7 +18,7 @@ fn press(code: KeyCode) -> KeyEvent {
 }
 
 fn texts(view: &TeamView, width: usize) -> Vec<String> {
-    let (rows, _) = view.rows(width, 30, &[], &Look::plain());
+    let (rows, _, _) = view.draw(width, 30, &[], &Look::plain());
     rows.iter()
         .map(|row| row.0.iter().map(|span| span.content.as_ref()).collect())
         .collect()

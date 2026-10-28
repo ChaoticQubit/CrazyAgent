@@ -6494,6 +6494,7 @@ fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_a
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
+                revision: 0,
             },
             hand_off(&fixture, "Write a.md"),
             hand_off(&fixture, "Write b.md"),
@@ -6568,6 +6569,7 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
         &[crate::team::TeamAction::OnHarnessSwitch {
             project_id: project.clone(),
             mode: crate::team::SwitchMode::Fresh,
+            revision: 0,
         }],
     );
     switch_session(&fixture.connection, "s-one");
