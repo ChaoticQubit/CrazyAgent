@@ -603,19 +603,21 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_leftover_that_runs_a_new_program_after_the_snapshot_is_still_named() {
-        use std::os::unix::process::CommandExt;
         let folder = tempfile::tempdir().unwrap();
         let mut leader = crate::spawn_gate::spawn(
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
+            std::process::Command::new("/usr/bin/perl")
+                .args([
+                    "-mPOSIX",
+                    "-e",
+                    "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1",
+                ])
                 .arg(
                     "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"child.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 1; exec \"/bin/sleep\", \"30\"' < /dev/null > /dev/null 2>&1 & exec /bin/sleep 30",
                 )
                 .current_dir(folder.path())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .process_group(0),
+                .stderr(std::process::Stdio::null()),
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
