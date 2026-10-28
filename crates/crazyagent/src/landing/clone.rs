@@ -11,6 +11,17 @@ const HEAD_BYTES_MAX: u64 = 512;
 const ALTERNATES_BYTES_MAX: usize = 4096;
 const REDIRECTS: [&str; 5] = [".git", "commondir", "shallow", "info/grafts", "../.git.git"];
 const PACK_EXTENSIONS: [&str; 7] = ["pack", "idx", "rev", "keep", "promisor", "mtimes", "bitmap"];
+const TEMP_KINDS: [&str; 5] = ["pack", "idx", "rev", "mtimes", "bitmap"];
+const TEMP_SUFFIX_LEN: usize = 6;
+
+#[cfg(test)]
+thread_local! {
+    /// A step a landing test runs on the clone's git folder after `fetch` checked it and
+    /// before git serves it, standing in for an agent that changes its clone in between.
+    /// None runs nothing.
+    pub(super) static BETWEEN_CHECK_AND_FETCH: std::cell::Cell<Option<fn(&Path)>> =
+        const { std::cell::Cell::new(None) };
+}
 
 fn invalid() -> EngineError {
     failure("changes_workspace_invalid")
@@ -85,6 +96,7 @@ fn fill(
     std::fs::create_dir_all(&info)
         .and_then(|()| std::fs::write(info.join("alternates"), line))
         .map_err(|_| failure("changes_git_failed"))?;
+    store_folders(worktree)?;
     clone.run(&["update-ref", &format!("refs/heads/{branch}"), head])?;
     clone.run(&["read-tree", "-u", "--reset", head])?;
     clone.run(&["update-index", "-q", "--refresh"])?;
@@ -94,6 +106,29 @@ fn fill(
     let pointer = std::fs::read(git_dir.join("HEAD")).map_err(|_| failure("changes_git_failed"))?;
     assert_eq!(pointer, format!("ref: refs/heads/{branch}\n").as_bytes());
     assert_eq!(clone.commit_of("HEAD")?.as_deref(), Some(head));
+    Ok(())
+}
+
+/// Makes the clone's pack folder and its 256 loose-object folders `00` to `ff` where any is
+/// missing (RL-3), so the Own branch sandbox can deny creating, moving or replacing them
+/// while the agent's git still writes objects inside. Each is made in the clone's object
+/// folder opened without following a link at the worktree, `.git` or `objects`, so a link
+/// the agent put there is refused, not followed; an entry already there is left for
+/// `check_store`. Input: the worktree. Output: Ok, else `changes_workspace_invalid`.
+pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
+    use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let git = openat(&root, ".git", flags, Mode::empty()).map_err(|_| invalid())?;
+    let objects = openat(&git, "objects", flags, Mode::empty()).map_err(|_| invalid())?;
+    let names =
+        std::iter::once("pack".to_owned()).chain((0..=u8::MAX).map(|byte| format!("{byte:02x}")));
+    for name in names {
+        match mkdirat(&objects, name.as_str(), Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(invalid()),
+        }
+    }
     Ok(())
 }
 
@@ -115,8 +150,8 @@ fn alternate_line(repository: &Path) -> Option<String> {
 /// would serve in its place, no `.git.git` beside it, which git serves when the git folder
 /// fails its repository test, no `commondir`, which moves its objects and refs elsewhere,
 /// and no `shallow` or `info/grafts` file, which rewrite the history it serves. Its pack
-/// folder holds only git's own `pack-<id>` files (`pack_file`), never a `multi-pack-index`
-/// that could name a pack outside it (RL-2). The Own
+/// folder holds only git's own `pack-<id>` and temp files (`pack_file`), never a
+/// `multi-pack-index` that could name a pack outside it (RL-2). The Own
 /// branch sandbox keeps the agent from changing these while the fetch runs. Those files also
 /// bound what the fetch can carry into the project (DEC102-F2): at most `bounds.files` of
 /// them, of at most `bounds.bytes` together, objects the project already has included until
@@ -182,12 +217,24 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
 }
 
 /// Tells whether a name in the clone's pack folder is one of git's own pack files:
-/// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`. Input: the
-/// file name. Output: the answer; a `multi-pack-index` or any other name is not one.
+/// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`, or a temp
+/// file an interrupted git command left, `tmp_<kind>_` and six letters or digits, which
+/// git never reads as a pack since only names ending in `.idx` are. Input: the file name.
+/// Output: the answer; a `multi-pack-index` or any other name is not one.
 fn pack_file(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    if let Some((kind, suffix)) = name
+        .strip_prefix("tmp_")
+        .and_then(|rest| rest.split_once('_'))
+    {
+        return TEMP_KINDS.contains(&kind)
+            && suffix.len() == TEMP_SUFFIX_LEN
+            && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    }
     let Some((id, extension)) = name
-        .to_str()
-        .and_then(|name| name.strip_prefix("pack-"))
+        .strip_prefix("pack-")
         .and_then(|rest| rest.split_once('.'))
     else {
         return false;
@@ -271,6 +318,10 @@ pub(super) fn fetch(
     }
     check_store(repository, &source, bounds)?;
     check_config(shared, &source)?;
+    #[cfg(test)]
+    if let Some(step) = BETWEEN_CHECK_AND_FETCH.get() {
+        step(&source);
+    }
     let source = source.to_str().ok_or_else(invalid)?;
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| failure("changes_unavailable"))?;
