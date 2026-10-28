@@ -338,6 +338,34 @@ pub trait Screen {
     fn place(&self) -> Option<Place> {
         None
     }
+
+    /// The project this screen belongs to, so the header can tell that project's waiting
+    /// change sets from the rest. Input: none. Output: the project of `place`, or None
+    /// outside a project.
+    fn project(&self) -> Option<ProjectId> {
+        match self.place()? {
+            Place::Project { id, .. }
+            | Place::Team { id, .. }
+            | Place::TeamSettings { id, .. }
+            | Place::Master { id, .. }
+            | Place::ProjectProcess { id, .. } => Some(id),
+            Place::Onboarding { project, .. } => project,
+            Place::Home
+            | Place::Welcome
+            | Place::Settings(_)
+            | Place::AddAccount
+            | Place::NewPool
+            | Place::NewPoolFrom(_)
+            | Place::EditPool(_)
+            | Place::NewProject
+            | Place::Setup { .. }
+            | Place::HomeFolder { .. }
+            | Place::AddProject
+            | Place::AddFolder
+            | Place::CloneRepo
+            | Place::Usage => None,
+        }
+    }
 }
 
 /// Builds the screen for a place.

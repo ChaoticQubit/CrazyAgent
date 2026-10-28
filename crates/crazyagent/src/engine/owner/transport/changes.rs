@@ -1,6 +1,7 @@
 use super::*;
 use crate::landing::{
     self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX, MESSAGE_BYTES_MAX,
+    WaitingChanges,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -85,7 +86,10 @@ enum Action {
     Update {
         id: ChangeSetId,
     },
-    Waiting,
+    Waiting {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -101,7 +105,7 @@ enum Reply {
     Diff { diff: ChangeDiff },
     Accepted { outcome: AcceptOutcome },
     Discarded { restorable_until_ms: u64 },
-    Waiting { count: u32 },
+    Waiting { waiting: WaitingChanges },
     Done,
     Rejected { code: String },
 }
@@ -145,10 +149,21 @@ impl OwnerClient {
     }
 
     /// Counts the change sets waiting for the owner, ready to review or conflicting, across
-    /// the projects the engine has. Output: the count.
-    pub async fn waiting_changes(&self) -> Result<u32, EngineError> {
-        match self.changes_exchange(Action::Waiting).await? {
-            Reply::Waiting { count } => Ok(count),
+    /// the projects the engine has, and the given project's among them. Input: the project,
+    /// if any. Output: both counts; a reply whose project count is missing, unasked or above
+    /// the total is refused.
+    pub async fn waiting_changes(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<WaitingChanges, EngineError> {
+        let asked = project.is_some();
+        match self.changes_exchange(Action::Waiting { project }).await? {
+            Reply::Waiting { waiting }
+                if waiting.here.is_some() == asked
+                    && waiting.here.is_none_or(|here| here <= waiting.all) =>
+            {
+                Ok(waiting)
+            }
             _ => Err(unknown()),
         }
     }
@@ -346,7 +361,7 @@ async fn prepare(
     let root = engine_root(authority)?;
     if !matches!(
         action,
-        Action::List { .. } | Action::Diff { .. } | Action::Waiting
+        Action::List { .. } | Action::Diff { .. } | Action::Waiting { .. }
     ) {
         return Ok(Prepared::Change(root, action));
     }
@@ -429,9 +444,9 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             },
             false,
         ),
-        Action::Waiting => (
+        Action::Waiting { project } => (
             Reply::Waiting {
-                count: landing::waiting(&db)?,
+                waiting: landing::waiting(&db, project.as_ref())?,
             },
             false,
         ),

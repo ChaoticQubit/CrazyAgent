@@ -60,7 +60,10 @@ pub struct Store {
     pub memory: Load<usize>,
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
-    pub waiting: Option<u32>,
+    pub waiting: Option<(
+        Option<crate::protocol::ProjectId>,
+        crate::landing::WaitingChanges,
+    )>,
 }
 
 impl Default for Store {
