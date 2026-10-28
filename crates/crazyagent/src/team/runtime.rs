@@ -468,6 +468,9 @@ impl TeamRuntime {
                     Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                     Err(problem) => return Err(problem.into()),
                 }
+                if let Some(record) = records.get(&id) {
+                    record.remove_context_files();
+                }
                 self.closed_note(id, &reason)?;
             }
         }
@@ -3864,11 +3867,13 @@ fn live_adopted(
         Next::Turn(_, Some(grant)) => grant,
         Next::Turn(_, None) => {
             let _ = host.kill(&agent);
+            record.remove_context_files();
             return Some("The live master was taken over without its signed-in account".into());
         }
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
                 let _ = host.kill(&agent);
+                record.remove_context_files();
             }
             return None;
         }
@@ -3879,6 +3884,7 @@ fn live_adopted(
             Ok(credential) => credential,
             Err(problem) => {
                 let _ = host.kill(&agent);
+                record.remove_context_files();
                 return Some(with_code(
                     "The signed-in account could not reach the agent",
                     Some(&problem.0),

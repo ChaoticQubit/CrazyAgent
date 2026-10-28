@@ -7,6 +7,7 @@ use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
@@ -86,13 +87,23 @@ struct Process {
 }
 
 /// The files one launch wrote into its agent home, and the lock that keeps a second launch
-/// out of that home. Dropping it deletes every file holding a secret and the copied skills.
+/// out of that home. Dropping it deletes every file holding a secret and the copied skills,
+/// unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
-    removals: Vec<PathBuf>,
-    copies: Option<PathBuf>,
+    files: Option<InstalledFiles>,
     _lock: File,
+}
+
+/// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
+/// the pane later deletes them when the pane stops: the agent home, and whether the launch
+/// was for Codex, which also writes `config.toml` and the skill copies there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledFiles {
+    pub home: PathBuf,
+    pub codex: bool,
 }
 
 struct Budget {
@@ -393,8 +404,10 @@ impl AgentContext {
         let state = home.join(STATE);
         let mut installed = Installed {
             arguments: Vec::new(),
-            removals: vec![state.clone()],
-            copies: None,
+            files: Some(InstalledFiles {
+                home: home.to_path_buf(),
+                codex: id == "codex",
+            }),
             _lock: lock,
         };
         remove(&state);
@@ -420,8 +433,6 @@ impl AgentContext {
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
-            installed.removals.push(config.clone());
-            installed.copies = Some(home.to_path_buf());
             remove_copies(home);
             if skills {
                 directory(&home.join("skills"), false)?;
@@ -472,7 +483,9 @@ impl AgentContext {
                 instructions.into_os_string(),
             ]);
         }
-        assert!(installed.removals.iter().all(|path| path.starts_with(home)));
+        assert!(installed.files.as_ref().is_some_and(|files| {
+            files.home == home && files.removals().iter().all(|path| path.starts_with(home))
+        }));
         assert!(installed.arguments.len() <= 6);
         Ok(installed)
     }
@@ -505,6 +518,43 @@ impl Installed {
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
     }
+
+    /// Names where this launch wrote its files, for the record of a pane that may outlive
+    /// the engine. Output: the files, none once `keep` left them to the pane.
+    pub fn files(&self) -> Option<&InstalledFiles> {
+        self.files.as_ref()
+    }
+
+    /// Takes over the files an earlier engine's launch left for a pane that still runs, so
+    /// they are deleted when the adopted pane stops. Input: the files from the pane record.
+    /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
+    /// private agent home, or `launch_home_busy` while another launch uses it.
+    pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
+        crate::harnesses::launch::validate_home(&files.home)?;
+        let lock = lock(&files.home)?;
+        Ok(Self {
+            arguments: Vec::new(),
+            files: Some(files.clone()),
+            _lock: lock,
+        })
+    }
+
+    /// Releases the home lock but leaves the files to a pane kept running as the engine
+    /// quits; a later engine adopts them from the pane record. Takes the guard.
+    pub fn keep(mut self) {
+        self.files = None;
+    }
+}
+
+impl InstalledFiles {
+    /// Lists the generated file and folder paths a launch deletes, all inside its home.
+    fn removals(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.home.join(STATE)];
+        if self.codex {
+            paths.push(self.home.join("config.toml"));
+        }
+        paths
+    }
 }
 
 impl Drop for Installed {
@@ -512,11 +562,13 @@ impl Drop for Installed {
     /// description, so a process that shares it, such as a child another thread is
     /// starting, can never keep the home busy after the launch ends.
     fn drop(&mut self) {
-        for path in &self.removals {
-            remove(path);
-        }
-        if let Some(home) = &self.copies {
-            remove_copies(home);
+        if let Some(files) = &self.files {
+            for path in files.removals() {
+                remove(&path);
+            }
+            if files.codex {
+                remove_copies(&files.home);
+            }
         }
         #[cfg(unix)]
         let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);

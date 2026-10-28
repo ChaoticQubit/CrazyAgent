@@ -225,7 +225,11 @@ impl TerminalSession {
                 pane.pid,
                 key.as_ref().map(|key| key.0.as_path()),
             )
-            .map(|record| PaneRecord { resumed, ..record }),
+            .map(|record| PaneRecord {
+                resumed,
+                context: installed.as_ref().and_then(Installed::files).cloned(),
+                ..record
+            }),
             _key: key,
             _context: installed,
             _relay: relay,
