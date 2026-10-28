@@ -20,6 +20,10 @@ const KEY: &str = "sk-stand-in-5521";
 const STAND_IN: &str = "#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 const SLOW_STAND_IN: &str = "#!/bin/sh\nprintf 'stand-in starting\\n'\n/bin/sleep 3\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 const SERVER_STAND_IN: &str = "#!/bin/sh\n(trap '' HUP TERM; exec /bin/sleep 300) < /dev/null > /dev/null 2>&1 &\necho $! > \"$HOME/server.pid\"\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+const SESSION_SERVER_STAND_IN: &str = "#!/bin/sh\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid() > 0 or die; $SIG{HUP} = $SIG{TERM} = \"IGNORE\"; open(my $out, \">\", \"$ENV{HOME}/server.pid.new\") or die; print $out \"$$\\n\"; close($out) or die; rename(\"$ENV{HOME}/server.pid.new\", \"$ENV{HOME}/server.pid\") or die; exec \"/bin/sleep\", \"300\"' < /dev/null > /dev/null 2>&1 &\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+const ALLOW_ALL: &str = "(version 1)\n(allow default)\n";
+const CONFINED: &str =
+    "(version 1)\n(allow default)\n(deny signal)\n(allow signal (target same-sandbox))\n";
 const EXITING_SERVER_STAND_IN: &str = "#!/bin/sh\n(trap '' HUP TERM; exec /bin/sleep 300) < /dev/null > /dev/null 2>&1 &\necho $! > \"$HOME/server.pid\"\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\n/bin/sleep 3\n";
 
 struct Server {
@@ -237,8 +241,8 @@ struct StandIn {
 }
 
 /// Starts `script` as a stand-in Claude Code in a pane named `name` of a fresh tmux server,
-/// under a sandbox profile that allows everything. Output: the running stand-in.
-fn stand_in(script: &str, name: &str) -> StandIn {
+/// under the sandbox profile text `profile_text`. Output: the running stand-in.
+fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -262,7 +266,7 @@ fn stand_in(script: &str, name: &str) -> StandIn {
     std::fs::write(&executable, script).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
     let profile = root_path.join("agent.sb");
-    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    std::fs::write(&profile, profile_text).unwrap();
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -293,6 +297,14 @@ fn stand_in(script: &str, name: &str) -> StandIn {
 /// Waits for the pid a stand-in wrote for the background process it started and checks
 /// that process runs in the pane's process group. Takes the home and the group.
 fn background(home: &Path, group: Pid) -> Pid {
+    let server = written_pid(home);
+    assert_eq!(getpgid(Some(server)).unwrap(), group);
+    server
+}
+
+/// Waits for the pid a stand-in wrote for the background process it started and checks
+/// that process runs. Takes the home. Output: the pid.
+fn written_pid(home: &Path) -> Pid {
     let written = home.join("server.pid");
     assert!(
         within(Duration::from_secs(15), || {
@@ -308,7 +320,6 @@ fn background(home: &Path, group: Pid) -> Pid {
         .and_then(Pid::from_raw)
         .unwrap();
     assert!(test_kill_process(server).is_ok());
-    assert_eq!(getpgid(Some(server)).unwrap(), group);
     server
 }
 
@@ -317,7 +328,7 @@ fn background(home: &Path, group: Pid) -> Pid {
 /// ended when the session stops, so no agent process outlives the run that started it.
 #[test]
 fn stopping_a_pane_session_ends_every_process_left_in_its_group() {
-    let pane = stand_in(SERVER_STAND_IN, "stand-in-3");
+    let pane = stand_in(SERVER_STAND_IN, "stand-in-3", ALLOW_ALL);
     let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
     let server = background(&pane.home, group);
 
@@ -338,7 +349,7 @@ fn stopping_a_pane_session_ends_every_process_left_in_its_group() {
 /// stop reports the cleanup uncertain instead of a confirmed stop while that group runs.
 #[test]
 fn a_pane_gone_unseen_reports_its_surviving_group_uncertain_without_killing_it() {
-    let pane = stand_in(EXITING_SERVER_STAND_IN, "stand-in-4");
+    let pane = stand_in(EXITING_SERVER_STAND_IN, "stand-in-4", ALLOW_ALL);
     let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
     let server = background(&pane.home, group);
     assert!(
@@ -363,4 +374,32 @@ fn a_pane_gone_unseen_reports_its_surviving_group_uncertain_without_killing_it()
         survived,
         "a stop killed a group its pane id was no longer proven to name"
     );
+}
+
+/// PR-1 (rv-code pre-review of RV-DS-75): a pane agent whose tool starts a process in a
+/// session of its own, as Claude Code runs every tool command, has that process ended when
+/// the session stops, and the stop confirms only once it is gone.
+#[test]
+fn stopping_a_pane_session_ends_what_its_tools_started_in_their_own_sessions() {
+    let pane = stand_in(SESSION_SERVER_STAND_IN, "stand-in-5", CONFINED);
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+    let server = written_pid(&pane.home);
+    assert_ne!(getpgid(Some(server)).unwrap(), group);
+
+    let stopped = pane.session.stop();
+    let ended = within(Duration::from_secs(10), || {
+        test_kill_process(server).is_err()
+    });
+    if !ended {
+        let _ = kill_process(server, Signal::KILL);
+    }
+    assert!(
+        ended || stopped.is_err(),
+        "a process the pane agent started in its own session outlived a stop reported as confirmed"
+    );
+    assert!(
+        ended,
+        "a process the pane agent started in its own session outlived the stop"
+    );
+    assert_eq!(stopped, Ok(None));
 }

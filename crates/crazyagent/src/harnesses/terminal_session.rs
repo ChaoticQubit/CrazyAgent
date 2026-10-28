@@ -24,6 +24,10 @@ const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const GROUP_FRESH: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const KEEPER_WAIT: Duration = Duration::from_secs(6);
+#[cfg(target_os = "macos")]
+const KEEPER_POLL: Duration = Duration::from_millis(50);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
@@ -176,6 +180,12 @@ impl TerminalSession {
                 resume: resume.is_some(),
             },
         )?;
+        #[cfg(target_os = "macos")]
+        let command = interactive::InteractiveCommand {
+            argv: crate::sandbox::kept_pane(command.argv)
+                .ok_or_else(|| failure("launch_sandbox_required"))?,
+            ..command
+        };
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
         }
@@ -370,11 +380,13 @@ impl TerminalSession {
         }
     }
 
-    /// Ends the pane, then every process its harness left in the pane's process group, as a
-    /// dev server started in the background, then removes the key file and the generated
-    /// context. A process that left the group is not found: a pane has no warden. Output:
-    /// none, since a pane reports no exit code, or `harness_cleanup_uncertain` when the group
-    /// outlived the wait or was found by an id no longer proven to be this pane's.
+    /// Ends the pane and every process its harness started, then removes the key file and
+    /// the generated context. On macOS the pane's keeper first has the run's warden kill every
+    /// process in the sandbox, sessions of their own included; then every process left in the
+    /// pane's process group is killed, as a dev server started in the background. Output:
+    /// none, since a pane reports no exit code, or `harness_cleanup_uncertain` when the keeper
+    /// did not confirm in time, or the group outlived the wait or was found by an id no
+    /// longer proven to be this pane's.
     pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
         self.halt();
         if self.uncertain {
@@ -508,6 +520,10 @@ impl TerminalSession {
                     .host
                     .alive()
                     .is_ok_and(|alive| alive.contains(&self.agent)));
+        #[cfg(target_os = "macos")]
+        if seen && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
+            self.uncertain = true;
+        }
         let _ = self.host.kill(&self.agent);
         self.end_group(seen);
     }
@@ -524,14 +540,14 @@ impl TerminalSession {
         if !seen {
             #[cfg(unix)]
             {
-                self.uncertain = super::launch::group_alive(self.pid);
+                self.uncertain |= super::launch::group_alive(self.pid);
             }
             return;
         }
         #[cfg(unix)]
         {
             super::launch::kill_group(self.pid);
-            self.uncertain = !super::launch::await_group_exit(self.pid);
+            self.uncertain |= !super::launch::await_group_exit(self.pid);
         }
     }
 }
@@ -540,6 +556,34 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.halt();
     }
+}
+
+/// Asks a pane's first process to stop with terminate and waits up to `KEEPER_WAIT` for the
+/// pane to end. A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in
+/// the sandbox and ends only once the warden confirmed that or found signals not confined,
+/// so the pane ending in time confirms it. Inputs: the host, the pane and its first process,
+/// proven the pane's within `GROUP_FRESH`. Output: whether the pane is gone.
+#[cfg(target_os = "macos")]
+pub(crate) fn stop_keeper(host: &dyn Host, agent: &AgentId, pid: u32) -> bool {
+    let gone = || host.alive().is_ok_and(|alive| !alive.contains(agent));
+    if gone() {
+        return true;
+    }
+    let Some(process) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    let _ = rustix::process::kill_process(process, rustix::process::Signal::TERM);
+    let deadline = Instant::now() + KEEPER_WAIT;
+    while !gone() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(KEEPER_POLL);
+    }
+    true
 }
 
 /// Frames a prompt as one bracketed paste the app takes as typed text, split into host
