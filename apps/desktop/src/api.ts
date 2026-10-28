@@ -999,6 +999,13 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
 }
 
+/** Sets how long one task turn and one agent session of the team may run, and how long a
+ * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
+ * seconds. Output: the engine receipt, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+}
+
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
  * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
  * or a plain error. */

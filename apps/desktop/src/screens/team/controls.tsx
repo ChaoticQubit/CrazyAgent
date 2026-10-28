@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setTeamTimeLimits } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { IntentReceipt, TeamStatus } from "../../engine-client";
@@ -8,7 +8,10 @@ import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
+export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
+export const IDLE_CHOICES_SECS = [120, 600, 3600] as const;
 const ANY_HARNESS = "";
+const NO_LIMIT = "off";
 const encoder = new TextEncoder();
 
 /** The harnesses a task can go to: every sub-agent harness of the team plan, once each, plus
@@ -16,6 +19,34 @@ const encoder = new TextEncoder();
 export function delegateOptions(status: Pick<TeamStatus, "harnesses">, harness: (id: string) => string = (id) => id): SelectOption[] {
   const subs = [...new Set(status.harnesses.filter((item) => item.role === "sub").map((item) => item.harness))];
   return [{ value: ANY_HARNESS, label: "Any sub-agent" }, ...subs.map((id) => ({ value: id, label: harness(id) }))];
+}
+
+/** Names a time limit the way the engine's notes do: whole hours as "1 h", whole minutes as
+ * "30 min", anything else in seconds, and no limit as "Off". Input: seconds or null. Output:
+ * the words. */
+export function limitLabel(secs: number | null): string {
+  if (secs === null) return "Off";
+  if (secs >= 3600 && secs % 3600 === 0) return `${secs / 3600} h`;
+  if (secs >= 60 && secs % 60 === 0) return `${secs / 60} min`;
+  return `${secs} s`;
+}
+
+/** The choices for one time limit: Off first, then each of `listed`, plus the stored value
+ * when it is none of those. Inputs: the stored limit and the listed choices, 30 min to 8 h by
+ * default. Output: options whose value is the seconds, or "off". */
+export function limitOptions(current: number | null, listed: readonly number[] = LIMIT_CHOICES_SECS): SelectOption[] {
+  const choices: (number | null)[] = [null, ...listed];
+  if (current !== null && !choices.includes(current)) choices.push(current);
+  return choices.map((secs) => ({ value: secs === null ? NO_LIMIT : String(secs), label: limitLabel(secs) }));
+}
+
+/** Keeps the session limit not below the task limit, as the engine requires, after the owner
+ * changed one of them; Off counts as no bound. Inputs: both limits, which one changed and its
+ * new value. Output: the pair to send. */
+export function limitPair(turn: number | null, session: number | null, changed: "turn" | "session", value: number | null): { turn: number | null; session: number | null } {
+  const below = (a: number | null, b: number | null) => a !== null && (b === null || a < b);
+  if (changed === "turn") return { turn: value, session: below(session, value) ? value : session };
+  return { turn: below(value, turn) ? value : turn, session: value };
 }
 
 /** Checks a task before it is handed to a sub-agent, with the engine's own rules: not blank,
@@ -40,8 +71,9 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the team before trying again.";
 }
 
-/** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, and hand one task
- * straight to a sub-agent when the master should not plan it. Inputs: the project id, the
+/** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
+ * task and an agent session may run, and hand one task straight to a sub-agent when the
+ * master should not plan it. Inputs: the project id, the
  * latest team status, a harness name lookup and a reload. Output: the controls. */
 export function TeamControls({ projectId, status, harness, reload }: {
   projectId: string;
@@ -50,6 +82,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   reload: () => void;
 }) {
   const [warm, setWarm] = useState<boolean | null>(null);
+  const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -57,6 +90,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [sent, setSent] = useState("");
   const options = delegateOptions(status, harness);
   const checked = warm ?? status.keep_warm;
+  const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
   const check = taskInput(text);
   const subs = options.length > 1;
 
@@ -66,6 +100,19 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const message = changeNote(await keepTeamWarm(projectId, on), "keeping agents ready");
     setBusy(false);
     setWarm(null);
+    setNote(message);
+    reload();
+  }
+
+  async function limit(changed: "turn" | "session" | "idle", value: string) {
+    if (busy) return;
+    const secs = value === NO_LIMIT ? null : Number(value);
+    const next = changed === "idle" ? { ...shown, idle: secs } : { ...limitPair(shown.turn, shown.session, changed, secs), idle: shown.idle };
+    setLimits(next);
+    setBusy(true);
+    const message = changeNote(await setTeamTimeLimits(projectId, next.turn, next.session, next.idle), "team time limits");
+    setBusy(false);
+    setLimits(null);
     setNote(message);
     reload();
   }
@@ -86,6 +133,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
   return <section className="tg-controls" aria-label="Team controls">
     <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
       onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
+    <div className="tg-limits" role="group" aria-label="Time limits">
+      <Select id={`tg-turn-limit-${projectId}`} label="Each task may run" value={shown.turn === null ? NO_LIMIT : String(shown.turn)} options={limitOptions(shown.turn)}
+        onValue={(value) => void limit("turn", value)} />
+      <Select id={`tg-session-limit-${projectId}`} label="Each agent session may run" value={shown.session === null ? NO_LIMIT : String(shown.session)} options={limitOptions(shown.session)}
+        onValue={(value) => void limit("session", value)}
+        helper="Off lets agents work as long as they need. A limit stops the agent's turn, and the conversation names the limit." />
+      <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
+        onValue={(value) => void limit("idle", value)}
+        helper="Off keeps an idle sub-agent running until the team stops. The master is never stopped while its work is still going." />
+    </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

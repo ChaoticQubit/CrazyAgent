@@ -38,6 +38,14 @@ const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64]
 pub const DELEGATE_MARKER: &str = "DELEGATE";
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
+/// The task and session time limits the owner may choose, in seconds: 30 min, 1 h, 2 h,
+/// 4 h and 8 h. No limit is the default and is stored as none.
+pub const LIMIT_CHOICES_SECS: [u32; 5] = [1800, 3600, 7200, 14_400, 28_800];
+/// How long an idle sub-agent may wait for work before it stops, in seconds: 2 min, 10 min
+/// and 1 h. Never stopping is the other choice, stored as zero.
+pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
+/// The idle stop a team starts with: 10 minutes.
+pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
 
 /// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
 /// on the agent's task until the master hears a short note of it on its next turn.
@@ -358,6 +366,12 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    TimeLimits {
+        project_id: ProjectId,
+        turn_secs: Option<u32>,
+        session_secs: Option<u32>,
+        idle_secs: Option<u32>,
+    },
     LiveMaster {
         project_id: ProjectId,
         on: bool,
@@ -443,6 +457,24 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::TimeLimits {
+                turn_secs,
+                session_secs,
+                idle_secs,
+                ..
+            } => {
+                let choice =
+                    |secs: &Option<u32>| secs.is_none_or(|secs| LIMIT_CHOICES_SECS.contains(&secs));
+                let idle = idle_secs.is_none_or(|secs| IDLE_CHOICES_SECS.contains(&secs));
+                let ordered = match (turn_secs, session_secs) {
+                    (Some(turn), Some(session)) => session >= turn,
+                    (Some(_), None) | (None, None) => true,
+                    (None, Some(_)) => false,
+                };
+                (choice(turn_secs) && choice(session_secs) && idle && ordered)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_time_limits_invalid"))
+            }
             Self::KeepWarm { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
@@ -459,6 +491,7 @@ impl TeamAction {
             | Self::Delegate { project_id, .. }
             | Self::Cancel { project_id, .. }
             | Self::KeepWarm { project_id, .. }
+            | Self::TimeLimits { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -752,6 +785,12 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_settings (
                 project TEXT PRIMARY KEY,
                 keep_warm INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_time_limits (
+                project TEXT PRIMARY KEY,
+                turn_secs INTEGER,
+                session_secs INTEGER,
+                idle_secs INTEGER NOT NULL DEFAULT 600
             );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
@@ -1387,6 +1426,21 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::TimeLimits {
+            turn_secs,
+            session_secs,
+            idle_secs,
+            ..
+        } => {
+            tx.execute(
+                "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(project) DO UPDATE SET turn_secs=excluded.turn_secs,
+                 session_secs=excluded.session_secs, idle_secs=excluded.idle_secs",
+                params![project.as_str(), turn_secs, session_secs, idle_secs.unwrap_or(0)],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -1610,6 +1664,12 @@ pub struct PlanStep {
 pub struct TeamStatus {
     pub project_id: ProjectId,
     pub keep_warm: bool,
+    #[serde(default)]
+    pub turn_limit_secs: Option<u32>,
+    #[serde(default)]
+    pub session_limit_secs: Option<u32>,
+    #[serde(default)]
+    pub idle_stop_secs: Option<u32>,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -1719,6 +1779,90 @@ pub fn keep_warm(connection: &Connection, project: &ProjectId) -> Result<bool, E
         .optional()
         .map(|value| value.unwrap_or(false))
         .map_err(error)
+}
+
+/// The time limits the owner set for a project's team agents, in seconds: one turn, one
+/// agent process, and how long an idle sub-agent waits for work. None is no limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeLimits {
+    pub turn: Option<u32>,
+    pub session: Option<u32>,
+    pub idle: Option<u32>,
+}
+
+impl Default for TimeLimits {
+    fn default() -> Self {
+        Self {
+            turn: None,
+            session: None,
+            idle: Some(IDLE_STOP_DEFAULT_SECS),
+        }
+    }
+}
+
+impl TimeLimits {
+    /// The bound on one master or sub-agent turn. Output: the duration, or none for no limit.
+    pub fn turn_time(self) -> Option<std::time::Duration> {
+        self.turn
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+
+    /// The bound on one agent process. Output: the duration, or none for no limit.
+    pub fn session_time(self) -> Option<std::time::Duration> {
+        self.session
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+
+    /// How long an idle sub-agent waits for work. Output: the duration, or none to keep it.
+    pub fn idle_time(self) -> Option<std::time::Duration> {
+        self.idle
+            .map(|secs| std::time::Duration::from_secs(secs.into()))
+    }
+}
+
+/// Names a time span the way Team settings shows it: whole hours as "1 h", whole minutes as
+/// "30 min", anything else in seconds. Input: the span in seconds. Output: the words.
+pub fn span_words(secs: u64) -> String {
+    if secs >= 3600 && secs % 3600 == 0 {
+        format!("{} h", secs / 3600)
+    } else if secs >= 60 && secs % 60 == 0 {
+        format!("{} min", secs / 60)
+    } else {
+        format!("{secs} s")
+    }
+}
+
+/// Reads the time limits the owner set for a project. Takes a connection and the project.
+/// Returns the defaults until the owner sets them (no task or session limit, a 10 minute
+/// idle stop), or `team_time_limits_invalid` for a stored bound outside 1 s to 24 h.
+pub fn time_limits(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<TimeLimits, EngineError> {
+    let stored: Option<(Option<i64>, Option<i64>, i64)> = connection
+        .query_row(
+            "SELECT turn_secs, session_secs, idle_secs FROM team_time_limits WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((turn, session, idle)) = stored else {
+        return Ok(TimeLimits::default());
+    };
+    let bound = |secs: Option<i64>| match secs {
+        None => Ok(None),
+        Some(secs) => u32::try_from(secs)
+            .ok()
+            .filter(|secs| (1..=86_400).contains(secs))
+            .map(Some)
+            .ok_or_else(|| failure("team_time_limits_invalid")),
+    };
+    Ok(TimeLimits {
+        turn: bound(turn)?,
+        session: bound(session)?,
+        idle: bound(Some(idle).filter(|secs| *secs != 0))?,
+    })
 }
 
 /// Tells whether the owner paused the project's whole team.
@@ -1932,9 +2076,13 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     };
     assert!(agents.len() as i64 <= STATUS_AGENTS_MAX);
     let (live_master, live_problem) = master::switch(connection, project)?;
+    let limits = time_limits(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
+        turn_limit_secs: limits.turn,
+        session_limit_secs: limits.session,
+        idle_stop_secs: limits.idle,
         paused: paused(connection, project)?,
         live_master,
         live_problem,

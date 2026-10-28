@@ -180,6 +180,9 @@ impl AccountBinding {
     }
 }
 
+/// The longest one launched harness process may run: 24 hours.
+pub const RUN_TIME_MAX: Duration = Duration::from_secs(86_400);
+
 /// Bounds for one launched harness process.
 /// `run_time` caps the whole session, `stop_grace` the wait between TERM and KILL,
 /// `output_bytes` the total stdout read and `events` the events delivered.
@@ -698,7 +701,7 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     }
     let limits = request.limits;
     if limits.run_time.is_zero()
-        || limits.run_time > Duration::from_secs(86_400)
+        || limits.run_time > RUN_TIME_MAX
         || limits.stop_grace > Duration::from_secs(30)
         || !(1..=64 * 1024 * 1024).contains(&limits.output_bytes)
         || !(1..=1_000_000).contains(&limits.events)

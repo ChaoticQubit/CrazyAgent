@@ -132,6 +132,29 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets the project team's task and session time limits and its sub-agent idle stop, in
+    /// seconds from the listed choices, none for no limit. Takes the project id, the three
+    /// limits and the client generation. Returns the actual commit receipt; a value outside
+    /// the choices, or a session limit below the task limit, is refused as
+    /// `team_action_invalid`.
+    pub async fn team_time_limits(
+        &mut self,
+        id: &str,
+        turn_secs: Option<u32>,
+        session_secs: Option<u32>,
+        idle_secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = TeamAction::TimeLimits {
+            project_id,
+            turn_secs,
+            session_secs,
+            idle_secs,
+        };
+        self.team_action(action, generation).await
+    }
+
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
     /// app running in a terminal the owner types into. Takes the project id, the switch and
     /// the client generation. Returns the actual commit receipt.

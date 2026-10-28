@@ -126,6 +126,9 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -1316,4 +1319,118 @@ async fn a_real_engine_keeps_the_wake_rules_the_owner_sets_at_each_level() {
     );
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(view.wake.is_none());
+}
+
+#[test]
+fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('t'))), TeamReply::Handled);
+    let mut view = loaded();
+    assert!(
+        find(&frame(&view, 120, 24), "Team").contains("Task  Off  Session  Off  Idle stop  Off")
+    );
+    let reply = view.key(press(KeyCode::Char('t')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: Some(1800),
+            session_secs: None,
+            idle_secs: None
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Each task may now run up to 30 min, each agent session as long as it needs."
+        ))
+    );
+    let mut limited = team();
+    limited.turn_limit_secs = Some(28_800);
+    limited.session_limit_secs = Some(28_800);
+    let query = view.next_query(NOW + 10).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(limited))));
+    assert!(find(&frame(&view, 120, 24), "Team").contains("Task  8 h  Session  8 h"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('l'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: Some(28_800),
+            session_secs: None,
+            idle_secs: None
+        }),
+        "past 8 h the session limit goes Off; an Off session holds any task limit"
+    );
+    let mut view = TeamView::new(project());
+    let mut limited = team();
+    limited.turn_limit_secs = Some(28_800);
+    limited.session_limit_secs = Some(28_800);
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(limited))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('t'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None
+        }),
+        "a task limit turned Off turns the session limit Off with it"
+    );
+    let mut idle = team();
+    idle.idle_stop_secs = Some(crate::team::IDLE_STOP_DEFAULT_SECS);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(idle))));
+    assert!(find(&frame(&view, 120, 24), "Team").contains("Idle stop  10 min"));
+    let reply = view.key(press(KeyCode::Char('i')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: Some(3600)
+        }),
+        "the idle stop steps from 10 min to 1 h and leaves the task and session limits"
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("An idle sub-agent now stops after 1 h."))
+    );
+    let mut idle = team();
+    idle.idle_stop_secs = Some(3600);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(idle))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('i'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None
+        }),
+        "past 1 h the idle stop goes Off"
+    );
 }

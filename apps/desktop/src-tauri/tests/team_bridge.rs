@@ -12,12 +12,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 9] = [
+const COMMANDS: [&str; 10] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
     "desktop_team_cancel",
     "desktop_team_keep_warm",
+    "desktop_team_time_limits",
     "desktop_team_live_master",
     "desktop_team_pause",
     "desktop_team_hand_off",
@@ -218,6 +219,43 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
             .unwrap_err()
             .code,
         "team_action_invalid"
+    );
+
+    let team = bridge.team_status(&id).await?;
+    assert_eq!(
+        (
+            team.turn_limit_secs,
+            team.session_limit_secs,
+            team.idle_stop_secs
+        ),
+        (None, None, Some(600)),
+        "no time limit and a 10 minute idle stop until the owner sets them"
+    );
+    let limited = bridge
+        .team_time_limits(&id, Some(3600), Some(14_400), None, 15)
+        .await?;
+    assert!(
+        matches!(limited.outcome, ActionOutcome::Applied),
+        "{limited:?}"
+    );
+    let team = bridge.team_status(&id).await?;
+    assert_eq!(
+        (
+            team.turn_limit_secs,
+            team.session_limit_secs,
+            team.idle_stop_secs
+        ),
+        (Some(3600), Some(14_400), None),
+        "an idle stop of None is Off"
+    );
+    assert_eq!(
+        bridge
+            .team_time_limits(&id, Some(7200), Some(3600), Some(600), 16)
+            .await
+            .unwrap_err()
+            .code,
+        "team_action_invalid",
+        "a session limit below the task limit is refused"
     );
     assert_eq!(
         bridge.team_status("absent-project").await.unwrap_err().code,

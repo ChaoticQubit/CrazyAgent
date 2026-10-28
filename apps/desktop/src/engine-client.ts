@@ -750,6 +750,9 @@ export interface TeamMessage {
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  turn_limit_secs?: number | null;
+  session_limit_secs?: number | null;
+  idle_stop_secs?: number | null;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -856,6 +859,12 @@ export function teamCancel(id: string, task: number | null, generation: number):
 
 export function teamKeepWarm(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
+}
+
+/** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
+ * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
 }
 
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a
