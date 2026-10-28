@@ -8,6 +8,7 @@ use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
 };
+use crate::harnesses::leftovers::{self, Unstopped};
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
@@ -871,9 +872,27 @@ impl ResearchRunner {
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
             let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
-            let _ = session.stop();
+            let stopped = session.stop();
             #[cfg(unix)]
             lifeline.release();
+            match stopped {
+                Ok(_) => {}
+                Err(Unstopped::Uncertain) => {
+                    if let Some(credential) = credential {
+                        credential.retain();
+                    }
+                    std::mem::forget(lease);
+                    return Err(RunError::Uncertain(leftovers::UNCERTAIN));
+                }
+                Err(Unstopped::Left(left)) => {
+                    let mut credential = credential;
+                    if let Some(credential) = credential.as_mut() {
+                        credential.stop_renewing();
+                    }
+                    left.hold((credential, lease));
+                    return Err(RunError::Uncertain(leftovers::LEFT));
+                }
+            }
             drop(credential);
             drop(lease);
             return Ok((ending?, group, output));

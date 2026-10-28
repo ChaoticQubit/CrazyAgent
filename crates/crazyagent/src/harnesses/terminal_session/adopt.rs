@@ -211,6 +211,10 @@ impl TerminalSession {
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
+            unconfined: !matches!(
+                record.access,
+                Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
+            ),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: None,

@@ -9,7 +9,7 @@ use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
 };
 use crate::config::ModelAccess;
-use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
@@ -17,6 +17,7 @@ use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
     RUN_TIME_MAX,
 };
+use crate::harnesses::leftovers::Unstopped;
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
@@ -4489,9 +4490,9 @@ fn work(
         }
     };
     let problem = match started {
-        Ok(AgentSession::Terminal(session)) if adopted_live => {
-            live_serve(*session, None, &orders, &reports, &cancel, &leave, true)
-        }
+        Ok(AgentSession::Terminal(session)) if adopted_live => live_serve(
+            *session, None, &orders, &reports, &cancel, &leave, true, None,
+        ),
         Ok(session) => serve(session, &orders, &reports, &cancel, &interrupt, &leave),
         Err(problem) => Some(problem),
     };
@@ -4557,7 +4558,7 @@ fn live(
             )
         }
     };
-    let problem = match started {
+    match started {
         Ok(AgentSession::Terminal(session)) => live_serve(
             *session,
             resume.is_none().then_some(framing.as_str()),
@@ -4566,23 +4567,22 @@ fn live(
             cancel,
             leave,
             keep,
+            held,
         ),
-        Ok(other) => {
-            let _ = other.stop();
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
+            drop(held);
             if resume.is_some() && problem.0 == RESUME_REFUSED {
                 let _ = reports.send(Report::ResumeRefused);
             }
             Some(with_code("The agent could not start", Some(&problem.0)))
         }
-    };
-    drop(held);
-    problem
+    }
 }
 
 /// Takes over the pane of a live master on a signed-in account that an earlier engine left
@@ -4632,36 +4632,37 @@ fn live_adopted(
                 ));
             }
         };
-    let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+    let held = Some((credential, profile));
+    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, None, orders, reports, cancel, leave, true)
+            live_serve(*session, None, orders, reports, cancel, leave, true, held)
         }
-        Ok(other) => {
-            let _ = other.stop();
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
             let _ = host.kill(&agent);
+            drop(held);
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
             ))
         }
-    };
-    drop(credential);
-    drop(profile);
-    problem
+    }
 }
 
 /// Follows every turn of a live master's pane, the owner's included, and reports each
 /// start and end with the turn's reply text, bounded, for landing, usage and reply-line
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Takes the session, the briefing to
-/// type first, the worker's channels and flags, and whether a later engine may take the
-/// pane over. Returns the problem that ended it, if any.
+/// type first, the worker's channels and flags, whether a later engine may take the pane
+/// over, and the account's credential copy and lease the session holds, if any, which the
+/// stop settles (see [`settle_stop`]). Returns the problem that ended it, if any, a stop's
+/// own problem first.
+#[allow(clippy::too_many_arguments)]
 fn live_serve(
     mut session: TerminalSession,
     framing: Option<&str>,
@@ -4670,6 +4671,7 @@ fn live_serve(
     cancel: &AtomicBool,
     leave: &AtomicBool,
     keep: bool,
+    held: Option<Held>,
 ) -> Option<String> {
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
@@ -4679,9 +4681,10 @@ fn live_serve(
     if let Some(framing) = framing
         && let Err(problem) = session.send_or_cancel(framing, cancel)
     {
-        session.stop();
-        return (problem.0 != "launch_cancelled")
-            .then(|| with_code("The master could not be briefed", Some(&problem.0)));
+        return settle_stop(session.stop(), held).or_else(|| {
+            (problem.0 != "launch_cancelled")
+                .then(|| with_code("The master could not be briefed", Some(&problem.0)))
+        });
     }
     let mut text = String::new();
     let (mut limited, mut interrupted) = (false, false);
@@ -4736,10 +4739,46 @@ fn live_serve(
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
     if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
         session.leave();
-    } else {
-        session.stop();
+        drop(held);
+        return None;
     }
-    problem
+    settle_stop(session.stop(), held).or(problem)
+}
+
+/// The account's credential copy and lease an agent's harness holds while it runs.
+type Held = (AgentCredential, NativeProfileUse);
+
+/// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
+/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
+/// access stop that left processes running keeps both until they end, with the copy's
+/// keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
+/// harness held, if anything. Output: none for a clean stop, or the plain problem, naming
+/// what still runs and that Full access cannot stop it.
+fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> Option<String> {
+    match stopped {
+        Ok(_) => {
+            drop(held);
+            None
+        }
+        Err(Unstopped::Uncertain) => {
+            if let Some((credential, profile)) = held {
+                credential.retain();
+                std::mem::forget(profile);
+            }
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN),
+            ))
+        }
+        Err(Unstopped::Left(left)) => {
+            let problem = with_code(&left.plain(), Some(crate::harnesses::leftovers::LEFT));
+            if let Some((mut credential, profile)) = held {
+                credential.stop_renewing();
+                left.hold((credential, profile));
+            }
+            Some(problem)
+        }
+    }
 }
 
 enum Next {
@@ -4777,8 +4816,8 @@ fn next_turn(
 
 /// Serves turns on an agent whose harness keeps running between them. At the end it stops
 /// the agent, or, when the engine quits with the agent kept, stops the running turn and
-/// leaves the pane running for the next engine. A stop its warden did not confirm ends the
-/// agent with that problem.
+/// leaves the pane running for the next engine. A stop its warden did not confirm, or a
+/// Full access stop that left processes running, ends the agent with that problem.
 fn serve(
     mut session: AgentSession,
     orders: &Receiver<Order>,
@@ -4821,18 +4860,17 @@ fn serve(
     if problem.is_none() && leave.load(Ordering::SeqCst) {
         let _ = session.interrupt();
         session.leave();
-    } else if let Err(uncertain) = session.stop() {
-        problem = Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(&uncertain.0),
-        ));
+    } else if let Some(stopped) = settle_stop(session.stop(), None) {
+        problem = Some(stopped);
     }
     problem
 }
 
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
-/// stop its warden did not confirm keeps both for the engine's life and ends the agent.
+/// stop its warden did not confirm keeps both for the engine's life and ends the agent; a
+/// Full access stop that left processes running keeps both until they end, names them and
+/// ends the agent.
 /// A sub-agent's turn continues the conversation its previous turn recorded, or the one the
 /// plan resumes for a woken agent, and a new conversation is reported so a later wake
 /// continues it; a refused resume is reported and ends the agent as a kept one does. A
@@ -4921,27 +4959,15 @@ fn per_turn(
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
         }
-        let stopped = session.stop();
-        let reusable = stopped.is_ok()
+        let stopped = settle_stop(session.stop(), Some((credential, profile)));
+        let reusable = stopped.is_none()
             && matches!(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = match stopped {
-            Ok(_) => {
-                drop(credential);
-                drop(profile);
-                (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-            }
-            Err(uncertain) => {
-                credential.retain();
-                std::mem::forget(profile);
-                Some(with_code(
-                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
-                    Some(&uncertain.0),
-                ))
-            }
-        };
+        let closed = stopped.or_else(|| {
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
+        });
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }

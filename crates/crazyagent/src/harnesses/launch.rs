@@ -1,4 +1,5 @@
 use super::interactive::KEY_FILE;
+use super::leftovers::{Lineage, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -1090,6 +1091,7 @@ pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
+    unconfined: bool,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1213,6 +1215,7 @@ impl Session {
             child,
             warden,
             uncertain: false,
+            unconfined: request.unconfined,
             stdin,
             lines,
             driver,
@@ -1311,14 +1314,20 @@ impl Session {
     }
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
-    /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally, or
-    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
-    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+    /// run's warden, when it has one, stop every process left in its sandbox. A Full access
+    /// run has no warden, so the processes found in its lineage before the kill are checked
+    /// after it. Output: the leader's exit code when it exited normally,
+    /// [`Unstopped::Uncertain`] when a warden did not confirm that its sandbox is empty, or
+    /// [`Unstopped::Left`] naming what a Full access run left running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.unconfined.then(|| Lineage::of(self.process_group()));
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {
-            return Err(failure("harness_cleanup_uncertain"));
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
         }
         Ok(code)
     }

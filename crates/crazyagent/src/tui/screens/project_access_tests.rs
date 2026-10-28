@@ -113,6 +113,6 @@ fn the_access_box_says_beside_the_level_that_lowering_it_stops_agents_running_ab
     assert!(words(&beside).contains(LOWERING_STOPS_AGENTS), "{beside}");
     assert_eq!(
         LOWERING_STOPS_AGENTS,
-        "Lowering the level stops agents running above it; they restart at the new level."
+        "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal."
     );
 }

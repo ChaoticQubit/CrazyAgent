@@ -6,10 +6,11 @@ function assert(condition: boolean, message: string): asserts condition {
 }
 
 /** The plain warning the owner sees before giving a project's agents Full access. */
-export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: they can read your keys and change any file.";
+export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
 
-/** What a lower saved level does to agents already running: the engine stops each one that started above it. */
-export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level.";
+/** What a lower saved level does to agents already running: the engine stops each one that started above it,
+ * but not what a Full access agent started outside its terminal. */
+export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
 
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [

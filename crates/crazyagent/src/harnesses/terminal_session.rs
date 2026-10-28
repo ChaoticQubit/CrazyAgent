@@ -3,6 +3,7 @@ use super::launch::{
     LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, route,
     validate,
 };
+use super::leftovers::{Lineage, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
@@ -47,6 +48,7 @@ pub struct TerminalSession {
     facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
+    unconfined: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -220,6 +222,7 @@ impl TerminalSession {
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
+            unconfined: request.unconfined,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -366,10 +369,16 @@ impl TerminalSession {
     }
 
     /// Ends the pane and every process in it, then removes the key file and the
-    /// generated context. Output: none, since a pane reports no exit code.
-    pub fn stop(mut self) -> Option<i32> {
+    /// generated context. A Full access pane has no Seatbelt, so the processes found in its
+    /// lineage before the end are checked after it. Output: none, since a pane reports no
+    /// exit code, or the [`Unstopped`] naming what a Full access pane left running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.unconfined.then(|| Lineage::of(self.pid));
         self.halt();
-        None
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
+        }
+        Ok(None)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -605,12 +614,13 @@ impl AgentSession {
         }
     }
 
-    /// Stops the agent and every process it started. Output: the exit code when known, or
-    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it.
-    pub fn stop(self) -> Result<Option<i32>, LaunchError> {
+    /// Stops the agent and every process it started. Output: the exit code when known,
+    /// [`Unstopped::Uncertain`] when a headless agent's warden did not confirm it, or
+    /// [`Unstopped::Left`] naming what a Full access agent left running.
+    pub fn stop(self) -> Result<Option<i32>, Unstopped> {
         match self {
             Self::Piped(session) => session.stop(),
-            Self::Terminal(session) => Ok(session.stop()),
+            Self::Terminal(session) => session.stop(),
         }
     }
 }
