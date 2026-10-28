@@ -955,7 +955,11 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
                 .unwrap();
         }
     }
-    let found = records(home.path(), Format::Claude);
+    let (found, cut) = records(home.path(), Format::Claude);
+    assert!(
+        cut,
+        "a walk stopped at the entry bound says the home was cut"
+    );
     assert_eq!(found.len(), FILES_PER_SCAN_MAX);
     let folders: std::collections::BTreeSet<&Path> =
         found.iter().map(|path| path.parent().unwrap()).collect();
@@ -965,12 +969,13 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
     );
 }
 
-/// A home past the entry bound still counts the record that changed last: the walk enters
-/// the most recently changed folder first and reads every entry of it, so the bound leaves
-/// out only folders that changed before. Here that record is the last entry of a folder of
-/// 1,100 records that a walk in plain directory order reaches last.
+/// A home past the entry bound still counts the record written last, however its agent dates
+/// it, and its reading says it is partial until a scan reads the home whole. The walk orders
+/// by the inode change time, which no agent can set, and enters the folder changed last
+/// first. Here that record is the last entry of a folder of 1,100 records that a walk in
+/// plain directory order reaches last, and the agent set both to an old modification time.
 #[test]
-fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_partial() {
     const FOLDERS: usize = 20;
     let (_root, db) = store();
     let home = tempfile::tempdir().unwrap();
@@ -995,25 +1000,28 @@ fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
     };
     let folders = listed(&projects);
     let last = folders[0].clone();
-    for dir in &folders[1..] {
-        std::fs::File::open(dir)
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    for path in [&live, &last] {
+        std::fs::File::open(path)
             .unwrap()
             .set_modified(at(0))
             .unwrap();
     }
-    let live = listed(&last).pop().unwrap();
-    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
-    let added = scan_home(
-        &db,
-        home.path(),
-        Format::Claude,
-        &attribution(RunKind::Agent, None),
-        NOW,
-    )
-    .unwrap();
+    let who = attribution(RunKind::Agent, None);
+    let partial = |db: &Connection| {
+        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
+    };
+    let added = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
+    let cut = partial(&db);
+    for dir in &folders[1..16] {
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap();
     assert_eq!(
-        (added.input, added.output),
-        (7, 3),
-        "the record that changed last is counted"
+        ((added.input, added.output), cut, partial(&db)),
+        ((7, 3), Some(1), Some(0)),
+        "the record written last is counted, and the reading is partial only while the home is cut"
     );
 }
