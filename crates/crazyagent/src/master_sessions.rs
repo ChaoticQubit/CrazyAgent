@@ -710,20 +710,31 @@ pub fn fresh_harness(
 }
 
 /// Tells which harness a session's conversation last ran on when the master about to start
-/// runs another one: the harness of the conversation the session kept, or, for a session
-/// that kept none but has engine turns, the harness of the project's last master. Aliases of
-/// one harness count as the same. Takes the connection, project, session and the harness
-/// about to start. Returns the earlier harness, or None when unchanged or unknown.
+/// runs another: the target of its last applied switch (seen once, even before the new
+/// harness reports a conversation), else the kept conversation's, else, with engine turns,
+/// the last master's; aliases count as one. Takes the connection, project, session and the
+/// harness about to start. Returns the earlier harness, or None when unchanged or unknown.
 pub fn switched_from(
     connection: &Connection,
     project: &ProjectId,
     session: &SessionId,
     harness: &str,
 ) -> Result<Option<String>, EngineError> {
+    let switched: Option<String> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
     let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
-    let earlier = match kept {
-        Some(kept) => Some(kept.harness),
-        None if turn_count(connection, session)? > 0 => connection
+    let earlier = match (switched, kept) {
+        (Some(switched), _) => Some(switched),
+        (None, Some(kept)) => Some(kept.harness),
+        (None, None) if turn_count(connection, session)? > 0 => connection
             .query_row(
                 "SELECT CASE WHEN length(harness)<=64 THEN harness END FROM team_agents
                  WHERE project=?1 AND role='master' ORDER BY id DESC LIMIT 1",
@@ -733,7 +744,7 @@ pub fn switched_from(
             .optional()
             .map_err(error)?
             .flatten(),
-        None => None,
+        (None, None) => None,
     };
     Ok(earlier.filter(|earlier| !crate::harnesses::same(earlier, harness)))
 }
@@ -1245,6 +1256,56 @@ mod tests {
         );
         assert!(!text.contains("answer 01"), "{text}");
         assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
+
+    /// A switch is seen once: after the session's master switched to Codex, a later start on
+    /// Codex is no switch even before Codex reported a conversation of its own, and a start
+    /// on Claude Code again is a switch back from Codex.
+    #[test]
+    fn a_switch_is_seen_once_even_before_the_new_harness_reports_its_conversation() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-once").unwrap();
+        let id = "3f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        std::fs::write(&record, "").unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, session.as_str(), &kept).unwrap();
+        assert_eq!(
+            switched_from(&connection, &project, &session, "codex").unwrap(),
+            Some("claude-code".to_owned())
+        );
+        crate::team::record_switch(
+            &connection,
+            &project,
+            session.as_str(),
+            "codex",
+            crate::team::SwitchMode::Carry,
+        )
+        .unwrap();
+        assert_eq!(
+            switched_from(&connection, &project, &session, "codex").unwrap(),
+            None,
+            "the switch to Codex was applied already"
+        );
+        assert_eq!(
+            switched_from(&connection, &project, &session, "claude-code").unwrap(),
+            Some("codex".to_owned())
+        );
     }
 
     #[test]
