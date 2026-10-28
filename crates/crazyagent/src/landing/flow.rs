@@ -250,7 +250,10 @@ fn open_plain(path: &Path) -> Option<std::fs::File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+/// Reads a file an agent may have replaced, at most `limit` bytes, through `open_plain`.
+/// Inputs: the path and the limit. Output: the bytes, else `changes_workspace_invalid` for
+/// a file that is not plain or is longer.
+pub(super) fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
     let file = open_plain(path).ok_or_else(invalid)?;
     let mut bytes = Vec::new();

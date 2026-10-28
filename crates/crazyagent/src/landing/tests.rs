@@ -2113,6 +2113,58 @@ impl Case {
         std::fs::write(&target, bytes).unwrap();
         assert_ne!(id, other);
     }
+
+    /// Tells whether the owner repository's object store holds an object, read as the
+    /// owner's git reads it. Input: the id. Output: the answer.
+    fn owner_has(&self, id: &str) -> bool {
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &self.home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(&self.repo)
+                .args(["cat-file", "-e", id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .status
+        .success()
+    }
+
+    /// Makes a repository beside the owner's that the agent's sandbox would not let it
+    /// read, with one commit holding one file. Input: the file's text. Output: the
+    /// repository folder and its commit.
+    fn foreign(&self, text: &str) -> (PathBuf, String) {
+        let foreign = self.repo.parent().unwrap().join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        git_in(
+            &self.home,
+            &foreign,
+            &["init", "-q", "--template=", "-b", "main"],
+        );
+        write(&foreign.join("secret.txt"), text);
+        git_in(&self.home, &foreign, &["add", "secret.txt"]);
+        git_in(
+            &self.home,
+            &foreign,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Other",
+            ],
+        );
+        let commit = git_in(&self.home, &foreign, &["rev-parse", "HEAD"]);
+        (foreign, commit.trim().to_owned())
+    }
 }
 
 fn own_branch_turn() -> TurnEnd {
@@ -2394,4 +2446,62 @@ fn an_own_branch_agent_that_skips_the_update_merge_is_asked_again_and_its_merge_
         case.owner(&["ls-tree", "-r", "--name-only", &commit]),
         "README\nsrc/new.rs\n"
     );
+}
+
+/// The engine's fetch never reads an object store the agent added to its clone: a second
+/// alternates line, or a pack linked in from another repository, is refused before git
+/// runs, and none of that repository's objects reach the project (DEC102-F1).
+#[test]
+fn a_clone_that_borrows_another_object_store_is_refused_and_imports_nothing() {
+    let case = Case::own_branch();
+    let (foreign, commit) = case.foreign("not for the agent\n");
+    let secret = case.blob_id("not for the agent\n");
+    let alternates = case.workspace.git_dir.join("objects/info/alternates");
+    let engine_line = std::fs::read_to_string(&alternates).unwrap();
+    std::fs::write(
+        &alternates,
+        format!("{engine_line}{}\n", foreign.join(".git/objects").display()),
+    )
+    .unwrap();
+    case.agent(&["update-ref", "refs/heads/agent/agent-own", &commit]);
+    let heads = case.owner_refs("refs/heads");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert!(
+        !case.owner_has(&secret),
+        "a foreign object reached the project"
+    );
+
+    std::fs::write(&alternates, &engine_line).unwrap();
+    git_in(&case.home, &foreign, &["repack", "-a", "-d", "-q"]);
+    let packs = foreign.join(".git/objects/pack");
+    for entry in std::fs::read_dir(&packs).unwrap() {
+        let name = entry.unwrap().file_name();
+        std::os::unix::fs::symlink(
+            packs.join(&name),
+            case.workspace.git_dir.join("objects/pack").join(&name),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert!(
+        !case.owner_has(&secret),
+        "a foreign object reached the project"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
 }
