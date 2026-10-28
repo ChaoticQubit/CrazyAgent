@@ -397,9 +397,9 @@ pub fn read_planned(_file: &PlannedFile) -> Result<Vec<u8>, &'static str> {
 /// Copies or plans one folder of the skill through its open descriptor: each entry is
 /// classified and opened relative to that descriptor without following a link, so an entry
 /// swapped after its check is refused, never followed. A link is read as text, worked out
-/// inside the root and opened through real folders only. Inputs: the canonical root, this
-/// folder's path and descriptor, its copy, its depth, the rules and the tally. Output: Ok,
-/// or a plain rejection code.
+/// inside the root and opened through real folders only; one into `.git` or `.DS_Store` is
+/// left out as they are. Inputs: the canonical root, this folder's path and descriptor, its
+/// copy, its depth, the rules and the tally. Output: Ok, or a plain rejection code.
 #[cfg(unix)]
 fn copy_tree(
     root: &Path,
@@ -475,11 +475,17 @@ fn copy_tree(
                 let resolved = lexical(root, &from.join(OsStr::from_bytes(named.as_bytes())))
                     .ok_or("skill_link_outside")?;
                 assert!(resolved.starts_with(root) && resolved != root);
-                let opened = open_real(&resolved, PLAIN).map_err(|_| "skill_file_unsupported")?;
-                let opened = regular(opened)?;
                 let inside = resolved
                     .strip_prefix(root)
                     .map_err(|_| "skill_link_outside")?;
+                if inside
+                    .iter()
+                    .any(|part| SKIPPED.iter().any(|skipped| part == *skipped))
+                {
+                    continue;
+                }
+                let opened = open_real(&resolved, PLAIN).map_err(|_| "skill_file_unsupported")?;
+                let opened = regular(opened)?;
                 if rules.skip_private && inside.iter().any(private) {
                     tally.skip(relative);
                     continue;
@@ -1114,5 +1120,35 @@ mod tests {
             .map(|entry| entry.file_name())
             .collect();
         assert_eq!(stored, vec![std::ffi::OsString::from("a")]);
+    }
+
+    #[test]
+    fn a_link_into_git_is_left_out_as_git_itself_is() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("store")).unwrap();
+        let source = skill(root.path(), GOOD);
+        fs::create_dir(source.join(".git")).unwrap();
+        fs::write(
+            source.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://example.com/owner/repo.git\n",
+        )
+        .unwrap();
+        symlink(".git/config", source.join("config.md")).unwrap();
+        symlink("../.git/config", source.join("scripts/remote.md")).unwrap();
+        for (index, rules) in [PICKED, IMPORTED].iter().enumerate() {
+            let destination = root.path().join("store").join(index.to_string());
+            let meta = copy_with(&source, &destination, rules).unwrap();
+            assert_eq!(meta.files, 2, "{rules:?}");
+            assert!(fs::symlink_metadata(destination.join("config.md")).is_err());
+            assert!(fs::symlink_metadata(destination.join("scripts/remote.md")).is_err());
+            let (checked, planned) = check_with(&source, rules).unwrap();
+            assert_eq!(checked, meta);
+            assert!(
+                planned
+                    .iter()
+                    .all(|file| !file.from.iter().any(|part| part == ".git")),
+                "{rules:?}"
+            );
+        }
     }
 }
