@@ -63,9 +63,11 @@ impl OwnerController {
     }
 
     /// Ends each holder through its own owner action: a research job is cancelled and a
-    /// master conversation is closed. A holder that already ended is refused, which is not
-    /// an error. Inputs: the holders and the client generation. Output: Ok once each was
-    /// answered, or `controller_pending_uncertain` when one may still be recorded.
+    /// master conversation is closed. What a Full access agent left running has no action
+    /// of its own; stopping the account's agents lets go of it. A holder that already ended
+    /// is refused, which is not an error. Inputs: the holders and the client generation.
+    /// Output: Ok once each was answered, or `controller_pending_uncertain` when one may
+    /// still be recorded.
     pub async fn end_holders(
         &mut self,
         holders: &[Holder],
@@ -77,6 +79,7 @@ impl OwnerController {
                     self.cancel_research(project.clone(), *job, generation)
                         .await?
                 }
+                Holder::Leftover { .. } => continue,
                 Holder::Master { project, session } => {
                     self.read(OwnerRead::ProjectMaster {
                         project_id: project.clone(),

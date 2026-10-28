@@ -334,7 +334,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         "{report}"
     );
     assert!(
-        report.ends_with("Its account stays held until they end"),
+        report.ends_with("Its account stays held until they end or you sign it out"),
         "{report}"
     );
 }

@@ -7,6 +7,7 @@ use crazyagent::harnesses::launch::{
 use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
+use crazyagent::protocol::CredentialRef;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -853,7 +854,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
     );
 
     let (held, released) = std::sync::mpsc::channel::<()>();
-    left.hold(held);
+    left.hold(Some(CredentialRef::new("leaving-headless").unwrap()), held);
     assert_eq!(
         released.recv_timeout(Duration::from_secs(3)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),

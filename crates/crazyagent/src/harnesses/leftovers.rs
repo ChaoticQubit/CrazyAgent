@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use crate::protocol::CredentialRef;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The plain code of a stop that left processes of a Full access agent running.
@@ -46,6 +49,52 @@ const PS_TABLE: &[&str] = &[
     "-o",
     "pid=,ppid=,uid=,stat=,lstart=,comm=",
 ];
+
+/// One hold of a Full access stop: the account it keeps, if any, the report naming what
+/// still runs, and what the stop holds, such as the agent's credential copy and lease.
+struct Held {
+    account: Option<CredentialRef>,
+    report: String,
+    kept: Box<dyn Send>,
+}
+
+/// Every account a Full access stop keeps now, by the order they were kept in, so a refused
+/// sign-out can name them and the owner can let them go.
+static HELD: Mutex<BTreeMap<u64, Held>> = Mutex::new(BTreeMap::new());
+static NEXT_HELD: AtomicU64 = AtomicU64::new(0);
+
+fn held() -> MutexGuard<'static, BTreeMap<u64, Held>> {
+    HELD.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Lets go of every hold a Full access stop keeps on one account, while what it named may
+/// still run, because the owner chose to sign the account out anyway. Input: the account.
+/// Output: how many holds ended.
+pub fn release(account: &CredentialRef) -> usize {
+    let released: Vec<Held> = {
+        let mut held = held();
+        let keys: Vec<u64> = held
+            .iter()
+            .filter(|(_, hold)| hold.account.as_ref() == Some(account))
+            .map(|(key, _)| *key)
+            .collect();
+        keys.iter().filter_map(|key| held.remove(key)).collect()
+    };
+    let count = released.len();
+    drop(released);
+    count
+}
+
+/// Names what keeps one account held after Full access stops, newest first. Input: the
+/// account. Output: each hold's report.
+pub fn held_by(account: &CredentialRef) -> Vec<String> {
+    held()
+        .values()
+        .rev()
+        .filter(|hold| hold.account.as_ref() == Some(account))
+        .map(|hold| hold.report.clone())
+        .collect()
+}
 
 /// Why a stop could not report every process of an agent ended.
 #[derive(Debug)]
@@ -118,7 +167,7 @@ impl Leftovers {
         assert!(!self.0.known.is_empty() || self.0.unchecked);
         if self.0.known.is_empty() {
             return format!(
-                "Full access could not list what the agent started outside its terminal after its stop, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes",
+                "Full access could not list what the agent started outside its terminal after its stop, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes, or until you sign it out",
                 UNCHECKED_HOLD_MAX.as_secs() / 60
             );
         }
@@ -141,25 +190,36 @@ impl Leftovers {
             ""
         };
         format!(
-            "Full access cannot stop what the agent started outside its terminal; still running: {}{counted}{unlisted}. Its account stays held until they end",
+            "Full access cannot stop what the agent started outside its terminal; still running: {}{counted}{unlisted}. Its account stays held until they end or you sign it out",
             named.join(", ")
         )
     }
 
-    /// Keeps `held`, such as the agent's credential copy and account lease, until a listing
-    /// shows no process of the agent running, then drops it; the engine's exit ends the hold
-    /// too. With none named, it ends after `UNCHECKED_HOLD_MAX` even while no listing works.
-    /// When no watching thread starts, `held` is kept for the engine's life instead.
-    /// Inputs: the leftovers and what they hold. Output: none.
-    pub fn hold<T: Send + 'static>(self, held: T) {
-        let slot = Arc::new(Mutex::new(Some(held)));
-        let watched = Arc::clone(&slot);
+    /// Keeps `kept`, such as the agent's credential copy and account lease, listed under
+    /// `account` with this report, until a listing shows no process of the agent running or
+    /// the owner signs the account out ([`release`]), then drops it; the engine's exit ends
+    /// the hold too. With none named, it ends after `UNCHECKED_HOLD_MAX` even while no
+    /// listing works. When no watching thread starts, only the owner's sign-out ends it.
+    /// Inputs: the leftovers, the account they keep, if any, and what they hold.
+    /// Output: none.
+    pub fn hold<T: Send + 'static>(self, account: Option<CredentialRef>, kept: T) {
+        let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+        let report = self.plain();
+        let previous = held().insert(
+            key,
+            Held {
+                account,
+                report,
+                kept: Box::new(kept),
+            },
+        );
+        assert!(previous.is_none());
         let mut lineage = self.0;
-        let started = std::thread::Builder::new()
+        let _ = std::thread::Builder::new()
             .name("full-access-hold".into())
             .spawn(move || {
                 let begun = Instant::now();
-                loop {
+                while held().contains_key(&key) {
                     let checked = lineage.refresh().is_ok();
                     if lineage.known.is_empty()
                         && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX)
@@ -168,18 +228,9 @@ impl Leftovers {
                     }
                     std::thread::sleep(HOLD_POLL);
                 }
-                drop(
-                    watched
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .take(),
-                );
+                let ended = held().remove(&key);
+                drop(ended);
             });
-        if started.is_err()
-            && let Some(held) = slot.lock().unwrap_or_else(PoisonError::into_inner).take()
-        {
-            std::mem::forget(held);
-        }
     }
 }
 
@@ -654,15 +705,72 @@ mod tests {
         assert_eq!(left.code(), UNCHECKED);
         let report = left.plain();
         assert!(report.contains("cannot confirm they ended"), "{report}");
-        assert!(report.ends_with("at most 10 minutes"), "{report}");
+        assert!(
+            report.ends_with("at most 10 minutes, or until you sign it out"),
+            "{report}"
+        );
 
         left.0.table = PS_TABLE;
         let (held, released) = std::sync::mpsc::channel::<()>();
-        left.hold(held);
+        left.hold(None, held);
         assert_eq!(
             released.recv_timeout(Duration::from_secs(5)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
             "the account stayed held after the processes could be listed and none ran"
         );
+    }
+
+    #[test]
+    fn signing_out_lets_go_of_an_account_a_full_access_stop_keeps_and_names() {
+        let mut leftover = crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 30"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let pid = rustix::process::Pid::from_child(&leftover);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rustix::process::getsid(Some(pid)) != Ok(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the leftover never left its session"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let lineage = Lineage::of(leftover.id()).unwrap();
+        let account = CredentialRef::new("signed-out-full-access").unwrap();
+        let other = CredentialRef::new("other-full-access").unwrap();
+        let (held, released) = std::sync::mpsc::channel::<()>();
+        Leftovers(lineage).hold(Some(account.clone()), held);
+
+        let reports = held_by(&account);
+        let release_count = release(&other);
+        let after_other = released.recv_timeout(Duration::from_millis(500));
+        let count = release(&account);
+        let after_release = released.recv_timeout(Duration::from_secs(1));
+        let remaining = held_by(&account);
+        let _ = leftover.kill();
+        let _ = leftover.wait();
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(
+            reports[0].contains(&format!("still running: {} perl", leftover.id())),
+            "{reports:?}"
+        );
+        assert_eq!(release_count, 0);
+        assert_eq!(
+            after_other,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "signing out another account let this one go"
+        );
+        assert_eq!(count, 1);
+        assert_eq!(
+            after_release,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the owner signed the account out and it stayed held while its leftover ran"
+        );
+        assert!(remaining.is_empty(), "{remaining:?}");
     }
 }

@@ -890,7 +890,8 @@ impl ResearchRunner {
                     if let Some(credential) = credential.as_mut() {
                         credential.stop_renewing();
                     }
-                    left.hold((credential, lease));
+                    let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
+                    left.hold(account, (credential, lease));
                     return Err(RunError::Uncertain(code));
                 }
             }

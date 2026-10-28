@@ -55,6 +55,10 @@ impl Drop for NativeProfileRelease {
 pub(crate) enum NativeProfileUse {}
 
 impl NativeProfileUse {
+    pub(crate) fn account(&self) -> &crate::protocol::CredentialRef {
+        match *self {}
+    }
+
     pub(crate) fn profile_path(&self) -> Result<PathBuf, EngineError> {
         match *self {}
     }

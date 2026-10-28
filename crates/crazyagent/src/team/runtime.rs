@@ -4775,7 +4775,7 @@ fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> O
             let problem = with_code(&left.plain(), Some(left.code()));
             if let Some((mut credential, profile)) = held {
                 credential.stop_renewing();
-                left.hold((credential, profile));
+                left.hold(Some(profile.account().clone()), (credential, profile));
             }
             Some(problem)
         }

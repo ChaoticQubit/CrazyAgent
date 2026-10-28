@@ -799,21 +799,23 @@ impl State {
             let agents = used
                 .agents
                 .iter()
-                .map(|agent| (agent.label.as_str(), agent.project.as_str()));
+                .map(|agent| (agent.label.as_str(), Some(agent.project.as_str())));
             let holders = used.holders.iter().map(|holder| match holder {
-                Holder::Master { project, .. } => ("Master conversation", project.as_str()),
-                Holder::Research { project, title, .. } => (title.as_str(), project.as_str()),
+                Holder::Master { project, .. } => ("Master conversation", Some(project.as_str())),
+                Holder::Research { project, title, .. } => (title.as_str(), Some(project.as_str())),
+                Holder::Leftover { report } => (report.as_str(), None),
             });
             let listed = used.agents.len() + used.holders.len();
             let mut names: Vec<String> = agents
                 .chain(holders)
                 .take(USING_SHOWN_MAX)
-                .map(|(label, project)| {
-                    format!(
+                .map(|(label, project)| match project {
+                    Some(project) => format!(
                         "{} (project {})",
                         display_text(label, 256),
                         display_text(project, 256)
-                    )
+                    ),
+                    None => display_text(label, 1024),
                 })
                 .collect();
             if listed > USING_SHOWN_MAX {
@@ -871,7 +873,8 @@ impl State {
 }
 
 /// The one owner action that ends what holds an account and then signs it out, named by
-/// what it ends: agents and research jobs are stopped, master conversations are ended.
+/// what it ends: agents and research jobs are stopped, master conversations are ended,
+/// and what Full access agents left running is let go of while it still runs.
 /// Input: what holds the account. Output: the action's label.
 pub(super) fn release_label(used: &AccountUse) -> &'static str {
     let master = used
@@ -886,7 +889,8 @@ pub(super) fn release_label(used: &AccountUse) -> &'static str {
     match (others, master) {
         (true, true) => "Stop agents, end conversation and sign out",
         (false, true) => "End conversation and sign out",
-        _ => "Stop agents and sign out",
+        (true, false) => "Stop agents and sign out",
+        (false, false) => "Sign out anyway",
     }
 }
 
