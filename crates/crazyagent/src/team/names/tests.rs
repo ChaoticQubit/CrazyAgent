@@ -409,7 +409,7 @@ fn no_handle_takes_the_shape_of_an_agent_id() {
         Err("team_handle_invalid")
     );
     let delegated = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, delegated, "Team 7").unwrap();
+    give_role(&connection, &alpha, delegated, "Team 7", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, delegated).unwrap(),
         Some(format!("task-{delegated}"))
