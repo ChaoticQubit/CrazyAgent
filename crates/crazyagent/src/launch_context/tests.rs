@@ -540,7 +540,6 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
             .unwrap(),
         crate::agent_home::Received {
             text: written.clone(),
-            skills: Vec::new(),
         },
         "the owner sees what the last launch received after it ends"
     );

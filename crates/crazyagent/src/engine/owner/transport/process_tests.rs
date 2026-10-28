@@ -342,7 +342,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
     };
     let sub_home = launched_home(&root, sub);
     prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
-    record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
+    record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
         AgentInstructions {
@@ -459,6 +459,57 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
     let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
     assert_eq!(
         shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_skills_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare, record_skills};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    let home = launched_home(&root, sub);
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: Vec::new(),
+        section_bytes: 0,
+    };
+    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
+    let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .skills,
+        installed
+    );
+
+    let forged = "secret-exfiltration\n";
+    let mut planted = vec![home.join("crazyagent-skills")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "AGENTS.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.skills, installed,
         "the card lists only the engine's own record, whatever the agent writes in its home"
     );
     assert_eq!(shown.text, "# Rules\n");
