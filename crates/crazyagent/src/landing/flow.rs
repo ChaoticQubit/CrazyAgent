@@ -1070,7 +1070,9 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
         prompt.push_str("These files have conflict markers (<<<<<<<, ======= and >>>>>>>):\n");
         for file in record.conflicts.iter().take(CONFLICTS_SHOWN_MAX) {
             prompt.push_str("- ");
-            prompt.push_str(&file.replace(char::is_control, "\u{fffd}"));
+            prompt.push_str(&crate::memory::visible_text(
+                &file.replace(char::is_control, "\u{fffd}"),
+            ));
             prompt.push('\n');
         }
         if record.conflicts.len() > CONFLICTS_SHOWN_MAX {
