@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  addMemory, approveMemory, deleteMemory, dismissSuggestion, memoryEdit, memorySuggestions, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryWrites,
+  addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryWrites,
   MEMORY_TEXT_BYTES_MAX, type AgentMemoryWrites, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
@@ -15,7 +15,8 @@ const NOT_READY = "This change isn't ready in this build yet.";
  * names by id. Output: "App-wide", "App-wide, from Harbor Notes", "Harbor Notes only", with
  * "saved by" and the agent for an agent's memory, and the approval it waits for. */
 export function memorySource(memory: SavedMemory, names: Map<string, string>): string {
-  const place = memory.scope === "project" ? `${names.get(memory.project_id ?? "") ?? "A removed project"} only`
+  const only = `${names.get(memory.project_id ?? "") ?? "A removed project"} only`;
+  const place = memory.scope === "project" ? memory.origin === "imported" && memory.source_path ? `${only}, imported from ${memory.source_path}` : only
     : memory.origin === "promoted" ? `App-wide, from ${names.get(memory.from_project_id ?? "") ?? "a removed project"}` : "App-wide";
   if (memory.origin === "requested") return `Waiting for your approval. ${place}, asked by ${memory.agent ?? "an agent"}`;
   if (memory.origin === "agent") return `${place}, saved by ${memory.agent ?? "an agent"}`;
@@ -56,6 +57,33 @@ function AddMemoryForm({ where, onAdd }: { where: string; onAdd: (text: string) 
   </Panel>;
 }
 
+function ImportMemoryForm({ projects, initial, onImport }: {
+  projects: { id: string; name: string }[];
+  initial: string;
+  onImport: (project: string) => Promise<string>;
+}) {
+  const [project, setProject] = useState(initial);
+  const [pending, setPending] = useState(false);
+  const [done, setDone] = useState("");
+  const chosen = projects.some((item) => item.id === project) ? project : projects[0]?.id ?? "";
+  const run = async () => {
+    if (!chosen || pending) return;
+    setPending(true);
+    setDone(await onImport(chosen));
+    setPending(false);
+  };
+  return <Panel title="Import memory">
+    <div className="stack-small">
+      <p className="secondary">Choose a folder of markdown memory files, such as a Claude Code project memory folder. Each file becomes one memory of the chosen project. MEMORY.md, links and other files are left out.</p>
+      {projects.length === 0 ? <p className="muted">Add a project first. Imported memories belong to one project.</p> : <>
+        <Select id="memory-import-project" label="Into project" value={chosen} options={projects.map((item) => ({ value: item.id, label: item.name }))} onValue={setProject} />
+        <span><Button icon="folder" pending={pending} pendingLabel="Importing..." onClick={() => void run()}>Import memory</Button></span>
+      </>}
+      {done && <p className="muted small" role="status">{done}</p>}
+    </div>
+  </Panel>;
+}
+
 /** One research suggestion rewritten in the owner's words before it is saved, like the TUI's
  * edit key. Inputs: the suggestion, an optional field label, whether a save is running, and
  * the save and cancel actions. Output: the inline editor, starting from the suggested text with
@@ -88,9 +116,9 @@ export function SuggestionEditor({ suggestion, label, pending, onSave, onCancel 
 
 /** Settings, Memory as a pure view: research suggestions to save, edit then save, or dismiss
  * (one click is the owner's approval), the Agent memory writes setting, saved memory for the
- * chosen scope with who saved it, search, older pages, approve and delete, and a form to add a
- * memory. Inputs: the reads, filters, last failure and the actions. */
-export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
+ * chosen scope with who saved it, search, older pages, approve and delete, and forms to add and
+ * import memory. Inputs: the reads, filters, last failure and the actions. */
+export function MemoryView({ saved, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
   saved: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
   scope: string;
@@ -101,6 +129,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
   onSearch: (search: string) => void;
   onScope: (scope: string) => void;
   onAdd: (text: string) => Promise<boolean>;
+  onImport: (project: string) => Promise<string>;
   onSave: (suggestion: Suggestion) => void;
   onSaveEdited: (suggestion: Suggestion, text: string) => void;
   onDismiss: (suggestion: Suggestion) => void;
@@ -167,6 +196,7 @@ export function MemoryView({ saved, suggested, scope, projects, search, failure,
     </div></Panel>}
     <Panel title="Saved" actions={filters} padded={false}>{list}</Panel>
     <AddMemoryForm where={where} onAdd={onAdd} />
+    <ImportMemoryForm projects={projects} initial={scope} onImport={onImport} />
   </div>;
 }
 
@@ -219,6 +249,18 @@ export function MemorySettings() {
         session.showToast("Saved to memory.");
         reloadSaved();
         return true;
+      }}
+      onImport={async (project) => {
+        setFailure("");
+        const picked = session.noteResult(await pickFolder("memory"));
+        if (picked.kind !== "ok") { setFailure(plain(picked)); return ""; }
+        if (picked.value === null) return "";
+        const result = session.noteResult(await importMemory(project, picked.value));
+        reloadSaved();
+        if (result.kind !== "ok") { setFailure(plain(result)); return ""; }
+        const done = `Imported ${result.value.imported}, skipped ${result.value.skipped}.`;
+        session.showToast(done);
+        return done;
       }}
       onSave={(suggestion) => void act(suggestion.id, () => saveSuggestion(suggestion), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}
       onSaveEdited={(suggestion, text) => void act(suggestion.id, () => saveEditedSuggestion(suggestion, text), "Saved to memory.", () => { reloadSuggested(); reloadSaved(); })}

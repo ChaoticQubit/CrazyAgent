@@ -921,6 +921,7 @@ fn recall(
             MemoryOrigin::Agent { agent } | MemoryOrigin::Requested { agent } => agent.as_str(),
             MemoryOrigin::Written | MemoryOrigin::Promoted { .. } => "the owner",
             MemoryOrigin::Selected { .. } => "the owner, from a file",
+            MemoryOrigin::Imported { .. } => "the owner, imported from a file",
         };
         text.push_str(&format!(
             "> ({place}, saved by {by}) {}\n",

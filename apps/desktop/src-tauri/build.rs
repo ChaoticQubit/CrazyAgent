@@ -79,6 +79,7 @@ fn main() {
         "desktop_memory",
         "desktop_approved_memories",
         "desktop_add_memory",
+        "desktop_import_memory",
         "desktop_promote_memory",
         "desktop_delete_memory",
         "desktop_approve_memory",

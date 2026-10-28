@@ -64,6 +64,11 @@ pub(in crate::tui) enum SettingsJob {
         text: String,
         generation: u64,
     },
+    ImportMemory {
+        project: ProjectId,
+        folder: String,
+        generation: u64,
+    },
     Suggestions {
         projects: Vec<ProjectId>,
     },
@@ -164,6 +169,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::ApproveMemory { .. } => "ApproveMemory",
             Self::AgentWrites { .. } => "AgentWrites",
             Self::AddMemory { .. } => "AddMemory",
+            Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
@@ -274,6 +280,7 @@ pub(in crate::tui) enum SettingsEvent {
     MemoryApproved(Result<(), String>),
     AgentWrites(Result<AgentWrites, String>),
     MemoryAdded(Result<(), String>),
+    MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
@@ -309,6 +316,7 @@ impl SettingsEvent {
             SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
             SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
+            SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
             SettingsJob::Suggestion { suggestion, .. } => {
                 Self::SuggestionDone(suggestion.clone(), Err(problem))
@@ -544,6 +552,17 @@ impl NativeOwner {
                     "memory_outcome_unknown",
                     lost,
                 ),
+                Err(error) => Err(error),
+            }),
+            SettingsJob::ImportMemory {
+                project,
+                folder,
+                generation,
+            } => SettingsEvent::MemoryImported(match self.settings_controller() {
+                Ok(controller) => controller
+                    .import_memories(project, std::path::Path::new(&folder), generation)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
             SettingsJob::Suggestions { projects } => {

@@ -1,4 +1,4 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
+use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::library::{
     AgentWrites, ApprovedMemories, LibraryAction, MemoryOrigin, MemoryScope, SavedMemory,
@@ -36,6 +36,7 @@ impl From<SavedMemory> for MemoryNote {
             MemoryOrigin::Selected { path } => ("selected", None, Some(path), None),
             MemoryOrigin::Agent { agent } => ("agent", None, None, Some(agent)),
             MemoryOrigin::Requested { agent } => ("requested", None, None, Some(agent)),
+            MemoryOrigin::Imported { file } => ("imported", None, Some(file), None),
         };
         Self {
             id: memory.id.as_str().to_owned(),
@@ -56,6 +57,15 @@ pub struct MemoryList {
     pub items: Vec<MemoryNote>,
     pub next: Option<u64>,
     pub agent_writes: AgentWrites,
+}
+
+/// How an import of a memory folder ended: memories saved, markdown files not saved, and
+/// the receipt of the change that stopped it while its outcome is still unconfirmed.
+#[derive(Debug, Serialize)]
+pub struct MemoryImport {
+    pub imported: u32,
+    pub skipped: u32,
+    pub stopped: Option<IntentReceipt>,
 }
 
 fn code(code: &str, fallback: &'static str) -> BridgeError {
@@ -262,6 +272,54 @@ impl NativeBridge {
             text,
         };
         self.change_memory(action, generation).await
+    }
+
+    /// Imports the markdown memory files of a folder the owner chose into one project's
+    /// memory, one memory per file, each as its own owner change. Takes the project id, the
+    /// absolute folder and a fresh draft generation. Returns the counts; a duplicate or refused
+    /// file is skipped, full memory skips the rest, and an unconfirmed change stops the import.
+    pub async fn import_memory(
+        &mut self,
+        project: &str,
+        folder: &str,
+        generation: u64,
+    ) -> Result<MemoryImport, BridgeError> {
+        self.allow_change()?;
+        let project_id = ProjectId::new(project).map_err(|_| failure("invalid_project"))?;
+        let scan = crazyagent::memory::import::read_folder(std::path::Path::new(folder))
+            .map_err(|error| code(&error.0, "memory_import_folder_invalid"))?;
+        let count = scan.files.len();
+        let total = count as u32 + scan.skipped;
+        let mut report = MemoryImport {
+            imported: 0,
+            skipped: scan.skipped,
+            stopped: None,
+        };
+        for (index, item) in scan.files.into_iter().enumerate() {
+            let action = LibraryAction::Import {
+                project_id: project_id.clone(),
+                file: item.file,
+                text: item.text,
+            };
+            let receipt = self.change_memory(action, generation).await?;
+            match (receipt.outcome, receipt.pending) {
+                (ActionOutcome::Applied, false) => report.imported += 1,
+                (ActionOutcome::Rejected, false)
+                    if receipt.rejection.as_deref() == Some("memory_full") =>
+                {
+                    report.skipped += (count - index) as u32;
+                    break;
+                }
+                (ActionOutcome::Rejected, false) => report.skipped += 1,
+                _ => {
+                    report.stopped = Some(receipt);
+                    break;
+                }
+            }
+        }
+        assert!(report.imported + report.skipped <= total);
+        assert!(report.stopped.is_some() || report.imported + report.skipped == total);
+        bounded(report)
     }
 
     async fn change_memory(
