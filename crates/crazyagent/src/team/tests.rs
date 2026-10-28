@@ -3399,3 +3399,111 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
         ]
     );
 }
+
+/// The six Messages settings (MSG-E) start at the proposed defaults, an owner save through the
+/// team action is stored whole and read back in the team status, a value outside the listed
+/// choices is refused before any row is written, and the choice is per project.
+#[test]
+fn messages_settings_start_at_the_defaults_save_whole_per_project_and_refuse_unlisted_values() {
+    use agent_messages::{MessageSettings, ResultsShown};
+    let (_directory, mut connection) = database();
+    let setup = stored("team-messages", vec![]);
+    let other = stored("team-messages-other", vec![]);
+    for stored in [&setup, &other] {
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![
+                    stored.project_id.as_str(),
+                    serde_json::to_string(stored).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        MessageSettings {
+            keep_master_messages: true,
+            kept_per_project: 2000,
+            progress_shown: true,
+            results: ResultsShown::FirstLine,
+            owner_items_shown: true,
+            page_size: 50,
+        },
+        "the proposal's defaults until the owner saves"
+    );
+    let save = |connection: &mut Connection, settings: MessageSettings| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-messages", &["local-a"]),
+            &TeamAction::MessageSettings {
+                project_id: setup.project_id.clone(),
+                settings,
+            },
+        );
+        tx.commit().unwrap();
+        outcome
+    };
+    let chosen = MessageSettings {
+        keep_master_messages: false,
+        kept_per_project: 5000,
+        progress_shown: false,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        page_size: 100,
+    };
+    assert_eq!(save(&mut connection, chosen).unwrap(), Outcome::Applied);
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        chosen
+    );
+    for kept in agent_messages::KEPT_CHOICES {
+        for page_size in agent_messages::PAGE_CHOICES {
+            let listed = MessageSettings {
+                kept_per_project: kept,
+                page_size,
+                ..chosen
+            };
+            assert_eq!(save(&mut connection, listed).unwrap(), Outcome::Applied);
+            assert_eq!(
+                status(&connection, &setup).unwrap().message_settings,
+                listed
+            );
+        }
+    }
+    let last = status(&connection, &setup).unwrap().message_settings;
+    for unlisted in [
+        MessageSettings {
+            kept_per_project: 1000,
+            ..chosen
+        },
+        MessageSettings {
+            kept_per_project: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 30,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 200,
+            ..chosen
+        },
+    ] {
+        assert_eq!(
+            save(&mut connection, unlisted).unwrap_err().0,
+            "team_message_settings_invalid"
+        );
+        assert_eq!(status(&connection, &setup).unwrap().message_settings, last);
+    }
+    assert_eq!(
+        status(&connection, &other).unwrap().message_settings,
+        MessageSettings::default(),
+        "the choice is per project"
+    );
+}

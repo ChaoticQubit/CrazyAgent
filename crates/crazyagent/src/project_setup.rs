@@ -2176,10 +2176,13 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 18] = [
+const REMOVED_WITH_PROJECT: [&str; 21] = [
     "research_jobs",
     "onboarding",
     "team_messages",
+    "team_events",
+    "team_agent_messages",
+    "team_message_settings",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
