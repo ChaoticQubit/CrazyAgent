@@ -125,6 +125,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
         query,
         ChangesQuery::Diff {
             id: id('1'),
+            head: "1".repeat(40),
             page: 0
         }
     );

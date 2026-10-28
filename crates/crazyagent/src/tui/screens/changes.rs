@@ -116,6 +116,7 @@ impl ProjectChanges {
         } else if let Some(diff) = self.diff.as_ref().filter(|diff| diff.wants_more()) {
             ChangesQuery::Diff {
                 id: diff.id.clone(),
+                head: diff.head.clone(),
                 page: diff.next?,
             }
         } else if self.stale || (!self.not_ready && now_ms - self.read_ms >= LIST_POLL_MS) {
@@ -188,8 +189,11 @@ impl ProjectChanges {
                     refusal(code)
                 )));
             }
-            (ChangesQuery::Diff { id, page }, Ok(ChangesView::Diff(page_diff))) => {
-                if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
+            (ChangesQuery::Diff { id, head, page }, Ok(ChangesView::Diff(page_diff))) => {
+                if let Some(diff) = self
+                    .diff
+                    .as_mut()
+                    .filter(|diff| &diff.id == id && &diff.head == head)
                     && diff.next == Some(*page)
                 {
                     diff.files.extend(page_diff.files.iter().cloned());

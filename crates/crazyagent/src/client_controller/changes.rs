@@ -16,11 +16,17 @@ impl OwnerController {
         self.changes_client()?.change_sets(project).await
     }
 
-    /// Reads one page of a change set's diff; callers ask for the next page only when
-    /// the owner reaches it. Inputs: the change set and the page, 0 first. Output: the
-    /// page's files with their marks, its plain text and the next page.
-    pub async fn change_diff(&self, id: ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
-        self.changes_client()?.change_diff(id, page).await
+    /// Reads one page of a change set's diff at the head the owner is reading; callers ask
+    /// for the next page only when the owner reaches it. Inputs: the change set, that head
+    /// and the page, 0 first. Output: the page's files with their marks, its plain text and
+    /// the next page, or `changes_stale` once the set moved to another head.
+    pub async fn change_diff(
+        &self,
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    ) -> Result<ChangeDiff, EngineError> {
+        self.changes_client()?.change_diff(id, head, page).await
     }
 
     /// Lands a change set as one squash commit on the owner's checked-out branch.

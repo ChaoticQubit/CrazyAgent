@@ -48,13 +48,22 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads one page of a change set's diff as plain text, run without the bridge lock.
-    /// Inputs: the change set id and the page. Output: the page.
-    pub fn change_diff(&self, id: String, page: u16) -> Result<Unlocked<ChangeDiff>, BridgeError> {
+    /// Reads one page of a change set's diff as plain text at the head the owner is
+    /// reading, run without the bridge lock. Inputs: the change set id, that head and the
+    /// page. Output: the page, or `changes_stale` once the set moved to another head.
+    pub fn change_diff(
+        &self,
+        id: String,
+        head: String,
+        page: u16,
+    ) -> Result<Unlocked<ChangeDiff>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
-            client.change_diff(id, page).await.map_err(changes_error)
+            client
+                .change_diff(id, head, page)
+                .await
+                .map_err(changes_error)
         }))
     }
 

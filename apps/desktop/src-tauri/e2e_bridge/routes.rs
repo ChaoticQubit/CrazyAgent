@@ -1724,13 +1724,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[serde(rename_all = "camelCase")]
             struct Args {
                 id: String,
+                head: String,
                 page: u16,
             }
-            let Args { id, page } = match parse(args) {
+            let Args { id, head, page } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.change_diff(id, page)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.change_diff(id, head, page)?; call.await }.await;
             routed(result)
         }
         "desktop_accept_change" => {

@@ -191,3 +191,13 @@ test("a change set that moved on while open goes back to review: Accept and Disc
   assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "discard", set: asked \}\)\}/);
   assert.match(source, /const asked = \{ \.\.\.set, head \};/);
 });
+
+test("every diff page is read at the head under review, and a page refused as moved on rereads the list (RV-DS-13)", () => {
+  assert.equal(client.loadChangeDiff.length, 3, "the diff read names the change set, the head and the page");
+  const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");
+  assert.match(api, /call<ChangeDiff>\("desktop_change_diff", \{ id, head, page \}\)/);
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /loadChangeDiff\(set\.id, head, page\)/);
+  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) onMoved\(\);/);
+  assert.match(source, /onMoved=\{\(\) => setRound\(\(value\) => value \+ 1\)\}/);
+});

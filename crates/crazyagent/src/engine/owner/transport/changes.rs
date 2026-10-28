@@ -65,6 +65,7 @@ enum Action {
     },
     Diff {
         id: ChangeSetId,
+        head: String,
         page: u16,
     },
     Accept {
@@ -116,11 +117,12 @@ fn valid_commit(commit: &str) -> bool {
 impl Action {
     fn validate(&self) -> Result<(), EngineError> {
         match self {
-            Self::Accept { expected_head, .. } | Self::Discard { expected_head, .. }
-                if !valid_commit(expected_head) =>
-            {
-                Err(failure("changes_stale"))
-            }
+            Self::Accept { expected_head, .. }
+            | Self::Discard { expected_head, .. }
+            | Self::Diff {
+                head: expected_head,
+                ..
+            } if !valid_commit(expected_head) => Err(failure("changes_stale")),
             Self::Accept {
                 message: Some(message),
                 ..
@@ -140,10 +142,19 @@ impl OwnerClient {
         }
     }
 
-    /// Reads one page of a change set's diff, as plain text. Inputs: the change set and
-    /// the page, 0 first. Output: the page's files and text and the next page.
-    pub async fn change_diff(&self, id: ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
-        match self.changes_exchange(Action::Diff { id, page }).await? {
+    /// Reads one page of a change set's diff, as plain text, at the head the owner is
+    /// reading. Inputs: the change set, that head and the page, 0 first. Output: the
+    /// page's files and text and the next page, or `changes_stale` once the set moved.
+    pub async fn change_diff(
+        &self,
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    ) -> Result<ChangeDiff, EngineError> {
+        match self
+            .changes_exchange(Action::Diff { id, head, page })
+            .await?
+        {
             Reply::Diff { diff } if diff.next.is_none_or(|next| next > page) => Ok(diff),
             _ => Err(unknown()),
         }
@@ -407,9 +418,9 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
         }
-        Action::Diff { id, page } => (
+        Action::Diff { id, head, page } => (
             Reply::Diff {
-                diff: landing::diff(&db, &id, page)?,
+                diff: landing::diff(&db, &id, &head, page)?,
             },
             false,
         ),
@@ -634,6 +645,117 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// Makes an owner repository under an engine root with one agent worktree whose turn
+    /// added a file, recorded as a change set. Input: the root. Output: the workspace and
+    /// the change set.
+    #[cfg(unix)]
+    fn recorded(root: &Path) -> (landing::Workspace, ChangeSetId) {
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&home, &repo, &["add", "README"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Start",
+            ],
+        );
+        git(
+            &home,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("NEW"), "first\n").unwrap();
+        let workspace = landing::Workspace {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let db = landing::open(root).unwrap();
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        (workspace, id)
+    }
+
+    /// A diff page is read at the head the owner is reading, named in the request as the
+    /// desktop and the TUI send it, and refused as `changes_stale` once the set moved on, so
+    /// no page of another head is shown under the head Accept names (RV-DS-13, RV-DS-79).
+    #[cfg(unix)]
+    #[test]
+    fn a_diff_page_is_read_only_at_the_head_the_owner_is_reading() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        let (workspace, id) = recorded(root);
+        let db = landing::open(root).unwrap();
+        let head_of = || landing::change_set(&db, &id).unwrap().unwrap().1.head;
+        let first = head_of();
+        let asked = |head: &str| -> Result<Reply, EngineError> {
+            let request = format!(
+                r#"{{"changes":{{"kind":"diff","id":"{}","head":"{head}","page":0}}}}"#,
+                id.as_str()
+            );
+            let Envelope { changes } =
+                serde_json::from_str(&request).map_err(|_| failure("changes_request_invalid"))?;
+            changes.validate()?;
+            run(root, changes).map(|(reply, _)| reply)
+        };
+        let shown = |reply: Result<Reply, EngineError>| match reply {
+            Ok(Reply::Diff { diff }) => diff.text,
+            Ok(_) => "another reply".into(),
+            Err(problem) => problem.0,
+        };
+        assert!(
+            shown(asked(&first)).contains("+first"),
+            "page at the head read"
+        );
+
+        std::fs::write(workspace.worktree.join("NEW"), "second\n").unwrap();
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-2".into(),
+            prompt_line: "Change the file".into(),
+        };
+        landing::record_turn_end(&db, &workspace, &turn).unwrap();
+        let second = head_of();
+        assert_ne!(second, first);
+        assert_eq!(shown(asked(&first)), "changes_stale");
+        assert!(shown(asked(&second)).contains("+second"));
+        assert_eq!(shown(asked("not-a-commit")), "changes_stale");
     }
 
     /// Reads the plain codes a source file refuses with, before its tests.

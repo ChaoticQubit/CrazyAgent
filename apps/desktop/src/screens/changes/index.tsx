@@ -49,13 +49,14 @@ function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? changesRefusal({ code: failure.code, cause: failure.cause }) : "";
 }
 
-function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
+function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   set: ChangeSet;
   now: number;
   busy: boolean;
   onAsk: (asking: Asking) => void;
   onUpdate: (set: ChangeSet) => void;
   onRestore: (set: ChangeSet) => void;
+  onMoved: () => void;
 }) {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
@@ -73,10 +74,11 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
   useEffect(() => {
     let current = true;
     setDiff(undefined);
-    void loadChangeDiff(set.id, page).then((result) => {
+    void loadChangeDiff(set.id, head, page).then((result) => {
       if (!current) return;
       setDiff(result);
       if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
+      if (result.kind === "error" && result.code === "changes_stale") onMoved();
     });
     return () => { current = false; };
   }, [set.id, head, page]);
@@ -180,7 +182,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
           <span className="pj-small pj-secondary">{sizeLine(set)}</span>
         </button>
       </li>)}</ul>
-      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
+      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={() => setRound((value) => value + 1)} />}
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message) => void accept(asking.set, message)} />}
