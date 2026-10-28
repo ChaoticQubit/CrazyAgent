@@ -473,6 +473,61 @@ mod tests {
     }
 
     #[test]
+    fn folders_holding_a_hidden_path_are_anchored_so_the_path_cannot_be_removed_or_replaced() {
+        let config = r"C:\Users\mira\Projects\shop\.config";
+        let keys = r"C:\Users\mira\Projects\shop\.config\keys";
+        let key = r"C:\Users\mira\Projects\shop\.config\keys\deploy.pem";
+        let cache = format!(r"{HOME}\cache");
+        let token = format!(r"{HOME}\cache\token");
+        let built = || {
+            profile(
+                &[r"C:\Tools"],
+                &[PROJECT, HOME, TMP],
+                &[
+                    (key, Guard::Hidden),
+                    (token.as_str(), Guard::Hidden),
+                    (r"C:\Tools\keys", Guard::Hidden),
+                ],
+            )
+        };
+
+        let present = plan(&built()).unwrap();
+        assert!(present.contains(&ace(key, Access::DenyAll)));
+        assert!(present.contains(&ace(&token, Access::DenyAll)));
+        let anchored: Vec<&str> = present
+            .iter()
+            .filter(|item| item.access == Access::Anchor)
+            .map(|item| item.path.as_str())
+            .collect();
+        assert_eq!(
+            anchored,
+            [PROJECT, config, keys, HOME, cache.as_str()],
+            "no agent may delete a hidden path through its folder or rename a folder above it"
+        );
+        assert!(
+            !present
+                .iter()
+                .any(|item| item.access == Access::KeepEntries)
+        );
+        assert!(
+            !present
+                .iter()
+                .any(|item| item.path.starts_with(r"C:\Tools") && item.access == Access::Anchor),
+            "a hidden path in a read root needs no anchor: the agent deletes nothing there"
+        );
+
+        let missing = super::plan(&built(), |path| path != key).unwrap();
+        assert!(
+            missing.contains(&ace(keys, Access::KeepEntries)),
+            "no agent may create a missing hidden path"
+        );
+        assert!(missing.contains(&ace(config, Access::Anchor)));
+        let gone = super::plan(&built(), |path| path != keys && path != key).unwrap();
+        assert!(gone.contains(&ace(config, Access::KeepEntries)));
+        assert!(!gone.iter().any(|item| item.path == keys && item.access.denies() && !item.access.inherits()));
+    }
+
+    #[test]
     fn folders_holding_a_read_only_path_are_anchored_so_the_path_cannot_be_vacated() {
         let git = r"C:\Users\mira\Projects\shop\.git";
         let state = r"C:\Users\mira\Projects\shop\.crazyagent";
