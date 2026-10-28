@@ -1,9 +1,9 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
-export type { SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
@@ -303,6 +303,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
   memory_delete: "deleting a memory",
+  memory_approve: "approving a memory",
+  memory_agent_writes: "saving Agent memory writes",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -874,6 +876,18 @@ export function addMemory(project: string | null, text: string): Promise<Result<
 /** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */
 export function deleteMemory(id: string): Promise<Result<void>> {
   return change("desktop_delete_memory", { id, generation: nextGeneration() });
+}
+
+/** Approves one memory an agent asked to save, so agents get it from their next launch.
+ * Input: memory id. Output: ok once approved. */
+export function approveMemory(id: string): Promise<Result<void>> {
+  return change("desktop_approve_memory", { id, generation: nextGeneration() });
+}
+
+/** Saves the owner's Agent memory writes setting: agents save directly, or ask first.
+ * Input: the choice. Output: ok once saved. */
+export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
 }
 
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its

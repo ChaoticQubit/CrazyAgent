@@ -86,6 +86,8 @@
     "allow-desktop-add-memory",
     "allow-desktop-promote-memory",
     "allow-desktop-delete-memory",
+    "allow-desktop-approve-memory",
+    "allow-desktop-set-agent-memory-writes",
     "allow-desktop-forget-memory",
     "allow-desktop-remember-research",
     "allow-desktop-save-selection-to-memory",

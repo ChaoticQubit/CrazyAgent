@@ -379,6 +379,9 @@ impl AgentContext {
         context
             .instructions
             .push_str(crate::team::tool::HISTORY_LINE);
+        context
+            .instructions
+            .push_str(crate::team::tool::MEMORY_LINE);
         assert!(context.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(context)
     }
