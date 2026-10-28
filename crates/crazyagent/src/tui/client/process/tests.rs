@@ -403,7 +403,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
-    use crate::engine::owner::InstructionSettings;
+    use crate::engine::owner::{InstructionSettings, InstructionView};
     use crate::instruction_files::Choice;
     let root = private_root("ca-tsettings-");
     let work = private_root("ca-tsettings-work-");
@@ -436,22 +436,44 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             })
             .await
             .result,
-        Ok(ProcessReply::Settings(InstructionSettings::default())),
+        Ok(ProcessReply::Settings(InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        })),
         "a project the owner never changed gets the project's files and keeps transcripts"
     );
+    let mut version = 0;
     for files in [Choice::ProjectAndUser, Choice::None, Choice::Project] {
         for transcripts in [false, true] {
             let settings = InstructionSettings { files, transcripts };
+            let saved = InstructionView {
+                settings,
+                version: version + 1,
+            };
             assert_eq!(
                 native
                     .process(ProcessQuery::SaveSettings {
                         project: project.clone(),
                         settings,
+                        version: Some(version),
                     })
                     .await
                     .result,
-                Ok(ProcessReply::Settings(settings))
+                Ok(ProcessReply::Settings(saved))
             );
+            assert_eq!(
+                native
+                    .process(ProcessQuery::SaveSettings {
+                        project: project.clone(),
+                        settings: InstructionSettings::default(),
+                        version: Some(version),
+                    })
+                    .await
+                    .result,
+                Err(crate::storage::versioned::STALE_CODE.into()),
+                "a save from the version before refuses as stale"
+            );
+            version += 1;
             assert_eq!(
                 native
                     .process(ProcessQuery::Settings {
@@ -459,7 +481,7 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
                     })
                     .await
                     .result,
-                Ok(ProcessReply::Settings(settings))
+                Ok(ProcessReply::Settings(saved))
             );
             let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
             assert_eq!(

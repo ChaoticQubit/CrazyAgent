@@ -27,8 +27,8 @@ pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{ServerPage, SkillPage};
 pub use transport::process::{
-    AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES, ProcessSaved,
-    ProcessText, SavedText,
+    AgentInstructions, InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES,
+    ProcessSaved, ProcessText, SavedText,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
@@ -166,6 +166,7 @@ pub enum OwnerMutation {
     },
     SetProjectAgentPolicy {
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
     Team {
@@ -350,9 +351,14 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectSetup { action }
             }
-            Self::SetProjectAgentPolicy { project_id, policy } => {
+            Self::SetProjectAgentPolicy {
+                project_id,
+                version,
+                policy,
+            } => {
                 let action = crate::project_setup::SetupAction::SetAgentPolicy {
                     project_id: project_id.clone(),
+                    version: *version,
                     policy: policy.clone(),
                 };
                 action.validate()?;

@@ -49,6 +49,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_text_unsafe",
     "process_text_unwritable",
     "process_unavailable",
+    "stale_revision",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +85,7 @@ enum Action {
     SaveSettings {
         project: ProjectId,
         settings: InstructionSettings,
+        version: Option<u64>,
     },
 }
 
@@ -127,6 +129,7 @@ enum Reply {
     },
     Settings {
         settings: InstructionSettings,
+        version: u64,
     },
     Rejected {
         code: String,
@@ -151,6 +154,15 @@ pub struct AgentInstructions {
     pub loaded: Vec<LoadedFile>,
     pub skills_used: Vec<String>,
     pub files: Vec<InstructionRecord>,
+}
+
+/// One project's agent instruction settings and the version they were read at. A save names
+/// that version, so it never replaces settings saved since the owner's screen read them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionView {
+    pub settings: InstructionSettings,
+    pub version: u64,
 }
 
 /// One instructions text and the version it was read at. A save names that version, so it
@@ -229,7 +241,7 @@ enum Answer {
     Current(ProcessText),
     Saved(SavedText),
     Agent(AgentInstructions),
-    Settings(InstructionSettings),
+    Settings(InstructionView),
 }
 
 fn unknown() -> EngineError {
@@ -395,32 +407,40 @@ impl OwnerClient {
 
     /// Reads one project's agent instruction settings: which instruction files its agents
     /// get and whether headless Claude runs keep their transcript. Input: the project.
-    /// Output: the settings, the defaults when the owner never changed them.
+    /// Output: the settings, the defaults when the owner never changed them, with their
+    /// version.
     pub async fn instruction_settings(
         &self,
         project: ProjectId,
-    ) -> Result<InstructionSettings, EngineError> {
+    ) -> Result<InstructionView, EngineError> {
         self.process_settings_reply(Action::Settings { project })
             .await
     }
 
-    /// Stores one project's agent instruction settings whole; agents launched after this
-    /// follow them. Inputs: the project and the settings. Output: the settings as stored.
+    /// Stores one project's agent instruction settings whole when the owner's screen read
+    /// the current version; agents launched after this follow them. Inputs: the project, the
+    /// settings and the version read, none when the screen could not read the stored
+    /// settings and replaces them. Output: the settings as stored with their new version, or
+    /// `stale_revision` when they changed since that version or became readable.
     pub async fn save_instruction_settings(
         &self,
         project: ProjectId,
         settings: InstructionSettings,
-    ) -> Result<InstructionSettings, EngineError> {
-        self.process_settings_reply(Action::SaveSettings { project, settings })
-            .await
+        version: Option<u64>,
+    ) -> Result<InstructionView, EngineError> {
+        self.process_settings_reply(Action::SaveSettings {
+            project,
+            settings,
+            version,
+        })
+        .await
     }
 
-    async fn process_settings_reply(
-        &self,
-        action: Action,
-    ) -> Result<InstructionSettings, EngineError> {
+    async fn process_settings_reply(&self, action: Action) -> Result<InstructionView, EngineError> {
         match self.process_exchange(action, None).await? {
-            (Reply::Settings { settings }, None) => Ok(settings),
+            (Reply::Settings { settings, version }, None) => {
+                Ok(InstructionView { settings, version })
+            }
             _ => Err(unknown()),
         }
     }
@@ -624,7 +644,13 @@ pub(super) async fn serve(
             };
             (reply, Some(view.text))
         }
-        Ok(Answer::Settings(settings)) => (Reply::Settings { settings }, None),
+        Ok(Answer::Settings(view)) => (
+            Reply::Settings {
+                settings: view.settings,
+                version: view.version,
+            },
+            None,
+        ),
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -692,8 +718,12 @@ async fn handle(
         Action::Settings { project } if text.is_none() => {
             instruction_settings(&root, &project, None).map(Answer::Settings)
         }
-        Action::SaveSettings { project, settings } if text.is_none() => {
-            instruction_settings(&root, &project, Some(settings)).map(Answer::Settings)
+        Action::SaveSettings {
+            project,
+            settings,
+            version,
+        } if text.is_none() => {
+            instruction_settings(&root, &project, Some((settings, version))).map(Answer::Settings)
         }
         action => run(&root, home.as_deref(), action, text),
     })
@@ -1073,17 +1103,20 @@ fn agent_instructions(
     })
 }
 
-/// Reads one set-up project's agent instruction settings, or stores new ones whole first.
-/// The setup check, the save and the read back run in one transaction, taken for writing
-/// up front on a save, so no other save or project removal lands between them.
-/// Inputs: the engine root, the project and the settings to store, none to only read.
-/// Output: the settings as stored, `process_project_unknown` for a project with no setup,
-/// or a plain code.
+/// Reads one set-up project's agent instruction settings, or stores new ones whole first
+/// when the version the owner's screen read is still current. A save that names no version
+/// replaces stored settings the engine cannot read, which no screen could show with a
+/// version, and is refused once they are readable. The setup check, the version write, the
+/// save and the read back run in one transaction, taken for writing up front on a save, so
+/// no other save or project removal lands between them. Inputs: the engine root, the project
+/// and the settings to store with the version read, none to only read. Output: the settings
+/// as stored with their version, `process_project_unknown` for a project with no setup,
+/// `stale_revision` for a save from an older version, or a plain code.
 fn instruction_settings(
     root: &Path,
     project: &ProjectId,
-    save: Option<InstructionSettings>,
-) -> Result<InstructionSettings, EngineError> {
+    save: Option<(InstructionSettings, Option<u64>)>,
+) -> Result<InstructionView, EngineError> {
     let unavailable = |_| failure("instruction_settings_unavailable");
     let mut connection = match save {
         None => read_only(root)?,
@@ -1118,13 +1151,35 @@ fn instruction_settings(
     if !known {
         return Err(failure("process_project_unknown"));
     }
-    if let Some(settings) = save {
+    let item = versioned::instruction_settings_item(project);
+    let current = |tx: &rusqlite::Transaction<'_>| {
+        versioned::current(tx, &item)
+            .map(|current| current.version)
+            .map_err(|_| failure("instruction_settings_unavailable"))
+    };
+    let mut expected = None;
+    if let Some((settings, version)) = save {
+        let read = match version {
+            Some(version) => version,
+            None if crate::instruction_files::load(&tx, project).is_err() => current(&tx)?,
+            None => return Err(failure(versioned::STALE_CODE)),
+        };
+        let written = versioned::owner_write(&tx, &item, read)
+            .map_err(|_| failure("instruction_settings_unavailable"))?;
+        if written.is_err() {
+            return Err(failure(versioned::STALE_CODE));
+        }
         crate::instruction_files::save(&tx, project, settings).map_err(unavailable)?;
+        expected = Some((settings, read + 1));
     }
     let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
-    assert!(save.is_none_or(|saved| saved == stored));
+    let version = current(&tx)?;
+    assert!(expected.is_none_or(|expected| expected == (stored, version)));
     tx.commit().map_err(unavailable)?;
-    Ok(stored)
+    Ok(InstructionView {
+        settings: stored,
+        version,
+    })
 }
 
 fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {

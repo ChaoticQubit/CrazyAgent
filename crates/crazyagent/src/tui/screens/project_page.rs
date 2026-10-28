@@ -201,6 +201,7 @@ pub(in crate::tui) struct ProjectPage {
     sent: Vec<SetupQuery>,
     assigning: Option<(Option<CredentialRef>, Option<String>)>,
     recording: Option<u64>,
+    access_wanted: Option<AgentAccess>,
     created_access: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
@@ -229,6 +230,7 @@ impl ProjectPage {
             sent: Vec::new(),
             assigning: None,
             recording: None,
+            access_wanted: None,
             created_access: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
@@ -248,16 +250,29 @@ impl ProjectPage {
     }
 
     /// Saves the agent access level the owner picked in New project, right after the project
-    /// was made; until it lands the project stays Sandboxed, and a refusal says so.
-    /// Takes the picked level and the context. Returns nothing; the reply arrives later.
+    /// was made: it reads the project's policy first and saves at the version read, since a
+    /// project made again under an earlier id keeps that id's policy version. Until the save
+    /// lands the project stays Sandboxed, and a refusal says so.
+    /// Takes the picked level and the context. Returns nothing; the replies arrive later.
     pub(in crate::tui) fn save_created_access(&mut self, access: AgentAccess, ctx: &mut Ctx) {
         assert_ne!(access, AgentAccess::Sandboxed);
+        self.access_wanted = Some(access);
+        self.send(
+            SetupQuery::AgentPolicy {
+                project: self.screen.project.clone(),
+            },
+            ctx,
+        );
+    }
+
+    fn send_created_access(&mut self, access: AgentAccess, version: u64, ctx: &mut Ctx) {
         let generation = ctx.next_generation();
         self.created_access = Some(generation);
         self.send(
             SetupQuery::Change {
                 action: SetupAction::SetAgentPolicy {
                     project_id: self.screen.project.clone(),
+                    version,
                     policy: AgentPolicy {
                         access,
                         toolchains: Vec::new(),
@@ -267,6 +282,13 @@ impl ProjectPage {
             },
             ctx,
         );
+    }
+
+    fn stays_sandboxed(why: &str, ctx: &mut Ctx) {
+        ctx.say(Message::warning(
+            "The project is made, but its agents stay Sandboxed.",
+            &format!("{why} Choose Agent access again on the Settings tab with c."),
+        ));
     }
 
     /// Reads the team graph for the panel beside the master, while this page is on top on
@@ -588,6 +610,18 @@ impl ProjectPage {
         self.screen.now_ms = now_ms();
         self.screen.apply(&query, event.result.clone());
         let applied = matches!(event.result, Ok(SetupView::Changed(OwnerResult::Applied)));
+        if matches!(query, SetupQuery::AgentPolicy { .. })
+            && let Some(access) = self.access_wanted.take()
+        {
+            match &event.result {
+                Ok(SetupView::AgentPolicy(view)) => {
+                    self.send_created_access(access, view.version, ctx);
+                }
+                Err(code) => Self::stays_sandboxed(&plain_problem(code), ctx),
+                Ok(_) => Self::stays_sandboxed(&plain_problem("change_outcome_unknown"), ctx),
+            }
+            return;
+        }
         let SetupQuery::Change { action, generation } = &query else {
             return;
         };
@@ -609,10 +643,7 @@ impl ProjectPage {
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) => plain_problem(code),
                     Ok(_) => plain_problem("change_outcome_unknown"),
                 };
-                ctx.say(Message::warning(
-                    "The project is made, but its agents stay Sandboxed.",
-                    &format!("{why} Choose Agent access again on the Settings tab with c."),
-                ));
+                Self::stays_sandboxed(&why, ctx);
             }
             return;
         }

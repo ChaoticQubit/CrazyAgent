@@ -302,17 +302,23 @@ impl OwnerController {
     }
 
     /// Replaces a project's agent policy: access level and toolchain choices. Takes the
-    /// project id, the policy and the client generation. Returns the actual owner response;
-    /// a level this computer cannot run is a plain rejection.
+    /// project id, the version the screen showed, the policy and the client generation.
+    /// Returns the actual owner response; a level this computer cannot run is a plain
+    /// rejection, and a policy changed since the screen read it is `stale_revision`.
     pub async fn set_project_agent_policy(
         &mut self,
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.project_agent_policy(project_id.clone()).await?;
         self.begin_mutation(
-            OwnerMutation::SetProjectAgentPolicy { project_id, policy },
+            OwnerMutation::SetProjectAgentPolicy {
+                project_id,
+                version,
+                policy,
+            },
             generation,
         )?;
         self.send_pending().await

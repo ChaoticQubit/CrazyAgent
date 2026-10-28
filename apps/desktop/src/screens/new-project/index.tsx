@@ -2,7 +2,7 @@ import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receip
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import {
-  failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
+  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog } from "../../api-projects";
 import { SessionContext } from "../../state";
@@ -166,7 +166,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     }
     const access = draft.access ?? NEW_PROJECT_ACCESS;
     if (access !== "sandboxed") {
-      const saved = await saveAgentPolicy(id, { access, toolchains: [] }, nextGeneration());
+      const read = await loadAgentPolicy(id);
+      const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, toolchains: [] }, read.value.version, nextGeneration()) : read;
       const state = saved.kind === "ok" ? receiptState(saved.value) : null;
       if (state?.kind !== "applied") {
         const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";

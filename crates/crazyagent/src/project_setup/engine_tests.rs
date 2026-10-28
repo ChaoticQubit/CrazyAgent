@@ -1714,6 +1714,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         .find(|row| row.toolchain == Toolchain::Rust)
         .expect("the owner's rustup and cargo are found");
     assert!(rust.installed);
+    assert_eq!(fresh.version, 0, "a policy nobody saved is at version 0");
 
     let policy = AgentPolicy {
         access: AgentAccess::OwnBranch,
@@ -1723,12 +1724,35 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         }],
     };
     let saved = owner
-        .set_project_agent_policy(project.clone(), policy.clone(), 2)
+        .set_project_agent_policy(project.clone(), fresh.version, policy.clone(), 2)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     let view = owner.project_agent_policy(project.clone()).await.unwrap();
     assert_eq!(view.access, AgentAccess::OwnBranch);
+    assert_eq!(view.version, 1);
+    let stale = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            AgentPolicy {
+                access: AgentAccess::Sandboxed,
+                toolchains: Vec::new(),
+            },
+            7,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(stale),
+        rejected("stale_revision"),
+        "a save from the policy another window replaced never lands"
+    );
+    assert_eq!(
+        owner.project_agent_policy(project.clone()).await.unwrap(),
+        view,
+        "the refused save left the saved policy and its version"
+    );
     assert_eq!(
         view.toolchains
             .iter()
@@ -1757,6 +1781,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
     let action = SetupAction::SetAgentPolicy {
         project_id: project.clone(),
+        version: view.version,
         policy: twice,
     };
     assert_eq!(action.validate().unwrap_err().0, "agent_policy_invalid");
@@ -1774,7 +1799,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         toolchains: Vec::new(),
     };
     let saved = owner
-        .set_project_agent_policy(project.clone(), full, 3)
+        .set_project_agent_policy(project.clone(), view.version, full, 3)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);

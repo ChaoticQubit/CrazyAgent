@@ -655,13 +655,14 @@ async fn desktop_set_project_agent_policy(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    version: u64,
     policy: crazyagent::sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .set_project_agent_policy(&id, policy, generation)
+        .set_project_agent_policy(&id, version, policy, generation)
         .await
 }
 
@@ -2535,7 +2536,7 @@ async fn desktop_instruction_settings(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: String,
-) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.instruction_settings(project_id)?;
     call.await
@@ -2570,11 +2571,12 @@ async fn desktop_save_instruction_settings(
     state: State<'_, NativeState>,
     project_id: String,
     settings: crazyagent::engine::owner::InstructionSettings,
-) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
+    version: Option<u64>,
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?
-        .save_instruction_settings(project_id, settings)?;
+        .save_instruction_settings(project_id, settings, version)?;
     call.await
 }
 

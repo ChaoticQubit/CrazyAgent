@@ -194,7 +194,7 @@ test("unsaved instruction text survives a save reply, another client's save and 
 
 function agentSettings(extra = {}) {
   return renderToStaticMarkup(createElement(view.AgentSettingsView, {
-    settings: { kind: "ok", value: client.DEFAULT_INSTRUCTION_SETTINGS }, busy: false, failure: "", onSave: never("onSave"), ...extra,
+    settings: { kind: "ok", value: { settings: client.DEFAULT_INSTRUCTION_SETTINGS, version: 0 } }, busy: false, failure: "", onSave: never("onSave"), ...extra,
   }));
 }
 
@@ -213,7 +213,7 @@ test("a project's agent settings offer every instruction files option and the tr
   assert.match(markup, /Keep transcripts for headless Claude runs/);
   assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
   for (const choice of client.INSTRUCTION_CHOICES) {
-    const shown = agentSettings({ settings: { kind: "ok", value: { files: choice.value, transcripts: false } } });
+    const shown = agentSettings({ settings: { kind: "ok", value: { settings: { files: choice.value, transcripts: false }, version: 3 } } });
     assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${choice.label}</`));
     assert.ok(shown.includes(choice.note.replaceAll("'", "&#x27;")), choice.value);
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
@@ -237,11 +237,29 @@ test("a project's Process page reads and saves its agent settings through the en
   assert.match(source, /<AgentSettings projectId=\{scope\.id\} \/>/);
   assert.match(source, /if \(scope\.kind === "app"\) return editor;/, "the app page has no agent settings");
   const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
-  assert.match(api, /call<InstructionSettings>\("desktop_instruction_settings", \{ projectId \}\)/);
-  assert.match(api, /call<InstructionSettings>\("desktop_save_instruction_settings", \{ projectId, settings \}\)/);
+  assert.match(api, /call<InstructionView>\("desktop_instruction_settings", \{ projectId \}\)/);
+  assert.match(api, /call<InstructionView>\("desktop_save_instruction_settings", \{ projectId, settings, version \}\)/);
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   for (const command of ["desktop_instruction_settings", "desktop_save_instruction_settings"]) {
     assert.match(lib, new RegExp(`async fn ${command}\\(`));
     assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
   }
+});
+
+test("an agent settings save names the version the page read, and a save refused as stale shows the saved settings again", () => {
+  const read = { settings: { files: "none", transcripts: false }, version: 7 };
+  assert.equal(client.settingsSaveVersion({ kind: "ok", value: read }), 7, "a save names the version read");
+  assert.equal(client.settingsSaveVersion({ kind: "error", code: "instruction_settings_invalid", message: "" }), null,
+    "unreadable settings are replaced with no version");
+  assert.equal(client.AGENT_SETTINGS_STALE,
+    "These agent settings changed since you opened them. The page now shows the saved ones; make your change again.");
+  assert.match(agentSettings({ settings: { kind: "ok", value: read }, failure: client.AGENT_SETTINGS_STALE }), /changed since you opened them/);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/process.rs", import.meta.url), "utf8");
+  const listed = engine.slice(engine.indexOf("PROCESS_CODES: &[&str] = &["), engine.indexOf("];"));
+  assert.match(listed, /"stale_revision"/, "the engine can refuse a settings save as stale");
+  const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
+  assert.match(source, /saveInstructionSettings\(projectId, next, settingsSaveVersion\(settings\)\)/);
+  assert.match(source, /result\.code === "stale_revision"\) \{\s*reload\(\);\s*setFailure\(AGENT_SETTINGS_STALE\);/);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.match(lib, /async fn desktop_save_instruction_settings\([^)]*version: Option<u64>/);
 });

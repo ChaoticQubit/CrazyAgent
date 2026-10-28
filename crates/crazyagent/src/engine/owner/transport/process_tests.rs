@@ -608,8 +608,11 @@ fn stale_agent_instructions_save_is_refused() {
     );
 }
 
+/// Saves made at once from six screens each name the version they read: a save lands only
+/// on the version it read and reads back what it stored at the next one, every other save
+/// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
 #[test]
-fn saves_at_once_each_read_back_the_settings_they_stored() {
+fn saves_at_once_land_only_on_the_version_they_read() {
     use crate::instruction_files::Choice;
     let (_directory, root) = root();
     let folder = root.join("project");
@@ -622,29 +625,132 @@ fn saves_at_once_each_read_back_the_settings_they_stored() {
         })
         .collect();
     assert_eq!(options.len(), 6);
-    let start = std::sync::Barrier::new(options.len());
-    std::thread::scope(|scope| {
+    let start = Barrier::new(options.len());
+    let landed: u64 = std::thread::scope(|scope| {
         let saves: Vec<_> = options
             .iter()
             .map(|&settings| {
                 let (root, project, start) = (&root, &project, &start);
                 scope.spawn(move || {
                     start.wait();
+                    let mut landed = 0_u64;
                     for _ in 0..100 {
-                        assert_eq!(
-                            instruction_settings(root, project, Some(settings)),
-                            Ok(settings)
-                        );
+                        let read = instruction_settings(root, project, None).unwrap();
+                        match instruction_settings(
+                            root,
+                            project,
+                            Some((settings, Some(read.version))),
+                        ) {
+                            Ok(saved) => {
+                                assert_eq!(
+                                    saved,
+                                    InstructionView {
+                                        settings,
+                                        version: read.version + 1
+                                    }
+                                );
+                                landed += 1;
+                            }
+                            Err(refused) => assert_eq!(refused.0, versioned::STALE_CODE),
+                        }
                     }
+                    landed
                 })
             })
             .collect();
-        for save in saves {
-            save.join()
-                .expect("every save reads back what it stored, whatever saves beside it");
-        }
+        saves
+            .into_iter()
+            .map(|save| {
+                save.join()
+                    .expect("every save lands on the version it read or is refused as stale")
+            })
+            .sum()
     });
-    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+    assert!(
+        landed >= 1,
+        "a save on the version no other save moved always lands"
+    );
+    let now = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(now.version, landed);
+    assert!(options.contains(&now.settings));
+}
+
+/// A save from an older version is refused as stale and leaves the stored settings and
+/// version as they were; a save naming no version is refused while the stored settings are
+/// readable and replaces them, at the next version, once they are not (Q35).
+#[test]
+fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_save_with_no_version()
+{
+    use crate::instruction_files::Choice;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let fresh = instruction_settings(&root, &project, None).unwrap();
+    assert_eq!(
+        fresh,
+        InstructionView {
+            settings: InstructionSettings::default(),
+            version: 0
+        }
+    );
+    let none = InstructionSettings {
+        files: Choice::None,
+        transcripts: false,
+    };
+    let saved = instruction_settings(&root, &project, Some((none, Some(0)))).unwrap();
+    assert_eq!(
+        saved,
+        InstructionView {
+            settings: none,
+            version: 1
+        }
+    );
+    let user = InstructionSettings {
+        files: Choice::ProjectAndUser,
+        transcripts: true,
+    };
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, Some(0))))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, None)))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE,
+        "readable settings are never replaced by a save that read no version"
+    );
+    assert_eq!(instruction_settings(&root, &project, None).unwrap(), saved);
+
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    connection
+        .execute(
+            "UPDATE agent_instruction_settings SET files='bogus' WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    drop(connection);
+    assert_eq!(
+        instruction_settings(&root, &project, None).unwrap_err().0,
+        "instruction_settings_invalid"
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((user, None))).unwrap(),
+        InstructionView {
+            settings: user,
+            version: 2
+        },
+        "unreadable settings are replaced at the next version"
+    );
+    assert_eq!(
+        instruction_settings(&root, &project, Some((none, None)))
+            .unwrap_err()
+            .0,
+        versioned::STALE_CODE
+    );
 }
 
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {

@@ -593,6 +593,7 @@ pub(in crate::tui) struct ProjectScreen {
     folders_version: u64,
     folders_stale: bool,
     agent_policy_read_ms: Option<i64>,
+    access_stale: bool,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -663,6 +664,7 @@ impl ProjectScreen {
             folders_version: 0,
             folders_stale: false,
             agent_policy_read_ms: None,
+            access_stale: false,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -915,6 +917,15 @@ impl ProjectScreen {
                 self.read_paths_read_ms = Some(self.now_ms);
             }
             SetupView::AgentPolicy(view) => {
+                if std::mem::take(&mut self.access_stale)
+                    && let Some(access) = self.access.as_mut()
+                {
+                    access.view.version = view.version;
+                    access.error = Some(format!(
+                        "Saved now: {}. {KEEP_MINE}",
+                        super::project_access::summary(Some(&view))
+                    ));
+                }
                 self.agent_policy = Some(view);
                 self.agent_policy_read_ms = Some(self.now_ms);
             }
@@ -945,8 +956,9 @@ impl ProjectScreen {
         self.assert_consistent();
     }
 
-    /// Puts a refused add, edit or remove back in its box with the reason. A General or
-    /// read-only folders edit refused as stale keeps its draft and reads the saved value again.
+    /// Puts a refused add, edit or remove back in its box with the reason. A General,
+    /// read-only folders or Agent access edit refused as stale keeps its draft and reads the
+    /// saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
@@ -986,6 +998,11 @@ impl ProjectScreen {
                 if let Some(access) = self.access.as_mut() {
                     access.busy = false;
                     access.error = reason;
+                }
+                if stale {
+                    self.access_stale = true;
+                    self.agent_policy = None;
+                    self.agent_policy_read_ms = None;
                 }
                 true
             }
@@ -2108,7 +2125,10 @@ impl ProjectScreen {
             }
             KeyCode::Char('c') => {
                 match &self.agent_policy {
-                    Some(view) => self.access = Some(AccessEdit::of(view)),
+                    Some(view) => {
+                        self.access = Some(AccessEdit::of(view));
+                        self.access_stale = false;
+                    }
                     None => {
                         self.problem = Some("Still loading the agent access. Try again.".into());
                     }
@@ -2269,6 +2289,7 @@ impl ProjectScreen {
             AccessKey::Save(policy) => {
                 let action = SetupAction::SetAgentPolicy {
                     project_id: self.project.clone(),
+                    version: access.view.version,
                     policy,
                 };
                 if let Err(error) = action.validate() {

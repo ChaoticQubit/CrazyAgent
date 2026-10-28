@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadInstructionSettings,
-  loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments, textBytes,
-  type InstructionSettings, type SavedText, type SkillEntry,
+  AGENT_SETTINGS_STALE, DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadInstructionSettings,
+  loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, settingsSaveVersion, skillSegments, textBytes,
+  type InstructionSettings, type InstructionView, type SavedText, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, Switch, TextArea } from "../ui";
@@ -135,14 +135,14 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
  * that could not be read say why and show the defaults, so a change replaces them.
  * Inputs: the read, whether a save runs, the last save failure and the save action. */
 export function AgentSettingsView({ settings, busy, failure, onSave }: {
-  settings: Loaded<InstructionSettings>;
+  settings: Loaded<InstructionView>;
   busy: boolean;
   failure: string;
   onSave: (settings: InstructionSettings) => void;
 }) {
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
-  const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
+  const current = settings.kind === "ok" ? settings.value.settings : DEFAULT_INSTRUCTION_SETTINGS;
   const choice = INSTRUCTION_CHOICES.find((option) => option.value === current.files) ?? INSTRUCTION_CHOICES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
   return <Panel title="Agent settings">
@@ -163,7 +163,8 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   </Panel>;
 }
 
-/** A project's agent settings: reads them from the engine and saves each change at once.
+/** A project's agent settings: reads them from the engine and saves each change at once at
+ * the version read; a save refused because they changed since reads them again and says so.
  * Input: the project id. */
 export function AgentSettings({ projectId }: { projectId: string }) {
   const session = useAppSession();
@@ -173,11 +174,14 @@ export function AgentSettings({ projectId }: { projectId: string }) {
   const store = async (next: InstructionSettings) => {
     setFailure("");
     setBusy(true);
-    const result = session.noteResult(await saveInstructionSettings(projectId, next));
+    const result = session.noteResult(await saveInstructionSettings(projectId, next, settingsSaveVersion(settings)));
     setBusy(false);
     if (result.kind === "ok") {
       session.showToast("Agent settings saved. Agents started from now on follow them.");
       reload();
+    } else if (result.kind === "error" && result.code === "stale_revision") {
+      reload();
+      setFailure(AGENT_SETTINGS_STALE);
     } else setFailure(processMessage(result));
   };
   return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;

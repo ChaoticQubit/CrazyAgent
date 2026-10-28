@@ -747,6 +747,7 @@ pub enum SetupAction {
     },
     SetAgentPolicy {
         project_id: ProjectId,
+        version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
 }
@@ -1810,9 +1811,11 @@ pub(crate) fn execute(
             version,
             paths,
         } => set_read_paths(tx, project_id, *version, paths),
-        SetupAction::SetAgentPolicy { project_id, policy } => {
-            set_agent_policy(tx, project_id, policy)
-        }
+        SetupAction::SetAgentPolicy {
+            project_id,
+            version,
+            policy,
+        } => set_agent_policy(tx, project_id, *version, policy),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2364,11 +2367,14 @@ fn set_read_paths(
 }
 
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices. Takes the transaction, project and policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy or a level this computer cannot run.
+/// choices, when the owner's screen showed the current version. Takes the transaction,
+/// project, the version the screen read and the policy. Returns Applied, or a plain
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
+/// a policy that changed since it was read (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
+    version: u64,
     policy: &crate::sandbox::policy::AgentPolicy,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
@@ -2386,6 +2392,10 @@ fn set_agent_policy(
     }
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
+    }
+    let item = crate::storage::versioned::agent_policy_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
     crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
     Ok(Outcome::Applied)

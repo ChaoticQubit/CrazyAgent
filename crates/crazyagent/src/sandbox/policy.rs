@@ -131,10 +131,11 @@ impl AgentPolicy {
             .collect()
     }
 
-    /// What a client shows: the level, every level with its availability, and each
-    /// toolchain family the owner has installed, the project uses or the owner chose.
-    /// Inputs: the project folder and the owner's tool homes. Output: the view.
-    pub fn view(&self, project: &Path, homes: &ToolHomes) -> PolicyView {
+    /// What a client shows: the level, every level with its availability, each toolchain
+    /// family the owner has installed, the project uses or the owner chose, and the policy's
+    /// version, which a save names. Inputs: the project folder, the owner's tool homes and
+    /// the version. Output: the view.
+    pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
             .into_iter()
@@ -159,6 +160,7 @@ impl AgentPolicy {
                 })
                 .collect(),
             toolchains,
+            version,
         }
     }
 
@@ -170,13 +172,14 @@ impl AgentPolicy {
     }
 }
 
-/// One project's agent policy as a client shows it.
+/// One project's agent policy as a client shows it, with the version a save names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyView {
     pub access: AgentAccess,
     pub levels: Vec<LevelView>,
     pub toolchains: Vec<ToolchainView>,
+    pub version: u64,
 }
 
 /// One access level with the reason it cannot run here, if any.
