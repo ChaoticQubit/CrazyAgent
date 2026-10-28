@@ -245,6 +245,7 @@ async fn a_change_set_discard_runs_without_the_owner_barrier_and_a_revoked_clien
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next() {
+    let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(PATIENT_WAIT_MS).await;
     let runtime = owner.runtime();
     let (swept, sweep) = occupy_storage(&owner);
