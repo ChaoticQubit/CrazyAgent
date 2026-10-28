@@ -941,3 +941,52 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
         "{shown}"
     );
 }
+
+#[test]
+fn a_marked_line_taller_than_the_view_can_be_stepped_through_to_its_last_row_and_back() {
+    let words: Vec<String> = (0..1500).map(|word| format!("step{word:04}")).collect();
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let page = ChangeDiff {
+        files: vec![changed(
+            "CLAUDE.md",
+            FileStatus::Modified,
+            FileKind::Text,
+            vec![FileMark::Instructions],
+        )],
+        text: format!(
+            "diff --git a/CLAUDE.md b/CLAUDE.md\n--- a/CLAUDE.md\n+++ b/CLAUDE.md\n@@ -1 +1 @@\n-Old.\n+{} END-OF-INSTRUCTION\n",
+            words.join(" ")
+        ),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    let first = text(&view);
+    assert!(first.contains("step0000"), "{first}");
+    assert!(
+        !first.contains("END-OF-INSTRUCTION"),
+        "the line is taller than the view: {first}"
+    );
+    let mut steps = 0;
+    while !text(&view).contains("END-OF-INSTRUCTION") {
+        assert!(
+            steps < 400,
+            "Down never reaches the last row of the marked line: {}",
+            text(&view)
+        );
+        assert!(view.key(key(KeyCode::Down), NOW));
+        steps += 1;
+    }
+    let middle = text(&view);
+    assert!(middle.contains("step1499"), "{middle}");
+    assert!(steps > 1, "the line is stepped through row by row");
+    for _ in 0..steps {
+        assert!(view.key(key(KeyCode::Up), NOW));
+    }
+    let back = text(&view);
+    assert!(
+        back.contains("step0000") && !back.contains("END-OF-INSTRUCTION"),
+        "Up steps back through the same rows: {back}"
+    );
+}
