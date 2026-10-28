@@ -119,6 +119,8 @@ fn main() {
         "desktop_resume_master_session",
         "desktop_owner_profile",
         "desktop_save_owner_profile",
+        "desktop_sandbox_settings",
+        "desktop_set_sandbox_settings",
         "desktop_pool_summaries",
         "desktop_account_schedule",
         "desktop_account_ranking",

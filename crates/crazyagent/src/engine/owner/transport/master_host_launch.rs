@@ -918,6 +918,14 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
+    #[cfg(target_os = "linux")]
+    let sandbox = {
+        let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);
+        if let Some(code) = sandbox.linux_refusal(executable) {
+            return Err(failure(code));
+        }
+        sandbox
+    };
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
     let installed = if policy.access == AgentAccess::Full {
@@ -940,6 +948,26 @@ fn turn_sandbox(
             .all(|writable| writable != repository)
     );
     Ok(installed)
+}
+
+/// Reads the owner's sandbox settings from the engine database without writing to it.
+/// Input: the owner root. Output: the settings, or `master_sandbox_unavailable` when they
+/// cannot be read, so the turn fails closed rather than start under another option.
+#[cfg(target_os = "linux")]
+fn stored_sandbox_settings(
+    root: &Root,
+) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+    let connection = rusqlite::Connection::open_with_flags(
+        root.path.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| failure("master_sandbox_unavailable"))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|_| failure("master_sandbox_unavailable"))?;
+    crate::sandbox_settings::load(&connection).map_err(|_| failure("master_sandbox_unavailable"))
 }
 
 /// Refuses the master turn boundary where the owner-only turn directory cannot be made.

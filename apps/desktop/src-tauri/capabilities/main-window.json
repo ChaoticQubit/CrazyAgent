@@ -124,6 +124,8 @@
     "allow-desktop-resume-master-session",
     "allow-desktop-owner-profile",
     "allow-desktop-save-owner-profile",
+    "allow-desktop-sandbox-settings",
+    "allow-desktop-set-sandbox-settings",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",
     "allow-desktop-account-ranking",

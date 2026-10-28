@@ -947,6 +947,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
+    crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
@@ -1282,6 +1283,7 @@ fn apply(
         Command::OwnerConversation { .. }
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
+            | Command::OwnerSandbox { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1466,6 +1468,7 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
+        Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2512,6 +2515,7 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

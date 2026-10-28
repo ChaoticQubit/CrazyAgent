@@ -36,6 +36,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
@@ -1635,6 +1636,29 @@ async fn desktop_save_owner_profile(
 }
 
 #[tauri::command]
+async fn desktop_sandbox_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<SandboxSettings, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.sandbox_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_sandbox_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    settings: SandboxSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_sandbox_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2603,6 +2627,8 @@ pub fn run() {
             desktop_submit_claude_auth_code,
             desktop_owner_profile,
             desktop_save_owner_profile,
+            desktop_sandbox_settings,
+            desktop_set_sandbox_settings,
             desktop_pool_summaries,
             desktop_account_schedule,
             desktop_account_ranking,

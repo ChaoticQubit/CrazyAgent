@@ -2,10 +2,11 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::github::GitHubStatus;
 use crate::projects_home::ProjectsHome;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::SetupStatus;
 
 /// One request from the setup page: setup status and runs, default-pack changes,
-/// the projects home folder and the GitHub account.
+/// the projects home folder, the GitHub account and the sandbox settings.
 /// Input: built by the setup page. Output: run on the owner worker; the reply
 /// arrives as `SettingsEvent::AppSetup`.
 pub(in crate::tui) enum AppSetupJob {
@@ -29,6 +30,11 @@ pub(in crate::tui) enum AppSetupJob {
     },
     GitHub,
     GitHubSignOut,
+    Sandbox,
+    SetSandbox {
+        settings: SandboxSettings,
+        generation: u64,
+    },
 }
 
 /// One change to an installed default-pack entry.
@@ -49,6 +55,8 @@ pub(in crate::tui) enum AppSetupEvent {
     FolderSize(String, Result<u64, String>),
     GitHub(Result<GitHubStatus, String>),
     GitHubSignedOut(Result<GitHubStatus, String>),
+    Sandbox(Result<SandboxSettings, String>),
+    SandboxSet(Result<(), String>),
 }
 
 impl AppSetupJob {
@@ -64,6 +72,8 @@ impl AppSetupJob {
             Self::FolderSize { .. } => "FolderSize",
             Self::GitHub => "GitHub",
             Self::GitHubSignOut => "GitHubSignOut",
+            Self::Sandbox => "Sandbox",
+            Self::SetSandbox { .. } => "SetSandbox",
         }
     }
 }
@@ -81,6 +91,8 @@ impl AppSetupEvent {
             AppSetupJob::FolderSize { path } => Self::FolderSize(path.clone(), Err(problem)),
             AppSetupJob::GitHub => Self::GitHub(Err(problem)),
             AppSetupJob::GitHubSignOut => Self::GitHubSignedOut(Err(problem)),
+            AppSetupJob::Sandbox => Self::Sandbox(Err(problem)),
+            AppSetupJob::SetSandbox { .. } => Self::SandboxSet(Err(problem)),
         }
     }
 }
@@ -151,6 +163,20 @@ impl NativeOwner {
                     .await
                     .map_err(|error| problem(&error, lost)),
             ),
+            AppSetupJob::Sandbox => AppSetupEvent::Sandbox(
+                controller
+                    .sandbox_settings()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetSandbox {
+                settings,
+                generation,
+            } => AppSetupEvent::SandboxSet(applied(
+                controller.set_sandbox_settings(settings, generation).await,
+                "sandbox_outcome_unknown",
+                lost,
+            )),
         }
     }
 }
@@ -273,6 +299,33 @@ mod tests {
             matches!(&refused, AppSetupEvent::PackChanged(Err(code)) if code == "pack_not_installed"),
             "a refused pack change keeps the engine's own code"
         );
+
+        let AppSetupEvent::Sandbox(Ok(sandbox)) = ask(&mut native, AppSetupJob::Sandbox).await
+        else {
+            panic!("sandbox settings required")
+        };
+        assert_eq!(sandbox.linux_sockets, crate::sandbox::LinuxSockets::TcpOnly);
+        for (generation, linux_sockets) in [
+            (3, crate::sandbox::LinuxSockets::TcpPorts),
+            (4, crate::sandbox::LinuxSockets::Refuse),
+            (5, crate::sandbox::LinuxSockets::TcpOnly),
+        ] {
+            let settings = SandboxSettings { linux_sockets };
+            let set = ask(
+                &mut native,
+                AppSetupJob::SetSandbox {
+                    settings,
+                    generation,
+                },
+            )
+            .await;
+            assert!(matches!(set, AppSetupEvent::SandboxSet(Ok(()))));
+            let AppSetupEvent::Sandbox(Ok(read)) = ask(&mut native, AppSetupJob::Sandbox).await
+            else {
+                panic!("sandbox settings required")
+            };
+            assert_eq!(read, settings);
+        }
 
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())

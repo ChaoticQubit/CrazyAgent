@@ -181,6 +181,10 @@ pub enum Command {
         profile: crate::owner_profile::OwnerProfile,
     },
     #[serde(skip_deserializing)]
+    OwnerSandbox {
+        settings: crate::sandbox_settings::SandboxSettings,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },

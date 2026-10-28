@@ -36,6 +36,9 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
+  linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+  linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
@@ -309,6 +312,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_selection: "changing the memory selection",
   master: "changing the master conversation",
   owner_profile: "saving your profile",
+  sandbox_settings: "changing the sandbox setting",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -369,6 +373,24 @@ export function getProfile(): Promise<Result<OwnerProfile | null>> {
 /** Saves or updates the owner profile. Input: the full profile. Output: ok once saved. */
 export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
   return change("desktop_save_owner_profile", { profile, generation: nextGeneration() });
+}
+
+/** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
+export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
+
+/** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
+export interface SandboxSettings {
+  linux_sockets: LinuxSockets;
+}
+
+/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
+export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
+  return call<SandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
+export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";

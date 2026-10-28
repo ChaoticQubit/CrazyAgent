@@ -220,6 +220,9 @@ pub enum OwnerMutation {
     SaveOwnerProfile {
         profile: crate::owner_profile::OwnerProfile,
     },
+    SetSandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -461,6 +464,9 @@ impl OwnerMutation {
                     profile: profile.clone(),
                 }
             }
+            Self::SetSandboxSettings { settings } => Command::OwnerSandbox {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -631,6 +637,7 @@ pub enum OwnerRead {
         job: i64,
     },
     OwnerProfile,
+    SandboxSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -724,6 +731,7 @@ impl OwnerRead {
             | Self::TeamEvents
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
+            | Self::SandboxSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -1107,6 +1115,9 @@ pub enum OwnerData {
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    SandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

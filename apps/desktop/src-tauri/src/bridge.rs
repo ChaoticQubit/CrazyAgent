@@ -605,6 +605,7 @@ impl NativeBridge {
             } => ("brief", Some(project_id.as_str().to_owned()), None),
             OwnerMutation::ModelAccess { .. } => ("model_access", None, None),
             OwnerMutation::SaveOwnerProfile { .. } => ("owner_profile", None, None),
+            OwnerMutation::SetSandboxSettings { .. } => ("sandbox_settings", None, None),
             OwnerMutation::CreateProject { project_id, .. } => {
                 ("create_project", Some(project_id.as_str().to_owned()), None)
             }
