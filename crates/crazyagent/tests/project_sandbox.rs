@@ -1332,6 +1332,57 @@ fn an_own_branch_agent_never_plants_the_fallback_repository_upload_pack_tries() 
 }
 
 #[test]
+fn an_own_branch_agent_never_writes_a_multi_pack_index_into_its_clone() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let pack = clone.join(".git").join("objects").join("pack");
+    fs::create_dir_all(&pack).unwrap();
+    let git = format!(
+        "{AGENT_GIT} -c user.email=agent@local -c user.name=agent -c core.hooksPath=/dev/null"
+    );
+    let committed = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && printf 'agent work\\n' > work.txt && {git} add work.txt && {git} commit -q -m work && {git} repack -q -a -d",
+            quoted(&clone),
+        ),
+    );
+    assert!(committed.status.success(), "{committed:?}");
+    for (script, target) in [
+        (
+            format!("printf x > {}", quoted(&pack.join("multi-pack-index"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!("printf x > {}", quoted(&pack.join("MULTI-PACK-INDEX"))),
+            pack.join("multi-pack-index"),
+        ),
+        (
+            format!(
+                "printf x > {}",
+                quoted(&pack.join("multi-pack-index-0123.bitmap"))
+            ),
+            pack.join("multi-pack-index-0123.bitmap"),
+        ),
+        (
+            format!("mkdir {}", quoted(&pack.join("multi-pack-index.d"))),
+            pack.join("multi-pack-index.d"),
+        ),
+        (
+            format!("cd {} && {git} multi-pack-index write", quoted(&clone)),
+            pack.join("multi-pack-index"),
+        ),
+    ] {
+        write_refused(&confined, &profile, &script, &target);
+    }
+}
+
+#[test]
 fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     assert!(Path::new(AGENT_GIT).is_file());
     let case = case();
