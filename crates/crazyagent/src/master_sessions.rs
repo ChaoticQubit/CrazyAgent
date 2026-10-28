@@ -847,22 +847,22 @@ fn part_bytes(title: &str, entries: &[String]) -> usize {
 
 /// One part of a switch handoff within `room` bytes: its title, then its entries newest
 /// first, each cut to `HANDOFF_TURN_BYTES_MAX` so the newest always fits, the one crossing
-/// the room cut to what is left, and `HANDOFF_OMITTED` when any were cut or left out. Takes
-/// the title, the entries oldest first and the room. Returns the part.
+/// the room cut to what is left, every cut ending in "...", and `HANDOFF_OMITTED` when any
+/// were cut or left out. Takes the title, entries oldest first and the room. Returns it.
 fn handoff_part(title: &str, entries: &[String], room: usize) -> String {
     let budget = room - HANDOFF_OMITTED.len() - 2;
     let mut text = title.to_owned();
     let mut given = 0;
     let mut cut = false;
     for entry in entries.iter().rev() {
-        let entry = fit(entry.clone(), HANDOFF_TURN_BYTES_MAX);
+        let entry = marked(entry, HANDOFF_TURN_BYTES_MAX);
         let left = budget.saturating_sub(text.len() + 2);
         let whole = entry.len() <= left;
         if !whole && left < HANDOFF_TURN_MIN_BYTES {
             break;
         }
         text.push_str("\n\n");
-        text.push_str(&fit(entry, left));
+        text.push_str(&marked(&entry, left));
         given += 1;
         if !whole {
             cut = true;
@@ -905,10 +905,15 @@ fn record_turns(kept: &SessionConversation) -> Vec<String> {
 
 /// One handed-over turn within `HANDOFF_TURN_BYTES_MAX`: what was typed, then its last
 /// replies that fit, with `TURN_OMITTED` where earlier replies were left out and the last
-/// reply cut when even it does not fit. Takes the typed input, if any, and the replies
-/// oldest first. Returns the turn's lines.
+/// reply cut with "..." when even it does not fit. Takes the typed input, if any, and the
+/// replies oldest first. Returns the turn's lines.
 fn bounded_turn(input: Option<&str>, replies: &[String]) -> String {
-    let head = input.map(|input| fit(format!("Typed to you: {input}"), HANDOFF_TURN_BYTES_MAX / 2));
+    let head = input.map(|input| {
+        marked(
+            &format!("Typed to you: {input}"),
+            HANDOFF_TURN_BYTES_MAX / 2,
+        )
+    });
     let room = HANDOFF_TURN_BYTES_MAX
         - head.as_ref().map_or(0, |head| head.len() + 1)
         - TURN_OMITTED.len()
@@ -919,7 +924,7 @@ fn bounded_turn(input: Option<&str>, replies: &[String]) -> String {
         let line = format!("You: {reply}");
         if used + line.len() + 1 > room {
             if kept.is_empty() {
-                kept.push(fit(line, room - 1));
+                kept.push(marked(&line, room - 1));
             }
             break;
         }
@@ -982,6 +987,20 @@ pub fn flat(text: &str, max: usize) -> Option<String> {
     assert!(kept.chars().count() <= max);
     assert!(!kept.chars().any(char::is_control));
     Some(kept)
+}
+
+/// Cuts a text to at most `max` bytes on a character boundary, ending a cut with "..." as
+/// `flat` marks one, so a handed-over turn never loses its end silently. Takes the text and
+/// the bound, over 3 when the text must be cut. Returns the text, whole when it fits.
+fn marked(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    assert!(max > 3);
+    let mut kept = fit(text.to_owned(), max - 3);
+    kept.push_str("...");
+    assert!(kept.len() <= max);
+    kept
 }
 
 /// Cuts a text to at most `max` bytes on a character boundary. Takes the text and bound.
@@ -1306,6 +1325,39 @@ mod tests {
             switched_from(&connection, &project, &session, "claude-code").unwrap(),
             Some("codex".to_owned())
         );
+    }
+
+    /// An engine turn of multi-byte text longer than one handed-over turn is cut with a
+    /// visible "..." where its reply was cut, never silently.
+    #[test]
+    fn a_multi_byte_engine_turn_cut_to_fit_shows_where_it_was_cut() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-wide").unwrap();
+        let body = serde_json::json!({
+            "engine_request": {"line": "検".repeat(300)},
+            "reply": {"text": "答".repeat(600)},
+        });
+        connection
+            .execute(
+                "INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,1,'turn-1',1001,'succeeded',?2)",
+                rusqlite::params![session.as_str(), body.to_string()],
+            )
+            .unwrap();
+        let text = handoff(&connection, &project, &session, None, "Codex").unwrap();
+        let turn = text
+            .find(&format!("Engine: {}", "検".repeat(300)))
+            .expect("the engine turn is handed over");
+        let reply = text[turn..].find("\nYou: 答").expect("its reply starts") + turn;
+        assert!(text[reply..].contains("答..."), "the cut is shown: {text}");
+        assert!(!text.contains(&"答".repeat(600)), "{text}");
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
     }
 
     #[test]
