@@ -652,3 +652,228 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
         "a project without a setup is told too"
     );
 }
+
+#[test]
+fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_code() {
+    let directory = tempfile::Builder::new()
+        .prefix("ca-exposed-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let work = root.join("work");
+    for folder in [&home, &work] {
+        fs::DirBuilder::new().mode(0o700).create(folder).unwrap();
+    }
+    let profile = root.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![LaunchServer {
+                name: "tools".into(),
+                spec: ServerSpec::Stdio {
+                    command: "/usr/bin/true".into(),
+                    args: Vec::new(),
+                },
+                secrets: vec![LaunchSecret {
+                    name: "TOKEN".into(),
+                    value: crate::plugins::SecretValue::new(
+                        home.as_os_str().as_encoded_bytes().to_vec(),
+                    ),
+                }],
+            }],
+        },
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+    };
+    let request = || crate::harnesses::launch::LaunchRequest {
+        harness: "codex".into(),
+        executable: fs::canonicalize("/usr/bin/true").unwrap(),
+        working_dir: work.clone(),
+        account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile.clone()),
+        git_identity: None,
+        limits: crate::harnesses::launch::LaunchLimits::default(),
+    };
+    assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
+
+    let headless = crate::harnesses::launch::command_with_context(&request(), &context());
+    assert_eq!(
+        headless.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    let tmux =
+        crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
+    let host: std::sync::Arc<dyn crate::terminal::Host> = std::sync::Arc::new(
+        crate::terminal::tmux::Tmux::open(Some(tmux), &root.join(crate::terminal::FOLDER)),
+    );
+    let pane = crate::harnesses::terminal_session::TerminalSession::start(
+        host,
+        crate::terminal::AgentId::team(1).unwrap(),
+        request(),
+        Some(context()),
+    );
+    assert_eq!(
+        pane.err().map(|refused| refused.0).as_deref(),
+        Some("launch_secret_in_command")
+    );
+    assert!(
+        !home.join("config.toml").exists(),
+        "a refused launch leaves no generated file holding the secret"
+    );
+}
+
+/// A Codex agent pane started with an MCP secret in its project context and left running,
+/// as an engine leaves it when it quits, with what a later engine needs to adopt it.
+struct LeftPane {
+    _directory: tempfile::TempDir,
+    config: PathBuf,
+    host: std::sync::Arc<dyn crate::terminal::Host>,
+    agent: crate::terminal::AgentId,
+    record: crate::harnesses::terminal_session::PaneRecord,
+    tmux: PathBuf,
+    socket: PathBuf,
+}
+
+impl LeftPane {
+    /// Starts the pane as team agent `team` in a fresh private home under a `prefix`
+    /// folder, then leaves it. Returns the left pane.
+    fn start(prefix: &str, team: i64) -> Self {
+        let directory = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let work = root.join("work");
+        for folder in [&home, &work] {
+            fs::DirBuilder::new().mode(0o700).create(folder).unwrap();
+        }
+        let profile = root.join("project.sb");
+        fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        let harness = root.join("harness");
+        fs::write(&harness, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        fs::set_permissions(&harness, fs::Permissions::from_mode(0o755)).unwrap();
+        let secret = format!("adopted-secret-{}-{team}", std::process::id());
+        let context = AgentContext {
+            plugins: LaunchPlugins {
+                skills: Vec::new(),
+                servers: vec![LaunchServer {
+                    name: "tools".into(),
+                    spec: ServerSpec::Stdio {
+                        command: "/usr/bin/true".into(),
+                        args: Vec::new(),
+                    },
+                    secrets: vec![LaunchSecret {
+                        name: "TOKEN".into(),
+                        value: crate::plugins::SecretValue::new(secret.as_bytes().to_vec()),
+                    }],
+                }],
+            },
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+        };
+        let request = crate::harnesses::launch::LaunchRequest {
+            harness: "codex".into(),
+            executable: harness,
+            working_dir: work,
+            account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools: true,
+            sandbox_profile: Some(profile),
+            git_identity: None,
+            limits: crate::harnesses::launch::LaunchLimits::default(),
+        };
+        let tmux = crate::terminal::tmux::installed(&root)
+            .expect("tmux must be installed on this machine");
+        let socket = root
+            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::SOCKET);
+        let host: std::sync::Arc<dyn crate::terminal::Host> =
+            std::sync::Arc::new(crate::terminal::tmux::Tmux::open(
+                Some(tmux.clone()),
+                &root.join(crate::terminal::FOLDER),
+            ));
+        let agent = crate::terminal::AgentId::team(team).unwrap();
+        let config = home.join("config.toml");
+        let session = crate::harnesses::terminal_session::TerminalSession::start(
+            host.clone(),
+            agent.clone(),
+            request,
+            Some(context),
+        )
+        .unwrap();
+        assert!(fs::read_to_string(&config).unwrap().contains(&secret));
+        let record = session.record().cloned().unwrap();
+        session.leave();
+        assert!(
+            config.exists(),
+            "leaving keeps the files for the harness that still runs"
+        );
+        Self {
+            _directory: directory,
+            config,
+            host,
+            agent,
+            record,
+            tmux,
+            socket,
+        }
+    }
+
+    /// Ends the tmux server that holds the pane.
+    fn kill_server(&self) {
+        let _ = crate::spawn_gate::status(
+            std::process::Command::new(&self.tmux)
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        );
+    }
+
+    /// Takes the pane over as a later engine does. Returns the session or the refusal.
+    fn adopt(&self) -> Result<crate::harnesses::terminal_session::TerminalSession, LaunchError> {
+        crate::harnesses::terminal_session::TerminalSession::adopt(
+            self.host.clone(),
+            self.agent.clone(),
+            &self.record,
+            crate::harnesses::launch::LaunchLimits::default(),
+        )
+    }
+}
+
+impl Drop for LeftPane {
+    fn drop(&mut self) {
+        self.kill_server();
+    }
+}
+
+#[test]
+fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
+    let pane = LeftPane::start("ca-adopt-ctx-", 7);
+    let adopted = pane.adopt().unwrap();
+    drop(adopted);
+    assert!(
+        !pane.config.exists(),
+        "the adopted pane removes the file that holds its MCP secret when it stops"
+    );
+}
+
+#[test]
+fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
+    let pane = LeftPane::start("ca-adopt-gone-", 8);
+    pane.kill_server();
+    assert_eq!(
+        pane.adopt().err().map(|refused| refused.0).as_deref(),
+        Some("terminal_closed")
+    );
+    assert!(
+        !pane.config.exists(),
+        "a pane that is gone keeps no file that holds its MCP secret"
+    );
+}

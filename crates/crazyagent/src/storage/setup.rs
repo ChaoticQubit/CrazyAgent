@@ -370,6 +370,7 @@ fn install(
                 scope: Scope::Global,
                 name,
                 spec: spec.clone(),
+                secrets: Vec::new(),
             },
         };
         let change = plugins::run(tx, root, command).map_err(taken)?;

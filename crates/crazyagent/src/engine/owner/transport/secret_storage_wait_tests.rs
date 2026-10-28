@@ -252,6 +252,7 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
                 command: "/usr/bin/true".into(),
                 args: Vec::new(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -291,6 +292,66 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
         0,
         "the replaced secret must not stay behind"
     );
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_added_with_secrets_while_storage_is_busy_is_kept_with_every_one_of_them() {
+    let busy = Busy::start().await;
+    let controller = crate::client_controller::OwnerController::attach(
+        busy.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    let first = format!("first-added-secret-{}", std::process::id());
+    let second = format!("second-added-secret-{}", std::process::id());
+
+    let (swept, sweep) = busy.occupy_storage();
+    let added = controller
+        .add_mcp_server(
+            Scope::Global,
+            "busy-added".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            vec![
+                (
+                    "API_TOKEN".into(),
+                    AccountSecret::new(first.as_bytes().to_vec()).unwrap(),
+                ),
+                (
+                    "API_KEY".into(),
+                    AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+                ),
+            ],
+        )
+        .await;
+    let code = added.err().map(|error| error.0).unwrap_or_default();
+    assert!(
+        code.ends_with("outcome_unknown") || code.contains("outcome_unknown_"),
+        "the add must outlast the owner wait behind the real sweep: {code}"
+    );
+    settled(&swept, sweep).await;
+
+    let servers = controller.plugin_servers(None).await.unwrap();
+    assert_eq!(servers.len(), 1, "storage committed the add");
+    let secrets: Vec<(&str, bool)> = servers[0]
+        .secrets
+        .iter()
+        .map(|secret| (secret.name.as_str(), secret.saved))
+        .collect();
+    assert_eq!(
+        secrets,
+        [("API_TOKEN", true), ("API_KEY", true)],
+        "a server is never left with only part of the secrets it was added with"
+    );
+    for secret in [&first, &second] {
+        assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 1);
+    }
+    drop(controller);
     busy.stop().await;
 }
 
@@ -341,6 +402,7 @@ async fn server_with_secrets(busy: &Busy, name: &str, secrets: &[(&str, &str)]) 
                 command: "/usr/bin/true".into(),
                 args: Vec::new(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();

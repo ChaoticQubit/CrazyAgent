@@ -556,6 +556,9 @@ impl TeamRuntime {
                     Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                     Err(problem) => return Err(problem.into()),
                 }
+                if let Some(record) = records.get(&id) {
+                    record.remove_context_files();
+                }
                 self.closed_note(id, &reason)?;
             }
         }
@@ -4611,27 +4614,33 @@ fn live_adopted(
         Next::Turn(_, Some(grant), _) => grant,
         Next::Turn(_, None, _) => {
             let _ = host.kill(&agent);
+            record.remove_context_files();
             return Some("The live master was taken over without its signed-in account".into());
         }
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
                 let _ = host.kill(&agent);
+                record.remove_context_files();
             }
             return None;
         }
     };
     let Grant { profile, .. } = *grant;
-    let credential =
-        match profile.hand_to_agent(&managed.home, limits.run_time, &managed.executable) {
-            Ok(credential) => credential,
-            Err(problem) => {
-                let _ = host.kill(&agent);
-                return Some(with_code(
-                    "The signed-in account could not reach the agent",
-                    Some(&problem.0),
-                ));
-            }
-        };
+    let credential = match profile.hand_to_agent(
+        &managed.home,
+        record.run_time_left(limits.run_time),
+        &managed.executable,
+    ) {
+        Ok(credential) => credential,
+        Err(problem) => {
+            let _ = host.kill(&agent);
+            record.remove_context_files();
+            return Some(with_code(
+                "The signed-in account could not reach the agent",
+                Some(&problem.0),
+            ));
+        }
+    };
     let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
             live_serve(*session, None, orders, reports, cancel, leave, true)

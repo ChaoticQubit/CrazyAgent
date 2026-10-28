@@ -21,6 +21,7 @@ fn server(connection: &mut Connection, root: &Path, name: &str, spec: &ServerSpe
             scope: Scope::Global,
             name: name.into(),
             spec: spec.clone(),
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {
@@ -605,4 +606,114 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
 fn a_dot_folder_part_never_reaches_the_store() {
     let root = tempfile::tempdir().unwrap();
     let _ = store_folder(root.path(), &["skills", "project", "."]);
+}
+
+/// Grows a list of items made of `unit` until the check stops accepting it: each item as
+/// long as the check takes, at most `count` items of `length` units. Inputs: the bounds,
+/// the unit and the check. Output: the largest list the check accepts.
+fn largest(
+    count: usize,
+    length: usize,
+    unit: &str,
+    accepts: &dyn Fn(&[String]) -> bool,
+) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    while items.len() < count {
+        let mut size = length;
+        loop {
+            items.push(unit.repeat(size));
+            if accepts(&items) {
+                break;
+            }
+            items.pop();
+            if size == 1 {
+                return items;
+            }
+            size -= 1;
+        }
+    }
+    items
+}
+
+#[test]
+fn the_largest_server_the_checks_accept_fits_one_reply_frame() {
+    const REPLY_ROOM: usize = 256;
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let command = format!("/{}", "'".repeat(crate::plugins::COMMAND_BYTES_MAX - 1));
+    let args = largest(
+        crate::plugins::ARGS_MAX,
+        crate::plugins::ARG_BYTES_MAX,
+        "'",
+        &|args| {
+            ServerSpec::Stdio {
+                command: command.clone(),
+                args: args.to_vec(),
+            }
+            .validate()
+            .is_ok()
+        },
+    );
+    let spec = ServerSpec::Stdio { command, args };
+    spec.validate().unwrap();
+    let id = server(
+        &mut connection,
+        root,
+        &"s".repeat(crate::plugins::SERVER_NAME_BYTES_MAX),
+        &spec,
+    );
+    for index in 0..SECRETS_PER_SERVER_MAX {
+        let name = format!(
+            "S{index:0>2}{}",
+            "_".repeat(crate::plugins::SECRET_NAME_BYTES_MAX - 3)
+        );
+        attach(&mut connection, root, &id, &name, b"value");
+    }
+    let fits = |connection: &mut Connection| {
+        let ResultValue::Server(view) =
+            execute(connection, root, Command::Server { id: id.clone() }).unwrap()
+        else {
+            panic!("server view required");
+        };
+        let ResultValue::Servers(views, _) = execute(
+            connection,
+            root,
+            Command::Servers {
+                project: None,
+                offset: 0,
+            },
+        )
+        .unwrap() else {
+            panic!("server page required");
+        };
+        assert_eq!(views.len(), 1);
+        for bytes in [
+            serde_json::to_vec(&view).unwrap().len(),
+            serde_json::to_vec(&views).unwrap().len(),
+        ] {
+            assert!(
+                bytes + REPLY_ROOM <= crate::protocol::FRAME_BYTES_MAX,
+                "one server's view takes {bytes} bytes"
+            );
+        }
+        *view
+    };
+    fits(&mut connection);
+    let tools = largest(TOOLS_MAX, TOOL_NAME_BYTES_MAX, "\"", &|tools| {
+        valid_tools(tools.to_vec()).is_ok()
+    });
+    assert!(!tools.is_empty());
+    execute(
+        &mut connection,
+        root,
+        Command::RecordCheck {
+            id: id.clone(),
+            digest: spec.digest(),
+            outcome: Ok(tools.clone()),
+        },
+    )
+    .unwrap();
+    let view = fits(&mut connection);
+    assert_eq!(view.tools, tools, "the check kept every tool it accepted");
+    assert_eq!(view.secrets.len(), SECRETS_PER_SERVER_MAX);
 }

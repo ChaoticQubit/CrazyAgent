@@ -901,7 +901,20 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        assert!(!carries_secret(&command, &context));
+        context
+            .refuse_exposed(
+                std::iter::once(command.get_program().as_encoded_bytes())
+                    .chain(
+                        command
+                            .get_args()
+                            .map(|argument| argument.as_encoded_bytes()),
+                    )
+                    .chain(command.get_envs().flat_map(|(name, value)| {
+                        std::iter::once(name.as_encoded_bytes())
+                            .chain(value.map(|value| value.as_encoded_bytes()))
+                    })),
+            )
+            .map_err(RunError::Context)?;
         let mut running = AgentProcess::spawn(&mut command)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
@@ -1464,19 +1477,6 @@ fn read_folders(
     folders.sort();
     folders.dedup();
     Ok(folders)
-}
-
-/// Reports whether any MCP secret of the project context appears in the
-/// command's program, arguments or environment.
-fn carries_secret(command: &Command, context: &AgentContext) -> bool {
-    context.exposes_secret(command.get_program().as_encoded_bytes())
-        || command
-            .get_args()
-            .any(|argument| context.exposes_secret(argument.as_encoded_bytes()))
-        || command.get_envs().any(|(name, value)| {
-            context.exposes_secret(name.as_encoded_bytes())
-                || value.is_some_and(|value| context.exposes_secret(value.as_encoded_bytes()))
-        })
 }
 
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {

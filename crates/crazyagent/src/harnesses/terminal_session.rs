@@ -177,16 +177,14 @@ impl TerminalSession {
             return Err(failure("launch_transcript_unavailable"));
         }
         if let Some(context) = context {
-            assert!(
-                command
-                    .argv
-                    .iter()
-                    .all(|argument| !context.exposes_secret(argument.as_bytes()))
-            );
-            assert!(command.env.iter().all(|(name, value)| {
-                !context.exposes_secret(name.as_bytes())
-                    && !context.exposes_secret(value.as_bytes())
-            }));
+            context.refuse_exposed(
+                command.argv.iter().map(String::as_bytes).chain(
+                    command
+                        .env
+                        .iter()
+                        .flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]),
+                ),
+            )?;
         }
         let since = SystemTime::now();
         let reader = match resume {
@@ -227,7 +225,11 @@ impl TerminalSession {
                 pane.pid,
                 key.as_ref().map(|key| key.0.as_path()),
             )
-            .map(|record| PaneRecord { resumed, ..record }),
+            .map(|record| PaneRecord {
+                resumed,
+                context: installed.as_ref().and_then(Installed::files).cloned(),
+                ..record
+            }),
             _key: key,
             _context: installed,
             _relay: relay,

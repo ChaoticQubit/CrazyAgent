@@ -54,6 +54,8 @@ enum Action {
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        #[serde(default)]
+        secrets: Vec<String>,
     },
     UpdateServer {
         id: String,
@@ -192,9 +194,16 @@ impl Action {
             Self::ImportSkill {
                 replace: Some(id), ..
             } if !valid_id(id) => Err(failure("plugin_not_found")),
-            Self::AddServer { name, spec, .. } => {
+            Self::AddServer {
+                name,
+                spec,
+                secrets,
+                ..
+            } => {
                 crate::plugins::validate_server_name(name)?;
-                spec.validate()
+                spec.validate()?;
+                let names: Vec<&str> = secrets.iter().map(String::as_str).collect();
+                crate::plugins::validate_secret_names(&names)
             }
             Self::UpdateServer { spec, .. } | Self::Approve { spec, .. } => spec.validate(),
             Self::SetSecret { name, .. } | Self::RemoveSecret { name, .. } => {
@@ -241,7 +250,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<SkillPage, EngineError> {
         match self
-            .plugins_exchange(Action::Skills { project, offset }, None, self.timeout)
+            .plugins_exchange(Action::Skills { project, offset }, Vec::new(), self.timeout)
             .await?
         {
             Reply::Skills { page } => Ok(page),
@@ -285,7 +294,11 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<ServerPage, EngineError> {
         match self
-            .plugins_exchange(Action::Servers { project, offset }, None, self.timeout)
+            .plugins_exchange(
+                Action::Servers { project, offset },
+                Vec::new(),
+                self.timeout,
+            )
             .await?
         {
             Reply::Servers { page } => Ok(page),
@@ -295,7 +308,7 @@ impl OwnerClient {
 
     /// Reads one MCP server by id. Output: the server as the lists show it.
     pub async fn plugin_server(&self, id: String) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::Server { id }, None).await
+        self.server_reply(Action::Server { id }, Vec::new()).await
     }
 
     /// Adds a skill by copying an owner-picked folder that holds SKILL.md into the engine's
@@ -311,7 +324,11 @@ impl OwnerClient {
         &self,
     ) -> Result<crate::skills::import::ImportList, EngineError> {
         match self
-            .plugins_exchange(Action::ImportScan, None, self.timeout.max(IMPORT_TIMEOUT))
+            .plugins_exchange(
+                Action::ImportScan,
+                Vec::new(),
+                self.timeout.max(IMPORT_TIMEOUT),
+            )
             .await?
         {
             Reply::ImportScan { list } => Ok(list),
@@ -355,16 +372,28 @@ impl OwnerClient {
         self.done_reply(Action::RemoveSkill { id }).await
     }
 
-    /// Adds an MCP server that waits for approval. Inputs: scope, a plain name and the
-    /// command or URL. Output: the server with status "Waiting for approval".
+    /// Adds an MCP server that waits for approval, with its secrets in the same request:
+    /// each value goes in a private frame of its own, and the engine keeps the server with
+    /// every secret or keeps none of them. Inputs: scope, a plain name, the command or URL
+    /// and the secrets by name. Output: the server with status "Waiting for approval".
     pub async fn add_mcp_server(
         &self,
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        secrets: Vec<(String, AccountSecret)>,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::AddServer { scope, name, spec }, None)
-            .await
+        let (names, values): (Vec<String>, Vec<AccountSecret>) = secrets.into_iter().unzip();
+        self.server_reply(
+            Action::AddServer {
+                scope,
+                name,
+                spec,
+                secrets: names,
+            },
+            values,
+        )
+        .await
     }
 
     /// Changes how an MCP server runs. Any change sends it back to "Waiting for approval".
@@ -373,7 +402,7 @@ impl OwnerClient {
         id: String,
         spec: ServerSpec,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::UpdateServer { id, spec }, None)
+        self.server_reply(Action::UpdateServer { id, spec }, Vec::new())
             .await
     }
 
@@ -384,7 +413,8 @@ impl OwnerClient {
         id: String,
         spec: ServerSpec,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::Approve { id, spec }, None).await
+        self.server_reply(Action::Approve { id, spec }, Vec::new())
+            .await
     }
 
     /// Turns an MCP server on or off where it was added. Output: the server.
@@ -393,7 +423,7 @@ impl OwnerClient {
         id: String,
         enabled: bool,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::SetServer { id, enabled }, None)
+        self.server_reply(Action::SetServer { id, enabled }, Vec::new())
             .await
     }
 
@@ -421,7 +451,7 @@ impl OwnerClient {
         name: String,
         value: AccountSecret,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::SetSecret { id, name }, Some(value))
+        self.server_reply(Action::SetSecret { id, name }, vec![value])
             .await
     }
 
@@ -431,7 +461,7 @@ impl OwnerClient {
         id: String,
         name: String,
     ) -> Result<ServerView, EngineError> {
-        self.server_reply(Action::RemoveSecret { id, name }, None)
+        self.server_reply(Action::RemoveSecret { id, name }, Vec::new())
             .await
     }
 
@@ -440,7 +470,7 @@ impl OwnerClient {
     /// reason it can't start.
     pub async fn check_mcp_server(&self, id: String) -> Result<ServerView, EngineError> {
         let before = self.plugin_server(id.clone()).await?.checks;
-        self.server_reply(Action::Check { id: id.clone() }, None)
+        self.server_reply(Action::Check { id: id.clone() }, Vec::new())
             .await?;
         let deadline = tokio::time::Instant::now() + check::CHECK_TIME + Duration::from_secs(3);
         loop {
@@ -462,7 +492,7 @@ impl OwnerClient {
         project: ProjectId,
     ) -> Result<EffectivePlugins, EngineError> {
         match self
-            .plugins_exchange(Action::Effective { project }, None, self.timeout)
+            .plugins_exchange(Action::Effective { project }, Vec::new(), self.timeout)
             .await?
         {
             Reply::Effective { plugins } => Ok(plugins),
@@ -471,7 +501,10 @@ impl OwnerClient {
     }
 
     async fn skill_reply(&self, action: Action) -> Result<SkillView, EngineError> {
-        match self.plugins_exchange(action, None, self.timeout).await? {
+        match self
+            .plugins_exchange(action, Vec::new(), self.timeout)
+            .await?
+        {
             Reply::Skill { skill } => Ok(skill),
             _ => Err(unknown()),
         }
@@ -480,16 +513,19 @@ impl OwnerClient {
     async fn server_reply(
         &self,
         action: Action,
-        secret: Option<AccountSecret>,
+        secrets: Vec<AccountSecret>,
     ) -> Result<ServerView, EngineError> {
-        match self.plugins_exchange(action, secret, self.timeout).await? {
+        match self.plugins_exchange(action, secrets, self.timeout).await? {
             Reply::Server { server } => Ok(server),
             _ => Err(unknown()),
         }
     }
 
     async fn done_reply(&self, action: Action) -> Result<(), EngineError> {
-        match self.plugins_exchange(action, None, self.timeout).await? {
+        match self
+            .plugins_exchange(action, Vec::new(), self.timeout)
+            .await?
+        {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
@@ -498,14 +534,14 @@ impl OwnerClient {
     async fn plugins_exchange(
         &self,
         action: Action,
-        secret: Option<AccountSecret>,
+        secrets: Vec<AccountSecret>,
         timeout: Duration,
     ) -> Result<Reply, EngineError> {
         action.validate()?;
         tokio::time::timeout(timeout, async {
             let envelope = Envelope {
                 plugins: action,
-                secret_present: secret.is_some(),
+                secret_present: !secrets.is_empty(),
             };
             let frame = encode_frame(&envelope).map_err(|_| failure("plugins_request_bounds"))?;
             self.root.verify()?;
@@ -531,7 +567,7 @@ impl OwnerClient {
                 .write_all(&frame)
                 .await
                 .map_err(|_| failure("plugins_owner_unavailable"))?;
-            if let Some(secret) = secret {
+            for secret in secrets {
                 let mut bytes = secret.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
@@ -619,7 +655,7 @@ pub(super) fn imports(bytes: &[u8]) -> bool {
 /// still to make under the owner barrier, with the secret it carries.
 enum Prepared {
     Read(Box<Reply>),
-    Change(Action, Option<AccountSecret>),
+    Change(Action, Vec<AccountSecret>),
 }
 
 /// Serves one plugins request. A read is made first; then, under the owner barrier, the
@@ -637,18 +673,22 @@ pub(super) async fn serve(
 ) -> Result<(), EngineError> {
     let envelope: Envelope =
         serde_json::from_slice(bytes).map_err(|_| failure("plugins_request_invalid"))?;
-    let secret = if envelope.secret_present {
-        Some(receive_secret(stream).await?)
+    let frames = if envelope.secret_present {
+        secret_frames(&envelope.plugins).clamp(1, crate::plugins::SECRETS_PER_SERVER_MAX)
     } else {
-        None
+        0
     };
+    let mut secrets = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        secrets.push(receive_secret(stream).await?);
+    }
     let prepared = prepare(
         engine,
         authority,
         packet,
         admission,
         envelope.plugins,
-        secret,
+        secrets,
     )
     .await;
     let _barrier = engine.owner_egress.write().await;
@@ -677,7 +717,7 @@ async fn prepare(
     packet: &[u8; 37],
     admission: &Admission,
     action: Action,
-    secret: Option<AccountSecret>,
+    secrets: Vec<AccountSecret>,
 ) -> Result<Prepared, EngineError> {
     {
         let _barrier = engine.owner_egress.write().await;
@@ -686,9 +726,9 @@ async fn prepare(
         }
     }
     if action.changes() {
-        return Ok(Prepared::Change(action, secret));
+        return Ok(Prepared::Change(action, secrets));
     }
-    handle(engine, authority, action, secret)
+    handle(engine, authority, action, secrets)
         .await
         .map(|reply| Prepared::Read(Box::new(reply)))
 }
@@ -709,7 +749,7 @@ async fn finish(
     }
     match prepared {
         Prepared::Read(reply) => Ok(*reply),
-        Prepared::Change(action, secret) => handle(engine, authority, action, secret).await,
+        Prepared::Change(action, secrets) => handle(engine, authority, action, secrets).await,
     }
 }
 
@@ -751,10 +791,10 @@ async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     action: Action,
-    secret: Option<AccountSecret>,
+    secrets: Vec<AccountSecret>,
 ) -> Result<Reply, EngineError> {
     action.validate()?;
-    if secret.is_some() != matches!(action, Action::SetSecret { .. }) {
+    if secrets.len() != secret_frames(&action) {
         return Err(failure("server_secret_invalid"));
     }
     Ok(match action {
@@ -883,8 +923,60 @@ async fn handle(
             actor(engine, Command::RemoveSkill { id }).await?;
             Reply::Done
         }
-        Action::AddServer { scope, name, spec } => {
-            server(actor(engine, Command::AddServer { scope, name, spec }).await?)?
+        Action::AddServer {
+            scope,
+            name,
+            spec,
+            secrets: names,
+        } => {
+            let root = engine_root(authority)?;
+            let mut stored: Vec<crate::plugins::EffectiveSecret> = Vec::with_capacity(names.len());
+            for (secret, value) in names.into_iter().zip(secrets) {
+                let kept = crate::storage::plugins::new_secret_reference().and_then(|reference| {
+                    crate::storage::plugins::store_secret(&root, &reference, value.into_bytes())?;
+                    Ok(reference)
+                });
+                match kept {
+                    Ok(reference) => stored.push(crate::plugins::EffectiveSecret {
+                        name: secret,
+                        reference,
+                    }),
+                    Err(problem) => {
+                        for kept in &stored {
+                            let _ = crate::storage::plugins::remove_secret(&root, &kept.reference);
+                        }
+                        return Err(problem);
+                    }
+                }
+            }
+            let references: Vec<String> = stored
+                .iter()
+                .map(|secret| secret.reference.clone())
+                .collect();
+            server(
+                engine
+                    .settled_job(
+                        |reply| {
+                            Job::Plugins(
+                                Command::AddServer {
+                                    scope,
+                                    name,
+                                    spec,
+                                    secrets: stored,
+                                },
+                                reply,
+                            )
+                        },
+                        move |result| match result {
+                            Ok(_) => Ok(()),
+                            Err(_) => {
+                                let _ = crate::storage::plugins::remove_secrets(&root, &references);
+                                Ok(())
+                            }
+                        },
+                    )
+                    .await?,
+            )?
         }
         Action::UpdateServer { id, spec } => {
             server(actor(engine, Command::UpdateServer { id, spec }).await?)?
@@ -923,7 +1015,10 @@ async fn handle(
             Reply::Done
         }
         Action::SetSecret { id, name } => {
-            let secret = secret.ok_or_else(|| failure("server_secret_invalid"))?;
+            let secret = secrets
+                .into_iter()
+                .next()
+                .ok_or_else(|| failure("server_secret_invalid"))?;
             let root = engine_root(authority)?;
             let reference = crate::storage::plugins::new_secret_reference()?;
             crate::storage::plugins::store_secret(&root, &reference, secret.into_bytes())?;
@@ -1168,6 +1263,17 @@ async fn actor(engine: &Engine, command: Command) -> Result<ResultValue, EngineE
     engine
         .native_auth_job(|reply| Job::Plugins(command, reply))
         .await
+}
+
+/// How many private secret frames follow a plugins request: one for a secret change, one
+/// for each secret a server is added with, none otherwise. Input: the request. Output: the
+/// count.
+fn secret_frames(action: &Action) -> usize {
+    match action {
+        Action::SetSecret { .. } => 1,
+        Action::AddServer { secrets, .. } => secrets.len(),
+        _ => 0,
+    }
 }
 
 async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {

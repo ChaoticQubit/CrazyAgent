@@ -590,6 +590,7 @@ fn an_owner_server_named_like_an_entry_keeps_its_secret_across_new_pins() {
             scope: Scope::Global,
             name: "context-mode".into(),
             spec: spec(),
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {

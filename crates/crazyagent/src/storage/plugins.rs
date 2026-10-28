@@ -3,7 +3,7 @@ use crate::plugins::{
     EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
     LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
     SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
-    SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
+    SkillView, TOOL_NAME_BYTES_MAX, TOOL_NAMES_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -48,6 +48,7 @@ pub(crate) enum Command {
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        secrets: Vec<EffectiveSecret>,
     },
     UpdateServer {
         id: String,
@@ -840,9 +841,12 @@ fn add_server(
     scope: Scope,
     name: String,
     spec: ServerSpec,
+    secrets: Vec<EffectiveSecret>,
 ) -> Result<ServerRecord, EngineError> {
     crate::plugins::validate_server_name(&name)?;
     spec.validate()?;
+    let names: Vec<&str> = secrets.iter().map(|secret| secret.name.as_str()).collect();
+    crate::plugins::validate_secret_names(&names)?;
     require_scope(tx, &scope)?;
     let key = scope_key(&scope);
     if count(tx, "server", &key)? >= SERVERS_PER_SCOPE_MAX {
@@ -858,7 +862,7 @@ fn add_server(
         spec,
         enabled: true,
         approved: None,
-        secrets: Vec::new(),
+        secrets,
         check: None,
         checks: 0,
     };
@@ -886,6 +890,7 @@ fn put_server(tx: &Transaction<'_>, record: &ServerRecord) -> Result<(), EngineE
 
 fn valid_tools(tools: Vec<String>) -> Result<Vec<String>, String> {
     if tools.len() > TOOLS_MAX
+        || tools.iter().map(String::len).sum::<usize>() > TOOL_NAMES_BYTES_MAX
         || tools.iter().any(|tool| {
             tool.is_empty()
                 || tool.len() > TOOL_NAME_BYTES_MAX
@@ -1084,8 +1089,13 @@ pub(super) fn run(
                 .map_err(error)?;
             ResultValue::SkillRemoved(root.join(&record.folder))
         }
-        Command::AddServer { scope, name, spec } => {
-            let record = add_server(tx, scope, name, spec)?;
+        Command::AddServer {
+            scope,
+            name,
+            spec,
+            secrets,
+        } => {
+            let record = add_server(tx, scope, name, spec, secrets)?;
             ResultValue::Server(Box::new(server_view(&record, root, None)))
         }
         Command::UpdateServer { id, spec } => {
