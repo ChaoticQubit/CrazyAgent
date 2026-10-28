@@ -1610,6 +1610,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
 
 /// Makes the agent state folder `name` under `agents` with a file in it, as an
 /// earlier onboarding of a project with the same id left it.
+#[cfg(target_os = "macos")]
 fn leftover_agent(agents: &Path, name: &str) {
     fs::create_dir_all(agents.join(name).join("home")).unwrap();
     fs::write(agents.join(name).join("stdout.log"), "earlier run\n").unwrap();
@@ -1664,6 +1665,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 fn onboarding_created_ms(root: &Path) -> i64 {
     let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     database

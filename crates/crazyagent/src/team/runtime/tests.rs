@@ -1851,6 +1851,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     );
 }
 
+#[cfg(target_os = "macos")]
 const LIVE_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -1874,6 +1875,7 @@ while IFS= read -r line; do
 done
 "#;
 
+#[cfg(target_os = "macos")]
 fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -1893,6 +1895,7 @@ fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRu
     .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn masters(connection: &Connection) -> Vec<i64> {
     connection
         .prepare("SELECT id FROM team_agents WHERE project=?1 AND role='master' ORDER BY id")
@@ -1903,6 +1906,7 @@ fn masters(connection: &Connection) -> Vec<i64> {
         .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn turned_off(fixture: &Fixture, why: &str) -> bool {
     let said = |text: &str| {
         text.starts_with(&format!("The live master was turned off: {why}"))
@@ -1918,6 +1922,7 @@ fn turned_off(fixture: &Fixture, why: &str) -> bool {
             .any(|message| message.state == MessageState::Note && said(&message.text))
 }
 
+#[cfg(target_os = "macos")]
 fn idle_ticks(team: &mut TeamRuntime) {
     for _ in 0..20 {
         team.tick().unwrap();
@@ -2033,6 +2038,7 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
     team.shutdown().unwrap();
 }
 
+#[cfg(target_os = "macos")]
 const LIMITED_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -2127,6 +2133,7 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
     host.close(&[]).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -2164,6 +2171,7 @@ done
 
 /// Makes `to` the project's live master session, parking the live one first, as the
 /// owner's New session and Resume actions do. Takes the database and the session id.
+#[cfg(target_os = "macos")]
 fn switch_session(connection: &Connection, to: &str) {
     connection
         .execute(
@@ -2182,6 +2190,7 @@ fn switch_session(connection: &Connection, to: &str) {
         .unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn kept_conversation(connection: &Connection, session: &str) -> Option<(String, PathBuf)> {
     connection
         .query_row(
@@ -2193,6 +2202,7 @@ fn kept_conversation(connection: &Connection, session: &str) -> Option<(String, 
         .unwrap()
 }
 
+#[cfg(target_os = "macos")]
 fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
     let log = fixture
         .base
@@ -2206,6 +2216,7 @@ fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn noted(fixture: &Fixture, text: &str) -> usize {
     fixture
         .status()
@@ -2497,6 +2508,7 @@ fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
     host.close(&[]).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 const CRASHING_CODEX: &str = r#"#!/bin/sh
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
@@ -2569,6 +2581,7 @@ fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
     host.close(&[]).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn live_turns(connection: &Connection) -> (i64, bool) {
     connection
         .query_row(
