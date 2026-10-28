@@ -1029,6 +1029,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
+        live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -1401,6 +1402,14 @@ fn switch_read(request: &Request) -> bool {
 }
 
 fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
+    switched(on, problem, None)
+}
+
+fn switched(
+    on: Option<bool>,
+    problem: Option<&str>,
+    live_switch: Option<crate::team::SessionSwitch>,
+) -> Arrival {
     let status = crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
@@ -1409,6 +1418,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
+        live_switch,
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
@@ -2003,4 +2013,61 @@ fn the_master_view_names_its_way_back_as_the_earlier_conversation() {
         rows[23]
     );
     assert!(!rows[23].contains("Esc Back"), "{}", rows[23]);
+}
+
+/// The master view's header says where the live session's master harness last switched and
+/// what the new harness got, next to the switch key, and keeps saying it after the owner
+/// turns the live master off.
+#[test]
+fn the_master_view_head_says_the_live_session_switched_harness() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    let switch = |mode| crate::team::SessionSwitch {
+        harness: "Claude Code".into(),
+        mode,
+        note: crate::master_sessions::switched_note("Claude Code", mode),
+    };
+    shell.arrive(switched(
+        Some(true),
+        None,
+        Some(switch(crate::team::SwitchMode::Carry)),
+    ));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!(
+            "{:<58}s Stop live master",
+            "Live master on. Switched to Claude Code, carried over."
+        )
+    );
+    shell.arrive(switched(
+        Some(true),
+        None,
+        Some(switch(crate::team::SwitchMode::Fresh)),
+    ));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master on. Switched to Claude Code, started fresh."),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(turned(false, Ok(())));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!(
+            "{:<57}s Start live master",
+            "Live master stopped. Switched to Claude Code, started …"
+        )
+    );
+    shell.arrive(switch_off_unswitched());
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!("{:<57}s Start live master", "Live master stopped.")
+    );
+}
+
+fn switch_off_unswitched() -> Arrival {
+    switched(Some(false), None, None)
 }

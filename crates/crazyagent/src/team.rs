@@ -374,6 +374,16 @@ impl SwitchMode {
     }
 }
 
+/// The latest master harness switch of the project's live session, for the divider its
+/// conversation shows: the harness's display name, what it was given under the owner's
+/// setting and the note that says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSwitch {
+    pub harness: String,
+    pub mode: SwitchMode,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum TeamAction {
@@ -851,6 +861,13 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_finished_view (
                 project TEXT PRIMARY KEY,
                 show INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_session_switches (
+                session TEXT PRIMARY KEY,
+                project TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                mode TEXT NOT NULL CHECK(mode IN ('carry','fresh')),
+                created_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS team_paused_accounts (
                 connection TEXT PRIMARY KEY,
@@ -1921,6 +1938,8 @@ pub struct TeamStatus {
     pub on_harness_switch: SwitchMode,
     #[serde(default)]
     pub show_finished: bool,
+    #[serde(default)]
+    pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
@@ -2156,6 +2175,62 @@ pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<boo
         .optional()
         .map(|value| value.unwrap_or(false))
         .map_err(error)
+}
+
+/// The longest stored harness name a session switch row is read with.
+const SWITCH_HARNESS_BYTES_MAX: i64 = 64;
+
+/// Records that a session's master harness switched, replacing the session's earlier switch,
+/// so its conversation shows where the new harness took over. Takes a connection, the
+/// project, the session, the new launch harness and the owner's mode. Returns nothing.
+pub fn record_switch(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    harness: &str,
+    mode: SwitchMode,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_session_switches(session,project,harness,mode,created_ms)
+             VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(session) DO UPDATE SET project=excluded.project,
+                 harness=excluded.harness, mode=excluded.mode, created_ms=excluded.created_ms",
+            params![session, project.as_str(), harness, mode.name(), now_ms()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The latest master harness switch of the project's live session, if it ever switched.
+/// Takes a connection and the project. Returns the switch with its note, or None.
+pub fn live_switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<SessionSwitch>, EngineError> {
+    let Some(session) = crate::master_sessions::live_session(connection, project)? else {
+        return Ok(None);
+    };
+    let row: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=?3 THEN harness END,mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session, project.as_str(), SWITCH_HARNESS_BYTES_MAX],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((Some(harness), mode)) = row else {
+        return Ok(None);
+    };
+    let mode = SwitchMode::named(&mode).ok_or_else(|| error("team_switch_mode_invalid"))?;
+    let harness = crate::master_sessions::harness_label(&harness).to_owned();
+    let note = crate::master_sessions::switched_note(&harness, mode);
+    Ok(Some(SessionSwitch {
+        harness,
+        mode,
+        note,
+    }))
 }
 
 /// Tells whether the owner paused the project's whole team.
@@ -2500,6 +2575,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
         show_finished: show_finished(connection, project)?,
+        live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,
         live_problem,

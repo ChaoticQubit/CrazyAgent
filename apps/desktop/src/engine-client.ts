@@ -754,6 +754,12 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+export interface SessionSwitch {
+  harness: string;
+  mode: SwitchMode;
+  note: string;
+}
+
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
@@ -763,6 +769,7 @@ export interface TeamStatus {
   on_harness_switch?: SwitchMode;
   show_finished?: boolean;
   partial?: boolean;
+  live_switch?: SessionSwitch | null;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;

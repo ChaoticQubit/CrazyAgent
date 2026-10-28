@@ -76,3 +76,31 @@ test("a resumed session asks only for the owner lines it does not hold, at most 
   assert.equal(sessions.ownerText(turns[1], { b: "typed here" }, { "12": "older copy" }), "typed here");
   assert.equal(sessions.ownerText(turns[3], {}, {}), undefined);
 });
+
+test("a session whose master harness switched shows the engine's Switched to divider", async () => {
+  const note = "Switched to Codex. The conversation continues: Codex got its earlier turns, newest first, and the open tasks.";
+  const team = (extra) => ({ kind: "ok", value: { project_id: "p-1", ...extra } });
+  assert.equal(sessions.switchDivider(undefined), null);
+  assert.equal(sessions.switchDivider({ kind: "error", code: "x", message: "m" }), null);
+  assert.equal(sessions.switchDivider(team({})), null);
+  assert.equal(sessions.switchDivider(team({ live_switch: null })), null);
+  assert.equal(sessions.switchDivider(team({ live_switch: { harness: "Codex", mode: "carry", note } })), note);
+  assert.equal(renderToStaticMarkup(createElement(sessions.SwitchDivider, { team: team({}) })), "");
+  const shown = renderToStaticMarkup(createElement(sessions.SwitchDivider, { team: team({ live_switch: { harness: "Codex", mode: "carry", note } }) }));
+  assert.match(shown, /role="separator"/);
+  assert.match(shown, /data-testid="harness-switch"/);
+  assert.match(shown, /Switched to Codex\. The conversation continues/);
+
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const data = (live_switch) => ({
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: team({ live_switch }), at: 1 }, reloadTeam: () => {},
+  });
+  const fresh = "Switched to Claude Code. Started fresh: Claude Code did not get the earlier conversation, as the On harness switch setting asks.";
+  const earlier = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: data({ harness: "Claude Code", mode: "fresh", note: fresh }), readOnly: true }));
+  assert.match(earlier, /No earlier conversation\./);
+  assert.match(earlier, /<p class="cs-line cs-engine"[^>]*>Switched to Claude Code\. Started fresh/);
+  const editable = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: data({ harness: "Claude Code", mode: "fresh", note: fresh }) }));
+  assert.doesNotMatch(editable, /Switched to Claude Code/);
+});

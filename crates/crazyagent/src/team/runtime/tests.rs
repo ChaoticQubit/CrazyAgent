@@ -3846,6 +3846,11 @@ fn renaming_the_master_harness_to_its_catalog_id_keeps_the_same_master() {
         [master],
         "one master, revived"
     );
+    assert_eq!(
+        fixture.status().live_switch,
+        None,
+        "an alias is no harness switch"
+    );
 }
 
 /// With Carry over, the default, a session whose master harness changed keeps one
@@ -3892,6 +3897,15 @@ fn a_master_harness_switch_carries_the_conversation_over_by_default() {
         "{handed}"
     );
     assert!(handed.contains("You: Done."), "{handed}");
+    assert_eq!(
+        fixture.status().live_switch,
+        Some(crate::team::SessionSwitch {
+            harness: "Claude Code".into(),
+            mode: crate::team::SwitchMode::Carry,
+            note: note.clone(),
+        }),
+        "the session's conversation shows where Claude Code took over"
+    );
     assert_eq!(
         crate::master_sessions::live_session(&fixture.connection, &project)
             .unwrap()
@@ -3975,6 +3989,14 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
     let briefed = typed(&fixture, second);
     assert!(!briefed.contains("The owner switched"), "{briefed}");
     assert!(!briefed.contains("You: Done."), "{briefed}");
+    assert_eq!(
+        fixture.status().live_switch,
+        Some(crate::team::SessionSwitch {
+            harness: "Claude Code".into(),
+            mode: crate::team::SwitchMode::Fresh,
+            note: note.clone(),
+        })
+    );
     assert_eq!(
         masters(&fixture.connection),
         [first, second],
