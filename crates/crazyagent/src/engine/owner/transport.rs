@@ -1323,6 +1323,12 @@ impl OwnerServer {
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
+        let backfill = setup::engine_root(&self.authority).ok().map(|root| {
+            tokio::spawn(setup::backfill_hooks(
+                self.engine.storage.sender.clone(),
+                root,
+            ))
+        });
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();
@@ -1381,6 +1387,9 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         upkeep.abort();
+        if let Some(backfill) = backfill {
+            backfill.abort();
+        }
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }

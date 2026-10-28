@@ -39,7 +39,7 @@ impl Drop for CheckGuard {
     }
 }
 
-fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
+pub(super) fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
     authority.root.verify()?;
     authority
         .root
@@ -369,6 +369,48 @@ fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Adds the hooks of every installed default-pack entry whose pinned checkout is already
+/// in the setup folder, so entries installed before hooks were seeded get them too.
+/// Nothing is downloaded, a linked checkout is skipped and an entry whose hooks are present
+/// is left alone. Inputs: the storage job sender and the engine root. Output: nothing; an
+/// entry that fails is logged and the rest still run.
+#[cfg(unix)]
+pub(super) async fn backfill_hooks(sender: mpsc::Sender<Job>, root: PathBuf) {
+    let setup = root.join("setup");
+    let cached = tokio::task::spawn_blocking(move || {
+        let manifest = crate::setup::pack::default_pack().ok()?;
+        Some(
+            manifest
+                .entries
+                .iter()
+                .filter_map(|entry| Some((entry.id.clone(), fetch::plugin_folder(&setup, entry)?)))
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await;
+    let Ok(Some(cached)) = cached else {
+        return;
+    };
+    for (id, plugin) in cached {
+        if let Err(problem) = storage(
+            &sender,
+            Command::SeedHooks {
+                id: id.clone(),
+                plugin,
+            },
+        )
+        .await
+        {
+            eprintln!("pack_hooks_not_added entry={id} cause={}", problem.0);
+        }
+    }
+}
+
+/// Adds no hooks where pack checkouts cannot be installed. Takes the same inputs as the
+/// Unix version, unused. Returns nothing.
+#[cfg(not(unix))]
+pub(super) async fn backfill_hooks(_sender: mpsc::Sender<Job>, _root: PathBuf) {}
+
 async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackManifestEntry>) {
     let installer = platform_installer(root);
     let graph_tool = progress::snapshot(root).graph_tool;
@@ -387,4 +429,5 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
     for entry in entries {
         install_entry(sender, installer.clone(), root, bundled.clone(), entry).await;
     }
+    backfill_hooks(sender.clone(), root.to_path_buf()).await;
 }
