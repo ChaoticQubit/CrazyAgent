@@ -23,6 +23,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_git_failed",
     "changes_git_unsupported",
     "changes_ignored_files",
+    "changes_link_outside",
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",
