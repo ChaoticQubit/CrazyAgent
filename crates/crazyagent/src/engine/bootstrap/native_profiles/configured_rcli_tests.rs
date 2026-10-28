@@ -364,6 +364,35 @@ fn configured_rcli_same_physical_home_cannot_overlap_execution_through_an_alias(
     guard.revalidate_retained().unwrap();
 }
 
+/// A reboot can renumber the volume's device while every inode stays, so the profile root
+/// and slot manifests name the device the volume had before; the configured RCLI profile
+/// registered before the reboot is still read as the same profile after it.
+#[test]
+fn configured_rcli_profile_survives_a_reboot_that_renumbered_the_volume() {
+    let mut case = ConfiguredCase::new(true, true);
+    let metadata = case.register();
+    let state = case.root.path().join("state");
+    let renumbered = std::fs::metadata(&state).unwrap().dev() ^ 1;
+    let slot = state
+        .join(ROOT)
+        .join(digest(case.profile.as_str().as_bytes()));
+    for recorded in [state.join(ROOT).join(MANIFEST), slot.join(MANIFEST)] {
+        crate::engine::bootstrap::tests::renumber_recorded_devices(&recorded, renumbered);
+    }
+    let database = state.join("engine.db");
+    let mut recaptured =
+        NativeProfileCustody::capture(&database, &std::fs::metadata(&database).unwrap()).unwrap();
+    let actual = recaptured.configured_rcli_profile(&case.host, &case.connection, &case.profile);
+    assert_eq!(
+        actual.as_ref().err().map(|error| error.0.as_str()),
+        None,
+        "a configured profile registered before a reboot is read after it"
+    );
+    let actual = actual.unwrap();
+    assert_eq!(actual.profile_generation, metadata.profile_generation);
+    assert_eq!(actual.profile_config_sha256, metadata.profile_config_sha256);
+}
+
 #[test]
 fn configured_rcli_metadata_survives_recapture_without_reading_key_contents() {
     let mut case = ConfiguredCase::new(true, true);
