@@ -885,6 +885,55 @@ fn finished_team() -> crate::team::TeamStatus {
     }
 }
 
+#[test]
+fn the_finished_box_keeps_the_picked_agent_drawn_when_the_list_is_longer_than_the_box() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::{AgentRole, TeamAction, TeamAgent};
+    let mut status = finished_team();
+    let stopped = status.agents[1].clone();
+    status.agents = (3..15)
+        .map(|id| TeamAgent {
+            id,
+            label: AgentRole::Sub.agent_label(id),
+            ..stopped.clone()
+        })
+        .collect();
+    let mut shell = fresh(120, 20);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(status))),
+    ));
+    for _ in 0..8 {
+        shell.key(Key::Down);
+    }
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished (12)"), "{text}");
+    assert!(
+        text.contains("> Sub-agent 6"),
+        "the ninth agent, picked with eight Downs, is drawn: {text}"
+    );
+    assert!(text.contains("more above"), "{text}");
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            &sent[..],
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::WakeAgent { agent: 6, .. },
+                ..
+            })]
+        ),
+        "w wakes the agent drawn as picked: {sent:?}"
+    );
+}
+
 fn setup_reply(
     query: crate::project_setup::SetupQuery,
     result: Result<crate::project_setup::SetupView, &str>,

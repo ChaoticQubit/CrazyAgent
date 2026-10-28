@@ -304,7 +304,9 @@ impl Finished {
     /// The box lines while it is open: the setting, then each finished agent with its
     /// harness and status and, below it, the engine's reason when it cannot wake and what it
     /// last worked on; the picked one is marked.
-    /// Rows past the box's height are counted in one "and N more" line.
+    /// The list starts low enough that the picked row is always drawn, with the rows above it
+    /// counted in one "N more above" line and the rows past the box's height in one "and N
+    /// more" line.
     /// Inputs: the line width, the box's inner height and the context. Output: the title and
     /// at most `room` lines (one when `room` is zero), or None while closed.
     pub(super) fn lines(
@@ -340,10 +342,27 @@ impl Finished {
             )));
         }
         let free = room.max(1);
-        for (index, row) in rows.iter().enumerate() {
+        assert!(rows.is_empty() || self.cursor < rows.len());
+        let height = |row: &FinishedRow| 2 + usize::from(row.note.is_some() && !row.wakeable);
+        let top = (0..=self.cursor)
+            .take_while(|_| !rows.is_empty())
+            .find(|&top| {
+                let drawn: usize = rows[top..=self.cursor].iter().map(height).sum();
+                let below = usize::from(self.cursor + 1 < rows.len());
+                lines.len() + usize::from(top > 0) + drawn + below <= free
+            })
+            .unwrap_or(self.cursor);
+        if top > 0 {
+            lines.push(Line::raw(cut(
+                &format!("{top} more above"),
+                limit,
+                ctx.glyphs.ellipsis,
+            )));
+        }
+        for (index, row) in rows.iter().enumerate().skip(top) {
             let left = rows.len() - index;
             let note = row.note.as_ref().filter(|_| !row.wakeable);
-            let height = 2 + usize::from(note.is_some());
+            let height = height(row);
             if lines.len() + height + usize::from(left > 1) > free {
                 lines.push(Line::raw(cut(
                     &format!("and {left} more"),
