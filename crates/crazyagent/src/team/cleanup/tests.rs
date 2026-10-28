@@ -877,3 +877,29 @@ fn a_finished_clone_agent_with_refs_only_its_clone_holds_is_kept_with_the_plain_
     assert!(outside_ref.is_file());
     assert!(case.retiring().is_empty());
 }
+
+/// A finished Own branch agent that left a huge sparse file at a tracked path keeps its
+/// clone as dirty within seconds: the engine compares each tracked file's size with the
+/// landed tip before git hashes any of them under the repository hold, so the file is
+/// never read (CCS-1).
+#[test]
+fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_it() {
+    let case = Case::new();
+    case.clone_agent(1, "stopped");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(case.worktree(1).join("README"))
+        .unwrap()
+        .set_len(8 << 30)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let kept = case.remove(&[1]);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        (kept, elapsed < std::time::Duration::from_secs(20)),
+        (refused("cleanup_worktree_dirty"), true),
+        "{elapsed:?}"
+    );
+    assert!(case.kept(1) && case.base_known(1));
+}
