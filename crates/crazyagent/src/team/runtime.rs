@@ -4,6 +4,7 @@ use super::{
     admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
     parse_delegations, pick_account, tool,
 };
+use crate::agent_git::Layout;
 use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
 };
@@ -25,6 +26,7 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
 };
+use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -128,6 +130,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    access: AgentAccess,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -144,7 +147,9 @@ impl Plan {
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: Some(self.sandbox_profile.clone()),
+            sandbox_profile: (self.access != AgentAccess::Full)
+                .then(|| self.sandbox_profile.clone()),
+            unconfined: self.access == AgentAccess::Full,
             git_identity: self.git_identity.clone(),
             limits: self.limits,
         }
@@ -2303,13 +2308,11 @@ impl TeamRuntime {
             } else {
                 String::new()
             };
-            let prompt = format!(
-                "You are a sub-agent of the project \"{}\". Work only inside {}.\n{earlier}Your task: {}\nWhen you finish, reply with a short summary of what you did.",
-                stored.name,
-                worktree
-                    .map_or(folder.clone(), |worktree| folder.join(worktree))
-                    .display(),
-                prompt
+            let prompt = sub_agent_prompt(
+                &stored.name,
+                &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
+                &earlier,
+                &prompt,
             );
             let limit = super::time_limits(&self.connection, &stored.project_id)?.turn_time();
             let worker = self.workers.get_mut(&agent).expect("worker exists");
@@ -2649,7 +2652,25 @@ impl TeamRuntime {
         again: Option<&HostedRestart>,
         kept: Option<[String; 3]>,
     ) -> Result<Result<i64, String>, EngineError> {
-        let prepared = self.prepare(stored, id, role, harness, tools, account, kept.is_some());
+        let layout = match &kept {
+            Some([_, worktree, git_dir])
+                if Path::new(git_dir) == crate::agent_git::git_dir(Path::new(worktree)) =>
+            {
+                Layout::Clone
+            }
+            Some(_) => Layout::Linked,
+            None => self.git_layout(&stored.project_id),
+        };
+        let prepared = self.prepare(
+            stored,
+            id,
+            role,
+            harness,
+            tools,
+            account,
+            kept.is_some(),
+            layout,
+        );
         let resume = self
             .resuming
             .take()
@@ -2682,7 +2703,7 @@ impl TeamRuntime {
                     .map(|p| p.display().to_string())
             })
             .flatten();
-        let landing = match agent_git_dir(&root, &plan.working_dir) {
+        let landing = match agent_git_dir(&root, &plan.working_dir, layout) {
             Ok(landing) if kept.as_ref().is_none_or(|kept| kept == &landing) => landing,
             Ok(_) => {
                 let problem =
@@ -2833,6 +2854,16 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Where a new agent of a project keeps its git state (DEC-102): its own clone at the
+    /// Own branch and Full access levels, a linked worktree at Sandboxed or when the saved
+    /// level cannot be read (launch then refuses it). Input: the project. Output: the layout.
+    fn git_layout(&self, project: &ProjectId) -> Layout {
+        match crate::sandbox::policy::load(&self.connection, project.as_str()) {
+            Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
+            _ => Layout::Linked,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         &self,
@@ -2843,6 +2874,7 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         adopt: bool,
+        layout: Layout,
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = self
@@ -2900,6 +2932,11 @@ impl TeamRuntime {
         } else {
             SandboxNetwork::Only(vec![remote])
         };
+        let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
+            .map_err(|_| with_code("the project's agent access could not be read", None))?;
+        if let Some(reason) = policy.access.unavailable() {
+            return Err(with_code(reason, Some("agent_access_unavailable")));
+        }
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
@@ -2919,7 +2956,7 @@ impl TeamRuntime {
         let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::detect(&root, &homes))
+            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
@@ -2948,10 +2985,28 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        if !adopt {
-            add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
-                with_code("the agent worktree could not be added", Some(run_code(&e)))
-            })?;
+        match (adopt, layout) {
+            (true, _) => {}
+            (false, Layout::Linked) => {
+                add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
+                    with_code("the agent worktree could not be added", Some(run_code(&e)))
+                })?
+            }
+            (false, Layout::Clone) => {
+                let worktrees = worktree.parent().ok_or("agent worktrees folder")?;
+                std::fs::create_dir_all(worktrees).map_err(|e| {
+                    with_code(
+                        "the agent worktrees folder could not be made",
+                        Some(io_code(&e)),
+                    )
+                })?;
+                crate::landing::add_agent_clone(&root, &worktree).map_err(|e| {
+                    with_code(
+                        "the agent's own copy of the project could not be made",
+                        Some(&e.0),
+                    )
+                })?
+            }
         }
         let working_dir = worktree
             .canonicalize()
@@ -2960,9 +3015,19 @@ impl TeamRuntime {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
-        sandbox = sandbox
-            .confine_to_worktree(&working_dir)
-            .map_err(sandboxed)?;
+        sandbox = match (layout, policy.access) {
+            (Layout::Linked, _) => sandbox.confine_to_worktree(&working_dir),
+            (Layout::Clone, AgentAccess::Sandboxed) => {
+                return Err(with_code(
+                    "this agent started with its own branch, but the project is Sandboxed now; its changes are still in Changes",
+                    Some("agent_access_lowered"),
+                ));
+            }
+            (Layout::Clone, AgentAccess::OwnBranch | AgentAccess::Full) => {
+                sandbox.confine_to_clone(&working_dir)
+            }
+        }
+        .map_err(sandboxed)?;
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -2984,6 +3049,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            access: policy.access,
             git_identity: owner_git_identity(&root),
             limits: self
                 .launch_limits(&stored.project_id)
@@ -3878,8 +3944,19 @@ impl TeamRuntime {
     }
 }
 
-/// Builds the master's opening frame: its sub-agents, how to hand out work
-/// and the project brief. Input: the setup, whether the team tool is on and, for an
+/// The turn a sub-agent gets for one task: the project, the worktree it works in, what it
+/// last did there when it was woken fresh, the task, and that its edits stay there for
+/// CrazyAgent to land. Inputs: the project name, the worktree, the earlier-work line (empty
+/// for none) and the task. Output: the prompt.
+fn sub_agent_prompt(name: &str, worktree: &Path, earlier: &str, task: &str) -> String {
+    format!(
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}Your task: {task}\nLeave your edits as files in that worktree: never create a branch, commit, push or write inside .git, and never retry a refused command outside the sandbox. CrazyAgent turns your edits into a change set the owner accepts in Changes.\nWhen you finish, reply with a short summary of what you did.",
+        worktree.display()
+    )
+}
+
+/// Builds the master's opening frame: its sub-agents, how to hand out work, how the
+/// team's work lands and the project brief. Input: the setup, whether the team tool is on and, for an
 /// empty plan, the harnesses with an eligible account now.
 /// Output: the frame text, with the brief from `master_brief`.
 fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
@@ -3895,8 +3972,11 @@ fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String 
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
-        stored.name, team, brief
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n{}\nProject brief:\n{}\n\n",
+        stored.name,
+        team,
+        crate::launch_context::MASTER_LANDING_RULES,
+        brief
     )
 }
 
@@ -3926,9 +4006,10 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 }
 
 /// The briefing a live master gets as its first prompt: who it is, the team, its tools,
-/// how team events arrive and when to ask the owner. Takes the setup, whether it has the
-/// engine's team tools, for an empty plan the harnesses with an eligible account now, and
-/// the finished sub-agents it can wake, listed only with the team tools. Returns the text.
+/// how team events arrive, when to ask the owner and how the team's work lands. Takes the
+/// setup, whether it has the engine's team tools, for an empty plan the harnesses with an
+/// eligible account now, and the finished sub-agents it can wake, listed only with the team
+/// tools. Returns the text.
 fn live_framing(
     stored: &StoredSetup,
     team_tool: bool,
@@ -3961,9 +4042,10 @@ fn live_framing(
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n\nProject brief:\n{}\n",
+        "You are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\nYour sub-agents:\n{}\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}\nProject brief:\n{}\n",
         stored.name,
         team,
+        crate::launch_context::MASTER_LANDING_RULES,
         master_brief(stored)
     )
 }
@@ -4827,12 +4909,26 @@ fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,
-/// so the engine's later commits never rely on what the agent may write: a folder directly
-/// in the project's `.git/worktrees` whose `gitdir` file names this worktree. Inputs: the
-/// project root and the worktree. Output: the root, worktree and metadata folder as text,
-/// or the plain reason.
-fn agent_git_dir(root: &Path, worktree: &Path) -> Result<[String; 3], String> {
+/// so the engine's later commits never rely on what the agent may write: for a linked
+/// worktree a folder directly in the project's `.git/worktrees` whose `gitdir` file names
+/// this worktree, for an agent's own clone the real folder `agent_git::git_dir` names.
+/// Inputs: the project root, the worktree and its layout. Output: the root, worktree and
+/// metadata folder as text, or the plain reason.
+fn agent_git_dir(root: &Path, worktree: &Path, layout: Layout) -> Result<[String; 3], String> {
     use std::io::Read;
+    if layout == Layout::Clone {
+        let git_dir = crate::agent_git::git_dir(worktree);
+        let plain = std::fs::symlink_metadata(&git_dir).is_ok_and(|found| found.is_dir());
+        let text = |path: &Path| path.to_str().map(str::to_owned);
+        let found = [text(root), text(worktree), text(&git_dir)];
+        return match found {
+            [Some(root), Some(worktree), Some(git_dir)] if plain => Ok([root, worktree, git_dir]),
+            _ => Err(with_code(
+                "the agent worktree could not be checked",
+                Some("team_worktree_git_dir"),
+            )),
+        };
+    }
     let read = |path: &Path| -> Result<String, String> {
         let mut text = String::new();
         std::fs::File::open(path)

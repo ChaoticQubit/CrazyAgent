@@ -519,6 +519,26 @@
   color: var(--text);
 }
 
+.tg-instructions-reported {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tg-instructions-loaded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tg-instructions-path {
+  font-family: var(--mono);
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
 .tg-instructions-skills {
   display: flex;
   flex-wrap: wrap;

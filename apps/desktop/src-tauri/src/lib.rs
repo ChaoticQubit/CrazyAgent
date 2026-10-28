@@ -611,6 +611,31 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_agent_policy(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_agent_policy(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_agent_policy(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    policy: crazyagent::sandbox::policy::AgentPolicy,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_agent_policy(&id, policy, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_project_files(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2436,6 +2461,8 @@ pub fn run() {
             desktop_project_read_paths,
             desktop_project_files,
             desktop_set_project_read_paths,
+            desktop_project_agent_policy,
+            desktop_set_project_agent_policy,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,

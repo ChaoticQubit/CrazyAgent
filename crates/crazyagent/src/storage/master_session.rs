@@ -160,6 +160,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) worktree_lease: RequestId,
     pub(crate) lease: WorktreeLease,
     pub(crate) agent_project: crate::agent_home::AgentProject,
+    pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
 }
 
 impl PreparedMasterTurn {
@@ -2706,6 +2707,8 @@ fn bundle(
     };
     let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
         .map_err(|problem| EngineError(problem.0))?;
+    let agent_policy =
+        crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,
@@ -2719,6 +2722,7 @@ fn bundle(
         worktree_lease: record.worktree_lease,
         lease: record.lease,
         agent_project,
+        agent_policy,
     };
     assert_eq!(
         prepared.attempt.request.task_id,

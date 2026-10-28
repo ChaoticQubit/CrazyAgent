@@ -206,9 +206,10 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile, the owner's git
-/// identity for the agent's own commits and limits. Every launch is refused unless a
-/// sandbox profile is given.
+/// account, optional model, tools switch, the project sandbox profile, whether the project
+/// gave its agents Full access, the owner's git identity for the agent's own commits and
+/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
+/// `unconfined` set for a Full access project (DEC-102).
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -218,6 +219,7 @@ pub struct LaunchRequest {
     pub model: Option<String>,
     pub tools: bool,
     pub sandbox_profile: Option<PathBuf>,
+    pub unconfined: bool,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
 }
@@ -431,10 +433,6 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    let profile = request
-        .sandbox_profile
-        .as_ref()
-        .ok_or_else(|| failure("launch_sandbox_required"))?;
     if !cfg!(target_os = "macos") {
         return Err(failure("launch_sandbox_unavailable"));
     }
@@ -465,14 +463,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
                 .map(|(name, value)| (name, OsStr::new(value))),
         );
     }
-    let mut command = crate::sandbox::agent_command(
-        profile,
-        &request.executable,
-        &base,
-        environment
-            .iter()
-            .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str()))),
-    )
+    let harness_env = environment
+        .iter()
+        .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+    let mut command = match &request.sandbox_profile {
+        Some(profile) => {
+            crate::sandbox::agent_command(profile, &request.executable, &base, harness_env)
+        }
+        None => crate::sandbox::unconfined_command(&request.executable, &base, harness_env),
+    }
     .map_err(|_| failure("launch_environment_refused"))?;
     command
         .args(&arguments)
@@ -484,7 +483,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
-    assert_eq!(command.get_program(), SANDBOX_EXEC);
+    assert_eq!(
+        command.get_program() == SANDBOX_EXEC,
+        request.sandbox_profile.is_some() && !request.unconfined
+    );
     assert!(command.get_args().all(|argument| {
         request
             .account
@@ -692,12 +694,13 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
             return Err(failure("launch_url_invalid"));
         }
     }
-    match &request.sandbox_profile {
-        Some(profile) if !profile.is_absolute() || !profile.is_file() => {
+    match (&request.sandbox_profile, request.unconfined) {
+        (Some(_), true) => return Err(failure("launch_sandbox_conflict")),
+        (Some(profile), false) if !profile.is_absolute() || !profile.is_file() => {
             return Err(failure("launch_sandbox_profile_unavailable"));
         }
-        Some(_) => {}
-        None => return Err(failure("launch_sandbox_required")),
+        (Some(_), false) | (None, true) => {}
+        (None, false) => return Err(failure("launch_sandbox_required")),
     }
     let limits = request.limits;
     if limits.run_time.is_zero()

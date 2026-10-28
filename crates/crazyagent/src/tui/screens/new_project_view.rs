@@ -3,8 +3,10 @@ use super::new_project::{
     harness_name, size_label, team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
+use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
+use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -1361,6 +1363,19 @@ fn review_summary(draw: &mut Draw) {
         )
         .pad(content),
     );
+    if wizard.phase == Phase::Editing {
+        let picking = wizard.focused() == Control::Access;
+        draw.add(entry(
+            "Agent access",
+            Row::of(
+                format!("< {} >", wizard.access.label()),
+                if picking { look.selection } else { look.fg },
+            ),
+        ));
+        if wizard.access == AgentAccess::Full {
+            draw.note(FULL_ACCESS_WARNING, look.warning);
+        }
+    }
     draw.add(Row::default());
 }
 
@@ -1521,6 +1536,13 @@ pub(in crate::tui) fn help_keys(wizard: &Wizard) -> Vec<(&'static str, &'static 
             ("Enter", "Pick harness"),
             ("Space", "Tools on or off"),
             ("d", "Remove"),
+            STEPS,
+            LEAVE,
+        ],
+        Control::Access => vec![
+            ("\u{2190}\u{2192}", "Change"),
+            ("Enter", "Create project"),
+            ("Tab", "Buttons"),
             STEPS,
             LEAVE,
         ],

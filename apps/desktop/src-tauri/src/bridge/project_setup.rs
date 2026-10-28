@@ -334,6 +334,21 @@ impl NativeBridge {
         bounded(paths)
     }
 
+    /// Reads a project's agent access level and the toolchains its agents may use, with
+    /// which levels this platform offers and which toolchains were found.
+    /// Takes the project id. Returns the engine's view of the saved policy.
+    pub async fn project_agent_policy(
+        &mut self,
+        id: &str,
+    ) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+        let policy = self
+            .controller()?
+            .project_agent_policy(project(id)?)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(policy)
+    }
+
     /// Lists a set-up project's files for the console's `@` completion: tracked and
     /// untracked, not ignored paths relative to its folder that contain the query.
     /// Takes the project id and the query. Returns at most 200 paths in git's order.
@@ -365,6 +380,27 @@ impl NativeBridge {
         self.controller()?
             .begin_mutation(
                 OwnerMutation::SetProjectReadPaths { project_id, paths },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Replaces a project's agent access level and toolchain choices; the engine refuses a
+    /// level this platform cannot enforce and a malformed policy.
+    /// Takes the project id, the policy and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn set_project_agent_policy(
+        &mut self,
+        id: &str,
+        policy: crazyagent::sandbox::policy::AgentPolicy,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::SetProjectAgentPolicy { project_id, policy },
                 generation,
             )
             .map_err(|error| caused("owner_not_ready", &error.0))?;

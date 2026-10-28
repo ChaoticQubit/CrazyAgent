@@ -150,14 +150,37 @@ export function skillHref(id: string): string {
   return formatRoute({ name: "settings", tab: "plugins", skill: id });
 }
 
+/** One instruction file an agent's harness reported loading: its file name and where it was.
+ * For Codex the place is the folder whose AGENTS.md chain it loaded. */
+export interface LoadedFile {
+  name: string;
+  path: string;
+}
+
 /** What one team agent received at its last launch, read back from its private home: its
- * harness, whether it has launched, the instruction file text and the installed skill names. */
+ * harness, whether it has launched, the instruction file text and the installed skill names;
+ * then what its harness reported in its own session records: how many were read, the
+ * instruction files it loaded and the skills it invoked. */
 export interface AgentInstructions {
   agent: number;
   harness: string;
   launched: boolean;
   text: string;
   skills: string[];
+  sessions: number;
+  loaded: LoadedFile[];
+  skills_used: string[];
+}
+
+/** The one-line summary of what an agent's harness reported: "Instructions: CLAUDE.md,
+ * AGENTS.md - Skills used: tdd", each file name once. Input: the view. Output: the line,
+ * saying "not reported yet" before the harness wrote a session record. */
+export function reportedLine(value: Pick<AgentInstructions, "sessions" | "loaded" | "skills_used">): string {
+  if (value.sessions === 0) return "Instructions: not reported yet - Skills used: not reported yet";
+  const names = [...new Set(value.loaded.map((file) => file.name))];
+  const files = names.length > 0 ? names.join(", ") : "none loaded by its harness";
+  const used = value.skills_used.length > 0 ? value.skills_used.join(", ") : "none";
+  return `Instructions: ${files} - Skills used: ${used}`;
 }
 
 const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;

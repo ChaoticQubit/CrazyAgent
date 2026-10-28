@@ -1337,3 +1337,131 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
     drop(owner);
     engine.stop().await;
 }
+
+#[tokio::test]
+async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
+    use crate::sandbox::toolchains::Toolchain;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(
+        fresh.access,
+        AgentAccess::Sandboxed,
+        "a project with no saved level stays Sandboxed"
+    );
+    let levels: Vec<AgentAccess> = fresh.levels.iter().map(|level| level.access).collect();
+    assert_eq!(levels, AgentAccess::ALL);
+    assert!(fresh.levels.iter().all(|level| level.unavailable.is_none()));
+    let rust = fresh
+        .toolchains
+        .iter()
+        .find(|row| row.toolchain == Toolchain::Rust)
+        .expect("the owner's rustup and cargo are found");
+    assert!(rust.installed);
+
+    let policy = AgentPolicy {
+        access: AgentAccess::OwnBranch,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed: !rust.allowed,
+        }],
+    };
+    let saved = owner
+        .set_project_agent_policy(project.clone(), policy.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(view.access, AgentAccess::OwnBranch);
+    assert_eq!(
+        view.toolchains
+            .iter()
+            .find(|row| row.toolchain == Toolchain::Rust)
+            .map(|row| row.allowed),
+        Some(!rust.allowed)
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_agent_policy WHERE project='setup-pooled'"),
+        1
+    );
+
+    let twice = AgentPolicy {
+        access: AgentAccess::Full,
+        toolchains: vec![
+            ToolchainChoice {
+                toolchain: Toolchain::Node,
+                allowed: true,
+            },
+            ToolchainChoice {
+                toolchain: Toolchain::Node,
+                allowed: false,
+            },
+        ],
+    };
+    assert_eq!(twice.validate(), Err("agent_policy_invalid"));
+    let action = SetupAction::SetAgentPolicy {
+        project_id: project.clone(),
+        policy: twice,
+    };
+    assert_eq!(action.validate().unwrap_err().0, "agent_policy_invalid");
+    assert_eq!(
+        owner
+            .project_agent_policy(project.clone())
+            .await
+            .unwrap()
+            .access,
+        AgentAccess::OwnBranch
+    );
+
+    let full = AgentPolicy {
+        access: AgentAccess::Full,
+        toolchains: Vec::new(),
+    };
+    let saved = owner
+        .set_project_agent_policy(project.clone(), full, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(view.access, AgentAccess::Full);
+    assert_eq!(
+        view.toolchains
+            .iter()
+            .find(|row| row.toolchain == Toolchain::Rust)
+            .map(|row| row.allowed),
+        Some(rust.used),
+        "a toolchain with no choice follows the project again"
+    );
+
+    let unknown = ProjectId::new("setup-missing").unwrap();
+    assert_eq!(
+        owner
+            .project_agent_policy(unknown.clone())
+            .await
+            .unwrap_err()
+            .0,
+        "invalid_project"
+    );
+    let removed = owner.remove_project(project.clone(), 4).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_agent_policy WHERE project='setup-pooled'"),
+        0,
+        "the project's agent access goes with it"
+    );
+    drop(owner);
+    engine.stop().await;
+}

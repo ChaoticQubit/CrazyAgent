@@ -121,6 +121,9 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
+  agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
+  agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -293,6 +296,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",

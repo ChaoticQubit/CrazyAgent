@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 18] = [
+const COMMANDS: [&str; 20] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -26,6 +26,8 @@ const COMMANDS: [&str; 18] = [
     "desktop_delete_project_context",
     "desktop_project_read_paths",
     "desktop_set_project_read_paths",
+    "desktop_project_agent_policy",
+    "desktop_set_project_agent_policy",
     "desktop_project_memories",
     "desktop_review_memory",
     "desktop_update_project_setup",

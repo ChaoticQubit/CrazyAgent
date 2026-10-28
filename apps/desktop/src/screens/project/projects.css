@@ -202,3 +202,5 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-console > .tg-terminal-state { padding: var(--space-4) var(--space-5); background: transparent; color: var(--terminal-muted); }
 .pj-console > .pj-note { margin: var(--space-4) var(--space-5); background: rgba(238, 234, 226, 0.06); color: var(--terminal-fg); }
 .pj-console > .pj-note.warn { background: rgba(227, 180, 94, 0.12); }
+
+.pj-waiting { margin-bottom: var(--space-4); }

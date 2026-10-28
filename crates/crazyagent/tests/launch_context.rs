@@ -163,6 +163,7 @@ fn request(case: &Case, harness: &str, home: &Path, tools: bool) -> LaunchReques
         model: Some("qwen2.5:0.5b".into()),
         tools,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     }
@@ -729,6 +730,94 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
         case.context(&ProjectId::new("ghost").unwrap()).err(),
         Some("plugin_project_unknown".into())
     );
+    drop(owner);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn every_master_and_agent_launch_states_how_work_lands() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let root = case.root.path().to_path_buf();
+    let project = ProjectId::new("landing").unwrap();
+    applied(
+        owner
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Landing".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Lands work through Changes.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap(),
+    );
+    let agent_rules = [
+        "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox",
+        "Leave your edits as files in your worktree.",
+        "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
+    ];
+    let master_rules = [
+        "Never ask a sub-agent to create a branch, commit or push",
+        "never name a base branch in a task",
+        "tell the owner to review and accept them in the project's Changes view",
+    ];
+    for tools in [false, true] {
+        let (_, master) = case.master(&project, tools).unwrap();
+        for rule in agent_rules.iter().chain(&master_rules) {
+            assert!(
+                master.contains(rule),
+                "master, tools {tools}, misses: {rule}"
+            );
+        }
+    }
+
+    let context = case.context(&project).unwrap();
+    let agents = private_directory(&root.join("agents"));
+    let codex_home = private_directory(&agents.join("codex-home"));
+    let (_, codex_files) =
+        command_with_context(&request(&case, "codex", &codex_home, false), &context).unwrap();
+    let config: toml::Table = fs::read_to_string(codex_home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let claude_home = private_directory(&agents.join("claude-home"));
+    let (claude_command, claude_files) = command_with_context(
+        &request(&case, "claude-code", &claude_home, false),
+        &context,
+    )
+    .unwrap();
+    let prompt =
+        fs::read_to_string(argument_after(&claude_command, "--append-system-prompt-file").unwrap())
+            .unwrap();
+    for (harness, text) in [
+        ("codex", developer.as_str()),
+        ("claude-code", prompt.as_str()),
+    ] {
+        for rule in agent_rules {
+            assert!(text.contains(rule), "{harness} misses: {rule}");
+        }
+        for rule in master_rules {
+            assert!(!text.contains(rule), "{harness} is a sub-agent: {rule}");
+        }
+    }
+    drop(codex_files);
+    drop(claude_files);
     drop(owner);
     case.close().await;
 }

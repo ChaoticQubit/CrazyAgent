@@ -180,3 +180,17 @@ export function fileMarks(file: ChangedFile): string[] {
 export function diffText(text: string): string {
   return displayText(text);
 }
+
+/** Counts the change sets waiting for the owner: ready to review or conflicting with their
+ * branch. One its agent is updating waits on the agent instead. Input: the change sets.
+ * Output: the count. */
+export function waitingCount(sets: readonly ChangeSet[]): number {
+  return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
+}
+
+/** The line that tells the owner change sets wait in Changes. Input: the count. Output: the
+ * line, or null when none wait. */
+export function waitingLine(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1 ? "1 change set is waiting for you in Changes" : `${count} change sets are waiting for you in Changes`;
+}

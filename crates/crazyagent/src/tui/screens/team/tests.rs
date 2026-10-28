@@ -1164,10 +1164,19 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: true,
             text: "# Instructions from CrazyAgent\n\nUse tdd.\u{1b}[31m red\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            sessions: 1,
+            loaded: vec![crate::agent_home::LoadedFile {
+                name: "AGENTS.md".into(),
+                path: "/w/agent-5".into(),
+            }],
+            skills_used: vec!["tdd".into(), "systematic-debugging".into()],
         }),
     ));
     let screen = render(&mut shell).join("\n");
     for shown in [
+        "Instructions: AGENTS.md",
+        "Skills used: tdd, systematic-debugging",
+        "AGENTS.md  /w/agent-5",
         "AGENTS.md",
         "50 bytes",
         "# Instructions from CrazyAgent",
@@ -1233,6 +1242,9 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
@@ -1277,12 +1289,20 @@ fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
             launched: true,
             text,
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
     assert!(
         screen.contains("RULE-01") && !screen.contains("RULE-40"),
         "{screen}"
+    );
+    assert!(
+        screen.contains("Instructions: not reported yet")
+            && screen.contains("Skills used: not reported yet"),
+        "a launched agent whose harness wrote no session record says so\n{screen}"
     );
     for _ in 0..3 {
         shell.key(Key::PageDown);

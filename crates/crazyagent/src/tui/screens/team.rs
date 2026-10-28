@@ -1260,8 +1260,9 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
 }
 
-/// The lines of an agent's Instructions box: the instruction file with its size and
-/// text, then the skills installed for it, or why nothing can be shown.
+/// The lines of an agent's Instructions box: what its harness reported loading and
+/// invoking, the instruction file with its size and text, then the skills installed for
+/// it, or why nothing can be shown.
 /// Inputs: the read, the box width and context. Output: the lines, unscrolled.
 fn instruction_lines(
     read: &Load<Box<AgentInstructions>>,
@@ -1292,13 +1293,14 @@ fn instruction_lines(
         Load::Ready(view) => view,
     };
     let file = Harness::from_id(&view.harness).map_or("Instructions", Harness::instruction_file);
-    let mut lines = match view.text.is_empty() {
+    let mut lines = reported_lines(view, limit, ctx);
+    lines.extend(match view.text.is_empty() {
         true => muted("No app or project instructions were given at its last launch."),
         false => vec![Line::from(vec![
             Span::styled(file, theme.heading),
             Span::styled(format!("  {}", size(view.text.len())), theme.muted),
         ])],
-    };
+    });
     lines.push(Line::default());
     for text in sanitize(&view.text).lines() {
         match text.is_empty() {
@@ -1318,6 +1320,47 @@ fn instruction_lines(
                 .map(|skill| Line::raw(format!("{} {}", ctx.glyphs.dot, plain(skill)))),
         ),
     }
+    lines
+}
+
+/// The lines saying what an agent's harness reported in its own session records: the
+/// instruction file names it loaded and the skills it invoked, then each file's place.
+/// Inputs: the view, the box width and context. Output: the lines and a blank line.
+fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let mut names: Vec<&str> = Vec::new();
+    for file in &view.loaded {
+        if !names.contains(&file.name.as_str()) {
+            names.push(&file.name);
+        }
+    }
+    let listed = |list: &[&str], none: &str| match list.is_empty() {
+        true => none.to_owned(),
+        false => list.join(", "),
+    };
+    let used: Vec<&str> = view.skills_used.iter().map(String::as_str).collect();
+    let (files, skills) = match view.sessions {
+        0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
+        _ => (
+            listed(&names, "none loaded by its harness"),
+            listed(&used, "none"),
+        ),
+    };
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for text in [
+        format!("Instructions: {files}"),
+        format!("Skills used: {skills}"),
+    ] {
+        lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
+    }
+    for file in &view.loaded {
+        let place = plain(&format!("{} {}  {}", ctx.glyphs.dot, file.name, file.path));
+        lines.extend(
+            wrap(&place, limit)
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, &ctx.theme)),
+        );
+    }
+    lines.push(Line::default());
     lines
 }
 

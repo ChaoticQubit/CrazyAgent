@@ -152,6 +152,10 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         paths: Vec<String>,
     },
+    SetProjectAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::AgentPolicy,
+    },
     Team {
         action: crate::team::TeamAction,
     },
@@ -319,6 +323,14 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::SetReadPaths {
                     project_id: project_id.clone(),
                     paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectAgentPolicy { project_id, policy } => {
+                let action = crate::project_setup::SetupAction::SetAgentPolicy {
+                    project_id: project_id.clone(),
+                    policy: policy.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -586,6 +598,9 @@ pub enum OwnerRead {
     ProjectReadPaths {
         project_id: ProjectId,
     },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -698,6 +713,7 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ProjectReadPaths { .. }
+            | Self::ProjectAgentPolicy { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -1052,6 +1068,10 @@ pub enum OwnerData {
     ProjectReadPaths {
         project_id: ProjectId,
         paths: Vec<String>,
+    },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,

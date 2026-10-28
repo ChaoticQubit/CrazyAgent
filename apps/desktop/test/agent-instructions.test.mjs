@@ -31,7 +31,7 @@ test("the master and each agent card name the team agent the engine reads", () =
 });
 
 test("the view shows the instruction file with its size and each installed skill as a tag", () => {
-  const markup = panel({ kind: "ok", value: { agent: 12, harness: "codex", launched: true, text: "Use tdd.\n", skills: ["tdd", "retired-skill"] } });
+  const markup = panel({ kind: "ok", value: { agent: 12, harness: "codex", launched: true, text: "Use tdd.\n", skills: ["tdd", "retired-skill"], sessions: 0, loaded: [], skills_used: [] } });
   assert.match(markup, /AGENTS\.md/);
   assert.match(markup, /9 bytes/);
   assert.match(markup, /Use <\/span><a[^>]*>tdd<\/a><span>\./);
@@ -40,14 +40,29 @@ test("the view shows the instruction file with its size and each installed skill
   assert.doesNotMatch(markup, /<a[^>]*>retired-skill<\/a>/, "a name the catalog no longer has is plain text");
   assert.doesNotMatch(markup, /<textarea|<input|<button[^>]*>Save/, "the view is read-only");
 
-  const claude = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "", skills: [] } });
+  const claude = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "", skills: [], sessions: 0, loaded: [], skills_used: [] } });
   assert.match(claude, /CLAUDE\.md/);
   assert.match(claude, /No app or project instructions were given at its last launch\./);
   assert.match(claude, /No skills were installed at its last launch\./);
 });
 
+test("the view says which instruction files the harness loaded and which skills it invoked", () => {
+  const value = { agent: 12, harness: "claude-code", launched: true, text: "", skills: [], sessions: 2,
+    loaded: [{ name: "CLAUDE.md", path: "/w/agent-12/CLAUDE.md" }, { name: "AGENTS.md", path: "/w/agent-12/AGENTS.md" }, { name: "CLAUDE.md", path: "/h/agent-12/CLAUDE.md" }],
+    skills_used: ["tdd", "systematic-debugging"] };
+  const markup = panel({ kind: "ok", value });
+  assert.match(markup, /Instructions: CLAUDE\.md, AGENTS\.md - Skills used: tdd, systematic-debugging/);
+  for (const path of ["/w/agent-12/CLAUDE.md", "/w/agent-12/AGENTS.md", "/h/agent-12/CLAUDE.md"]) assert.ok(markup.includes(path), path);
+  assert.ok(markup.indexOf("Skills used:") < markup.indexOf("No app or project instructions"), "the report leads the view");
+
+  assert.match(panel({ kind: "ok", value: { ...value, loaded: [], skills_used: [] } }), /Instructions: none loaded by its harness - Skills used: none/);
+  assert.match(panel({ kind: "ok", value: { ...value, sessions: 0, loaded: [], skills_used: [] } }),
+    /Instructions: not reported yet - Skills used: not reported yet/);
+  assert.doesNotMatch(panel({ kind: "ok", value: { ...value, launched: false } }), /Skills used/, "an agent that never launched has no report");
+});
+
 test("an agent that never launched and a refused read say so plainly", () => {
-  assert.match(panel({ kind: "ok", value: { agent: 4, harness: "codex", launched: false, text: "", skills: [] } }), /hasn&#x27;t launched yet/);
+  assert.match(panel({ kind: "ok", value: { agent: 4, harness: "codex", launched: false, text: "", skills: [], sessions: 0, loaded: [], skills_used: [] } }), /hasn&#x27;t launched yet/);
   const refused = panel({ kind: "error", code: "agent_instructions_unsafe", message: "" });
   assert.match(refused, /link or not a plain file/);
   assert.doesNotMatch(refused, /agent_instructions_/);

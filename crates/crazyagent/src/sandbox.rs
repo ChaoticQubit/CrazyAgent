@@ -16,6 +16,7 @@ use std::process::Command;
 pub mod extra_paths;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod policy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
 pub mod toolchains;
@@ -65,6 +66,9 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
+
+/// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
+pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
@@ -326,10 +330,17 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     !agent_env_refused(name)
 }
 
+/// The zsh temp-file prefix inside an agent's temp folder. zsh writes here-documents to
+/// `$TMPPREFIX`, `/tmp/zsh` by default, which no agent sandbox can write, so every agent
+/// shell gets its own. Input: the agent's temp folder. Output: the prefix path.
+pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
+    tmp.join("zsh")
+}
+
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`] and
-/// [`AGENT_TLS_ENV`].
+/// `HOME`, `TMPDIR` and `TMPPREFIX` always stay as `base` set them), then `TMPPREFIX` from
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -359,10 +370,17 @@ pub fn agent_env<'a>(
         if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
             return Err(refused());
         }
-        if name == "HOME" || name == "TMPDIR" {
+        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" {
             continue;
         }
         set(&mut env, name, value);
+    }
+    let prefix = env
+        .iter()
+        .find(|(name, _)| name == "TMPDIR")
+        .map(|(_, tmp)| shell_tmp_prefix(Path::new(tmp)));
+    if let Some(prefix) = prefix {
+        set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
     for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
@@ -423,6 +441,51 @@ pub fn agent_command<'a>(
     );
     assert_eq!(command.get_envs().count(), env.len());
     Ok(command)
+}
+
+/// Builds the command a Full access agent process starts from (DEC-102): the
+/// [`SESSION_SHIM`] and `<program>` with no `sandbox-exec` and no profile, so the agent has
+/// the owner's user permissions, yet the same cleared environment holding exactly
+/// [`agent_env`] and its own process group as a sandboxed agent. Inputs: the absolute
+/// program, the base variables and the harness's variables (None removes one). Output: the
+/// command, or `Invalid` when a variable fails [`agent_variable_allowed`].
+#[cfg(unix)]
+pub fn unconfined_command<'a>(
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    if !clean_absolute(program) {
+        return Err(invalid("agent program must be an absolute plain path"));
+    }
+    let env = agent_env(base, harness)?;
+    let mut command = Command::new(SESSION_SHIM[0]);
+    command
+        .args(&SESSION_SHIM[1..])
+        .arg(program)
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .process_group(0);
+    assert_eq!(command.get_program(), SESSION_SHIM[0]);
+    assert_eq!(
+        command.get_args().nth(SESSION_SHIM.len() - 1),
+        Some(program.as_os_str())
+    );
+    assert_eq!(command.get_envs().count(), env.len());
+    Ok(command)
+}
+
+/// Refuses a Full access agent on Windows (DEC-102): the level is unavailable there, so no
+/// command starts without the Windows boundary. Inputs: as the Unix version. Output:
+/// always `Unavailable` with [`FULL_ACCESS_NEEDS_MACOS`].
+#[cfg(target_os = "windows")]
+pub fn unconfined_command<'a>(
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    let _ = (program, base, harness.into_iter().count());
+    Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
 }
 
 /// Builds the one command every Windows agent process starts from: the boundary helper next
@@ -531,6 +594,7 @@ pub struct ProjectSandbox {
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
+    clone: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -581,6 +645,7 @@ impl ProjectSandbox {
             owner_home: owner,
             engine_secrets: Vec::new(),
             checkout: None,
+            clone: None,
         })
     }
 
@@ -660,7 +725,7 @@ impl ProjectSandbox {
     /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
     /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        if self.checkout.is_some() {
+        if self.checkout.is_some() || self.clone.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
@@ -711,6 +776,40 @@ impl ProjectSandbox {
             admin,
             objects,
         });
+        Ok(self)
+    }
+
+    /// Confines an Own branch or Full access agent (DEC-102) to its own clone of the project:
+    /// the clone, with its git folder inside it, is the agent's only writable project path,
+    /// so it commits on its own branch with full git while the project folder, its `.git`
+    /// and the object store the clone borrows through `objects/info/alternates` stay
+    /// read-only. Input: a canonical folder in the project's `worktrees/` folder whose
+    /// `.git` is a real folder, not a link. Output: the confined sandbox, or `Invalid`.
+    pub fn confine_to_clone(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.checkout.is_some() || self.clone.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        if !clean_absolute(worktree)
+            || worktree.parent() != Some(worktrees.as_path())
+            || canonical(worktree)? != worktree
+        {
+            return Err(invalid(
+                "the worktree must be a canonical folder in worktrees/",
+            ));
+        }
+        let git = worktree.join(".git");
+        let metadata = fs::symlink_metadata(&git)?;
+        if !metadata.is_dir() || canonical(&git)? != git {
+            return Err(invalid("the clone's git folder must be a real folder"));
+        }
+        clear_of_secrets(worktree, &self.secret_paths())?;
+        assert!(worktree.starts_with(&self.project_root) && worktree != self.project_root);
+        self.read_roots.push(self.project_root.clone());
+        self.clone = Some(worktree.to_path_buf());
         Ok(self)
     }
 
@@ -879,12 +978,14 @@ impl ProjectSandbox {
 
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
-    /// store, then its own home and temp dirs, its short temp folder, then its extra
-    /// worktrees.
+    /// store, or for a clone-confined agent its clone alone, then its own home and temp
+    /// dirs, its short temp folder, then its extra worktrees.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        let project: Vec<&PathBuf> = match &self.checkout {
-            Some(checkout) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
-            None => vec![&self.project_root],
+        assert!(self.checkout.is_none() || self.clone.is_none());
+        let project: Vec<&PathBuf> = match (&self.checkout, &self.clone) {
+            (Some(checkout), _) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
+            (None, Some(clone)) => vec![clone],
+            (None, None) => vec![&self.project_root],
         };
         project
             .into_iter()
@@ -1149,13 +1250,15 @@ impl ProjectSandbox {
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
-        match &self.checkout {
-            Some(checkout) => {
+        assert!(self.checkout.is_none() || self.clone.is_none());
+        match (&self.checkout, &self.clone) {
+            (Some(checkout), _) => {
                 working.push(checkout.worktree.as_path());
                 other.push(checkout.admin.as_path());
                 other.push(checkout.objects.as_path());
             }
-            None => working.push(self.project_root.as_path()),
+            (None, Some(clone)) => working.push(clone.as_path()),
+            (None, None) => working.push(self.project_root.as_path()),
         }
         other.push(self.agent_home.as_path());
         other.push(self.agent_tmp.as_path());
@@ -1257,6 +1360,40 @@ impl ProjectSandbox {
     /// runs under the installed profile. HOME and TMPDIR always point at the
     /// agent's own dirs, whatever the harness set.
     pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
+        let (program, cwd) = self.harness_start(harness)?;
+        let base = self.base_env();
+        let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
+        command.args(harness.get_args()).current_dir(cwd);
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
+
+    /// Rebuilds a harness launch command for a Full access agent (DEC-102) as [`Self::wrap`]
+    /// does, with the same checks and environment, but started by [`unconfined_command`]
+    /// with no Seatbelt profile. Input: the harness command. Output: the command, or
+    /// `Invalid` for an unsafe command.
+    #[cfg(unix)]
+    pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let (program, cwd) = self.harness_start(harness)?;
+        let base = self.base_env();
+        let mut command = unconfined_command(program, &borrowed(&base), harness.get_envs())?;
+        command.args(harness.get_args()).current_dir(cwd);
+        assert_ne!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
+
+    /// Refuses a Full access harness command on Windows, where the level is unavailable.
+    /// Input: the harness command. Output: always `Unavailable`.
+    #[cfg(not(unix))]
+    pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let _ = harness;
+        Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
+    }
+
+    fn harness_start<'a>(
+        &'a self,
+        harness: &'a Command,
+    ) -> Result<(&'a Path, &'a Path), SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
@@ -1271,11 +1408,7 @@ impl ProjectSandbox {
                 "harness must start inside the project folder or its worktree",
             ));
         }
-        let base = self.base_env();
-        let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
-        command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
-        Ok(command)
+        Ok((program, cwd))
     }
 }
 
@@ -1299,6 +1432,7 @@ pub trait Sandbox: Send + Sync {
 pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
+    unconfined: bool,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
     #[cfg(target_os = "windows")]
@@ -1329,6 +1463,7 @@ impl InstalledSandbox {
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
+                unconfined: false,
                 windows,
             })
         }
@@ -1344,15 +1479,36 @@ impl InstalledSandbox {
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
+                unconfined: false,
                 #[cfg(target_os = "linux")]
                 linux,
             })
         }
     }
 
-    /// The program every wrapped command starts: `sandbox-exec` on macOS, the Landlock
-    /// helper or bwrap on Linux, the boundary helper on Windows.
+    /// Marks this boundary as a Full access project's (DEC-102): every command it wraps then
+    /// starts with no Seatbelt profile (see [`ProjectSandbox::wrap_unconfined`]), keeping
+    /// the agent environment, the worktree start and the process group. Only macOS runs
+    /// Full access; elsewhere [`Self::wrap`] refuses an unconfined boundary. Output: the
+    /// marked boundary.
+    pub fn unconfined(mut self) -> Self {
+        self.unconfined = true;
+        self
+    }
+
+    /// Whether this boundary runs its commands with no Seatbelt profile.
+    pub fn is_unconfined(&self) -> bool {
+        self.unconfined
+    }
+
+    /// The program every wrapped command starts: `sandbox-exec` on macOS, or the session
+    /// shim's `perl` for a Full access boundary, the Landlock helper or bwrap on Linux, the
+    /// boundary helper on Windows.
     pub fn launcher(&self) -> &Path {
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        if self.unconfined {
+            return Path::new(SESSION_SHIM[0]);
+        }
         #[cfg(target_os = "linux")]
         {
             self.linux.launcher()
@@ -1381,6 +1537,16 @@ impl InstalledSandbox {
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
     /// on macOS, [`linux::LinuxSandbox`] on Linux and [`windows::WindowsSandbox`] on Windows.
     pub fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if self.unconfined {
+            return Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        if self.unconfined {
+            let command = self.sandbox.wrap_unconfined(harness)?;
+            assert_eq!(command.get_program(), self.launcher().as_os_str());
+            return Ok(command);
+        }
         #[cfg(target_os = "linux")]
         let command = Sandbox::wrap(&self.linux, harness)?;
         #[cfg(target_os = "windows")]

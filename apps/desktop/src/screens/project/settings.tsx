@@ -2,8 +2,9 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
-import type { ProjectCatalog, StoredSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
+import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
+import { AccessLevels, FULL_ACCESS_WARNING, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -24,6 +25,7 @@ const SECTIONS = [
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
   { id: "remove", label: "Remove project" },
 ] as const;
@@ -285,6 +287,67 @@ function SandboxSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+function AccessSection({ data }: { data: ProjectData }) {
+  const [view, setView] = useState<PolicyView | null>(null);
+  const [access, setAccess] = useState<AgentAccess>("sandboxed");
+  const [allowed, setAllowed] = useState<boolean[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const notReady = "Not ready yet: agent access isn't in this build.";
+  function seed(next: PolicyView) {
+    setView(next);
+    setAccess(next.access);
+    setAllowed(next.toolchains.map((row) => row.allowed));
+  }
+  useEffect(() => {
+    let live = true;
+    void loadAgentPolicy(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") seed(result.value);
+      else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  async function save() {
+    if (!view) return;
+    setConfirming(false);
+    setBusy(true);
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed), nextGeneration());
+    if (result.kind !== "ok") {
+      setBusy(false);
+      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    }
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") {
+      setBusy(false);
+      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    }
+    const fresh = await loadAgentPolicy(data.id);
+    setBusy(false);
+    if (fresh.kind === "ok") seed(fresh.value);
+    setNote("");
+    data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
+  }
+
+  const changed = view !== null && (access !== view.access || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  return <div className="pj-stack">
+    <h2>Agent access</h2>
+    <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access. Agents already running keep the access they started with.</p>
+    {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
+    {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
+      onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
+    <ConfirmDialog open={confirming} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
+      {FULL_ACCESS_WARNING}
+    </ConfirmDialog>
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -292,7 +355,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, Sandbox and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Plugins and skills, Agent access, Sandbox and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -316,6 +379,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <SandboxSection data={data} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
