@@ -42,8 +42,8 @@ export function signInFailure(code: string, provider: SubscriptionProvider): { t
   return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
-const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);
-const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+const GONE = new Set(["native_auth_operation_missing"]);
+const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required", "native_profile_source_conflict"]);
 
 /** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
  * sentence, or undefined when the sign-in had already stopped. */

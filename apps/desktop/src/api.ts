@@ -82,6 +82,7 @@ const COPY: Record<string, string> = {
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
+  native_auth_in_progress: "A sign-in is still running. Finish or cancel it on its sign-in page first.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -525,6 +526,9 @@ export function profileSettledLine(check: ProfileCheck): string | null {
 /** The banner line while a sign-in's outcome is unconfirmed. */
 export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
 
+/** The toast when settings changed after a stuck sign-in started: only the engine can end it. */
+export const STALE_SIGN_IN_LINE = "Settings changed after this sign-in started, so only the engine can end it, within 10 minutes of its start. Clear it again after that.";
+
 /** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
  * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
  * while the engine is still stopping it, or a plain error. */
@@ -535,7 +539,8 @@ export function clearStuckSignIn(): Promise<Result<boolean>> {
 /** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
 export function stuckClearedLine(result: Result<boolean>): string {
   if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
-  return result.kind === "error" ? result.message : plainError("unknown");
+  if (result.kind === "error") return result.code === "native_profile_source_conflict" ? STALE_SIGN_IN_LINE : result.message;
+  return plainError("unknown");
 }
 
 export interface PoolMember {
