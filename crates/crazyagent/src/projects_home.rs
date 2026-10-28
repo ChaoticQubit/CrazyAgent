@@ -16,10 +16,6 @@ pub const PATH_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
 pub const LINKED_WORKTREES_MAX: usize = 4096;
-const RESERVED_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
 
 #[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
@@ -318,7 +314,6 @@ pub fn plan_add(
 /// bytes with no path separators, control characters, trailing dot or space,
 /// or Windows device name; otherwise `home_folder_name_invalid`.
 pub fn folder_name(name: &str) -> Result<(), EngineError> {
-    let stem = name.split('.').next().unwrap_or(name).to_ascii_lowercase();
     if name.is_empty()
         || name.len() > NAME_BYTES_MAX
         || name.starts_with('.')
@@ -327,7 +322,7 @@ pub fn folder_name(name: &str) -> Result<(), EngineError> {
         || name.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
-        || RESERVED_NAMES.contains(&stem.as_str())
+        || crate::protocol::windows_device(name)
     {
         return Err(refused("home_folder_name_invalid"));
     }
@@ -358,7 +353,7 @@ pub fn slug(name: &str) -> Option<String> {
         }
         slug.push(c.to_ascii_lowercase());
     }
-    if slug.is_empty() || RESERVED_NAMES.contains(&slug.as_str()) {
+    if slug.is_empty() || crate::protocol::windows_device(&slug) {
         return None;
     }
     assert!(slug.len() <= SLUG_BYTES_MAX && !slug.ends_with('-'));

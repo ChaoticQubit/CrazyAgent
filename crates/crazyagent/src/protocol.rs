@@ -19,16 +19,37 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-/// True when the text is exactly one plain path component on this platform, so
-/// a folder joined with it gets a child, never itself, its parent or another
-/// root: not empty, `.`, `..`, a separator, a root or a Windows drive like `c:`.
-/// Input: the text. Output: whether it names one child folder.
+const WINDOWS_DEVICE_NAMES: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// True when the text is exactly one plain path component that names the same child
+/// folder on every platform, never itself, its parent or another root: not empty, `.`,
+/// `..`, a separator, a root or a Windows drive like `c:`, no trailing dot or space,
+/// which Windows strips, and no Windows device name. Input: the text. Output: whether
+/// it names one child folder.
 pub(crate) fn single_component(text: &str) -> bool {
     let mut parts = std::path::Path::new(text).components();
     matches!(
         (parts.next(), parts.next()),
         (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(text)
-    )
+    ) && !text.ends_with(['.', ' '])
+        && !windows_device(text)
+}
+
+/// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
+/// COM1 to COM9 or LPT1 to LPT9 in any case, alone or before an extension, with or
+/// without spaces before the dot. Input: one path component. Output: whether it is
+/// reserved on Windows.
+pub(crate) fn windows_device(name: &str) -> bool {
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim_end_matches(' ');
+    WINDOWS_DEVICE_NAMES
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
 fn validate_identity(value: &str) -> Result<(), ProtocolError> {
@@ -534,6 +555,26 @@ mod tests {
         }
         for text in ["a", "v1.2", "a..b", "owner:abc"] {
             assert!(single_component(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_identity_cannot_alias_a_folder_through_windows_name_normalization() {
+        for text in [
+            "foo.", "foo ", "con", "CON", "Con", "nul", "NUL.txt", "con.log", "nul .txt", "aux",
+            "prn", "com1", "COM9", "lpt1", "LPT9",
+        ] {
+            assert!(
+                !single_component(text),
+                "single_component accepted {text:?}"
+            );
+            assert!(ProjectId::new(text).is_err(), "ProjectId accepted {text:?}");
+        }
+        for text in [
+            "com10", "lpt10", "console", "connie", "nuly", "a.con", "v1.2",
+        ] {
+            assert!(single_component(text), "single_component refused {text:?}");
+            assert!(ProjectId::new(text).is_ok(), "ProjectId refused {text:?}");
         }
     }
 
