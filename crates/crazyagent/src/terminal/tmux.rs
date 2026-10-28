@@ -1,4 +1,4 @@
-use super::buffer::{Feed, buffer};
+use super::buffer::{Feed, buffer, skipped_marker};
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
     TerminalStream, VIEWERS_MAX, end_except, failure,
@@ -827,33 +827,67 @@ fn capture_rows(state: &State) -> Option<usize> {
     }
 }
 
+/// One reply block the reader is inside: its opening guard, the lines kept, how many lines
+/// and bytes it held so far, the rows an attach's capture holds, and whether it passed
+/// `REPLY_BYTES_MAX` or held a line past `LINE_BYTES_MAX`, which fails only its own request.
+struct Block {
+    opened: Vec<u8>,
+    lines: Lines,
+    seen: usize,
+    bytes: usize,
+    rows: Option<usize>,
+    oversized: bool,
+}
+
+/// Reads one control line without its newline, keeping at most `LINE_BYTES_MAX` bytes of
+/// it; the rest of a longer line is read and dropped. Takes the reader and an empty buffer.
+/// Returns how many bytes were dropped, or none once the output ends.
+fn read_line(output: &mut impl BufRead, line: &mut Vec<u8>) -> Option<usize> {
+    let read = output
+        .by_ref()
+        .take(LINE_BYTES_MAX as u64 + 1)
+        .read_until(b'\n', line)
+        .ok()?;
+    if read == 0 {
+        return None;
+    }
+    if line.last() == Some(&b'\n') {
+        line.pop();
+        return Some(0);
+    }
+    if line.len() <= LINE_BYTES_MAX {
+        return None;
+    }
+    let skipped = output
+        .skip_until(b'\n')
+        .ok()
+        .filter(|skipped| *skipped > 0)?;
+    let dropped = line.len() - LINE_BYTES_MAX + skipped - 1;
+    line.truncate(LINE_BYTES_MAX);
+    Some(dropped)
+}
+
 fn read(output: ChildStdout, state: &Mutex<State>) {
     let mut output = BufReader::new(output);
-    let mut block: Option<(Vec<u8>, Lines, usize, Option<usize>)> = None;
+    let mut block: Option<Block> = None;
     loop {
         let mut line = Vec::new();
-        match output
-            .by_ref()
-            .take(LINE_BYTES_MAX as u64 + 1)
-            .read_until(b'\n', &mut line)
-        {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        if line.pop() != Some(b'\n') {
+        let Some(dropped) = read_line(&mut output, &mut line) else {
             break;
-        }
+        };
         let Ok(mut state) = state.lock() else {
             break;
         };
-        if let Some((opened, lines, bytes, rows)) = &mut block {
-            let counted = rows.is_some_and(|rows| lines.len() < rows);
-            let ended = guard(&line, b"%end").filter(|rest| !counted && *rest == opened.as_slice());
-            let failed =
-                guard(&line, b"%error").filter(|rest| !counted && *rest == opened.as_slice());
-            if ended.is_some() || failed.is_some() {
-                let lines = std::mem::take(lines);
-                let answer = if ended.is_some() {
+        if let Some(open) = &mut block {
+            let counted = open.rows.is_some_and(|rows| open.seen < rows);
+            let closing = !counted && dropped == 0;
+            let ended = closing && guard(&line, b"%end") == Some(open.opened.as_slice());
+            let failed = closing && guard(&line, b"%error") == Some(open.opened.as_slice());
+            if ended || failed {
+                let lines = std::mem::take(&mut open.lines);
+                let answer = if open.oversized {
+                    Err(failure("terminal_reply_too_large"))
+                } else if ended {
                     Ok(lines)
                 } else {
                     Err(error_code(&lines))
@@ -862,15 +896,37 @@ fn read(output: ChildStdout, state: &Mutex<State>) {
                 finish(&mut state, answer);
                 continue;
             }
-            *bytes += line.len() + 1;
-            if *bytes > REPLY_BYTES_MAX || (rows.is_some() && !counted) {
+            if open.rows.is_some() && !counted {
                 break;
             }
-            lines.push(line);
+            open.seen += 1;
+            open.bytes = open.bytes.saturating_add(line.len() + dropped + 1);
+            if dropped > 0 || open.bytes > REPLY_BYTES_MAX {
+                open.oversized = true;
+                open.lines = Vec::new();
+            }
+            if !open.oversized {
+                open.lines.push(line);
+            }
+            continue;
+        }
+        if dropped > 0 {
+            if let Some(rest) = guard(&line, b"%output") {
+                let pane = rest.split(|byte| *byte == b' ').next().unwrap_or_default();
+                let lost = u64::try_from(line.len() + dropped).unwrap_or(u64::MAX);
+                deliver(&mut state, pane, &skipped_marker(lost));
+            }
             continue;
         }
         if let Some(opened) = guard(&line, b"%begin") {
-            block = Some((opened.to_vec(), Vec::new(), 0, capture_rows(&state)));
+            block = Some(Block {
+                opened: opened.to_vec(),
+                lines: Vec::new(),
+                seen: 0,
+                bytes: 0,
+                rows: capture_rows(&state),
+                oversized: false,
+            });
         } else if let Some(rest) = guard(&line, b"%output") {
             let (pane, data) = rest
                 .iter()
@@ -976,7 +1032,10 @@ impl Host for Tmux {
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
-        self.capture(agent, HISTORY_ROWS_MAX, true)
+        match self.capture(agent, HISTORY_ROWS_MAX, true) {
+            Err(problem) if problem.0 == "terminal_reply_too_large" => self.capture(agent, 0, true),
+            attached => attached,
+        }
     }
 
     fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {

@@ -287,6 +287,9 @@ pub fn plain_reason(code: &str) -> &'static str {
             "That is too much to type at once. Send it in smaller parts."
         }
         "terminal_size_bounds" | "terminal_size_invalid" => "That terminal size is out of range.",
+        "terminal_reply_too_large" => {
+            "This terminal holds too much to show at once. The agent keeps running."
+        }
         "terminal_detached" => "You closed this view. The agent keeps running.",
         "terminal_viewer_gone" | "terminal_viewer_slow" => {
             "This view stopped reading, so it was closed. Open the terminal again."

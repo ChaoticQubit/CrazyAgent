@@ -1186,6 +1186,76 @@ fn a_screen_read_and_an_ending_take_no_viewer_slot() {
 }
 
 #[test]
+fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keeps_running() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let _server = Server {
+        tmux,
+        socket: root.path().join(FOLDER).join(SOCKET),
+    };
+    let (ready, host) = platform(root.path());
+    assert!(ready);
+    let quiet = AgentId::team(3).unwrap();
+    host.spawn(
+        &quiet,
+        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "exec /bin/cat"]),
+    )
+    .unwrap();
+    let mut watching = host.attach(&quiet).unwrap();
+
+    let colourful = root.path().join("colourful.pl");
+    std::fs::write(
+        &colourful,
+        "for my $row (1..1900) { print join('', map { sprintf(\"\\e[38;5;%d;48;5;%dm%s\", $_ % 256, ($row + $_) % 256, chr(97 + $_ % 26)) } 1..1000), \"\\r\\n\" }\nopen(my $done, '>', 'printed') or die; close($done);\n",
+    )
+    .unwrap();
+    let loud = AgentId::team(4).unwrap();
+    host.spawn(
+        &loud,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                "while [ ! -f go ]; do /bin/sleep 0.05; done; /usr/bin/perl colourful.pl; exec /bin/sleep 600",
+            ],
+        ),
+    )
+    .unwrap();
+    host.resize(&loud, 1000, 50).unwrap();
+    std::fs::write(root.path().join("go"), b"").unwrap();
+    let printing = Instant::now();
+    while !root.path().join("printed").exists() {
+        assert!(
+            printing.elapsed() < Duration::from_secs(90),
+            "the colourful output never finished"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let opened = host
+        .attach(&loud)
+        .expect("a history past the reply bound still opens the screen");
+    assert!(opened.history.is_empty());
+    assert_eq!((opened.cols, opened.rows), (1000, 50));
+    assert!(contains(&opened.screen, b"\x1b["));
+    drop(opened);
+    assert_eq!(host.alive().unwrap(), vec![quiet.clone(), loud.clone()]);
+    host.input(&quiet, b"still-here\r").unwrap();
+    let mut seen = watching.screen.clone();
+    assert!(
+        read_until(&mut watching, &mut seen, b"still-here"),
+        "another agent's viewer kept its terminal: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    host.kill(&loud).unwrap();
+    host.kill(&quiet).unwrap();
+    assert!(ended(&mut watching));
+}
+
+#[test]
 #[ignore = "run only inside a tmux pane by the pane environment test"]
 fn pane_process_writes_its_environment() {
     let Some(out) = std::env::var_os(PANE_ENV_OUT).map(PathBuf::from) else {
