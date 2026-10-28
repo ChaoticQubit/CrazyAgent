@@ -817,13 +817,7 @@ impl EngineService {
         self.stops.push(stop);
         self.tasks.spawn(owner.run(stopped));
         cancelled(shutdown)?;
-        if let Some(old) = previous {
-            old.verify(&self.anchor)?;
-            if old.value.database != database || old.value.db_instance != stamp.db_instance {
-                return Err(fail("owner_locator_database_mismatch"));
-            }
-            check_generation(&self.anchor, &old.value)?;
-        }
+        let previous = self.trusted_previous(previous, database, &stamp.db_instance)?;
         self.retire_socket(ordinary, previous).await?;
         let server = Server::bind(
             &self.anchor.path.join(ordinary),
@@ -916,19 +910,90 @@ impl EngineService {
         }
     }
 
+    /// Keeps the locator an earlier run left while it still names this database and its
+    /// owner generation. Start holds the engine lock, so no earlier engine on this database
+    /// is alive: a locator whose pinned database, instance, generation or owner socket no
+    /// longer match, as when a reboot gives the volume another device number, is stale and
+    /// is set aside. A locator replaced since start read it is still refused.
+    /// Inputs: the locator read at start, the database identity and instance.
+    /// Output: the trusted locator or none, or the refusal.
+    #[cfg(unix)]
+    fn trusted_previous<'a>(
+        &self,
+        previous: Option<&'a PinnedLocator>,
+        database: Identity,
+        db_instance: &str,
+    ) -> Result<Option<&'a PinnedLocator>, EngineError> {
+        let Some(old) = previous else {
+            return Ok(None);
+        };
+        old.verify(&self.anchor)?;
+        let cause = if old.value.database != database || old.value.db_instance != db_instance {
+            "owner_locator_database_mismatch".to_owned()
+        } else {
+            match check_generation(&self.anchor, &old.value) {
+                Ok(()) => return Ok(Some(old)),
+                Err(error) => error.0,
+            }
+        };
+        old.verify(&self.anchor)?;
+        self.set_aside(LOCATOR, &cause)?;
+        Ok(None)
+    }
+
+    /// Moves a stale anchor entry to `<name>.stale-<8 hex>`, never over another entry and
+    /// never deleting it, and logs one line with its cause.
+    /// Inputs: the entry name and the cause code. Output: done, or the anchor, entropy or
+    /// rename error.
+    #[cfg(unix)]
+    fn set_aside(&self, name: &str, cause: &str) -> Result<(), EngineError> {
+        for _ in 0..8 {
+            self.anchor.verify()?;
+            let aside = format!("{name}.stale-{}", random_hex()?);
+            match rustix::fs::renameat_with(
+                &self.anchor.directory,
+                name,
+                &self.anchor.directory,
+                aside.as_str(),
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {
+                    eprintln!(
+                        "owner_stale_entry_set_aside name={name} aside={aside} cause={cause}"
+                    );
+                    return self.anchor.directory.sync_all().map_err(io_error);
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Err(fail("owner_stale_entry_collision_limit"))
+    }
+
+    /// Sets aside the entry at the ordinary socket path when no trusted locator names it and
+    /// it is a dead socket of this user: private, one link, and a connect finds no listener.
+    /// Start holds the engine lock, so no engine on this database listens there; anything
+    /// else, a live listener included, keeps `socket_path_already_exists`.
+    /// Inputs: the socket name and path. Output: done, or the refusal.
+    #[cfg(unix)]
+    async fn set_aside_dead_socket(&self, ordinary: &str, path: &Path) -> Result<(), EngineError> {
+        let identity = Identity::of(&self.anchor.metadata(ordinary)?);
+        if check_socket(&self.anchor, path, identity).is_err() {
+            return Err(fail("socket_path_already_exists"));
+        }
+        match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(path)).await {
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            _ => return Err(fail("socket_path_already_exists")),
+        }
+        check_socket(&self.anchor, path, identity)?;
+        self.set_aside(ordinary, "ordinary_socket_stale")
+    }
+
     #[cfg(unix)]
     fn create_generation(&mut self) -> Result<(), EngineError> {
         for _ in 0..8 {
             self.anchor.verify()?;
-            let mut random = [0; 4];
-            getrandom::fill(&mut random).map_err(|_| fail("owner_entropy_unavailable"))?;
-            let name = format!(
-                "o{}",
-                random
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            );
+            let name = format!("o{}", random_hex()?);
             match rustix::fs::mkdirat(&self.anchor.directory, &name, Mode::RWXU) {
                 Ok(()) => {
                     let metadata = self.anchor.metadata(&name)?;
@@ -958,9 +1023,9 @@ impl EngineService {
             Err(error) => return Err(io_error(error)),
             Ok(_) => {}
         }
-        let old = previous
-            .filter(|old| old.value.ordinary_name == ordinary)
-            .ok_or_else(|| fail("socket_path_already_exists"))?;
+        let Some(old) = previous.filter(|old| old.value.ordinary_name == ordinary) else {
+            return self.set_aside_dead_socket(ordinary, &path).await;
+        };
         old.verify(&self.anchor)?;
         check_socket(&self.anchor, &path, old.value.ordinary_socket)?;
         match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await {
@@ -1169,6 +1234,15 @@ impl EngineService {
             Err(EngineError(errors.join("; ")))
         }
     }
+}
+
+/// Eight lowercase hex digits from the system's entropy, for fresh anchor entry names.
+/// Output: the digits, or `owner_entropy_unavailable`.
+#[cfg(unix)]
+fn random_hex() -> Result<String, EngineError> {
+    let mut random = [0; 4];
+    getrandom::fill(&mut random).map_err(|_| fail("owner_entropy_unavailable"))?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Removes the published owner locator relative to the pinned engine root.
