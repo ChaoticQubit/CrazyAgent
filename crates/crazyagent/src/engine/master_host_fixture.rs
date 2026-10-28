@@ -27,6 +27,16 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
+/// A stand-in harness whose group keeps a process the engine can neither signal nor reap: a
+/// descendant in its own group starts a child that joins the harness group and exits, never
+/// reaped, then writes its own id and sleeps. macOS answers a probe of that group with EPERM.
+#[cfg(target_os = "macos")]
+pub(in crate::engine) const ZOMBIE_HOLDING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -e 'my $group = getpgrp(); setpgrp(0, 0) or exit 1; pipe(my $read, my $write) or exit 1; my $child = fork(); defined $child or exit 1; if ($child == 0) { close($read); setpgrp(0, $group) or exit 1; exit 0 } close($write); my $gone = <$read>; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
 /// The start of a stand-in harness that leaves what a Claude Code Bash tool shell can leave: a
 /// process that started its own session with its own stdio, as each tool shell does, and a
 /// `nohup` command whose shell already exited. It writes their ids into its working folder; a

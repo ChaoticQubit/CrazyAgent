@@ -228,6 +228,44 @@ async fn a_codex_host_process_that_left_its_group_is_stopped_with_the_host() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn a_codex_host_whose_group_keeps_an_unreaped_process_still_ends_and_releases_the_lease() {
+    use crate::engine::master_host_fixture::{
+        HarnessProcesses, MasterFixture, ZOMBIE_HOLDING_HARNESS,
+    };
+
+    let mut fixture = MasterFixture::new("codex");
+    let mut process = stand_in_host(&mut fixture, ZOMBIE_HOLDING_HARNESS).await;
+    let processes = HarnessProcesses::wait(&fixture.project);
+    assert_eq!(
+        rustix::process::getpgid(Some(processes.descendant)),
+        Ok(processes.descendant)
+    );
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err("codex_host_cleanup_uncertain".to_owned())
+    );
+    let started = Instant::now();
+    while fixture.sign_in("codex-group-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the profile lease was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    while rustix::process::test_kill_process_group(processes.leader) != Err(rustix::io::Errno::SRCH)
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "the harness group was never emptied"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    processes.assert_gone();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn closing_a_codex_host_stops_what_its_commands_detached() {
     use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
 

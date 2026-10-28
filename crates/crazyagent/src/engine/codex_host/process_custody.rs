@@ -48,6 +48,7 @@ struct OwnedChild {
     abandoned: bool,
     pending: Option<PendingWrite>,
     kill_sent: bool,
+    stopped_at: Option<Instant>,
     accounting_failed: bool,
     shared: Arc<ProcessShared>,
 }
@@ -84,6 +85,7 @@ pub(super) fn run(
         child.read_output(output_limit);
         child.observe_exit();
         child.observe_group();
+        child.give_up_group();
         child.release_held_pipes();
         if child.complete() {
             child.publish_completion();
@@ -132,6 +134,7 @@ fn start(
         abandoned: false,
         pending: None,
         kill_sent: false,
+        stopped_at: None,
         accounting_failed: false,
         shared: Arc::clone(shared),
     }));
@@ -278,6 +281,7 @@ impl OwnedChild {
     }
 
     fn stop(&mut self) {
+        self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
         self.pending = None;
         self.kill_group();
@@ -363,6 +367,29 @@ impl OwnedChild {
         self.abandoned = true;
     }
 
+    /// Stops waiting for the group of a reaped harness that still answers its probe
+    /// `CLOSE_TIME` after the first stop, as macOS answers for a group left with only an
+    /// unreaped process: the warden stops the sandbox, the pipes are given up and the
+    /// completion reports an uncertain cleanup, so the profile lease is released.
+    /// Takes nothing.
+    fn give_up_group(&mut self) {
+        if self.status.is_none()
+            || self.group_absent
+            || self.abandoned
+            || !self
+                .stopped_at
+                .is_some_and(|stopped| stopped.elapsed() >= CLOSE_TIME)
+        {
+            return;
+        }
+        self.fire_warden();
+        self.stdout = None;
+        self.stderr = None;
+        self.stdout_eof = true;
+        self.stderr_eof = true;
+        self.abandoned = true;
+    }
+
     fn cleanup_uncertain(&self, code: &'static str) {
         self.shared.fail(code);
         if let Ok(mut state) = self.shared.lock() {
@@ -372,7 +399,7 @@ impl OwnedChild {
 
     fn complete(&self) -> bool {
         self.status.is_some()
-            && self.group_absent
+            && (self.group_absent || self.abandoned)
             && self.stdout_eof
             && self.stderr_eof
             && !self.accounting_failed

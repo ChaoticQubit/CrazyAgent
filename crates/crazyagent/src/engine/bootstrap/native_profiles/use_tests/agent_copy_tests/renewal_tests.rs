@@ -209,6 +209,39 @@ fn a_custodian_check_waits_for_a_running_renewal_and_the_engine_admits_it_meanwh
 }
 
 #[test]
+fn a_sign_in_or_sign_out_never_runs_beside_a_renewal_that_outlived_its_lease() {
+    let mut case = UseCase::new();
+    for (index, name) in [(0, "sign-in"), (1, "refresh"), (2, "sign-out")] {
+        let lease = execution(&mut case);
+        let renewing = lease.hold_renewal(Duration::ZERO).unwrap();
+        drop(lease);
+        let custodian = |case: &UseCase| {
+            case.recapture().acquire_use_within(
+                &case.host,
+                &case.binding,
+                &request_id(name),
+                1,
+                purpose(index),
+                Some(Duration::from_millis(200)),
+            )
+        };
+        assert_eq!(
+            custodian(&case).err().map(|error| error.0).as_deref(),
+            Some("native_profile_in_use"),
+            "a {name} waits for the renewal to end"
+        );
+        drop(renewing);
+        let held = custodian(&case).unwrap();
+        assert_eq!(
+            held.hold_renewal(Duration::ZERO).err().unwrap().0,
+            "native_profile_renewal_busy",
+            "no renewal starts during a {name}"
+        );
+        drop(held);
+    }
+}
+
+#[test]
 fn one_renewal_runs_at_a_time_per_account() {
     let mut case = UseCase::new();
     let first = execution(&mut case);
