@@ -115,12 +115,13 @@ impl OwnerRuntimeHandle {
         }
         let (runtime_ref, capture_ref, capture) = allocate_master_capture(&self.authority.root)?;
         let folder = MasterRuntimeFolder::new(&self.authority.root, &runtime_ref);
+        let policy = prepared.agent_policy.pinned(&prepared.repository);
         let place = MasterTurnPlace {
             root: &self.authority.root,
             runtime_ref: &runtime_ref,
             repository: &prepared.repository,
             worktree: &prepared.cwd,
-            policy: &prepared.agent_policy,
+            policy: &policy,
         };
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
@@ -182,6 +183,8 @@ impl OwnerRuntimeHandle {
             capture,
             folder,
             tool_record,
+            access: policy.access,
+            toolchains: policy.allowed(&prepared.repository),
         })
     }
 }

@@ -131,6 +131,25 @@ impl AgentPolicy {
             .collect()
     }
 
+    /// The same policy with every family decided as it is for the project now, so a launch
+    /// that reads it again grants exactly the toolchains this read gave. Input: the project
+    /// folder. Output: the pinned policy.
+    pub fn pinned(&self, project: &Path) -> Self {
+        let allowed = self.allowed(project);
+        let pinned = Self {
+            access: self.access,
+            toolchains: Toolchain::ALL
+                .into_iter()
+                .map(|toolchain| ToolchainChoice {
+                    toolchain,
+                    allowed: allowed.contains(&toolchain),
+                })
+                .collect(),
+        };
+        assert!(pinned.validate().is_ok());
+        pinned
+    }
+
     /// What a client shows: the level, every level with its availability, and each
     /// toolchain family the owner has installed, the project uses or the owner chose.
     /// Inputs: the project folder and the owner's tool homes. Output: the view.
@@ -420,6 +439,13 @@ mod tests {
             None
         );
         assert_eq!(Narrowing::NotAllowed.code(), "agent_toolchain_lowered");
+
+        let pinned = sandboxed.pinned(project.path());
+        assert_eq!(pinned.allowed(project.path()), rust);
+        std::fs::remove_file(project.path().join("Cargo.toml")).unwrap();
+        assert_eq!(pinned.allowed(project.path()), rust);
+        assert!(sandboxed.allowed(project.path()).is_empty());
+        assert_eq!(narrowing(Some(&pinned), None, None, &rust), None);
     }
 
     #[test]

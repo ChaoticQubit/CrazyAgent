@@ -30,6 +30,8 @@ use std::time::Duration;
 #[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
+/// How often a running master turn checks its grants against the policy the owner saved.
+const POLICY_CHECK_EVERY: Duration = Duration::from_secs(1);
 /// SQLite's refusal when another engine connection held the database write lock past the
 /// storage wait; the write was rolled back, so the turn is driven again (LB-28).
 const STORAGE_BUSY: &str = "database is locked";
@@ -53,6 +55,8 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
+    pub(super) access: crate::sandbox::policy::AgentAccess,
+    pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 pub(super) struct Capture {
@@ -74,6 +78,8 @@ struct ActiveMaster {
     capture_ref: RequestId,
     provenance: Provenance,
     reported: Tokens,
+    access: crate::sandbox::policy::AgentAccess,
+    toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
 }
 
 impl MasterHost {
@@ -320,6 +326,37 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Turn(turn) => Ok(*turn),
             _ => Err(failure("master_runtime_result")),
         }
+    }
+
+    /// Tells whether the policy the owner saved now no longer covers what a running master
+    /// turn's sandbox profile granted. Inputs: the prepared turn, its id, and the level and
+    /// toolchains it runs with. Output: why it must stop, none while covered, or the storage
+    /// refusal.
+    async fn master_turn_narrowed(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        access: crate::sandbox::policy::AgentAccess,
+        toolchains: &[crate::sandbox::toolchains::Toolchain],
+    ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
+        let saved = match self
+            .master_runtime_command(MasterRuntimeCommand::Policy {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Policy(saved) => *saved,
+            _ => return Err(failure("master_runtime_result")),
+        };
+        Ok(crate::sandbox::policy::narrowing(
+            saved.as_ref(),
+            Some(prepared.repository.as_path()),
+            Some(access),
+            toolchains,
+        ))
     }
 
     /// Takes the profile of a prepared master turn and names its conversation in the agent
@@ -578,6 +615,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Prepared(prepared) => prepared,
             MasterRuntimeResult::Turn(turn) => return Ok(*turn),
             MasterRuntimeResult::Profile(_)
+            | MasterRuntimeResult::Policy(_)
             | MasterRuntimeResult::Checkout(_)
             | MasterRuntimeResult::Waiting => {
                 return Err(failure("master_runtime_result"));
@@ -641,6 +679,7 @@ impl OwnerRuntimeHandle {
         let _folder = launch.folder;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
+        let (access, toolchains) = (launch.access, launch.toolchains);
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -705,6 +744,8 @@ impl OwnerRuntimeHandle {
                 worktree_lease: prepared.worktree_lease.clone(),
             },
             reported: Tokens::default(),
+            access,
+            toolchains,
         };
         let observed = self
             .collect_master_turn(prepared, turn_id, &mut active)
@@ -848,6 +889,7 @@ impl OwnerRuntimeHandle {
         let mut reply = ReplyText::default();
         let mut inspect = tokio::time::interval(INSPECT_INTERVAL);
         inspect.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut policy_checked = std::time::Instant::now();
         loop {
             let event = tokio::select! {
                 biased;
@@ -862,6 +904,15 @@ impl OwnerRuntimeHandle {
                     }
                     if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Running) {
                         return Err(failure("master_runtime_state_changed"));
+                    }
+                    if policy_checked.elapsed() >= POLICY_CHECK_EVERY {
+                        policy_checked = std::time::Instant::now();
+                        if let Some(narrowed) = self
+                            .master_turn_narrowed(prepared, turn_id, active.access, &active.toolchains)
+                            .await?
+                        {
+                            return Err(failure(narrowed.code()));
+                        }
                     }
                     continue;
                 }
@@ -1110,7 +1161,11 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "gateway_invalid_authentication"
         | "native_profile_credential_expiring"
         | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,
-        "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
+        "gateway_connection_changed_or_denied"
+        | "agent_access_lowered"
+        | "agent_toolchain_lowered"
+        | "agent_policy_unreadable"
+        | "agent_project_unreadable" => MasterReason::ConnectionChanged,
         "gateway_quota_unknown" => MasterReason::QuotaUnknown,
         "gateway_quota_exhausted" => MasterReason::QuotaExhausted,
         "gateway_rate_limited" => MasterReason::RateLimited,

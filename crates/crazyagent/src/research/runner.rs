@@ -11,8 +11,8 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
-use crate::sandbox::policy::AgentAccess;
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host};
@@ -296,6 +296,31 @@ enum Ending {
     Cancelled,
     Interrupted,
     RateLimited,
+    Narrowed,
+}
+
+/// What a running research job's sandbox profile was built with, checked against the saved
+/// policy while it runs: its project and canonical folder, the access level and the granted
+/// toolchains.
+struct Granted {
+    project: ProjectId,
+    root: PathBuf,
+    access: AgentAccess,
+    toolchains: Vec<Toolchain>,
+}
+
+impl Granted {
+    /// Tells whether the policy the owner saved now no longer covers what the job holds, so
+    /// it must stop. Takes the job store. Returns the cause, or none.
+    fn narrowed(&self, jobs: &ResearchJobs) -> Option<Narrowing> {
+        let saved = jobs.agent_policy(&self.project).ok();
+        narrowing(
+            saved.as_ref(),
+            Some(self.root.as_path()),
+            Some(self.access),
+            &self.toolchains,
+        )
+    }
 }
 
 impl ResearchRunner {
@@ -567,7 +592,7 @@ impl ResearchRunner {
                     jobs.cancelled(&job)?;
                     return Ok(run(ResearchStatus::Cancelled, None, Some(group)));
                 }
-                if let Ending::Interrupted = ending {
+                if let Ending::Interrupted | Ending::Narrowed = ending {
                     let _ = jobs.release(&job);
                     let status = jobs
                         .get(job.id)?
@@ -800,8 +825,14 @@ impl ResearchRunner {
         let extra = jobs
             .read_paths(&project)
             .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
+        let granted = Granted {
+            project: project.clone(),
+            root: root.clone(),
+            access: policy.access,
+            toolchains: policy.allowed(&root),
+        };
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))?
+            .allow_tools(&Toolchains::grant(&homes, &granted.toolchains))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
         for folder in read_folders(executable, &context, job.tools)? {
@@ -853,7 +884,7 @@ impl ResearchRunner {
             let group = session.process_group();
             #[cfg(unix)]
             let mut lifeline = Lifeline::watch(group)?;
-            let ending = self.supervise_pane(jobs, job, &mut session, &prompt, &output);
+            let ending = self.supervise_pane(jobs, job, &granted, &mut session, &prompt, &output);
             let _ = session.stop();
             #[cfg(unix)]
             lifeline.release();
@@ -921,7 +952,7 @@ impl ResearchRunner {
         if let Some(mut stdin) = running.child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let ending = self.supervise(jobs, job, &mut running, &counted, &limited)?;
+        let ending = self.supervise(jobs, job, &granted, &mut running, &counted, &limited)?;
         let stopped = running.stop();
         let _ = jobs.heartbeat(job, counted.load(Ordering::Relaxed));
         drop(running);
@@ -1013,13 +1044,15 @@ impl ResearchRunner {
     }
 
     /// Follows a direct agent process until it exits, its stderr shows it waiting out a
-    /// rate or usage limit, the job is cancelled, the runner stops or a limit passes; the
-    /// caller then stops it. Takes the job store, the job, the process, its output count
-    /// and the limit flag its stderr drain sets. Returns how the run ended.
+    /// rate or usage limit, the job is cancelled, the saved policy no longer covers what it
+    /// was granted, the runner stops or a limit passes; the caller then stops it. Takes the
+    /// job store, the job, its grants, the process, its output count and the limit flag its
+    /// stderr drain sets. Returns how the run ended.
     fn supervise(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
+        granted: &Granted,
         agent: &mut AgentProcess,
         counted: &AtomicU64,
         limited: &AtomicBool,
@@ -1049,6 +1082,9 @@ impl ResearchRunner {
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
                 }
+                if granted.narrowed(jobs).is_some() {
+                    break Ending::Narrowed;
+                }
             }
             std::thread::sleep(POLL);
         };
@@ -1056,13 +1092,15 @@ impl ResearchRunner {
     }
 
     /// Types the research prompt into the agent's pane and follows its session record until
-    /// the turn ends or reports a rate or usage limit, the job is cancelled, the runner
-    /// stops or a limit passes. The agent's last reply becomes the report at `output`, as
-    /// `codex exec -o` and `claude -p` give. Returns how the run ended.
+    /// the turn ends or reports a rate or usage limit, the job is cancelled, the saved policy
+    /// no longer covers what it was granted, the runner stops or a limit passes. The agent's
+    /// last reply becomes the report at `output`, as `codex exec -o` and `claude -p` give.
+    /// Returns how the run ended.
     fn supervise_pane(
         &self,
         jobs: &ResearchJobs,
         job: &ResearchJob,
+        granted: &Granted,
         session: &mut TerminalSession,
         prompt: &str,
         output: &Path,
@@ -1089,6 +1127,9 @@ impl ResearchRunner {
                     Ok(true) => break Ending::Cancelled,
                     Err(JobError::NotHeld) => break Ending::Interrupted,
                     Ok(false) | Err(_) => {}
+                }
+                if granted.narrowed(jobs).is_some() {
+                    break Ending::Narrowed;
                 }
             }
             match session.next_event(POLL) {

@@ -133,6 +133,6 @@ fn the_access_box_says_beside_the_toolchains_that_turning_one_off_stops_agents_r
     );
     assert_eq!(
         TOOLCHAIN_OFF_STOPS_AGENTS,
-        "Turning a toolchain off stops agents running with it; they restart without it."
+        "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it."
     );
 }

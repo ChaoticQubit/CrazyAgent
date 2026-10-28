@@ -11,8 +11,8 @@ export const FULL_ACCESS_WARNING = "Agents run with your user's permissions: the
 /** What a lower saved level does to agents already running: the engine stops each one that started above it. */
 export const LOWERING_STOPS_AGENTS = "Lowering the level stops agents running above it; they restart at the new level.";
 
-/** What turning a toolchain off does to agents already running: the engine stops each one its sandbox granted it to. */
-export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents running with it; they restart without it.";
+/** What turning a toolchain off does to work already running: the engine stops each agent, research job and master turn its sandbox granted it to. */
+export const TOOLCHAIN_OFF_STOPS_AGENTS = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
 
 /** Every access level from the most to the least confined, with what it lets agents do. */
 export const ACCESS_LEVELS: { access: AgentAccess; label: string; help: string }[] = [
