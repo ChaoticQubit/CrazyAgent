@@ -193,3 +193,10 @@ fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped(
         Some("skill_unreadable")
     );
 }
+
+#[test]
+#[should_panic(expected = "assertion failed")]
+fn a_dot_folder_part_never_reaches_the_store() {
+    let root = tempfile::tempdir().unwrap();
+    let _ = store_folder(root.path(), &["skills", "project", "."]);
+}

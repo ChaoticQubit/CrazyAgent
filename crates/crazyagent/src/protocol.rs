@@ -26,6 +26,7 @@ fn validate_identity(value: &str) -> Result<(), ProtocolError> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
         || value.contains("..")
+        || value == "."
     {
         return Err(ProtocolError(
             "identity must be 1..128 safe ASCII bytes".into(),
@@ -505,6 +506,13 @@ mod tests {
         assert!(ProjectId::new("../secret").is_err());
         assert!(ProjectId::new("a".repeat(129)).is_err());
         assert!(serde_json::from_str::<SessionId>("\"x y\"").is_err());
+    }
+
+    #[test]
+    fn a_lone_dot_is_not_an_identity() {
+        assert!(ProjectId::new(".").is_err());
+        assert!(serde_json::from_str::<ProjectId>("\".\"").is_err());
+        assert!(ProjectId::new("v1.2").is_ok());
     }
 
     #[test]

@@ -213,7 +213,7 @@ pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, Engin
     let mut path = root.join(STORE);
     private_directory(&path)?;
     for part in parts {
-        assert!(!part.is_empty() && !part.contains('/') && *part != "..");
+        assert!(!part.is_empty() && !part.contains('/') && *part != ".." && *part != ".");
         path.push(part);
         private_directory(&path)?;
     }
