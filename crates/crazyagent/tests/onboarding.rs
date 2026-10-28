@@ -2284,3 +2284,30 @@ async fn a_restorable_discarded_change_holds_a_home_move_until_its_restore_windo
     drop(db);
     bench.stop().await;
 }
+
+/// A research job that runs for a project in the home holds a home move with its own
+/// sentence, since its worktree in the project would be cut off; once the job ended the
+/// move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_research_job_holds_a_home_move_until_it_ends() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let jobs =
+        crazyagent::research::jobs::ResearchJobs::open(&bench.root.join("engine.db")).unwrap();
+    jobs.enqueue(project.as_str(), "stack", "codex", false)
+        .unwrap();
+    let job = jobs
+        .claim(project.as_str(), "test-runner", 4)
+        .unwrap()
+        .expect("a queued job is claimed");
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_research_running", &repo, &next);
+    jobs.finish(&job, "context/research/stack.md").unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(jobs);
+    bench.stop().await;
+}

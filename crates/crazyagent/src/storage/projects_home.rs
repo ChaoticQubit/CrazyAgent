@@ -305,11 +305,14 @@ pub(super) fn move_plan(
 
 /// Names the agent work inside the home that a home move would cut off, as its refusal
 /// code: `home_move_agent_work` for a team agent's worktree or own clone, one waiting for
-/// removal, or a change set that is open or has a step in flight; otherwise
+/// removal, or a change set that is open or has a step in flight;
+/// `home_move_research_running` for a research job running for a project in the home,
+/// whose worktree is a linked worktree of the project's repository; otherwise
 /// `home_move_changes_restorable` for a discarded change set that can still be restored,
 /// for `crate::landing::RESTORE_WINDOW_MS` after the discard. Their records, each own
 /// clone's alternates line and each linked worktree's git files name absolute paths inside
-/// the home. Inputs: the transaction and the saved home. Output: the code, or None.
+/// the home. A finished research job's worktree is never used again, so it holds no move.
+/// Inputs: the transaction and the saved home. Output: the code, or None.
 fn agent_work_inside(
     tx: &Transaction<'_>,
     home: &Path,
@@ -336,6 +339,16 @@ fn agent_work_inside(
     )? {
         return Ok(Some("home_move_agent_work"));
     }
+    if held_inside(
+        tx,
+        home,
+        "research_jobs",
+        "SELECT json_extract(s.body, '$.folder') FROM research_jobs j
+         JOIN project_setups s ON s.project=j.project WHERE j.status='running'",
+        params![],
+    )? {
+        return Ok(Some("home_move_research_running"));
+    }
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -354,10 +367,10 @@ fn agent_work_inside(
     .then_some("home_move_changes_restorable"))
 }
 
-/// Tells whether a table of agent worktree records holds one for a repository or worktree
-/// inside the home, as recorded or as the path resolves now. A table the engine has not
-/// made yet holds none. Inputs: the transaction, the home, the table, the query reading
-/// its repository and worktree paths and that query's parameters. Output: the answer.
+/// Tells whether a table of agent work records holds one with a path inside the home, as
+/// recorded or as the path resolves now. A table the engine has not made yet holds none.
+/// Inputs: the transaction, the home, the table, the query whose every column is a path
+/// and that query's parameters. Output: the answer.
 fn held_inside(
     tx: &Transaction<'_>,
     home: &Path,
@@ -383,12 +396,14 @@ fn held_inside(
             || std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(home))
     };
     let mut statement = tx.prepare(query).map_err(error)?;
+    let columns = statement.column_count();
     let mut rows = statement.query(parameters).map_err(error)?;
     while let Some(row) = rows.next().map_err(error)? {
-        let repository: String = row.get(0).map_err(error)?;
-        let worktree: String = row.get(1).map_err(error)?;
-        if inside(&repository) || inside(&worktree) {
-            return Ok(true);
+        for column in 0..columns {
+            let path: String = row.get(column).map_err(error)?;
+            if inside(&path) {
+                return Ok(true);
+            }
         }
     }
     Ok(false)

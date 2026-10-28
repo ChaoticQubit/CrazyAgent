@@ -19,7 +19,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 59] = [
+pub const INTAKE_CODES: [&str; 60] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -52,6 +52,7 @@ pub const INTAKE_CODES: [&str; 59] = [
     "home_move_in_progress",
     "home_move_agent_work",
     "home_move_changes_restorable",
+    "home_move_research_running",
     "home_folder_name_invalid",
     "home_new_project_failed",
     "home_add_unverified",
@@ -816,6 +817,7 @@ mod tests {
             "home_move_in_progress",
             "home_move_agent_work",
             "home_move_changes_restorable",
+            "home_move_research_running",
             "home_new_project_failed",
         ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");

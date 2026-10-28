@@ -656,6 +656,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "home_move_changes_restorable" => {
             "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved."
         }
+        "home_move_research_running" => {
+            "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved."
+        }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",
         "folder_size_unreadable" => "Some files in that folder cannot be read.",
