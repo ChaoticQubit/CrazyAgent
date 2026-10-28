@@ -150,6 +150,7 @@ fn only_plain_unused_top_level_home_folders_can_be_deleted() {
         project_id: ProjectId::new("used").unwrap(),
         name: "Used".into(),
         folder: home.join("used"),
+        repositories: vec![home.join("used")],
         onboarding: false,
     }];
     let text = |path: PathBuf| path.to_str().unwrap().to_owned();
@@ -597,6 +598,7 @@ fn a_home_folder_holding_a_set_up_project_cannot_be_deleted() {
         project_id: ProjectId::new("service-a").unwrap(),
         name: "Service A".into(),
         folder: home.join("org").join("service-a"),
+        repositories: vec![home.join("org").join("service-a")],
         onboarding: true,
     }];
     let text = |path: PathBuf| path.to_str().unwrap().to_owned();

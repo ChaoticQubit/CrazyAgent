@@ -94,17 +94,19 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Lists every set-up project, none left out, so the trash guard and the
-/// Found list see them all: each project's folder and whether onboarding is
-/// still under way. An onboarded project is Ready once the owner saved its
-/// setup, or its graph step is done or off and its mapping is done; a project
-/// made with New Project has no onboarding row and is Ready at once.
+/// Found list see them all: each project's folder, the repositories it
+/// declares and whether onboarding is still under way. An onboarded project
+/// is Ready once the owner saved its setup, or its graph step is done or off
+/// and its mapping is done; a project made with New Project has no onboarding
+/// row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
     let off = crate::onboarding::Step::Off.columns().0;
     let mut statement = tx
         .prepare(
-            "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
+            "SELECT s.body, o.graph_state, o.mapping_state, p.body FROM project_setups s
              LEFT JOIN onboarding o ON o.project=s.project
+             LEFT JOIN projects p ON p.id=s.project
              ORDER BY s.project",
         )
         .map_err(error)?;
@@ -114,14 +116,19 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(error)?;
     let mut projects = Vec::new();
     for row in rows {
-        let (body, graph, mapping) = row.map_err(error)?;
+        let (body, graph, mapping, project) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
+        let repositories = match project {
+            Some(project) => declared(&project)?.1,
+            None => Vec::new(),
+        };
         let onboarding = !stored.saved()
             && graph
                 .zip(mapping)
@@ -130,7 +137,48 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
             folder: stored.project_folder(),
             project_id: stored.project_id,
             name: stored.name,
+            repositories,
             onboarding,
+        });
+    }
+    Ok(projects)
+}
+
+/// Reads a project row's body. Input: the stored body. Output: the project
+/// and the repositories it declares as paths, or the parse failure.
+fn declared(body: &str) -> Result<(crate::protocol::StoredProject, Vec<PathBuf>), EngineError> {
+    let stored: crate::protocol::StoredProject = serde_json::from_str(body).map_err(error)?;
+    let repositories = stored.spec.repositories.iter().map(PathBuf::from).collect();
+    Ok((stored, repositories))
+}
+
+/// The projects whose folders the trash and move guards keep: every set-up
+/// project, then each project made without setup that declares a repository,
+/// its first repository standing in for its folder. Input: the transaction.
+/// Output: the projects with the repositories each declares.
+fn guarded(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
+    let mut projects = registered(tx)?;
+    let mut statement = tx
+        .prepare(
+            "SELECT p.body FROM projects p
+             WHERE NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=p.id)
+             ORDER BY p.id",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?;
+    for row in rows {
+        let (stored, repositories) = declared(&row.map_err(error)?)?;
+        let Some(folder) = repositories.first().cloned() else {
+            continue;
+        };
+        projects.push(Registered {
+            project_id: stored.project_id,
+            name: stored.spec.name,
+            folder,
+            repositories,
+            onboarding: false,
         });
     }
     Ok(projects)
@@ -206,7 +254,7 @@ pub(super) fn add_plan(
         return Err(error("stale_revision"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(&saved, &engine_root(path)?, source, mode, &registered(&tx)?)
+    home::plan_add(&saved, &engine_root(path)?, source, mode, &guarded(&tx)?)
 }
 
 /// Plans a MoveProjectsHome that moves the project folders and records the
@@ -527,7 +575,7 @@ pub(super) fn execute(
             let Some(saved) = home::load(tx)? else {
                 return rejected("projects_home_unset");
             };
-            let folder = match home::plan_trash(&saved, picked, &registered(tx)?) {
+            let folder = match home::plan_trash(&saved, picked, &guarded(tx)?) {
                 Ok(folder) => folder,
                 Err(e) => return rejected(&e.0),
             };

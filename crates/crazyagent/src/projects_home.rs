@@ -113,13 +113,15 @@ impl HomeAction {
 pub type HomeEffect = Result<Option<PathBuf>, String>;
 
 /// A project the engine has set up, as the projects home sees it.
-/// Input to `found`: the project, its name, its folder on disk and whether
-/// its onboarding is still running.
+/// Input to `found` and the trash and move guards: the project, its name, its
+/// folder on disk, the repositories it declares, where its master works, and
+/// whether its onboarding is still running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registered {
     pub project_id: ProjectId,
     pub name: String,
     pub folder: PathBuf,
+    pub repositories: Vec<PathBuf>,
     pub onboarding: bool,
 }
 
@@ -182,6 +184,21 @@ fn holds_owner_home(path: &Path, owner: &Path) -> bool {
 /// True when one of the two folders is inside the other or they are the same.
 fn overlaps(left: &Path, right: &Path) -> bool {
     left.starts_with(right) || right.starts_with(left)
+}
+
+/// True when a real folder overlaps a folder the project uses: its own folder
+/// or a repository it declares, each compared as recorded and, when it
+/// resolves, at its canonical path, so one declared through a link counts.
+/// Input: a canonical folder and the project. Output: whether it is in use.
+fn in_use(real: &Path, project: &Registered) -> bool {
+    assert!(real.is_absolute());
+    std::iter::once(&project.folder)
+        .chain(&project.repositories)
+        .filter(|used| used.is_absolute())
+        .any(|used| {
+            overlaps(real, used)
+                || std::fs::canonicalize(used).is_ok_and(|canonical| overlaps(real, &canonical))
+        })
 }
 
 /// Checks a folder the owner wants as the projects home.
@@ -249,8 +266,9 @@ pub fn linked_worktrees(folder: &Path) -> usize {
 /// free destination in the home, or a refusal for sources inside the home,
 /// the home itself, `/`, the user's home folder, any folder holding the home
 /// or engine data, hidden folders, names already taken in the home, a Move
-/// of a folder with git worktree links or nested with a set-up project, and a
-/// Copy of a folder that is itself a linked worktree or submodule checkout.
+/// of a folder with git worktree links or nested with a folder or repository
+/// a project uses, and a Copy of a folder that is itself a linked worktree or
+/// submodule checkout.
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
@@ -283,10 +301,7 @@ pub fn plan_add(
         if git_links(&real) {
             return Err(refused("home_move_worktrees"));
         }
-        if registered
-            .iter()
-            .any(|project| overlaps(&real, &project.folder))
-        {
+        if registered.iter().any(|project| in_use(&real, project)) {
             return Err(refused("home_move_project"));
         }
     }
@@ -378,9 +393,9 @@ pub fn state_folder(project: &Path) -> PathBuf {
 }
 
 /// Checks a folder the owner asked to delete from the projects home.
-/// Input: the canonical home, the owner's path text and the folders of
-/// set-up projects. Output: the real folder, or a refusal unless it is a
-/// plain top-level folder of the home that holds no set-up project's folder.
+/// Input: the canonical home, the owner's path text and the projects. Output:
+/// the real folder, or a refusal unless it is a plain top-level folder of the
+/// home that holds no project's folder and no repository a project declares.
 pub fn plan_trash(
     home: &Path,
     path: &str,
@@ -400,10 +415,7 @@ pub fn plan_trash(
         .and_then(|name| name.to_str())
         .ok_or_else(|| refused("home_trash_outside"))?;
     folder_name(name).map_err(|_| refused("home_trash_outside"))?;
-    if registered
-        .iter()
-        .any(|project| overlaps(&real, &project.folder))
-    {
+    if registered.iter().any(|project| in_use(&real, project)) {
         return Err(refused("home_trash_still_set_up"));
     }
     assert!(real.starts_with(home) && real != home);

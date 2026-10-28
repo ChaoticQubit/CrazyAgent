@@ -184,6 +184,7 @@ fn set_up_projects_show_as_ready_onboarding_or_missing() {
     let project = |id: &str, folder: PathBuf, onboarding: bool| Registered {
         project_id: ProjectId::new(id).unwrap(),
         name: format!("Project {id}"),
+        repositories: vec![folder.clone()],
         folder,
         onboarding,
     };
@@ -864,6 +865,7 @@ fn a_move_that_would_break_worktrees_or_another_project_is_refused_and_copy_stil
         project_id: ProjectId::new("project").unwrap(),
         name: "project".into(),
         folder: project.clone(),
+        repositories: vec![project.clone()],
         onboarding: false,
     }];
     for source in [&outer, &project, &project.join("src")] {
