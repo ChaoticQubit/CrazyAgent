@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+use crazyagent::harnesses::terminal_session::end_left_pane;
 use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
@@ -658,6 +659,60 @@ fn server_pid(tmux: &Path, socket: &Path) -> u32 {
         .trim()
         .parse()
         .unwrap()
+}
+
+/// PR-3 (rv-code final review of fix/rv-ds-process): ending a leftover pane whose window is
+/// already gone names no process to kill, although tmux answers a display for a missing
+/// target with another pane. The engine's holder and another agent's pane keep running, and
+/// the call reports the pane unknown.
+#[test]
+fn ending_a_gone_leftover_pane_kills_no_other_pane() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let gone = AgentId::team(3).unwrap();
+    let other = AgentId::team(4).unwrap();
+    let sleeper = shell(
+        root.path(),
+        Vec::new(),
+        &["/bin/sh", "-c", "exec /bin/sleep 300"],
+    );
+    host.spawn(&gone, &sleeper).unwrap();
+    let other_pid = host.spawn(&other, &sleeper).unwrap().pid;
+    let holder_pid: u32 = tmux_reply(
+        &tmux,
+        &socket,
+        &[
+            "list-panes",
+            "-t",
+            "crazyagent:=_crazyagent",
+            "-F",
+            "#{pane_pid}",
+        ],
+    )
+    .trim()
+    .parse()
+    .unwrap();
+    host.kill(&gone).unwrap();
+
+    let ended = end_left_pane(&host, &gone, "test").map_err(|problem| problem.0);
+
+    assert!(
+        process_running(holder_pid),
+        "ending a gone pane killed the engine's tmux holder"
+    );
+    assert!(
+        process_running(other_pid),
+        "ending a gone pane killed another agent's pane"
+    );
+    assert_eq!(ended, Err("terminal_agent_unknown".to_owned()));
+    host.kill(&other).unwrap();
 }
 
 #[test]

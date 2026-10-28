@@ -1018,14 +1018,16 @@ impl Host for Tmux {
     }
 
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
-        let lines = self.live_control()?.run(&format!(
-            "display-message -p -t {} '#{{pane_pid}}'",
+        let lines = self.live_control()?.ask(&format!(
+            "list-panes -t {} -F '#{{pane_pid}}{FORMAT_END}'",
             target(agent)
         ))?;
-        lines
-            .first()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .and_then(|text| text.trim().parse::<u32>().ok())
+        let [line] = lines.as_slice() else {
+            return Err(failure("terminal_command_failed"));
+        };
+        std::str::from_utf8(line)
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
             .filter(|pid| *pid > 1)
             .map(Some)
             .ok_or_else(|| failure("terminal_command_failed"))
