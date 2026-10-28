@@ -250,7 +250,10 @@ fn open_plain(path: &Path) -> Option<std::fs::File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+/// Reads a file an agent may have replaced, at most `limit` bytes, through `open_plain`.
+/// Inputs: the path and the limit. Output: the bytes, else `changes_workspace_invalid` for
+/// a file that is not plain or is longer.
+pub(super) fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     use std::io::Read;
     let file = open_plain(path).ok_or_else(invalid)?;
     let mut bytes = Vec::new();
@@ -929,7 +932,12 @@ pub(super) fn start(
     let _held = hold(repository);
     let head = match check_places(repository, worktree, git_dir)? {
         Layout::Linked => open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head()?,
-        Layout::Clone => clone::fetch(&shared(repository)?, repository, worktree)?,
+        Layout::Clone => clone::fetch(
+            &shared(repository)?,
+            repository,
+            worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?,
     };
     store::set_base(db, worktree, &head)
 }
@@ -937,14 +945,18 @@ pub(super) fn start(
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
 /// one above the base recorded for the worktree, else its HEAD, so commits the agent
 /// made itself are part of it. An agent's own clone is never committed in: its change
-/// set is the branch it committed on, fetched into the owner repository, and that branch
-/// must hold the set's base. The whole set, agent commits and staged files included,
+/// set is the branch it committed on, fetched into the owner repository before the
+/// repository hold is taken, so a slow agent-sized fetch never stalls the owner's landing,
+/// and that branch must hold the set's base. The whole set, agent commits and staged
+/// files included,
 /// must stay within the bounds before anything is stored. The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
 /// commits the same tree again.
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending, or
-/// `changes_branch_not_above_base` for a clone branch that dropped the base.
+/// `changes_branch_not_above_base` for a clone branch that dropped the base; an updating
+/// set refused so waits for its agent again, so the owner's next Update hands the agent
+/// the merge it skipped (GA-R3).
 pub(super) fn record(
     db: &Connection,
     workspace: &Workspace,
@@ -961,6 +973,16 @@ pub(super) fn record(
     let agent_id = name(&workspace.agent.id)?;
     let turn_id = name(&turn.turn)?;
     let worktree = workspace.worktree.to_str().ok_or_else(invalid)?;
+    let shared = shared(&workspace.repository)?;
+    let fetched = match layout {
+        Layout::Clone => Some(clone::fetch(
+            &shared,
+            &workspace.repository,
+            &workspace.worktree,
+            bounds,
+        )?),
+        Layout::Linked => None,
+    };
     let _held = hold(&workspace.repository);
     let open = store::open_for(db, worktree)?;
     if open
@@ -969,22 +991,21 @@ pub(super) fn record(
     {
         return Err(failure("changes_agent_has_pending"));
     }
-    let shared = shared(&workspace.repository)?;
-    let agent = match layout {
-        Layout::Linked => Some(open_agent(
-            db,
-            workspace.agent.kind,
-            &workspace.repository,
-            &workspace.worktree,
-            &workspace.git_dir,
-        )?),
-        Layout::Clone => None,
+    let (agent, head) = match fetched {
+        Some(tip) => (None, tip),
+        None => {
+            let agent = open_agent(
+                db,
+                workspace.agent.kind,
+                &workspace.repository,
+                &workspace.worktree,
+                &workspace.git_dir,
+            )?;
+            let head = agent.head()?;
+            (Some(agent), head)
+        }
     };
     let repo = agent.as_ref().map_or(&shared, |agent| &agent.repo);
-    let head = match &agent {
-        Some(agent) => agent.head()?,
-        None => clone::fetch(&shared, &workspace.repository, &workspace.worktree)?,
-    };
     let base = match store::base_of(db, worktree)? {
         Some(base) if repo.commit_of(&base)?.as_deref() == Some(base.as_str()) => base,
         _ => head.clone(),
@@ -996,6 +1017,12 @@ pub(super) fn record(
         .as_ref()
         .map_or(base.as_str(), |record| record.head.as_str());
     if agent.is_none() && !shared.test(&["merge-base", "--is-ancestor", above, &head])? {
+        if let Some(mut record) =
+            open.filter(|record| record.state == ChangeState::Updating && !record.waiting)
+        {
+            record.waiting = true;
+            store::save(db, &record)?;
+        }
         return Err(failure("changes_branch_not_above_base"));
     }
     if above != head {
@@ -1104,7 +1131,7 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
     let clone = in_clone(&record);
     let mut prompt = if clone {
         format!(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge --ff-only {}` in your worktree.\n",
+            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
             record.head, record.head
         )
     } else {
