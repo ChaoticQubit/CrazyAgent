@@ -644,8 +644,9 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// Remote settings folder is locked, the locked-keys file readable, the extensions folder
 /// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
 /// grace; a cleared environment holding only [`env::server_env`], with the owner `socket`
-/// the built-in extension connects to and TMPDIR at its short temp folder, stdout and stderr
-/// into the redacting `output` pipe, and its own process group.
+/// the built-in extension connects to and TMPDIR at its short temp folder, its server data
+/// folder as the working directory (the profile lets it read no folder above), stdout and
+/// stderr into the redacting `output` pipe, and its own process group.
 fn command(
     build: &Path,
     folder: &Path,
@@ -702,7 +703,7 @@ fn command(
         .arg("--disable-workspace-trust")
         .arg("--reconnection-grace-time")
         .arg(RECONNECTION_GRACE.as_secs().to_string())
-        .current_dir(folder)
+        .current_dir(&home)
         .env_clear()
         .envs(env::server_env(
             std::env::vars_os(),

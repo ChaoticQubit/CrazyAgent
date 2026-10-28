@@ -223,7 +223,9 @@ async fn a_stop_ends_the_ide_server_an_open_started() {
             .unwrap(),
     );
     let ide = root.path().join("ide");
-    std::fs::create_dir_all(&ide).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+        .create(&ide)
+        .unwrap();
     std::fs::write(
         ide.join("build-state.json"),
         serde_json::to_vec(&BuildState::Ready {

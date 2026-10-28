@@ -883,7 +883,11 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         args.iter()
             .all(|arg| !arg.to_string_lossy().contains(&token))
     );
-    assert_eq!(command.get_current_dir(), Some(folder.as_path()));
+    assert_eq!(
+        command.get_current_dir(),
+        Some(folder.join(SERVER_DATA).as_path()),
+        "the server starts in a folder its profile lets it read, so getcwd works under Seatbelt"
+    );
     let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
     for (name, value) in crate::ide::git::CONFIG_ENV {
         assert!(
