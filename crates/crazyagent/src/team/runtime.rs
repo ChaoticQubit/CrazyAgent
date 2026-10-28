@@ -369,10 +369,21 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
+    held_restarts: Vec<HostedRestart>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+/// How one agent start ended: started, held back because a projects home move holds the
+/// project folder, so the work that asked for it waits for the move to end with nothing
+/// spent or switched off, or refused for the plain reason.
+#[derive(Debug, PartialEq, Eq)]
+enum Start<T> {
+    Started(T),
+    Held,
+    Refused(String),
 }
 
 /// The most stopped masters of one project the last-master lookup reads.
@@ -512,6 +523,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             live_starts: BTreeMap::new(),
             resuming: None,
+            held_restarts: Vec::new(),
         })
     }
 
@@ -951,7 +963,9 @@ impl TeamRuntime {
         let Some(agents) = self.agents.clone() else {
             return Ok(());
         };
-        for restart in agents.take_restarts(TEAM_HOST) {
+        let mut restarts = std::mem::take(&mut self.held_restarts);
+        restarts.extend(agents.take_restarts(TEAM_HOST));
+        for restart in restarts {
             if let Ok(reference) = restart.reference.parse::<i64>() {
                 self.start_again(reference, Some(&restart), access)?;
             }
@@ -992,7 +1006,8 @@ impl TeamRuntime {
     /// worktree and register entry; no other sub-agent starts again, so a register entry
     /// never moves to another agent. A restarted master starts as a fresh process under its
     /// register entry. A Wake (no `again`) of an agent that is no longer finished does
-    /// nothing, so a stale Wake never stops or replaces a running agent.
+    /// nothing, so a stale Wake never stops or replaces a running agent. A restart a
+    /// projects home move holds back waits and is tried again on each tick until it starts.
     fn start_again(
         &mut self,
         reference: i64,
@@ -1075,7 +1090,14 @@ impl TeamRuntime {
                     Err(reason) => Err(reason),
                 }
             }
-            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
+            Ok(account) => match self.spawn_run(&stored, role, &harness, tools, &account, again)? {
+                Start::Started(id) => Ok(id),
+                Start::Held => {
+                    self.held_restarts.extend(again.cloned());
+                    return Ok(());
+                }
+                Start::Refused(reason) => Err(reason),
+            },
             Err(reason) => Err(reason),
         };
         match started {
@@ -1693,13 +1715,17 @@ impl TeamRuntime {
             None => {
                 let harness = stored.team.master.clone();
                 let started = match self.account_for(access, project, &harness, paused) {
-                    Ok(account) => self.spawn(
+                    Ok(account) => match self.spawn(
                         stored,
                         AgentRole::Master,
                         &harness,
                         stored.team.master_tools,
                         &account,
-                    )?,
+                    )? {
+                        Start::Started(id) => Ok(id),
+                        Start::Held => return Ok(()),
+                        Start::Refused(reason) => Err(reason),
+                    },
                     Err(reason) => Err(reason),
                 };
                 match started {
@@ -1869,17 +1895,23 @@ impl TeamRuntime {
         starts.push(Instant::now());
         let started = match self.account_for(access, project, &harness, paused) {
             Ok(account) => self.start_master(stored, &harness, &account, session.as_deref())?,
-            Err(reason) => Err(reason),
+            Err(reason) => Start::Refused(reason),
         };
         match started {
-            Ok((id, note)) => {
+            Start::Started((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
                 self.brief(stored, access, id)
             }
-            Err(reason) => self.live_off(
+            Start::Held => {
+                if let Some(starts) = self.live_starts.get_mut(project) {
+                    starts.pop();
+                }
+                Ok(())
+            }
+            Start::Refused(reason) => self.live_off(
                 project,
                 &format!("it could not start: {}", bound_text(&reason, 300)),
             ),
@@ -1895,15 +1927,15 @@ impl TeamRuntime {
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
     /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// session. Returns the agent id with the note to show, Held while a projects home move
+    /// holds the project folder, or the plain reason it could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
-    ) -> Result<Result<(i64, Option<String>), String>, EngineError> {
+    ) -> Result<Start<(i64, Option<String>)>, EngineError> {
         let project = &stored.project_id;
         let tools = stored.team.master_tools;
         let launch = launch_harness(harness).unwrap_or(harness);
@@ -1977,7 +2009,11 @@ impl TeamRuntime {
             self.resuming = None;
             if let Ok(id) = revived? {
                 assert_eq!(id, *agent);
-                return Ok(Ok(self.seat_session(id, session.as_ref(), None)));
+                return Ok(Start::Started(self.seat_session(
+                    id,
+                    session.as_ref(),
+                    None,
+                )));
             }
             let session = session.as_ref().expect("only a session resumes");
             let kept =
@@ -2016,18 +2052,18 @@ impl TeamRuntime {
             None => None,
         };
         let started = match started {
-            Some(id) => Ok(id),
-            None => self.spawn(stored, AgentRole::Master, harness, tools, account)?,
+            Some(id) => id,
+            None => match self.spawn(stored, AgentRole::Master, harness, tools, account)? {
+                Start::Started(id) => id,
+                Start::Held => return Ok(Start::Held),
+                Start::Refused(reason) => return Ok(Start::Refused(reason)),
+            },
         };
-        if started.is_ok()
-            && let (Some(session), Some(mode)) = (&session, switch_mode)
-        {
+        if let (Some(session), Some(mode)) = (&session, switch_mode) {
             super::record_switch(&self.connection, project, session.as_str(), launch, mode)?;
         }
-        Ok(started.map(|id| {
-            let (id, note) = self.seat_session(id, session.as_ref(), seeded);
-            (id, note.or(switch_note))
-        }))
+        let (id, note) = self.seat_session(started, session.as_ref(), seeded);
+        Ok(Start::Started((id, note.or(switch_note))))
     }
 
     /// Binds a live master that just started to the session it runs, with the seed its
@@ -2450,11 +2486,12 @@ impl TeamRuntime {
                         continue;
                     };
                     match self.spawn(stored, AgentRole::Sub, &harness, slot.tools, &account)? {
-                        Ok(agent) => {
+                        Start::Started(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
                         }
-                        Err(problem) => {
+                        Start::Held => continue,
+                        Start::Refused(problem) => {
                             self.fail_task(
                                 task,
                                 &format!(
@@ -2573,25 +2610,26 @@ impl TeamRuntime {
                 let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
                     break;
                 };
-                let started =
-                    self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)?;
-                if let Ok(agent) = started {
-                    self.workers.get_mut(&agent).expect("worker exists").warm = true;
-                }
-                if let Err(problem) = started {
-                    self.connection
-                        .execute(
-                            "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
-                            [project.as_str()],
-                        )
-                        .map_err(error)?;
-                    return self.note(
+                match self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)? {
+                    Start::Started(agent) => {
+                        self.workers.get_mut(&agent).expect("worker exists").warm = true;
+                    }
+                    Start::Held => return Ok(()),
+                    Start::Refused(problem) => {
+                        self.connection
+                            .execute(
+                                "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
+                                [project.as_str()],
+                            )
+                            .map_err(error)?;
+                        return self.note(
                         project,
                         &full_stop(format!(
                             "Keeping sub-agents warm was turned off because a sub-agent could not start: {}",
                             bound_text(&problem, 300)
                         )),
                     );
+                    }
                 }
             }
         }
@@ -2703,10 +2741,15 @@ impl TeamRuntime {
         harness: &str,
         tools: bool,
         account: &TeamAccount,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         self.spawn_run(stored, role, harness, tools, account, None)
     }
 
+    /// Records and launches one new team agent, unless the project already runs the most
+    /// panes or a projects home move holds its folder: the hold is checked in the same write
+    /// transaction that records the agent, so a move planned first holds the start back.
+    /// Takes the setup, the role, harness, tools switch, account and any register restart.
+    /// Returns the started agent, Held, or the plain reason it could not start.
     fn spawn_run(
         &mut self,
         stored: &StoredSetup,
@@ -2715,9 +2758,9 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         again: Option<&HostedRestart>,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         if self.panes(&stored.project_id) >= PANES_PER_PROJECT_MAX {
-            return Ok(Err(format!(
+            return Ok(Start::Refused(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents, the most one project may run at once"
             )));
         }
@@ -2727,7 +2770,7 @@ impl TeamRuntime {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
         if crate::projects_home::move_holds(&tx, &stored.project_folder()).map_err(error)? {
-            return Ok(Err(HOME_MOVING.into()));
+            return Ok(Start::Held);
         }
         tx.execute(
             "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6)",
@@ -2740,7 +2783,12 @@ impl TeamRuntime {
         if role == AgentRole::Sub {
             names::assign_persona(&self.connection, &stored.project_id, id)?;
         }
-        self.launch(stored, id, role, harness, tools, account, again, None)
+        Ok(
+            match self.launch(stored, id, role, harness, tools, account, again, None)? {
+                Ok(agent) => Start::Started(agent),
+                Err(reason) => Start::Refused(reason),
+            },
+        )
     }
 
     /// Wakes a stopped sub-agent (DEC-102), the one way a task pinned to it, the master's
@@ -4962,7 +5010,6 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
-const HOME_MOVING: &str = "the projects folder is being moved, so agents start once the move ends";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";

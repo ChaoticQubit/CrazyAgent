@@ -456,7 +456,9 @@ fn a_project_never_runs_more_than_fifteen_agent_terminals() {
         .unwrap();
     assert_eq!(
         refused,
-        Err("the project already runs 15 agents, the most one project may run at once".into())
+        Start::Refused(
+            "the project already runs 15 agents, the most one project may run at once".into()
+        )
     );
     assert_eq!(
         fixture.status().agents.len(),
@@ -2026,7 +2028,7 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
             None,
         )
         .unwrap();
-    assert_eq!(refused, Err(line.into()));
+    assert_eq!(refused, Start::Refused(line.into()));
     let agents = fixture.status().agents;
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].status, AgentStatus::Failed);
@@ -5947,4 +5949,128 @@ fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() 
         task_of(f, "Wait for the move").0 == "running"
     });
     assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// A start that a projects home move holds back leaves its work waiting (HMC-N1): a
+/// delegated task stays queued with no attempt spent and no error, the owner's Keep warm
+/// switch stays on with no note, and the owner's restart of the master waits; once the move
+/// ends the task runs and the restart is tried again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep_warm_off() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        "#!/bin/sh\nexec /bin/sleep 300\n",
+        TeamLimits::default(),
+    )
+    .with_agents(Arc::new(Agents::open(&fixture.base).unwrap()));
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::KeepWarm {
+                project_id: fixture.setup.project_id.clone(),
+                on: true,
+            },
+            hand_off(&fixture, "Wait for the move"),
+        ],
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,stopped_ms)
+             VALUES (?1,'master','codex',0,'stopped',1,1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let master = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO projects_home_move VALUES (1,'request-held',1,?1,?2,'[\"project\"]')",
+            params![
+                fixture.base.to_str().unwrap(),
+                fixture.base.join("next").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let stored = team
+        .stored(&fixture.setup.project_id)
+        .unwrap()
+        .expect("the project is set up");
+    let paused = team.paused().unwrap();
+    team.dispatch(&stored, &fixture.access, &paused).unwrap();
+    team.keep_warm(&stored, &fixture.access, &paused).unwrap();
+    let restart = HostedRestart {
+        id: "restart-held".into(),
+        host: TEAM_HOST.into(),
+        reference: master.to_string(),
+    };
+    team.start_again(master, Some(&restart), &fixture.access)
+        .unwrap();
+    assert_eq!(
+        task_of(&fixture, "Wait for the move"),
+        ("queued".to_owned(), None)
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT attempts FROM team_tasks WHERE prompt='Wait for the move'"
+        ),
+        0
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
+            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+        ),
+        1,
+        "the owner's Keep warm switch stays on"
+    );
+    assert_eq!(
+        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        1,
+        "no agent starts while the move holds the folder"
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT count(*) FROM team_messages WHERE text LIKE '%could not%' OR text LIKE '%turned off%'"
+        ),
+        0,
+        "nothing tells the owner a start failed"
+    );
+    fixture
+        .connection
+        .execute("DELETE FROM projects_home_move WHERE singleton=1", [])
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the held task runs and the held restart is tried once the move ends",
+        |f| {
+            task_of(f, "Wait for the move").0 == "running"
+                && count(
+                    &f.connection,
+                    "SELECT count(*) FROM team_agents WHERE role='master'",
+                ) == 2
+        },
+    );
+    assert_eq!(
+        count(
+            &fixture.connection,
+            &format!("SELECT keep_warm FROM team_settings WHERE project='{PROJECT}'")
+        ),
+        1
+    );
+    team.shutdown().unwrap();
 }
