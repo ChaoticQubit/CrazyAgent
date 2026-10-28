@@ -94,7 +94,7 @@ fn the_attach_screen_first_turns_on_the_input_modes_the_app_set() {
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 end".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -113,18 +113,26 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         }
     );
     assert_eq!(found.history, 312);
-    let full = format!("%2 @2 8 0 80 24 1 0 {}", u64::from(SCROLLBACK_LINES) * 3);
+    let full = format!(
+        "%2 @2 8 0 80 24 1 0 {}{FORMAT_END}",
+        u64::from(SCROLLBACK_LINES) * 3
+    );
     assert_eq!(
         located(&[full.into_bytes()]).unwrap().history,
         HISTORY_ROWS_MAX,
         "history past what the capture asks for is clamped to it"
     );
-    assert!(located(&[b"%2 @2 8 0 80 24".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4 end".to_vec()]).is_none());
+    assert!(located(&[b"  0 0 80 24 0 0 0 end".to_vec()]).is_none());
     assert!(located(&[]).is_none());
+    assert!(
+        located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).is_none(),
+        "a line without the end mark is one tmux cut short"
+    );
+    assert!(located(&[b"%1 @1 0 ".to_vec()]).is_none());
 }
 
 #[test]
@@ -179,7 +187,7 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     };
     assert_eq!(
         spawn_line(&agent, &command).unwrap(),
-        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+        "new-window -d -P -F '#{pane_id} #{pane_pid} end' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
     );
     let mut own_terminal = command.clone();
     own_terminal.env.insert(0, ("TERM".into(), "dumb".into()));
@@ -398,4 +406,125 @@ fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
             .starts_with(b"\x1b[0m\x1b[H\x1b[2J1\r\n2\r\n3\r\n"),
         "the history starts at the pane's first line"
     );
+}
+
+#[cfg(target_os = "macos")]
+struct Stalled(rustix::process::Pid);
+
+#[cfg(target_os = "macos")]
+impl Drop for Stalled {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::CONT);
+    }
+}
+
+/// tmux stops expanding a format once it has run for 100 ms of wall time and answers with
+/// the text so far as a success, which a server stalled on a loaded machine reaches: an
+/// attach then read `%1 @1 0 ` and failed, ending the agent. The real server is stalled
+/// again and again while callers attach, list the live agents and start new ones: every
+/// call still succeeds with the whole answer.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const STALLS: usize = 60;
+    const CALLERS: usize = 4;
+    const STARTED: i64 = 6;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let agent = AgentId::team(1).unwrap();
+    host.spawn(&agent, &command).unwrap();
+    let pid = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["display-message", "-p", "#{pid}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let server = String::from_utf8_lossy(&pid.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .unwrap();
+    let stalling = Arc::new(AtomicBool::new(true));
+    let mut callers: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let (host, agent, stalling) = (host.clone(), agent.clone(), stalling.clone());
+            std::thread::spawn(move || {
+                let mut problems = Vec::new();
+                let mut asked = 0;
+                while stalling.load(Ordering::SeqCst) {
+                    if let Err(problem) = host.screen(&agent) {
+                        problems.push(format!("screen: {}", problem.0));
+                    }
+                    match host.alive() {
+                        Ok(alive) if alive.contains(&agent) => {}
+                        other => problems.push(format!("alive: {other:?}")),
+                    }
+                    asked += 1;
+                }
+                (asked, problems)
+            })
+        })
+        .collect();
+    let starter = {
+        let (host, command, stalling) = (host.clone(), command.clone(), stalling.clone());
+        std::thread::spawn(move || {
+            let mut problems = Vec::new();
+            for id in 2..=STARTED {
+                let started = AgentId::team(id).unwrap();
+                match host.spawn(&started, &command) {
+                    Ok(pane) if pane.agent == started && pane.pid > 0 => {}
+                    other => problems.push(format!("spawn {id}: {other:?}")),
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            while stalling.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            (0, problems)
+        })
+    };
+    callers.push(starter);
+    {
+        let _stalled = Stalled(server);
+        for _ in 0..STALLS {
+            rustix::process::kill_process(server, rustix::process::Signal::STOP).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            rustix::process::kill_process(server, rustix::process::Signal::CONT).unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+    stalling.store(false, Ordering::SeqCst);
+    let mut asked = 0;
+    let mut problems = Vec::new();
+    for caller in callers {
+        let (count, found) = caller.join().unwrap();
+        asked += count;
+        problems.extend(found);
+    }
+    assert!(asked >= STALLS, "the callers kept asking: {asked}");
+    assert_eq!(problems, Vec::<String>::new());
+    let all: Vec<AgentId> = (1..=STARTED).map(|id| AgentId::team(id).unwrap()).collect();
+    assert_eq!(host.alive().unwrap(), all);
 }
