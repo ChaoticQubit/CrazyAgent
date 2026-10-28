@@ -995,10 +995,12 @@ impl ProjectScreen {
                 self.context = None;
             }
             SetupQuery::Change {
-                action: SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. },
+                action:
+                    action @ (SetupAction::CancelResearch { .. } | SetupAction::RetryResearch { .. }),
                 ..
             } => {
                 self.jobs_read_ms = None;
+                self.setup_due |= applied && matches!(action, SetupAction::RetryResearch { .. });
                 if applied {
                     self.log = None;
                 }

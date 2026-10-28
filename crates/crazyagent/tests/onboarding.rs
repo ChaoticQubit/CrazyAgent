@@ -10,7 +10,7 @@ use crazyagent::onboarding::service::{
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::plugins::Scope;
-use crazyagent::project_setup::{Platform, ProjectSetup};
+use crazyagent::project_setup::{Platform, ProjectSetup, ResearchJob, ResearchStatus};
 use crazyagent::projects_home::{FoundProject, FoundState};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::research::accounts::{AccountPick, SettingsResolver};
@@ -842,6 +842,70 @@ async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_i
         Some("home_trash_still_set_up")
     );
     assert!(bench.repo.join(".crazyagent").is_dir());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_roadmap_now_waits_until_the_onboarding_setup_is_confirmed() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let before = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!before.saved(), "the setup review is still open");
+    let jobs = |jobs: Vec<ResearchJob>| -> Vec<(i64, ResearchStatus)> {
+        jobs.into_iter().map(|job| (job.id, job.status)).collect()
+    };
+    let jobs_before = jobs(bench.owner.research_jobs(project.clone()).await.unwrap());
+
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .plan_roadmap(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(
+        rejection(&response).as_deref(),
+        Some("setup_unconfirmed"),
+        "{response:?}"
+    );
+    let after = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.revision, before.revision, "nothing is saved");
+    assert_eq!(after.research, before.research);
+    assert!(!after.saved());
+    assert_eq!(
+        jobs(bench.owner.research_jobs(project.clone()).await.unwrap()),
+        jobs_before,
+        "no planning job is queued"
+    );
+    let entry = bench.home_entry().await;
+    assert_eq!(
+        entry.state,
+        FoundState::Onboarding,
+        "the onboarding stays unfinished: {entry:?}"
+    );
+
+    bench.save_setup(&project, &before.editable()).await;
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .plan_roadmap(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_ne!(
+        rejection(&response).as_deref(),
+        Some("setup_unconfirmed"),
+        "a confirmed setup plans: {response:?}"
+    );
     bench.stop().await;
 }
 
