@@ -1803,3 +1803,249 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
     assert!(shown.contains("No changes yet."), "{shown}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s_on_the_agents_tab_opens_team_settings_and_each_setting_reaches_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("s Team settings"), "{shown}");
+
+    shell.key(Key::Char('s'));
+    assert_eq!(shell.depth(), 2);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team"), "{sent:?}");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("Notes CLI  /  Team settings"), "{shown}");
+    assert!(shown.contains("Keep warm  Off"), "{shown}");
+    assert!(shown.contains("t Task limit"), "{shown}");
+
+    for key in ['t', 'l', 'i', 'h'] {
+        shell.key(Key::Char(key));
+        let sent = pump(&mut shell, &mut connection).await;
+        assert_eq!(sent.first(), Some(&"team change"), "{key}: {sent:?}");
+        assert!(
+            sent.contains(&"team"),
+            "{key} reads the team again: {sent:?}"
+        );
+    }
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+            status.on_harness_switch,
+        ),
+        (
+            Some(1800),
+            Some(1800),
+            Some(3600),
+            crate::team::SwitchMode::Fresh
+        )
+    );
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("When the master harness changes, the new harness starts fresh."),
+        "{shown}"
+    );
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.depth(), 1);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes,
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        })
+    );
+}
+
+#[test]
+fn s_on_the_team_screen_opens_its_team_settings() {
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("s Team settings"), "{shown}");
+    shell.key(Key::Char('s'));
+    assert_eq!(shell.depth(), 2);
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("Notes CLI  /  Team settings"), "{shown}");
+    shell.key(Key::Esc);
+    assert_eq!(shell.depth(), 1);
+}
+
+fn git_in(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn pending_change(
+    root: &std::path::Path,
+    home: &std::path::Path,
+    repo: &std::path::Path,
+    project: &ProjectId,
+    name: &str,
+) -> crate::landing::ChangeSetId {
+    use crate::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+    let worktree = repo.parent().unwrap().join(name);
+    git_in(
+        home,
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let db = crate::landing::open(root).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',1,'stopped',1,1)",
+        [project.as_str()],
+    )
+    .unwrap();
+    let member = db.last_insert_rowid();
+    let git_dir = repo.join(".git/worktrees").join(name);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+         VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            member,
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            git_dir.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    std::fs::write(worktree.join("README"), format!("one\n{name}\n")).unwrap();
+    let workspace = Workspace {
+        project: project.clone(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: member.to_string(),
+            label: name.into(),
+        },
+        repository: repo.to_path_buf(),
+        worktree,
+        git_dir,
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: format!("Work as {name}"),
+    };
+    crate::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("an edited worktree makes a change set")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let work = tempfile::Builder::new()
+        .prefix("ca-tui-wait-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let (repo, home) = (base.join("repo"), base.join("home"));
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let owner = |args: &[&str]| git_in(&home, &repo, args);
+    owner(&["init", "-q", "--template=", "-b", "main"]);
+    owner(&["config", "user.name", "Repo Owner"]);
+    owner(&["config", "user.email", "owner@example.invalid"]);
+    owner(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README"), "one\n").unwrap();
+    owner(&["add", "README"]);
+    owner(&["commit", "-q", "-m", "Start"]);
+    let root = engine.root.path().to_path_buf();
+    pending_change(&root, &home, &repo, &notes, "agent-1");
+    pending_change(&root, &home, &repo, &notes, "agent-2");
+    let removed = ProjectId::new("removed-project").unwrap();
+    pending_change(&root, &home, &repo, &removed, "agent-3");
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let header = |shell: &mut Shell| render(shell, 120, 30).lines().next().unwrap().to_owned();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(line.contains("2 change sets wait in Changes"), "{line}");
+
+    let sets = engine.controller.change_sets(notes.clone()).await.unwrap();
+    assert_eq!(sets.len(), 2);
+    engine
+        .controller
+        .discard_changes(sets[0].id.clone(), sets[0].head.clone())
+        .await
+        .unwrap();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(line.contains("1 change set waits in Changes"), "{line}");
+
+    engine
+        .controller
+        .discard_changes(sets[1].id.clone(), sets[1].head.clone())
+        .await
+        .unwrap();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(!line.contains("in Changes"), "{line}");
+}

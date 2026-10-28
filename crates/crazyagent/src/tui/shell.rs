@@ -264,6 +264,12 @@ impl Shell {
             .shown(ctx);
     }
 
+    /// Runs the periodic refresh the run loop makes every few seconds.
+    /// Input: none. Output: none; requests are queued on the context.
+    pub fn tick(&mut self) {
+        self.refresh();
+    }
+
     fn running(&self) -> usize {
         self.ctx
             .store
