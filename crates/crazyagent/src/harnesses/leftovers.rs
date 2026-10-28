@@ -67,6 +67,7 @@ const PS_TABLE: &[&str] = &[
 struct Held {
     account: Option<CredentialRef>,
     report: String,
+    #[allow(dead_code)]
     kept: Box<dyn Send>,
 }
 
