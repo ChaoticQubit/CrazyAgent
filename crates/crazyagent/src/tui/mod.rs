@@ -337,6 +337,7 @@ fn event_loop(
                     } else if app.has_unresolved_conversation()
                         || app.master.has_pending()
                         || app.model_access.has_pending()
+                        || app.model_access.signing_in()
                         || app.has_unresolved_creation()
                     {
                         owner_reconnect = true;

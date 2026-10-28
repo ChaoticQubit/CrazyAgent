@@ -1,6 +1,7 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::agent_home::{self, Harness};
+use crazyagent::agent_git::Layout;
+use crazyagent::agent_home;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
@@ -89,13 +90,13 @@ impl Case {
         .unwrap()
     }
 
-    fn context(&self, project: &ProjectId) -> Result<AgentContext, String> {
+    fn context(&self, project: &ProjectId, layout: Layout) -> Result<AgentContext, String> {
         let connection = rusqlite::Connection::open_with_flags(
             self.root.path().join("engine.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
-        launch_context::for_project(&connection, project).map_err(|problem| problem.0)
+        launch_context::for_project(&connection, project, layout).map_err(|problem| problem.0)
     }
 
     fn master(&self, project: &ProjectId, tools: bool) -> Result<(bool, String), String> {
@@ -163,6 +164,7 @@ fn request(case: &Case, harness: &str, home: &Path, tools: bool) -> LaunchReques
         model: Some("qwen2.5:0.5b".into()),
         tools,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     }
@@ -418,7 +420,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
             .unwrap(),
     );
 
-    let context = case.context(&project).unwrap();
+    let context = case.context(&project, Layout::Linked).unwrap();
     let instructions = context.instructions().to_owned();
     assert!(instructions.len() <= launch_context::INSTRUCTIONS_BYTES_MAX);
     assert!(instructions.contains("Meal planner"));
@@ -627,17 +629,17 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     );
     assert!(!mcp_path.exists());
     assert!(!codex_skills.exists());
-    let received = |home: &Path, harness| {
-        let received = agent_home::received(home, harness).unwrap().unwrap();
-        received.skills.into_iter().collect::<BTreeSet<_>>()
+    let received = |home: &Path| {
+        let received = agent_home::given_skills(case.root.path(), home).unwrap();
+        received.into_iter().collect::<BTreeSet<_>>()
     };
     assert_eq!(
-        received(&codex_home, Harness::Codex),
+        received(&codex_home),
         BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()]),
         "the skill names of the last launch outlive its copies"
     );
     assert_eq!(
-        received(&claude_home, Harness::Claude),
+        received(&claude_home),
         BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()])
     );
 
@@ -666,7 +668,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(!off_home.join("skills/crazyagent").exists());
     drop(off_files);
     assert_eq!(
-        received(&off_home, Harness::Codex),
+        received(&off_home),
         BTreeSet::new(),
         "tools off installs and records no skill"
     );
@@ -693,7 +695,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(bare.get_args().any(|argument| argument == "mcp_servers={}"));
     assert!(!off_home.join("config.toml").exists());
 
-    let other_context = case.context(&other).unwrap();
+    let other_context = case.context(&other, Layout::Linked).unwrap();
     let other_home = private_directory(&agents.join("other-home"));
     let (_, other_files) =
         command_with_context(&request(&case, "codex", &other_home, true), &other_context).unwrap();
@@ -726,9 +728,116 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     drop(other_files);
 
     assert_eq!(
-        case.context(&ProjectId::new("ghost").unwrap()).err(),
+        case.context(&ProjectId::new("ghost").unwrap(), Layout::Linked)
+            .err(),
         Some("plugin_project_unknown".into())
     );
+    drop(owner);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn every_master_and_agent_launch_states_how_work_lands() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let root = case.root.path().to_path_buf();
+    let project = ProjectId::new("landing").unwrap();
+    applied(
+        owner
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Landing".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Lands work through Changes.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap(),
+    );
+    let agent_rules = [
+        "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox",
+        "Leave your edits as files in your worktree.",
+        "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
+    ];
+    let master_rules = [
+        "Never tell a sub-agent how to branch, commit or push",
+        "never name a base branch in a task",
+        "tell the owner to review and accept them in the project's Changes view",
+    ];
+    for tools in [false, true] {
+        let (_, master) = case.master(&project, tools).unwrap();
+        for rule in agent_rules.iter().chain(&master_rules) {
+            assert!(
+                master.contains(rule),
+                "master, tools {tools}, misses: {rule}"
+            );
+        }
+    }
+
+    let agents = private_directory(&root.join("agents"));
+    let own_branch_rules = [
+        "Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends",
+        "never write inside the project folder's `.git`",
+        "the owner's Accept in the project's Changes view lands your commits",
+    ];
+    for (layout, told, never) in [
+        (Layout::Linked, &agent_rules[..], &own_branch_rules[..]),
+        (
+            Layout::Clone,
+            &own_branch_rules[..],
+            &[
+                "never commit, push or tag",
+                "Leave your edits as files in your worktree.",
+            ][..],
+        ),
+    ] {
+        let context = case.context(&project, layout).unwrap();
+        let codex_home = private_directory(&agents.join(format!("codex-home-{layout:?}")));
+        let (_, codex_files) =
+            command_with_context(&request(&case, "codex", &codex_home, false), &context).unwrap();
+        let config: toml::Table = fs::read_to_string(codex_home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let developer = config["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let claude_home = private_directory(&agents.join(format!("claude-home-{layout:?}")));
+        let (claude_command, claude_files) = command_with_context(
+            &request(&case, "claude-code", &claude_home, false),
+            &context,
+        )
+        .unwrap();
+        let prompt = fs::read_to_string(
+            argument_after(&claude_command, "--append-system-prompt-file").unwrap(),
+        )
+        .unwrap();
+        for (harness, text) in [
+            ("codex", developer.as_str()),
+            ("claude-code", prompt.as_str()),
+        ] {
+            for rule in told {
+                assert!(text.contains(rule), "{harness} {layout:?} misses: {rule}");
+            }
+            for rule in never.iter().chain(&master_rules) {
+                assert!(!text.contains(rule), "{harness} {layout:?} is told: {rule}");
+            }
+        }
+        drop(codex_files);
+        drop(claude_files);
+    }
     drop(owner);
     case.close().await;
 }

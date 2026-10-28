@@ -32,6 +32,7 @@ fn server(connection: &mut Connection, root: &Path, name: &str) -> String {
                 command: "/usr/bin/true".into(),
                 args: vec!["--stdio".into()],
             },
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {

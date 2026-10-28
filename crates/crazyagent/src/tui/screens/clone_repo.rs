@@ -250,13 +250,18 @@ impl CloneRepo {
             .skip(self.offset)
             .take(Self::rows(ctx))
         {
-            let visibility = if repo.private { "Private" } else { "Public" };
-            let size = size_label(repo.size_kb.saturating_mul(1024));
+            let meta = if repo.refused.is_some() {
+                styled("Can't clone this name", Role::Warning, theme)
+            } else {
+                let visibility = if repo.private { "Private" } else { "Public" };
+                let size = size_label(repo.size_kb.saturating_mul(1024));
+                styled(format!("{visibility}  {size}"), Role::Muted, theme)
+            };
             lines.push(list_row(
                 row(
                     limit.saturating_sub(2),
                     Line::raw(repo.full_name.clone()),
-                    styled(format!("{visibility}  {size}"), Role::Muted, theme),
+                    meta,
                     ctx.glyphs,
                 ),
                 limit,
@@ -341,12 +346,17 @@ impl Screen for CloneRepo {
         if self.signed_in() {
             let count = self.repos.len();
             match key {
-                Key::Enter => {
-                    if let Some(repo) = self.repos.get(self.selected) {
-                        let full_name = repo.full_name.clone();
+                Key::Enter => match self
+                    .repos
+                    .get(self.selected)
+                    .map(|repo| (repo.full_name.clone(), repo.refused.clone()))
+                {
+                    Some((_, Some(code))) => self.problem = Some(copy(&code)),
+                    Some((full_name, None)) => {
                         self.send(IntakeQuery::CloneRepo { full_name }, ctx);
                     }
-                }
+                    None => {}
+                },
                 Key::Char('x') => self.send(IntakeQuery::GitHubSignOut, ctx),
                 Key::Up => self.selected = self.selected.saturating_sub(1),
                 Key::Down if self.selected + 1 < count => self.selected += 1,

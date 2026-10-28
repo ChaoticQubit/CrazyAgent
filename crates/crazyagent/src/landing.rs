@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
+mod clone;
+#[cfg(unix)]
 mod diff;
 #[cfg(unix)]
 mod flow;
@@ -109,7 +111,8 @@ impl From<ChangeSetId> for String {
 
 /// The agent worktree a turn or task ended in, as the engine computed it. Fields: the
 /// project, the agent, the owner's checkout root the worktree was added from, the
-/// worktree folder and its git metadata folder under the checkout's `.git/worktrees`.
+/// worktree folder and its git metadata folder: under the checkout's `.git/worktrees`
+/// for a linked worktree, `agent_git::git_dir` of the worktree for an agent's own clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     pub project: ProjectId,
@@ -239,6 +242,37 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     Ok(db)
 }
 
+/// Makes an agent's own clone of the owner repository in a new worktree folder for the
+/// Own branch and Full access levels (DEC-102): its own git folder at
+/// `agent_git::git_dir`, the project's objects borrowed read-only, its branch
+/// `agent_git::branch` checked out at the owner's HEAD commit. The engine runs no git in
+/// the clone after this but the fetch that reads its branch. Inputs: the owner's
+/// checkout root and the new worktree folder. Output: Ok once checked out, else a plain
+/// `changes_*` code.
+pub fn add_agent_clone(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::add(repository, worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, worktree);
+        Err(unavailable())
+    }
+}
+
+/// Readies an agent's own clone for another launch: makes any of its pack and
+/// loose-object folders that are missing, as `add_agent_clone` does for a new one, since
+/// the Own branch sandbox keeps the agent from making them itself (RL-3). Input: the
+/// clone's worktree. Output: Ok, else `changes_workspace_invalid`.
+pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return clone::store_folders(worktree);
+    #[cfg(not(unix))]
+    {
+        let _ = worktree;
+        Err(unavailable())
+    }
+}
+
 /// Records the commit a newly added agent worktree starts from, so the change sets it
 /// opens later hold every commit the agent makes above it. Call it once, right after the
 /// worktree is added and before any agent runs in it. Inputs: the store, the owner's
@@ -256,6 +290,110 @@ pub fn record_worktree_start(
         let _ = (db, repository, worktree, git_dir);
         Err(unavailable())
     }
+}
+
+/// One file as committed in the owner's checkout: its bytes up to the reader's bound, its
+/// size and whether the bound cut it.
+#[derive(Debug)]
+pub struct HeadBlob {
+    pub bytes: Vec<u8>,
+    pub size: u64,
+    pub cut: bool,
+}
+
+/// What reading one committed file found: its blob, none when nothing is at the path, or
+/// `instruction_file_unsafe` for a link, folder or submodule there.
+pub type HeadEntry = Result<Option<HeadBlob>, EngineError>;
+
+const HEAD_ENTRY_BYTES_MAX: usize = 4096;
+
+/// Reads regular files as committed at the commit the owner's checkout's HEAD names, with
+/// one engine git repository that runs nothing the repository configures, never from a
+/// work tree. Inputs: the checkout root, the distinct paths inside the repository, each
+/// without pathspec magic, and the most bytes to keep of each. Output: one entry per path
+/// in order, every one none when HEAD names no commit, or a plain git code for the
+/// repository.
+pub fn head_files(
+    checkout: &Path,
+    paths: &[&str],
+    limit: usize,
+) -> Result<Vec<HeadEntry>, EngineError> {
+    #[cfg(unix)]
+    return committed_files(checkout, paths, limit);
+    #[cfg(not(unix))]
+    {
+        let _ = (checkout, paths, limit);
+        Err(unavailable())
+    }
+}
+
+#[cfg(unix)]
+fn committed_files(
+    checkout: &Path,
+    paths: &[&str],
+    limit: usize,
+) -> Result<Vec<HeadEntry>, EngineError> {
+    assert!(paths.iter().enumerate().all(|(at, path)| {
+        !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
+    }));
+    let git_failed = || git::failure("changes_git_failed");
+    let owner = git::Repo::open(checkout, &checkout.join(".git"), None)?;
+    let Some(head) = owner.commit_of("HEAD")? else {
+        return Ok(paths.iter().map(|_| Ok(None)).collect());
+    };
+    let mut arguments = vec![
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)%x09%(path)",
+        head.as_str(),
+        "--",
+    ];
+    arguments.extend_from_slice(paths);
+    let listing = owner.capture(&arguments, HEAD_ENTRY_BYTES_MAX * paths.len())?;
+    let mut entries: Vec<(&str, &str, &str, &str, &str)> = Vec::new();
+    for entry in listing.split(|byte| *byte == 0) {
+        if entry.is_empty() {
+            continue;
+        }
+        let entry = std::str::from_utf8(entry).map_err(|_| git_failed())?;
+        let (fields, named) = entry.split_once('\t').ok_or_else(git_failed)?;
+        let fields: Vec<&str> = fields.split(' ').collect();
+        let [mode, kind, object, size] = fields.as_slice() else {
+            return Err(git_failed());
+        };
+        entries.push((named, mode, kind, object, size));
+    }
+    if !listing.is_empty() && !listing.ends_with(b"\0") {
+        return Err(git_failed());
+    }
+    let read = |path: &str| -> HeadEntry {
+        let Some(&(_, mode, kind, object, size)) =
+            entries.iter().find(|(named, ..)| *named == path)
+        else {
+            return Ok(None);
+        };
+        if kind != "blob" || !matches!(mode, "100644" | "100755") {
+            return Err(EngineError("instruction_file_unsafe".into()));
+        }
+        if !git::is_object_id(object) {
+            return Err(git_failed());
+        }
+        let size: u64 = size.parse().map_err(|_| git_failed())?;
+        let output = owner.exec(&["cat-file", "blob", object], None, &[], limit)?;
+        if output.code != 0 {
+            return Err(git_failed());
+        }
+        assert!(output.stdout.len() <= limit);
+        Ok(Some(HeadBlob {
+            bytes: output.stdout,
+            size,
+            cut: output.overflow,
+        }))
+    };
+    let found: Vec<HeadEntry> = paths.iter().map(|path| read(path)).collect();
+    assert_eq!(found.len(), paths.len());
+    Ok(found)
 }
 
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
@@ -477,9 +615,11 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
 
 /// Says why a finished agent's worktree cannot be removed now, as a plain code:
 /// `cleanup_changes_open`, `cleanup_changes_restorable`, `cleanup_worktree_invalid`,
-/// `cleanup_commits_unlanded` or `cleanup_worktree_dirty`. Inputs: the store, the owner's
-/// checkout root, the worktree, its git folder and the time now. Output: None when it can
-/// be removed.
+/// `cleanup_commits_unlanded`, `cleanup_refs_unlanded`, `cleanup_worktree_dirty` or
+/// `cleanup_worktree_unreadable` when git cannot read this one worktree. An agent's own
+/// clone is judged through the engine's fetch of its branch and its ref names read as
+/// data, with no git run in it. Inputs: the store, the owner's checkout root, the
+/// worktree, its git folder and the time now. Output: None when it can be removed.
 pub fn retire_blocker(
     db: &Connection,
     repository: &Path,
@@ -496,10 +636,12 @@ pub fn retire_blocker(
     }
 }
 
-/// Removes a finished agent's worktree with the host git, never forcing, after checking
-/// `retire_blocker` again while no landing step can run on its repository. Inputs: the
-/// store, the owner's checkout root, the worktree, its git folder and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// Removes a finished agent's worktree with the host git, never forcing, or an agent's
+/// own clone as a folder with no git, after checking `retire_blocker` again while no
+/// landing step can run on its repository. Inputs: the store, the owner's checkout root,
+/// the worktree, its git folder and the time now. Output: Ok once removed,
+/// `cleanup_worktree_leftover` when git deleted its record of the worktree, or a clone's
+/// folder was deleted, only part way, or the plain code that kept it.
 pub fn retire_worktree(
     db: &Connection,
     repository: &Path,

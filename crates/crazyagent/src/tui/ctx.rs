@@ -370,6 +370,7 @@ mod tests {
             assert!(ctx.try_request(Request::EditPool {
                 change: crate::tui::seam::PoolChange::Remove {
                     id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                    opened_projects: 0,
                 },
             }));
         }

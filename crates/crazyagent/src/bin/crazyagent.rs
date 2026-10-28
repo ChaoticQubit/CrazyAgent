@@ -886,9 +886,13 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .ok_or("HOME is not set")?;
-        let link = crazyagent::service::link_cli(&executable, &home.join(".local").join("bin"))
+        let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+        let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+        let target = crazyagent::service::persistable(&executable, &layout, appdir.as_deref())
             .map_err(|e| e.to_string())?;
-        println!("Linked {} to {}", link.display(), executable.display());
+        let link = crazyagent::service::link_cli(&target, &home.join(".local").join("bin"))
+            .map_err(|e| e.to_string())?;
+        println!("Linked {} to {}", link.display(), target.display());
         return Ok(());
     }
     let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;

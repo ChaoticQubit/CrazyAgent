@@ -6,10 +6,11 @@ use std::path::Path;
 pub(crate) const ACCOUNT_KEY: &str = "account_key";
 pub(crate) const MCP_SECRET: &str = "mcp_secret";
 pub(crate) const MCP_CHECKS: &str = "mcp_checks";
+pub(crate) const SKILL_FOLDER: &str = "skill_folder";
 const SWEEP_MAX: i64 = 10_000;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS file_trash (
-    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks')),
+    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
     PRIMARY KEY(kind, name)
 ) WITHOUT ROWID;";
@@ -72,6 +73,7 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
 
 fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, EngineError> {
     let quoted = format!("\"{name}\"");
+    let scoped = format!("project:{name}");
     let (query, value) = match kind {
         ACCOUNT_KEY => (
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE instr(CAST(body AS TEXT), ?1) > 0)",
@@ -85,6 +87,10 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
             "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE id=?1)",
             name,
         ),
+        SKILL_FOLDER => (
+            "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE kind='skill' AND scope=?1)",
+            scoped.as_str(),
+        ),
         _ => return Err(error("file_trash_kind_unknown")),
     };
     connection
@@ -97,6 +103,7 @@ fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
         ACCOUNT_KEY => super::accounts::remove_key_file(root, name),
         MCP_SECRET => super::plugins::remove_secret(root, name),
         MCP_CHECKS => super::plugins::remove_check_folder(root, name),
+        SKILL_FOLDER => super::plugins::remove_skill_project_folder(root, name),
         _ => Err(error("file_trash_kind_unknown")),
     }
 }

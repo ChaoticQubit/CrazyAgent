@@ -183,7 +183,14 @@ pub trait Host: Send + Sync {
     /// without its scrollback. Takes the name; fails like `attach` for an unknown name.
     /// Returns the screen as `attach` draws it.
     fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
-        self.attach(agent).map(|stream| stream.screen)
+        self.snapshot(agent).map(|stream| stream.screen)
+    }
+
+    /// Reads the size and visible screen of a live agent terminal without opening a viewer
+    /// and without its scrollback. Takes the name; fails like `attach` for an unknown name.
+    /// Returns them as a stream; a host that reads only through a viewer returns that viewer.
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.attach(agent)
     }
 
     /// Types bytes into an agent terminal exactly as given, control keys included.
@@ -280,6 +287,9 @@ pub fn plain_reason(code: &str) -> &'static str {
             "That is too much to type at once. Send it in smaller parts."
         }
         "terminal_size_bounds" | "terminal_size_invalid" => "That terminal size is out of range.",
+        "terminal_reply_too_large" => {
+            "This terminal holds too much to show at once. The agent keeps running."
+        }
         "terminal_detached" => "You closed this view. The agent keeps running.",
         "terminal_viewer_gone" | "terminal_viewer_slow" => {
             "This view stopped reading, so it was closed. Open the terminal again."

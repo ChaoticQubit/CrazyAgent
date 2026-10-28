@@ -185,6 +185,112 @@ fn handles_become_short_kebab_case_or_nothing() {
     assert_eq!(long, "word-word-word-word-word-word-wo");
 }
 
+/// A handle never reads as an agent number a master names agents by (RV-DS-62): bare digits,
+/// `team-<n>`, `sub-agent-<n>` and `<harness>-<n>` are refused as roles and renames, and a
+/// taken role is never suffixed into one.
+#[test]
+fn a_handle_never_reads_as_an_agent_number() {
+    for numbered in [
+        "7",
+        "@7",
+        "team-7",
+        "Team 7",
+        "sub-agent-7",
+        "Sub-agent 7",
+        "codex-7",
+        "@Codex-7",
+        "claude-code-12",
+    ] {
+        assert_eq!(handle(numbered), None, "{numbered}");
+    }
+    for kept in [
+        "onboarding-fix-2",
+        "task-1",
+        "v2",
+        "2fa",
+        "codex",
+        "team",
+        "7up",
+    ] {
+        assert!(handle(kept).is_some(), "{kept}");
+    }
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let first = agent(&connection, "alpha", "sub", "working");
+    let second = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, first, "codex").unwrap(),
+        Ok("codex".into())
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "codex").unwrap(),
+        Err("team_handle_taken"),
+        "codex-2 would read as agent 2"
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "7").unwrap(),
+        Err("team_handle_invalid")
+    );
+    assert_eq!(stored_name(&connection, second).unwrap().handle, None);
+}
+
+/// A handle kept in a numbered form from before such handles were refused (RV-DS-62) is
+/// cleared when the engine opens its database (PD-1): agent 3 kept as `Ada (@7)` would read
+/// that way in every roster while `@7` now reaches agent 7. Its label is then its persona
+/// alone; every other handle stays.
+#[test]
+fn a_numbered_handle_kept_from_before_is_cleared_when_the_engine_opens() {
+    let (directory, connection) = engine();
+    let mut legacy = Vec::new();
+    for (persona, handle) in [
+        ("Ada", "7"),
+        ("Grace", "codex-9"),
+        ("Alan", "team-4"),
+        ("Edsger", "sub-agent-5"),
+    ] {
+        let id = agent(&connection, "alpha", "sub", "working");
+        connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha',?2,?3)",
+                params![id, persona, handle],
+            )
+            .unwrap();
+        legacy.push((id, persona));
+    }
+    let kept = agent(&connection, "alpha", "sub", "working");
+    connection
+        .execute(
+            "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha','Barbara','onboarding-fix-2')",
+            [kept],
+        )
+        .unwrap();
+    drop(connection);
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    for (id, persona) in legacy {
+        assert_eq!(
+            stored_name(&connection, id),
+            Some(AgentName {
+                persona: persona.into(),
+                handle: None
+            }),
+            "{persona}"
+        );
+        assert_eq!(
+            label(AgentRole::Sub, id, name(&connection, id).unwrap().as_ref()),
+            persona
+        );
+    }
+    assert_eq!(
+        label(
+            AgentRole::Sub,
+            kept,
+            name(&connection, kept).unwrap().as_ref()
+        ),
+        "Barbara (@onboarding-fix-2)"
+    );
+}
+
 #[test]
 fn a_role_handle_is_unique_among_the_project_s_live_agents() {
     let (_directory, connection) = engine();
@@ -454,5 +560,78 @@ fn labels_read_persona_role_harness_and_status() {
     assert_eq!(
         line("Sub-agent 3", "mystery-tool", "Stopped"),
         "Sub-agent 3 \u{b7} mystery-tool \u{b7} stopped"
+    );
+}
+
+/// A woken sub-agent gets its names back (WK-R2): its persona, and its role handle while it
+/// is free; when a live agent took the handle while it was stopped, the woken agent gets the
+/// first free suffix and the live one keeps its own, so no two live agents share a handle.
+#[test]
+fn a_woken_agent_reclaims_its_names_and_never_shares_a_live_handle() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let ada = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, ada, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    let persona = stored_name(&connection, ada).unwrap().persona;
+    stop(&connection, ada);
+    let newer = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, newer, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [ada],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, ada).unwrap(),
+        AgentName {
+            persona: persona.clone(),
+            handle: Some("onboarding-fix-2".into()),
+        }
+    );
+    assert_eq!(
+        stored_name(&connection, newer).unwrap().handle.as_deref(),
+        Some("onboarding-fix"),
+        "the live agent keeps the handle its master knows"
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix-2").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    stop(&connection, newer);
+    stop(&connection, ada);
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [newer],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, newer)
+            .unwrap()
+            .handle
+            .as_deref(),
+        Some("onboarding-fix"),
+        "a free handle is kept as it was"
     );
 }

@@ -14,7 +14,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 18] = [
+const COMMANDS: [&str; 20] = [
     "desktop_project_catalog",
     "desktop_setup_project",
     "desktop_project_setup",
@@ -26,6 +26,8 @@ const COMMANDS: [&str; 18] = [
     "desktop_delete_project_context",
     "desktop_project_read_paths",
     "desktop_set_project_read_paths",
+    "desktop_project_agent_policy",
+    "desktop_set_project_agent_policy",
     "desktop_project_memories",
     "desktop_review_memory",
     "desktop_update_project_setup",
@@ -366,6 +368,98 @@ async fn desktop_creates_a_project_folder_and_reads_its_context_through_the_real
         .unwrap();
     let result =
         tokio::time::timeout(Duration::from_secs(20), flow(root.path(), sources.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+async fn read_paths_flow(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::client_controller::OwnerController;
+    use crazyagent::engine::Client;
+    use crazyagent::engine::owner::OwnerClientKind;
+    use crazyagent::protocol::ProjectId;
+
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Chore board".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(vec![]), 2).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    let shared = tempfile::Builder::new()
+        .prefix("ca-read-desk-")
+        .tempdir_in(std::fs::canonicalize("/tmp")?)?;
+    let real = std::fs::canonicalize(shared.path())?;
+    let folders: Vec<String> = ["docs", "specs", "notes"]
+        .iter()
+        .map(|name| {
+            let folder = real.join(name);
+            std::fs::create_dir(&folder).unwrap();
+            folder.to_str().unwrap().to_owned()
+        })
+        .collect();
+
+    assert_eq!(bridge.project_read_paths(&id).await?, Vec::<String>::new());
+    let first = bridge
+        .set_project_read_paths(&id, folders[..1].to_vec(), 3)
+        .await?;
+    assert!(matches!(first.outcome, ActionOutcome::Applied), "{first:?}");
+    let second = bridge
+        .set_project_read_paths(&id, folders[..2].to_vec(), 4)
+        .await?;
+    assert!(
+        matches!(second.outcome, ActionOutcome::Applied),
+        "a second save right after the first is taken: {second:?}"
+    );
+    assert_eq!(bridge.project_read_paths(&id).await?, folders[..2]);
+
+    let (_ordinary, mut other) = OwnerController::attach_configured(
+        Client::new(root.join("e.sock"), Duration::from_secs(2))?,
+        OwnerClientKind::Tui,
+    )
+    .await?;
+    other
+        .setup_project(
+            ProjectId::new("other-board")?,
+            ProjectSpec {
+                name: "Other board".into(),
+                repositories: vec![],
+            },
+            setup(vec![]),
+            1,
+        )
+        .await?;
+    let third = bridge
+        .set_project_read_paths(&id, folders.clone(), 5)
+        .await?;
+    assert!(
+        matches!(third.outcome, ActionOutcome::Applied),
+        "a save after another window's change is taken: {third:?}"
+    );
+    assert_eq!(bridge.project_read_paths(&id).await?, folders);
+    assert!(bridge.pending_intent()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_only_folders_save_again_and_after_another_windows_change() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-read-paths-desk-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(30), read_paths_flow(root.path())).await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();

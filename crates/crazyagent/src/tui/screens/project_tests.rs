@@ -84,6 +84,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
+            controller
+                .project_agent_policy(project)
+                .await
+                .map_err(problem)?,
+        ),
         SetupQuery::ReviewMemory {
             project,
             entry_id,
@@ -508,6 +514,14 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none() && screen.review.is_some(),
+        "e must show the whole memory before its editor opens"
+    );
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     screen.edit = None;
     screen.preview = None;
@@ -516,7 +530,34 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.width = 120;
 
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none(),
+        "e must show the whole memory before its editor opens"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(text(&drawn.rows).contains("# Competitors"));
+    assert!(
+        !drawn.help.contains(&("e", "Edit first")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none(),
+        "e edits only once the last line was on screen"
+    );
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(
+        drawn.help.contains(&("e", "Edit first")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
+    assert!(screen.review.is_none());
     let drawn = project_screen(&mut screen, 120, 36, &look);
     assert!(text(&drawn.rows).contains("Save to memory"));
     assert!(drawn.cursor.is_some());

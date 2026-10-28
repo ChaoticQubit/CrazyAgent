@@ -374,3 +374,18 @@ test("a pool with one account runs every agent of the team and never tells them 
   assert.doesNotMatch(html, /wait for a free account/i);
   assert.doesNotMatch(html, /Agents beyond/);
 });
+
+test("a plan that names a harness by its alias shows the one catalog entry, not a second raw option", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, undefined, undefined, undefined, ["claude"])];
+  assert.equal(wizard.entry(named, "claude")?.id, "claude-code");
+  assert.equal(wizard.entry(named, "claude-code")?.id, "claude-code");
+  assert.equal(wizard.entry(named, "gemini"), undefined);
+  assert.equal(wizard.entry(null, "claude"), undefined);
+  const team = { master: "claude", master_tools: true, sub_harnesses: [{ harness: "claude", agents: 1, tools: true }], min_agents: 1, max_agents: 2 };
+  const html = renderToStaticMarkup(createElement(TeamEditor, { team, harnesses: named, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.equal(html.match(/<option value="claude">/g), null);
+  assert.equal(html.match(/<option value="claude-code" selected="">Claude Code<\/option>/g)?.length, 2);
+});

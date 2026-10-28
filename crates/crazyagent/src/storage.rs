@@ -936,6 +936,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
@@ -1548,6 +1549,12 @@ fn execute(
     }
 }
 
+/// Records a new project and clears any plugin rows a prior project of the same id left
+/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
+/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
+/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
+/// or Rejected when the id is already in use.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -1573,6 +1580,7 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    plugins::remove_project(tx, project_id)?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
@@ -2412,6 +2420,18 @@ fn owner_read(
                 .map(|path| path.display().to_string())
                 .collect(),
         },
+        OwnerRead::ProjectAgentPolicy { project_id } => {
+            let setup = crate::project_setup::load_setup(&tx, project_id)?
+                .ok_or_else(|| error("invalid_project"))?;
+            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+                .map_err(|_| error("agent_policy_unreadable"))?;
+            OwnerData::ProjectAgentPolicy {
+                project_id: project_id.clone(),
+                policy: crate::sandbox::policy::load(&tx, project_id.as_str())
+                    .map_err(error)?
+                    .view(&setup.project_folder(), &homes),
+            }
+        }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?
@@ -2478,9 +2498,10 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
-        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
-            schedule: crate::scheduling::load(&tx)?,
-        },
+        OwnerRead::AccountSchedule { after } => {
+            let (schedule, next) = crate::scheduling::load_page(&tx, after.as_ref())?;
+            OwnerData::AccountSchedule { schedule, next }
+        }
         OwnerRead::AccountRanking => OwnerData::AccountRanking {
             pools: crate::scheduling::ranking(
                 &tx,

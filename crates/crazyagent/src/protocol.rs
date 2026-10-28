@@ -19,6 +19,18 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+/// True when the text is exactly one plain path component on this platform, so
+/// a folder joined with it gets a child, never itself, its parent or another
+/// root: not empty, `.`, `..`, a separator, a root or a Windows drive like `c:`.
+/// Input: the text. Output: whether it names one child folder.
+pub(crate) fn single_component(text: &str) -> bool {
+    let mut parts = std::path::Path::new(text).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(text)
+    )
+}
+
 fn validate_identity(value: &str) -> Result<(), ProtocolError> {
     if value.is_empty()
         || value.len() > 128
@@ -26,6 +38,7 @@ fn validate_identity(value: &str) -> Result<(), ProtocolError> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
         || value.contains("..")
+        || !single_component(value)
     {
         return Err(ProtocolError(
             "identity must be 1..128 safe ASCII bytes".into(),
@@ -509,6 +522,33 @@ mod tests {
         assert!(ProjectId::new("../secret").is_err());
         assert!(ProjectId::new("a".repeat(129)).is_err());
         assert!(serde_json::from_str::<SessionId>("\"x y\"").is_err());
+    }
+
+    #[test]
+    fn a_lone_dot_is_not_an_identity() {
+        assert!(ProjectId::new(".").is_err());
+        assert!(serde_json::from_str::<ProjectId>("\".\"").is_err());
+        assert!(ProjectId::new("v1.2").is_ok());
+    }
+
+    #[test]
+    fn only_one_plain_path_component_counts_as_one() {
+        for text in ["", ".", "..", "a/b", "/a", "a/", "./a", "a/."] {
+            assert!(!single_component(text), "{text}");
+        }
+        for text in ["a", "v1.2", "a..b", "owner:abc"] {
+            assert!(single_component(text), "{text}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_prefix_is_not_an_identity() {
+        for text in ["c:", "c:x", "z:"] {
+            assert!(!single_component(text), "{text}");
+            assert!(ProjectId::new(text).is_err(), "{text}");
+        }
+        assert!(ClientId::new("owner:abc").is_ok());
     }
 
     #[test]

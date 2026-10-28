@@ -161,7 +161,7 @@ test("sign-in stages come from real reducer states, never from a reply the reduc
   assert.deepEqual(signInStage(expired, "chatgpt"), { kind: "failed", text: "This code expired.", hint: "expired" });
   assert.deepEqual(signInStage(answered({ phase: "unavailable", challenge: null, code: null }), "claude").hint, "missing");
   assert.deepEqual(signInFailure("native_auth_some_new_code", "chatgpt"), { text: "Sign-in didn't finish. Try again. (native_auth_some_new_code)", hint: "retry" });
-  const closing = "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.";
+  const closing = "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.";
   assert.deepEqual(signInStage(answered({ phase: "uncertain", challenge: null, code: "native_auth_recovery_required" }), "claude"),
     { kind: "failed", text: closing, hint: "check" });
   assert.deepEqual(signInFailure("native_auth_recovery_required", "claude"), { text: closing, hint: "retry" });

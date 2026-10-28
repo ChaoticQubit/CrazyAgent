@@ -206,6 +206,7 @@ impl OwnerRuntimeHandle {
             &launch.home_dir,
             &launch.executable,
             &prepared.attempt.connection.endpoint,
+            &prepared.agent_policy,
         )?;
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self

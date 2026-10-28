@@ -101,6 +101,8 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
+  assert.equal(client.changesRefusal({ code: "changes_bare_repository" }), "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.");
+  assert.equal(client.changesRefusal({ code: "changes_link_outside" }), "These changes add a link that points outside the project or into an agent's folder. Ask the agent to remove it.");
   assert.equal(client.changesRefusal({ code: "changes_message_invalid" }), "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
   assert.equal(client.changesRefusal({ code: "changes_master_tools_off" }), "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.");
@@ -149,8 +151,22 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.doesNotMatch(html, /Write a commit message/);
   assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
   const blank = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "" }), pending: false, onCancel() {}, onAccept() {} }));
-  assert.match(blank, /Write a commit message of up to 4096 bytes to accept\./);
+  assert.match(blank, /Write a commit message of up to 4096 bytes, with no hidden characters, to accept\./);
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
+});
+
+test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
+  assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
+  assert.equal(model.commitMessage("Zero\u200bwidth"), null);
+  assert.equal(model.commitMessage("Ship it \u{1f468}\u200d\u{1f4bb}"), "Ship it \u{1f468}\u200d\u{1f4bb}");
+  const hidden = set({ message: "Formats changed files.\u{e0041}\u{e0042}" });
+  const html = renderToStaticMarkup(createElement(view.AcceptDialog, { set: hidden, pending: false, onCancel() {}, onAccept() {} }));
+  assert.match(html, /<textarea[^>]*>Formats changed files\.\\u\{e0041\}\\u\{e0042\}<\/textarea>/);
+  assert.doesNotMatch(html, /[\u{e0000}-\u{e0fff}]/u);
+  assert.match(html, /The proposed message held characters you cannot see\. They are shown as escapes: check it before you accept\./);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
+  const plain = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "Add a file" }), pending: false, onCancel() {}, onAccept() {} }));
+  assert.doesNotMatch(plain, /characters you cannot see/);
 });
 
 test("a set merged but not yet handed to its agent says so and can be asked again or discarded", () => {

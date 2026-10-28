@@ -1,5 +1,6 @@
 use super::*;
-use crate::agent_home::{PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+pub use crate::instruction_files::{Record as InstructionRecord, Settings as InstructionSettings};
 use crate::protocol::encode_frame;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub const PROCESS_CODES: &[&str] = &[
     "agent_instructions_too_large",
     "agent_instructions_unreadable",
     "agent_instructions_unsafe",
+    "instruction_settings_invalid",
+    "instruction_settings_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
@@ -62,6 +65,13 @@ enum Action {
         project: ProjectId,
         agent: Option<i64>,
     },
+    Settings {
+        project: ProjectId,
+    },
+    SaveSettings {
+        project: ProjectId,
+        settings: InstructionSettings,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -86,16 +96,26 @@ enum Reply {
         harness: String,
         launched: bool,
         skills: Vec<String>,
+        sessions: u32,
+        loaded: Vec<LoadedFile>,
+        skills_used: Vec<String>,
+        files: Vec<InstructionRecord>,
         bytes: u32,
+    },
+    Settings {
+        settings: InstructionSettings,
     },
     Rejected {
         code: String,
     },
 }
 
-/// What one team agent received at its last launch, read back from its private home: the
-/// agent id, its harness, whether it has launched, the text of its harness's instruction
-/// file (empty when none was given) and the names of the skills installed for it.
+/// What one team agent received at its last launch: the agent id, its harness, whether it
+/// has launched and the text of its harness's instruction file (empty when none was given),
+/// read back from its private home, then the engine's own records, kept outside that home,
+/// of the names of the skills installed for it and of the instruction files it found; then
+/// what its harness reported in its own session records: how many were read, the
+/// instruction files it loaded and the skills it invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentInstructions {
@@ -104,6 +124,10 @@ pub struct AgentInstructions {
     pub launched: bool,
     pub text: String,
     pub skills: Vec<String>,
+    pub sessions: u32,
+    pub loaded: Vec<LoadedFile>,
+    pub skills_used: Vec<String>,
+    pub files: Vec<InstructionRecord>,
 }
 
 /// What a saved instructions text comes to: the bytes of app and project instructions the
@@ -139,6 +163,7 @@ enum Answer {
     Text(String),
     Saved(ProcessSaved),
     Agent(AgentInstructions),
+    Settings(InstructionSettings),
 }
 
 fn unknown() -> EngineError {
@@ -210,16 +235,56 @@ impl OwnerClient {
                     harness,
                     launched,
                     skills,
+                    sessions,
+                    loaded,
+                    skills_used,
+                    files,
                     ..
                 },
                 Some(text),
-            ) => Ok(AgentInstructions {
+            ) if files.len() <= crate::instruction_files::FILES_MAX => Ok(AgentInstructions {
                 agent,
                 harness,
                 launched,
                 text,
                 skills,
+                sessions,
+                loaded,
+                skills_used,
+                files,
             }),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads one project's agent instruction settings: which instruction files its agents
+    /// get and whether headless Claude runs keep their transcript. Input: the project.
+    /// Output: the settings, the defaults when the owner never changed them.
+    pub async fn instruction_settings(
+        &self,
+        project: ProjectId,
+    ) -> Result<InstructionSettings, EngineError> {
+        self.process_settings_reply(Action::Settings { project })
+            .await
+    }
+
+    /// Stores one project's agent instruction settings whole; agents launched after this
+    /// follow them. Inputs: the project and the settings. Output: the settings as stored.
+    pub async fn save_instruction_settings(
+        &self,
+        project: ProjectId,
+        settings: InstructionSettings,
+    ) -> Result<InstructionSettings, EngineError> {
+        self.process_settings_reply(Action::SaveSettings { project, settings })
+            .await
+    }
+
+    async fn process_settings_reply(
+        &self,
+        action: Action,
+    ) -> Result<InstructionSettings, EngineError> {
+        match self.process_exchange(action, None).await? {
+            (Reply::Settings { settings }, None) => Ok(settings),
             _ => Err(unknown()),
         }
     }
@@ -278,6 +343,10 @@ impl OwnerClient {
                     harness,
                     launched,
                     skills,
+                    sessions,
+                    loaded,
+                    skills_used,
+                    files,
                     bytes,
                 } => {
                     let text = read_payload(&mut stream, bytes, PROCESS_BYTES_MAX)
@@ -291,6 +360,10 @@ impl OwnerClient {
                         harness,
                         launched,
                         skills,
+                        sessions,
+                        loaded,
+                        skills_used,
+                        files,
                         bytes,
                     };
                     Ok((reply, Some(text)))
@@ -370,10 +443,15 @@ pub(super) async fn serve(
                 harness: view.harness,
                 launched: view.launched,
                 skills: view.skills,
+                sessions: view.sessions,
+                loaded: view.loaded,
+                skills_used: view.skills_used,
+                files: view.files,
                 bytes: view.text.len() as u32,
             };
             (reply, Some(view.text))
         }
+        Ok(Answer::Settings(settings)) => (Reply::Settings { settings }, None),
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -436,6 +514,12 @@ async fn handle(
     tokio::task::spawn_blocking(move || match action {
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
+        }
+        Action::Settings { project } if text.is_none() => {
+            instruction_settings(&root, &project, None).map(Answer::Settings)
+        }
+        Action::SaveSettings { project, settings } if text.is_none() => {
+            instruction_settings(&root, &project, Some(settings)).map(Answer::Settings)
         }
         action => {
             let saved = match (&action, &text) {
@@ -502,10 +586,8 @@ fn run(
 /// lists.
 const SAVED_PROJECTS_MAX: i64 = 200;
 
-const _: () = assert!(
-    PROCESS_BYTES_MAX <= u32::MAX as usize
-        && super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize
-);
+const _: () = assert!(PROCESS_BYTES_MAX <= u32::MAX as usize);
+const _: () = assert!(super::master_host_launch::CLAUDE_PROCESS_BYTES_MAX <= u32::MAX as usize);
 
 /// Measures what the owner's instructions come to after a save that landed, from the text
 /// just saved: the app and project text the project's agents now receive, the largest
@@ -562,8 +644,10 @@ fn project_texts(root: &Path) -> Vec<String> {
 }
 
 /// Reads what one team agent of a project received at its last launch from its private
-/// home under `<root>/team`. Inputs: the engine root, the project and the agent id, none
-/// for the project's newest master. Output: the view, or a plain code.
+/// home under `<root>/team`, the engine's own instruction files record, and what its harness
+/// reported loading and invoking in its own session records there. Inputs: the engine root,
+/// the project and the agent id, none for the project's newest master. Output: the view,
+/// or a plain code.
 fn agent_instructions(
     root: &Path,
     project: &ProjectId,
@@ -601,14 +685,84 @@ fn agent_instructions(
     let received =
         crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
     let launched = received.is_some();
+    let recorded = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+    let (skills, files) = match launched {
+        true => (
+            crate::agent_home::given_skills(root, &home).map_err(recorded)?,
+            crate::agent_home::given_files(root, &home).map_err(recorded)?,
+        ),
+        false => (Vec::new(), Vec::new()),
+    };
     let received = received.unwrap_or_default();
+    let seen = match launched {
+        true => crate::agent_home::observed(&home, kind),
+        false => crate::agent_home::Observed::default(),
+    };
     Ok(AgentInstructions {
         agent: id,
         harness,
         launched,
         text: received.text,
-        skills: received.skills,
+        skills,
+        sessions: u32::try_from(seen.records).map_err(|_| failure("process_reply_bounds"))?,
+        loaded: seen.loaded,
+        skills_used: seen.used,
+        files,
     })
+}
+
+/// Reads one set-up project's agent instruction settings, or stores new ones whole first.
+/// The setup check, the save and the read back run in one transaction, taken for writing
+/// up front on a save, so no other save or project removal lands between them.
+/// Inputs: the engine root, the project and the settings to store, none to only read.
+/// Output: the settings as stored, `process_project_unknown` for a project with no setup,
+/// or a plain code.
+fn instruction_settings(
+    root: &Path,
+    project: &ProjectId,
+    save: Option<InstructionSettings>,
+) -> Result<InstructionSettings, EngineError> {
+    let unavailable = |_| failure("instruction_settings_unavailable");
+    let mut connection = match save {
+        None => read_only(root)?,
+        Some(_) => {
+            let connection = rusqlite::Connection::open_with_flags(
+                root.join("engine.db"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+            .map_err(unavailable)?;
+            connection
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(unavailable)?;
+            connection
+        }
+    };
+    let behavior = match save {
+        None => rusqlite::TransactionBehavior::Deferred,
+        Some(_) => rusqlite::TransactionBehavior::Immediate,
+    };
+    let tx = connection
+        .transaction_with_behavior(behavior)
+        .map_err(unavailable)?;
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_setups WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !known {
+        return Err(failure("process_project_unknown"));
+    }
+    if let Some(settings) = save {
+        crate::instruction_files::save(&tx, project, settings).map_err(unavailable)?;
+    }
+    let stored = crate::instruction_files::load(&tx, project).map_err(failure)?;
+    assert!(save.is_none_or(|saved| saved == stored));
+    tx.commit().map_err(unavailable)?;
+    Ok(stored)
 }
 
 fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {

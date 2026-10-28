@@ -1,6 +1,8 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES, ProcessSaved};
+use crazyagent::engine::owner::{
+    AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessSaved,
+};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -101,6 +103,41 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .agent_instructions(project, agent)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's agent instruction settings, run without the bridge lock.
+    /// Input: the project id. Output: the settings, the defaults when never changed.
+    pub fn instruction_settings(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .instruction_settings(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Stores one project's agent instruction settings whole, run without the bridge lock.
+    /// Inputs: the project id and the settings. Output: the settings as stored.
+    pub fn save_instruction_settings(
+        &self,
+        project_id: String,
+        settings: InstructionSettings,
+    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .save_instruction_settings(project, settings)
                 .await
                 .map_err(process_error)
         }))

@@ -15,6 +15,7 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const CHANGES_CODES: &[&str] = &[
     "changes_agent_busy",
     "changes_agent_has_pending",
+    "changes_bare_repository",
     "changes_branch_moved",
     "changes_conflict",
     "changes_detached_head",
@@ -22,6 +23,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_git_failed",
     "changes_git_unsupported",
     "changes_ignored_files",
+    "changes_link_outside",
     "changes_master_closed",
     "changes_master_not_started",
     "changes_master_tools_off",

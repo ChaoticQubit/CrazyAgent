@@ -148,11 +148,11 @@ export function conflictNote(set: ChangeSet): string | null {
 }
 
 /** The owner's edited commit message as Accept sends it: line ends made \n, trimmed.
- * Input: the editor text. Output: the message, or null when it is empty or longer than
- * the engine takes. */
+ * Input: the editor text. Output: the message, or null when it is empty, longer than the
+ * engine takes or holds a character displayText would show as an escape. */
 export function commitMessage(text: string): string | null {
   const message = text.replace(/\r\n/g, "\n").trim();
-  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX ? message : null;
+  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX && displayText(message) === message ? message : null;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own
@@ -179,4 +179,18 @@ export function fileMarks(file: ChangedFile): string[] {
  * codes, become visible escapes; newlines and tabs stay. Input: the text. Output: the text. */
 export function diffText(text: string): string {
   return displayText(text);
+}
+
+/** Counts the change sets waiting for the owner: ready to review or conflicting with their
+ * branch. One its agent is updating waits on the agent instead. Input: the change sets.
+ * Output: the count. */
+export function waitingCount(sets: readonly ChangeSet[]): number {
+  return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
+}
+
+/** The line that tells the owner change sets wait in Changes. Input: the count. Output: the
+ * line, or null when none wait. */
+export function waitingLine(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1 ? "1 change set is waiting for you in Changes" : `${count} change sets are waiting for you in Changes`;
 }

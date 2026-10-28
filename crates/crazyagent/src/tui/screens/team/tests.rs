@@ -528,14 +528,17 @@ fn a_rejected_attach_says_not_ready_and_gives_the_keys_back_to_the_tree() {
         format!("{:<43}", "This engine cannot stream agent terminals")
     );
     assert_eq!(chars(&rows[5], 34, 77), format!("{:<43}", "yet."));
-    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
-    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
+    assert!(rows[23].contains("Ctrl-] Back to the team"), "{}", rows[23]);
     shell.key(Key::Char('x'));
     assert!(
         requests(&mut shell)
             .iter()
             .all(|sent| input(sent).is_none())
     );
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
+    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
 }
 
 #[test]
@@ -641,8 +644,7 @@ fn an_ended_terminal_keeps_its_last_screen_says_the_run_finished_and_takes_no_ke
     assert_eq!(pane_row(&rows, 4), padded("ok"));
     assert_eq!(pane_row(&rows, 19), padded("This run finished."));
     assert_eq!(pane_row(&rows, 20), padded("Its last screen stays here."));
-    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
-    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
+    assert!(rows[23].contains("Ctrl-] Back to the team"), "{}", rows[23]);
     for key in [Key::Char('x'), Key::Tab, Key::Char('y')] {
         shell.key(key);
     }
@@ -650,6 +652,10 @@ fn an_ended_terminal_keeps_its_last_screen_says_the_run_finished_and_takes_no_ke
         requests(&mut shell).is_empty(),
         "no key reaches a terminal that ended"
     );
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Enter Open"), "{}", rows[23]);
+    assert!(!rows[23].contains("Tab Terminal"), "{}", rows[23]);
 }
 
 #[test]
@@ -706,7 +712,7 @@ fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     shell.key(Key::Char('x'));
     assert!(
         requests(&mut shell).is_empty(),
-        "keys go to the tree, not the stopped agent"
+        "keys typed after the stop never reach the stopped agent"
     );
     let rows = render(&mut shell);
     assert!(chars(&rows[3], 2, 32).contains("Master"), "{}", rows[3]);
@@ -714,6 +720,7 @@ fn a_team_read_showing_the_agent_stopped_detaches_and_keeps_the_last_screen() {
     assert_eq!(pane_row(&rows, 3), padded("$ make"));
     assert_eq!(pane_row(&rows, 19), padded("This agent has stopped."));
 
+    shell.key(LEADER);
     shell.key(Key::Enter);
     assert!(
         requests(&mut shell).is_empty(),
@@ -760,10 +767,13 @@ fn a_terminal_lost_with_the_engine_opens_again_once_the_engine_is_back() {
     assert_eq!(pane_row(&rows, 3), padded("after restart"));
     assert_eq!(pane_row(&rows, 19), padded(""));
     assert_eq!(pane_row(&rows, 20), padded(""));
-    shell.key(Key::Tab);
     shell.key(Key::Char('x'));
     let sent = requests(&mut shell);
-    assert_eq!(input(&sent[0]), Some(("team-1", &b"x"[..])));
+    assert_eq!(
+        input(&sent[0]),
+        Some(("team-1", &b"x"[..])),
+        "the terminal kept the keys while the engine was away"
+    );
 }
 
 fn attach_frames_after_reconnect(shell: &mut Shell) {
@@ -795,6 +805,271 @@ fn an_ended_terminal_is_not_opened_again_when_the_engine_comes_back() {
     assert!(matches!(&sent[0], Request::TeamGraph { .. }));
 }
 
+fn finished_team() -> crate::team::TeamStatus {
+    use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamStatus, TeamTask};
+    let agent = |id: i64, status: AgentStatus, finished: bool| TeamAgent {
+        id,
+        role: AgentRole::Sub,
+        label: AgentRole::Sub.agent_label(id),
+        harness: "codex".into(),
+        tools: true,
+        account: None,
+        worktree: None,
+        status,
+        status_label: status.label().into(),
+        task: None,
+        turns: 1,
+        problem: None,
+        process_group: None,
+        created_ms: 1,
+        heartbeat_ms: 1,
+        stopped_ms: None,
+        persona: None,
+        handle: None,
+        finished,
+        wakeable: false,
+        wake_note: None,
+    };
+    TeamStatus {
+        project_id: project(),
+        keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
+        live_switch: None,
+        paused: false,
+        live_master: None,
+        live_problem: None,
+        min_agents: 1,
+        max_agents: 5,
+        harnesses: Vec::new(),
+        agents: vec![
+            agent(2, AgentStatus::Working, false),
+            TeamAgent {
+                wakeable: true,
+                ..agent(3, AgentStatus::Stopped, true)
+            },
+            TeamAgent {
+                problem: Some("The agent process closed.".into()),
+                wake_note: Some(
+                    "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
+                        .into(),
+                ),
+                ..agent(4, AgentStatus::Failed, true)
+            },
+        ],
+        tasks: vec![TeamTask {
+            id: 9,
+            source: TaskSource::Master,
+            harness: "codex".into(),
+            tools: true,
+            prompt: "Write the docs\nwith care".into(),
+            status: TaskStatus::Done,
+            status_label: TaskStatus::Done.label().into(),
+            agent: Some(3),
+            attempts: 1,
+            result: Some("Done.".into()),
+            problem: None,
+            delivered: true,
+            output_bytes: 0,
+            created_ms: 1,
+            started_ms: Some(1),
+            finished_ms: Some(2),
+        }],
+        messages: Vec::new(),
+        plan: Vec::new(),
+        events: Default::default(),
+        partial: false,
+    }
+}
+
+fn setup_reply(
+    query: crate::project_setup::SetupQuery,
+    result: Result<crate::project_setup::SetupView, &str>,
+) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query,
+            result: result.map_err(str::to_owned),
+        },
+    ))))
+}
+
+#[test]
+fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    assert!(render(&mut shell).join("\n").contains("f Finished"));
+    shell.key(Key::Char('f'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::Setup(SetupQuery::Team { project: asked })] if *asked == project()),
+        "{sent:?}"
+    );
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Reading finished agents...")
+    );
+    let read = SetupQuery::Team { project: project() };
+    shell.arrive(setup_reply(
+        read.clone(),
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished (2)"), "{text}");
+    assert!(text.contains("Finished agents: Hide."), "{text}");
+    let failed = text
+        .find("> Sub-agent 4")
+        .expect("the newest finished agent is picked");
+    let stopped = text.find("  Sub-agent 3").expect("the older one follows");
+    assert!(failed < stopped, "{text}");
+    assert!(text.contains("The agent process closed."), "{text}");
+    assert!(text.contains("Last task: Write the docs"), "{text}");
+    assert!(
+        !text.contains("Sub-agent 2  "),
+        "a working agent is not finished: {text}"
+    );
+
+    assert!(
+        text.contains("Its worktree was cleaned up"),
+        "the engine's reason shows on the row: {text}"
+    );
+    shell.key(Key::Char('w'));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "an agent that cannot wake sends nothing"
+    );
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Sub-agent 4 cannot be woken."), "{text}");
+    shell.key(Key::Down);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::WakeAgent { project_id, agent },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    assert_eq!((project_id, *agent), (&project(), 3));
+    let woke = *generation;
+    shell.key(Key::Char('w'));
+    assert!(requests(&mut shell).is_empty(), "one wake at a time");
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::WakeAgent {
+                project_id: project(),
+                agent: 3,
+            },
+            generation: woke,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: "team_agent_running".to_owned(),
+            },
+        )),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Could not wake Sub-agent 3."), "{text}");
+    assert!(text.contains("It is already running."), "{text}");
+    assert!(
+        !text.contains("Waking Sub-agent 3."),
+        "a wake the engine refused is not reported as waking: {text}"
+    );
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused wake reads nothing again"
+    );
+
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { project_id, show },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    assert_eq!((project_id, *show), (&project(), true));
+    shell.key(Key::Char('h'));
+    assert!(requests(&mut shell).is_empty(), "one change at a time");
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Rejected {
+                code: "project_setup_missing".to_owned(),
+            },
+        )),
+    ));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused change reads nothing again"
+    );
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("Could not change where finished agents show."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Finished agents: Hide."),
+        "a refused change keeps the setting: {text}"
+    );
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { show: true, .. },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Applied,
+        )),
+    ));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(&sent[..], [Request::TeamGraph { project: asked }] if *asked == project()),
+        "{sent:?}"
+    );
+    assert!(
+        render(&mut shell)
+            .join("\n")
+            .contains("Finished agents: Show.")
+    );
+    shell.key(Key::Char('f'));
+    assert!(!render(&mut shell).join("\n").contains("Finished (2)"));
+}
+
 #[test]
 fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
     use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
@@ -811,6 +1086,12 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
     let status = TeamStatus {
         project_id: project(),
         keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
+        live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -837,6 +1118,9 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 stopped_ms: Some(2),
                 persona: None,
                 handle: None,
+                finished: false,
+                wakeable: false,
+                wake_note: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -864,6 +1148,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     };
     let mut shell = fresh(160, 40);
     shell.arrive(Arrival::TeamGraph {
@@ -943,10 +1228,20 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: true,
             text: "# Instructions from CrazyAgent\n\nUse tdd.\u{1b}[31m red\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            sessions: 1,
+            loaded: vec![crate::agent_home::LoadedFile {
+                name: "AGENTS.md".into(),
+                path: "/w/agent-5".into(),
+            }],
+            skills_used: vec!["tdd".into(), "systematic-debugging".into()],
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
     for shown in [
+        "Instructions: AGENTS.md",
+        "Skills used: tdd, systematic-debugging",
+        "AGENTS.md  /w/agent-5",
         "AGENTS.md",
         "50 bytes",
         "# Instructions from CrazyAgent",
@@ -1012,6 +1307,10 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
@@ -1056,12 +1355,21 @@ fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
             launched: true,
             text,
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }),
     ));
     let screen = render(&mut shell).join("\n");
     assert!(
         screen.contains("RULE-01") && !screen.contains("RULE-40"),
         "{screen}"
+    );
+    assert!(
+        screen.contains("Instructions: not reported yet")
+            && screen.contains("Skills used: not reported yet"),
+        "a launched agent whose harness wrote no session record says so\n{screen}"
     );
     for _ in 0..3 {
         shell.key(Key::PageDown);
@@ -1159,9 +1467,23 @@ fn switch_read(request: &Request) -> bool {
 }
 
 fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
+    switched(on, problem, None)
+}
+
+fn switched(
+    on: Option<bool>,
+    problem: Option<&str>,
+    live_switch: Option<crate::team::SessionSwitch>,
+) -> Arrival {
     let status = crate::team::TeamStatus {
         project_id: project(),
         keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
+        live_switch,
         paused: false,
         live_master: on,
         live_problem: problem.map(str::to_owned),
@@ -1173,6 +1495,7 @@ fn switch(on: Option<bool>, problem: Option<&str>) -> Arrival {
         messages: Vec::new(),
         plan: Vec::new(),
         events: crate::team::events::EventsView::default(),
+        partial: false,
     };
     Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Setup(Box::new(
         crate::tui::client::SetupEvent {
@@ -1416,6 +1739,60 @@ fn a_failed_switch_read_never_starts_the_live_master() {
         rows[2].contains("Live master stopped."),
         "a failed read keeps the switch it had: {}",
         rows[2]
+    );
+}
+
+#[test]
+fn keys_typed_after_the_master_terminal_closes_never_turn_the_live_master_off() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    shell.key(Key::Char('y'));
+    let sent = requests(&mut shell);
+    assert_eq!(input(&sent[0]), Some(("team-1", &b"y"[..])));
+
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Closed {
+            reason: "owner_socket_replaced".into(),
+        },
+    });
+    for character in "es, ship it".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Esc);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.is_empty(),
+        "keys typed after the close reach neither the terminal nor the master's switch: {sent:?}"
+    );
+    let rows = render(&mut shell);
+    assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
+    assert!(rows[2].contains("s Stop live master"), "{}", rows[2]);
+    assert!(rows[23].contains("Ctrl-] Leave terminal"), "{}", rows[23]);
+
+    shell.key(LEADER);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("s Stop live master"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter()
+            .any(|request| live_master_change(request, false)),
+        "s still stops the live master once the owner left the terminal: {sent:?}"
     );
 }
 
@@ -1733,7 +2110,6 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
         if code.starts_with("cleanup_")
             && !code.ends_with("_bounds")
             && *code != "cleanup_request_invalid"
-            && *code != "cleanup_outcome_unknown"
         {
             assert_ne!(
                 super::cleanup::words(code),
@@ -1742,6 +2118,45 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
             );
         }
     }
+}
+
+#[test]
+fn a_removal_the_engine_could_not_confirm_says_so_and_asks_for_a_fresh_read() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let read = CleanupQuery::Finished { project: project() };
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(vec![finished(
+            3,
+            "Lin (@docs)",
+            2048,
+        )])),
+    ));
+    shell.key(Key::Char('y'));
+    let sent = cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        sent[0].clone(),
+        Err("cleanup_outcome_unknown".into()),
+    ));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Could not confirm what cleanup did.");
+    assert_eq!(
+        message.rest,
+        "The engine did not answer in time and may still be working. Press c to read the list again."
+    );
+
+    shell.key(Key::Char('c'));
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    shell.arrive(cleanup_reply(read, Err("cleanup_outcome_unknown".into())));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Could not read finished agents.");
+    assert_eq!(
+        message.rest,
+        "The engine did not answer in time and may still be working. Press c to read the list again."
+    );
 }
 
 #[test]
@@ -1755,4 +2170,124 @@ fn the_master_view_names_its_way_back_as_the_earlier_conversation() {
         rows[23]
     );
     assert!(!rows[23].contains("Esc Back"), "{}", rows[23]);
+}
+
+/// The master view's header says where the live session's master harness last switched and
+/// what the new harness got, next to the switch key, and keeps saying it after the owner
+/// turns the live master off.
+#[test]
+fn the_master_view_head_says_the_live_session_switched_harness() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    let switch = |mode| crate::team::SessionSwitch {
+        harness: "Claude Code".into(),
+        mode,
+        note: crate::master_sessions::switched_note("Claude Code", mode),
+    };
+    shell.arrive(switched(
+        Some(true),
+        None,
+        Some(switch(crate::team::SwitchMode::Carry)),
+    ));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!(
+            "{:<58}s Stop live master",
+            "Live master on. Switched to Claude Code, carried over."
+        )
+    );
+    shell.arrive(switched(
+        Some(true),
+        None,
+        Some(switch(crate::team::SwitchMode::Fresh)),
+    ));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("Live master on. Switched to Claude Code, started fresh."),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(turned(false, Ok(())));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!(
+            "{:<57}s Start live master",
+            "Live master stopped. Switched to Claude Code, started …"
+        )
+    );
+    shell.arrive(switch_off_unswitched());
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[2], 2, 78),
+        format!("{:<57}s Start live master", "Live master stopped.")
+    );
+}
+
+fn switch_off_unswitched() -> Arrival {
+    switched(Some(false), None, None)
+}
+
+#[test]
+fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
+    use crate::engine::owner::InstructionRecord;
+    use crate::instruction_files::State;
+    let ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    let record = |name: &str, bytes: u64, state: State| InstructionRecord {
+        name: name.into(),
+        bytes,
+        state,
+    };
+    let view = AgentInstructions {
+        agent: 5,
+        harness: "claude-code".into(),
+        launched: true,
+        text: "Use tdd.\n".into(),
+        skills: Vec::new(),
+        sessions: 0,
+        loaded: Vec::new(),
+        skills_used: Vec::new(),
+        files: vec![
+            record("CLAUDE.md", 1_229, State::Given),
+            record("AGENTS.md", 300, State::Same),
+            record("CLAUDE.local.md", 0, State::Unsafe),
+            record("~/.claude/CLAUDE.md", 40_000, State::TooLarge),
+        ],
+    };
+    let text = |view: AgentInstructions| -> String {
+        super::instruction_lines(&Load::Ready(Box::new(view)), 120, &ctx)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let shown = text(view.clone());
+    for line in [
+        "Instruction files",
+        "CLAUDE.md  1.2 KB, given",
+        "AGENTS.md  300 bytes, left out: the same text as a file above",
+        "CLAUDE.local.md  0 bytes, left out: a link or not a plain file",
+        "~/.claude/CLAUDE.md  39.1 KB, left out: larger than CrazyAgent gives",
+    ] {
+        assert!(shown.contains(line), "{line} missing in\n{shown}");
+    }
+    assert!(
+        shown.find("\nInstruction files\n").unwrap() < shown.find("\nSkills\n").unwrap(),
+        "{shown}"
+    );
+    let none = text(AgentInstructions {
+        files: Vec::new(),
+        ..view
+    });
+    assert!(
+        none.contains("No instruction files were found at its last launch."),
+        "{none}"
+    );
 }

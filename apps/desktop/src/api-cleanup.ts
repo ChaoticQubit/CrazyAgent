@@ -29,10 +29,13 @@ const REFUSALS: Record<string, string> = {
   cleanup_commits_unlanded: "An agent has commits that haven't landed. CrazyAgent kept it and stopped there.",
   cleanup_folder_failed: "The worktree is gone but CrazyAgent couldn't remove the agent's folder. Try again.",
   cleanup_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  cleanup_refs_unlanded: "An agent's working copy has a stash, branch or tag that isn't saved anywhere else. CrazyAgent kept it and stopped there.",
   cleanup_request_invalid: "The engine didn't accept this cleanup request. Reload the page and try again.",
   cleanup_unavailable: "Cleanup isn't available in this engine yet.",
   cleanup_worktree_dirty: "An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.",
   cleanup_worktree_invalid: "An agent's working copy isn't where the engine recorded it. CrazyAgent kept it and stopped there.",
+  cleanup_worktree_leftover: "Git removed an agent's worktree but left files CrazyAgent couldn't delete. CrazyAgent kept it and stopped there.",
+  cleanup_worktree_unreadable: "Git couldn't read an agent's working copy, for example because of a leftover lock file. CrazyAgent kept it and stopped there.",
 };
 
 /** The refusal codes of the cleanup protocol that have their own sentence. */

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
-import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, type EngineVersions } from "./api";
+import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
@@ -170,6 +170,10 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
       {session.profileCheck && <Banner action={<Button size="small" pending={session.profileCheck.busy} pendingLabel="Checking..."
         onClick={() => void session.checkProfile()}>Check again</Button>}>
         {PROFILE_UNCONFIRMED_LINE}
+      </Banner>}
+      {session.stuckSignIn && <Banner action={<Button size="small" pending={session.stuckSignIn.busy} pendingLabel="Clearing..."
+        onClick={() => void session.clearStuckSignIn()}>Clear stuck sign-in</Button>}>
+        {STUCK_SIGN_IN_LINE}
       </Banner>}
       <Screen route={route} session={session} alerts={alerts} />
       <GoToLayer projects={projects ?? []} />

@@ -566,10 +566,12 @@ impl NativeProfileCustody {
     }
 
     /// Takes one use of a native profile like [`Self::acquire_use`], with a chosen hold on
-    /// the account's renewal lock for a check: `None` takes none, for the engine admitting a
-    /// check that only its custodian runs, and `Some(wait)` waits up to `wait` for a running
-    /// renewal to end. Inputs: the host, binding, operation, generation, purpose and that
-    /// choice. Output: the use, or `native_profile_in_use` while the lock stays busy.
+    /// the account's renewal lock for a sign-in, refresh, logout or check: `None` takes
+    /// none, for the engine admitting a custodian that holds it itself, and `Some(wait)`
+    /// waits up to `wait` for a running renewal to end, which may outlive its agent's lease.
+    /// An agent's execution never takes it. Inputs: the host, binding, operation,
+    /// generation, purpose and that choice. Output: the use, or `native_profile_in_use`
+    /// while the lock stays busy.
     pub(crate) fn acquire_use_within(
         &mut self,
         host: &HostStamp,
@@ -615,7 +617,7 @@ impl NativeProfileCustody {
         };
         guard.revalidate(host, binding, operation_id, generation, purpose)?;
         purpose.lock(&guard.manifest.file)?;
-        if purpose == NativeProfileUsePurpose::Check
+        if purpose != NativeProfileUsePurpose::Execution
             && let Some(wait) = renewal_wait
         {
             let held = renewal::hold(&guard.profile.file, wait).map_err(|error| {

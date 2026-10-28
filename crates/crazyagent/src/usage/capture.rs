@@ -16,6 +16,7 @@ const WEEK_MINUTES: u64 = 7 * 24 * 60;
 const NAME_BYTES_MAX: usize = 128;
 const AGENT_BYTES_MAX: usize = NAME_BYTES_MAX + 64;
 const WALK_DEPTH_MAX: usize = 3;
+const ENTRIES_PER_SCAN_MAX: usize = FILES_PER_SCAN_MAX * 64;
 const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 const FINISHED_RUNS_PER_SCAN: i64 = 64;
 const LINE_TOKENS_MAX: u64 = 1_000_000_000;
@@ -291,17 +292,27 @@ fn codex_line(
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
-/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`.
+/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
+/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all, entering the most
+/// recently changed folder first, and keeps only the newest records it saw, so a home an
+/// agent filled costs a bounded scan that leaves out its least recently changed folders.
 /// Inputs: the home and the format. Output: the paths.
-fn records(home: &Path, format: Format) -> Vec<PathBuf> {
+pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let root = match format {
         Format::Claude => home.join("projects"),
         Format::Codex => home.join("sessions"),
     };
-    let mut found = Vec::new();
+    let mut newest = std::collections::BinaryHeap::with_capacity(FILES_PER_SCAN_MAX + 1);
     let mut folders = vec![(root, 0)];
     let mut visited = 0;
-    while let Some((folder, level)) = folders.pop() {
+    let mut examined = 0;
+    let changed = |entry: &std::fs::DirEntry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    };
+    'walk: while let Some((folder, level)) = folders.pop() {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
             break;
@@ -309,33 +320,42 @@ fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
         };
-        for entry in entries.flatten().take(FILES_PER_SCAN_MAX * 4) {
+        let mut below = Vec::new();
+        for entry in entries.flatten() {
+            if examined == ENTRIES_PER_SCAN_MAX {
+                break 'walk;
+            }
+            examined += 1;
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if kind.is_dir() && level < WALK_DEPTH_MAX {
-                folders.push((entry.path(), level + 1));
+                below.push((changed(&entry), entry.path()));
             } else if kind.is_file()
                 && name.ends_with(".jsonl")
                 && (format == Format::Claude || name.starts_with("rollout-"))
             {
-                let changed = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                found.push((std::cmp::Reverse(changed), entry.path()));
+                newest.push((std::cmp::Reverse(changed(&entry)), entry.path()));
+                if newest.len() > FILES_PER_SCAN_MAX {
+                    newest.pop();
+                }
             }
         }
+        below.sort_unstable();
+        folders.extend(below.into_iter().map(|(_, path)| (path, level + 1)));
     }
-    found.sort();
-    found.truncate(FILES_PER_SCAN_MAX);
-    found.into_iter().map(|(_, path)| path).collect()
+    assert!(examined <= ENTRIES_PER_SCAN_MAX && newest.len() <= FILES_PER_SCAN_MAX);
+    newest
+        .into_sorted_vec()
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
 }
 
 #[cfg(unix)]
-fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
+pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     use std::os::unix::fs::MetadataExt;
     let file = rustix::fs::open(
         path,
@@ -354,7 +374,7 @@ fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
 }
 
 #[cfg(not(unix))]
-fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
+pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
@@ -468,7 +488,8 @@ fn stored_progress(db: &Connection, key: &str) -> Result<Progress, EngineError> 
 
 /// Counts what every session record in one agent home gained since the last scan and adds
 /// it to the run's attribution in the hour of `now_ms`; Codex limit windows the records
-/// carry update the account's limits. Every record is read before the store's write lock
+/// carry update the account's limits, from the most recently changed record that has one.
+/// Every record is read before the store's write lock
 /// is taken, and a record whose stored progress moved meanwhile is left to the scan that
 /// moved it, so no file read holds the lock and no line counts twice.
 /// Inputs: the store, the home, its format, the attribution and the time.
@@ -510,7 +531,7 @@ pub fn scan_home(
         .map_err(storage)?;
         add_tokens(&tx, hour_ms, attribution, &session, growth)?;
         added = added.plus(growth);
-        limits = observed.or(limits);
+        limits = limits.or(observed);
     }
     if let (Some(observation), Some(account)) = (limits, &attribution.account) {
         record_observation(&tx, account, &observation, LimitSource::Transcript, now_ms)?;

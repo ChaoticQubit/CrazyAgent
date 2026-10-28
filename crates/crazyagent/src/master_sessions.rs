@@ -1,9 +1,9 @@
 use crate::engine::EngineError;
 use crate::master_session::MasterSessionPhase;
 use crate::protocol::{Cursor, ProjectId, SessionId};
-use crate::team::AgentRole;
 use crate::team::master::SessionConversation;
 use crate::team::names;
+use crate::team::{AgentRole, SwitchMode};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -22,6 +22,18 @@ pub const STATE_BYTES_MAX: usize = 3072;
 pub const SUMMARY_BYTES_MAX: usize = 8192;
 /// The most rows of each kind the state section lists.
 pub const STATE_ROWS_MAX: usize = 12;
+/// The most bytes of earlier turns a master harness switch hands to the new harness.
+pub const HANDOFF_BYTES_MAX: usize = 8192;
+/// The line a switch handoff ends its turns with when older turns did not fit.
+pub const HANDOFF_OMITTED: &str = "(Older turns were left out to fit.)";
+/// The most bytes one turn takes in a switch handoff, so the newest turn always fits.
+pub const HANDOFF_TURN_BYTES_MAX: usize = HANDOFF_BYTES_MAX / 4;
+/// The line a handed-over turn shows where its earlier replies did not fit.
+pub const TURN_OMITTED: &str = "(Earlier replies in this turn were left out.)";
+/// The fewest bytes of room an older turn is cut into rather than left out.
+const HANDOFF_TURN_MIN_BYTES: usize = 160;
+/// The longest title a handoff part has, naming the conversation it comes from.
+const HANDOFF_TITLE_BYTES_MAX: usize = 128;
 
 const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
@@ -509,6 +521,22 @@ pub fn transcript_summary(
     project: &ProjectId,
     session: &SessionId,
 ) -> Result<Option<String>, EngineError> {
+    let entries = turn_entries(connection, project, session)?;
+    Ok(newest(
+        "Summary of this session's conversation so far, oldest first:",
+        "Summary of the newest turns of this session's conversation, oldest first:",
+        &entries,
+    ))
+}
+
+/// Reads a session's engine turns as one entry each, oldest first: the owner's message or
+/// the engine's line, then the reply or a no-reply line, each flattened and clipped.
+/// Takes the connection, project and session. Returns the entries of turns with text.
+fn turn_entries(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+) -> Result<Vec<String>, EngineError> {
     let mut statement = connection
         .prepare(
             "SELECT CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END,
@@ -529,7 +557,6 @@ pub fn transcript_summary(
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let header = "Summary of this session's conversation so far, oldest first:";
     let mut entries: Vec<String> = Vec::new();
     for (owner, engine, reply) in turns {
         let asked = match (owner, engine) {
@@ -549,11 +576,7 @@ pub fn transcript_summary(
         }
         entries.push(entry);
     }
-    Ok(newest(
-        header,
-        "Summary of the newest turns of this session's conversation, oldest first:",
-        &entries,
-    ))
+    Ok(entries)
 }
 
 /// Keeps the newest entries of a summary that fit `SUMMARY_BYTES_MAX`, oldest first under
@@ -626,7 +649,7 @@ pub fn resume_harness(
 ) -> Result<ResumePlan, EngineError> {
     let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
     if let Some(kept) = &kept
-        && kept.harness == harness
+        && crate::harnesses::same(&kept.harness, harness)
         && kept.connection == account
         && crate::harnesses::interactive::resumable(&kept.resume.id)
         && std::fs::symlink_metadata(&kept.resume.record).is_ok_and(|meta| meta.is_file())
@@ -686,6 +709,238 @@ pub fn fresh_harness(
     })
 }
 
+/// Tells which harness a session's conversation last ran on when the master about to start
+/// runs another: the target of its last applied switch (seen once, even before the new
+/// harness reports a conversation), else the kept conversation's, else, with engine turns,
+/// the last master's; aliases count as one. Takes the connection, project, session and the
+/// harness about to start. Returns the earlier harness, or None when unchanged or unknown.
+pub fn switched_from(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    harness: &str,
+) -> Result<Option<String>, EngineError> {
+    let switched: Option<String> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
+    let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
+    let earlier = match (switched, kept) {
+        (Some(switched), _) => Some(switched),
+        (None, Some(kept)) => Some(kept.harness),
+        (None, None) if turn_count(connection, session)? > 0 => connection
+            .query_row(
+                "SELECT CASE WHEN length(harness)<=64 THEN harness END FROM team_agents
+                 WHERE project=?1 AND role='master' ORDER BY id DESC LIMIT 1",
+                [project.as_str()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .flatten(),
+        (None, None) => None,
+    };
+    Ok(earlier.filter(|earlier| !crate::harnesses::same(earlier, harness)))
+}
+
+/// The display name of a harness: its catalog name, or the stored name the catalog does
+/// not know. Takes the stored name. Returns the name.
+pub fn harness_label(harness: &str) -> &str {
+    crate::harnesses::spec(harness).map_or(harness, |spec| spec.name)
+}
+
+/// The note a session's conversation shows where its master harness switched, read as a
+/// divider in the conversation: what the new harness was given under the owner's setting.
+/// Takes the new harness's display name and the mode. Returns the note.
+pub fn switched_note(to: &str, mode: SwitchMode) -> String {
+    match mode {
+        SwitchMode::Carry => format!(
+            "Switched to {to}. The conversation continues: {to} got its earlier turns, newest first, and the open tasks."
+        ),
+        SwitchMode::Fresh => format!(
+            "Switched to {to}. Started fresh: {to} did not get the earlier conversation, as the On harness switch setting asks."
+        ),
+    }
+}
+
+/// Builds the Carry over handoff the new master harness reads first: a line naming the
+/// switch, then one part per earlier conversation, the kept harness conversation first and
+/// the engine's master conversation second, each newest first within its share of
+/// `HANDOFF_BYTES_MAX`, then the open tasks. Takes the connection, project, session, the
+/// kept conversation and the earlier harness's display name. Returns the handoff.
+pub fn handoff(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    kept: Option<&SessionConversation>,
+    from: &str,
+) -> Result<String, EngineError> {
+    let mut parts: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(kept) =
+        kept.filter(|kept| kept.resume.id != crate::team::master::REFUSED_CONVERSATION)
+    {
+        let entries = record_turns(kept);
+        if !entries.is_empty() {
+            let label = harness_label(&kept.harness);
+            parts.push((
+                fit(
+                    format!("From the {label} conversation, newest first:"),
+                    HANDOFF_TITLE_BYTES_MAX,
+                ),
+                entries,
+            ));
+        }
+    }
+    let engine = turn_entries(connection, project, session)?;
+    if !engine.is_empty() {
+        parts.push((
+            "From CrazyAgent's master conversation, newest first:".to_owned(),
+            engine,
+        ));
+    }
+    let header = if parts.is_empty() {
+        format!(
+            "The owner switched this conversation's master from {from} to you. Its earlier turns could not be read."
+        )
+    } else {
+        format!(
+            "The owner switched this conversation's master from {from} to you. Its earlier turns, newest first:"
+        )
+    };
+    let mut text = fit(header, HANDOFF_BYTES_MAX / 4);
+    let mut left = HANDOFF_BYTES_MAX - text.len() - 2 * parts.len();
+    for (index, (title, entries)) in parts.iter().enumerate() {
+        let share = match parts.get(index + 1) {
+            Some((next_title, next)) => {
+                (left / 2).max(left.saturating_sub(part_bytes(next_title, next)))
+            }
+            None => left,
+        };
+        let part = handoff_part(title, entries, share);
+        left -= part.len();
+        text.push_str("\n\n");
+        text.push_str(&part);
+    }
+    assert!(text.len() <= HANDOFF_BYTES_MAX);
+    if let Some(state) = session_state(connection, project, session)? {
+        text.push_str("\n\n");
+        text.push_str(&state);
+    }
+    assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    Ok(text)
+}
+
+/// The room a handoff part needs to hand every entry over whole, its omitted line included.
+/// Takes the part's title and entries. Returns the size.
+fn part_bytes(title: &str, entries: &[String]) -> usize {
+    let room = title.len() + 2 + HANDOFF_OMITTED.len();
+    entries.iter().fold(room, |bytes, entry| {
+        bytes + 2 + entry.len().min(HANDOFF_TURN_BYTES_MAX)
+    })
+}
+
+/// One part of a switch handoff within `room` bytes: its title, then its entries newest
+/// first, each cut to `HANDOFF_TURN_BYTES_MAX` so the newest always fits, the one crossing
+/// the room cut to what is left, every cut ending in "...", and `HANDOFF_OMITTED` when any
+/// were cut or left out. Takes the title, entries oldest first and the room. Returns it.
+fn handoff_part(title: &str, entries: &[String], room: usize) -> String {
+    let budget = room - HANDOFF_OMITTED.len() - 2;
+    let mut text = title.to_owned();
+    let mut given = 0;
+    let mut cut = false;
+    for entry in entries.iter().rev() {
+        let entry = marked(entry, HANDOFF_TURN_BYTES_MAX);
+        let left = budget.saturating_sub(text.len() + 2);
+        let whole = entry.len() <= left;
+        if !whole && left < HANDOFF_TURN_MIN_BYTES {
+            break;
+        }
+        text.push_str("\n\n");
+        text.push_str(&marked(&entry, left));
+        given += 1;
+        if !whole {
+            cut = true;
+            break;
+        }
+    }
+    assert!(given > 0, "the newest turn of a part is always handed over");
+    if cut || given < entries.len() {
+        text.push_str("\n\n");
+        text.push_str(HANDOFF_OMITTED);
+    }
+    assert!(text.len() <= room);
+    text
+}
+
+/// Reads the conversation a session kept as one entry per turn, oldest first: what was typed
+/// to the master with the replies that followed it. Takes the kept conversation. Returns the
+/// entries, none when its record cannot be read.
+fn record_turns(kept: &SessionConversation) -> Vec<String> {
+    let messages =
+        crate::harnesses::transcript::conversation_messages(&kept.harness, &kept.resume.record);
+    let mut turns: Vec<(Option<String>, Vec<String>)> = Vec::new();
+    for (speaker, text) in &messages {
+        let Some(said) = flat(text, 600) else {
+            continue;
+        };
+        match (speaker, turns.last_mut()) {
+            (crate::harnesses::transcript::Speaker::Agent, Some((_, replies))) => {
+                replies.push(said);
+            }
+            (crate::harnesses::transcript::Speaker::Agent, None) => turns.push((None, vec![said])),
+            (crate::harnesses::transcript::Speaker::Input, _) => turns.push((Some(said), vec![])),
+        }
+    }
+    turns
+        .iter()
+        .map(|(input, replies)| bounded_turn(input.as_deref(), replies))
+        .collect()
+}
+
+/// One handed-over turn within `HANDOFF_TURN_BYTES_MAX`: what was typed, then its last
+/// replies that fit, with `TURN_OMITTED` where earlier replies were left out and the last
+/// reply cut with "..." when even it does not fit. Takes the typed input, if any, and the
+/// replies oldest first. Returns the turn's lines.
+fn bounded_turn(input: Option<&str>, replies: &[String]) -> String {
+    let head = input.map(|input| {
+        marked(
+            &format!("Typed to you: {input}"),
+            HANDOFF_TURN_BYTES_MAX / 2,
+        )
+    });
+    let room = HANDOFF_TURN_BYTES_MAX
+        - head.as_ref().map_or(0, |head| head.len() + 1)
+        - TURN_OMITTED.len()
+        - 1;
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0;
+    for reply in replies.iter().rev() {
+        let line = format!("You: {reply}");
+        if used + line.len() + 1 > room {
+            if kept.is_empty() {
+                kept.push(marked(&line, room - 1));
+            }
+            break;
+        }
+        used += line.len() + 1;
+        kept.push(line);
+    }
+    let mut lines: Vec<String> = head.into_iter().collect();
+    if kept.len() < replies.len() {
+        lines.push(TURN_OMITTED.to_owned());
+    }
+    lines.extend(kept.into_iter().rev());
+    let text = lines.join("\n");
+    assert!(text.len() <= HANDOFF_TURN_BYTES_MAX);
+    text
+}
+
 /// Tells whether a team agent is a stopped master of the project with its worktree still
 /// recorded, so it can start again in the home that keeps its harness conversations.
 /// Takes the connection, project and agent. Returns the answer.
@@ -734,6 +989,20 @@ pub fn flat(text: &str, max: usize) -> Option<String> {
     Some(kept)
 }
 
+/// Cuts a text to at most `max` bytes on a character boundary, ending a cut with "..." as
+/// `flat` marks one, so a handed-over turn never loses its end silently. Takes the text and
+/// the bound, over 3 when the text must be cut. Returns the text, whole when it fits.
+fn marked(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    assert!(max > 3);
+    let mut kept = fit(text.to_owned(), max - 3);
+    kept.push_str("...");
+    assert!(kept.len() <= max);
+    kept
+}
+
 /// Cuts a text to at most `max` bytes on a character boundary. Takes the text and bound.
 /// Returns the text, whole when it fits.
 fn fit(mut text: String, max: usize) -> String {
@@ -754,11 +1023,342 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 
 #[cfg(test)]
 mod tests {
-    use super::{LOST_NOTE, ResumePlan, clip, flat, resume_harness};
+    use super::{
+        HANDOFF_BYTES_MAX, HANDOFF_OMITTED, HANDOFF_TURN_BYTES_MAX, LOST_NOTE, ResumePlan,
+        STATE_BYTES_MAX, TURN_OMITTED, clip, flat, handoff, resume_harness, switched_from,
+    };
     use crate::harnesses::terminal_session::Resume;
     use crate::protocol::{ProjectId, SessionId};
     use crate::team::master::{SessionConversation, keep_conversation};
     use std::time::Duration;
+
+    /// A switch handoff gives the new harness the session's earlier turns newest first, as
+    /// many as fit its byte bound with a line saying older ones were left out, then the
+    /// session's open tasks; and the switch is seen only for another harness, never for an
+    /// alias of the one the conversation ran on.
+    #[test]
+    fn a_switch_handoff_is_newest_first_bounded_and_lists_open_tasks() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-switch").unwrap();
+        let id = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let mut lines = String::new();
+        for turn in 1..=30 {
+            let words = format!("turn {turn:02} ").repeat(60);
+            lines.push_str(
+                &serde_json::json!({"type": "user", "message": {"content": words}}).to_string(),
+            );
+            lines.push('\n');
+            lines.push_str(
+                &serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": format!("answer {turn:02}")}], "stop_reason": "end_turn"}})
+                    .to_string(),
+            );
+            lines.push('\n');
+        }
+        std::fs::write(&record, lines).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, session.as_str(), &kept).unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms)
+                 VALUES (?1,'owner','codex',0,'Write the release notes','queued',1)",
+                [project.as_str()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            switched_from(&connection, &project, &session, "claude").unwrap(),
+            None,
+            "an alias of the conversation's harness is no switch"
+        );
+        assert_eq!(
+            switched_from(&connection, &project, &session, "codex").unwrap(),
+            Some("claude-code".to_owned())
+        );
+
+        let text = handoff(&connection, &project, &session, Some(&kept), "Claude Code").unwrap();
+        assert!(
+            text.starts_with(
+                "The owner switched this conversation's master from Claude Code to you. Its earlier turns, newest first:"
+            ),
+            "{text}"
+        );
+        let newest = text
+            .find("answer 30")
+            .expect("the newest turn is handed over");
+        let older = text
+            .find("answer 29")
+            .expect("the next newest turn follows");
+        assert!(newest < older, "newest first: {text}");
+        assert!(!text.contains("answer 01"), "the oldest turn did not fit");
+        let turns_end = text.find(HANDOFF_OMITTED).expect("the cut is said");
+        assert!(turns_end <= HANDOFF_BYTES_MAX);
+        assert!(
+            text.contains("Open tasks:\n- Task 1 (codex, queued): Write the release notes"),
+            "{text}"
+        );
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
+
+    /// A tool-heavy newest turn, one typed input followed by many replies that together
+    /// exceed the whole handoff, is cut to fit, never dropped: the new harness gets that
+    /// turn's input and its last replies, a line saying earlier replies were left out, and
+    /// the older turns after it.
+    #[test]
+    fn a_long_newest_turn_is_cut_to_fit_the_handoff_not_dropped() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-switch").unwrap();
+        let id = "1f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let user = |text: &str| {
+            serde_json::json!({"type": "user", "message": {"content": text}}).to_string() + "\n"
+        };
+        let assistant = |text: &str| {
+            serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}})
+                .to_string()
+                + "\n"
+        };
+        let mut lines = String::new();
+        for turn in 1..=3 {
+            lines.push_str(&user(&format!("older {turn:02}")));
+            lines.push_str(&assistant(&format!("answer {turn:02}")));
+        }
+        lines.push_str(&user("implement the export"));
+        for reply in 1..=25 {
+            lines.push_str(&assistant(&format!("reply {reply:02} ").repeat(44)));
+        }
+        std::fs::write(&record, lines).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+
+        let text = handoff(&connection, &project, &session, Some(&kept), "Claude Code").unwrap();
+        let newest = text
+            .find("Typed to you: implement the export")
+            .expect("the newest turn's input is handed over");
+        let cut = text.find(TURN_OMITTED).expect("the cut replies are said");
+        let last = text
+            .find("You: reply 25 reply 25")
+            .expect("the newest turn's last reply is handed over");
+        let older = text
+            .find("Typed to you: older 03\nYou: answer 03")
+            .expect("the older turns follow");
+        assert!(newest < cut && cut < last && last < older, "{text}");
+        assert!(
+            !text.contains("reply 01"),
+            "the earliest replies did not fit"
+        );
+        assert!(
+            text.contains("Typed to you: older 01\nYou: answer 01"),
+            "every older turn fits: {text}"
+        );
+        assert!(!text.contains(HANDOFF_OMITTED), "{text}");
+        let turn = &text[newest..older];
+        assert!(turn.len() <= HANDOFF_TURN_BYTES_MAX + 2, "{}", turn.len());
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
+
+    /// A session with turns in both the kept harness conversation and the engine's master
+    /// conversation hands over each in its own part, newest first, so the newest engine
+    /// turns are never crowded out by a long harness conversation.
+    #[test]
+    fn a_switch_handoff_keeps_a_part_for_each_conversation_newest_first() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-parts").unwrap();
+        for turn in 1..=3_i64 {
+            let body = serde_json::json!({
+                "engine_request": {"line": format!("Check the build {turn:02}")},
+                "reply": {"text": format!("Build reply {turn:02}")},
+            });
+            connection
+                .execute(
+                    "INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'succeeded',?5)",
+                    rusqlite::params![
+                        session.as_str(),
+                        turn,
+                        format!("turn-{turn}"),
+                        1000 + turn,
+                        body.to_string()
+                    ],
+                )
+                .unwrap();
+        }
+        let id = "2f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        let mut lines = String::new();
+        for turn in 1..=20 {
+            let words = format!("turn {turn:02} ").repeat(60);
+            lines.push_str(
+                &serde_json::json!({"type": "user", "message": {"content": words}}).to_string(),
+            );
+            lines.push('\n');
+            lines.push_str(
+                &serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": format!("answer {turn:02}")}], "stop_reason": "end_turn"}})
+                    .to_string(),
+            );
+            lines.push('\n');
+        }
+        std::fs::write(&record, lines).unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+
+        let text = handoff(&connection, &project, &session, Some(&kept), "Claude Code").unwrap();
+        let terminal = text
+            .find("From the Claude Code conversation, newest first:")
+            .expect("the harness conversation has its part");
+        let newest_record = text
+            .find("answer 20")
+            .expect("its newest turn is handed over");
+        let older_record = text.find("answer 19").expect("then the one before");
+        let engine = text
+            .find("From CrazyAgent's master conversation, newest first:")
+            .expect("the engine conversation has its part");
+        let newest_engine = text
+            .find("Engine: Check the build 03\nYou: Build reply 03")
+            .expect("the newest engine turn is handed over");
+        let oldest_engine = text
+            .find("Engine: Check the build 01\nYou: Build reply 01")
+            .expect("every engine turn fits");
+        assert!(
+            terminal < newest_record
+                && newest_record < older_record
+                && older_record < engine
+                && engine < newest_engine
+                && newest_engine < oldest_engine,
+            "{text}"
+        );
+        assert!(
+            text.contains(HANDOFF_OMITTED),
+            "the harness part was cut: {text}"
+        );
+        assert!(!text.contains("answer 01"), "{text}");
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
+
+    /// A switch is seen once: after the session's master switched to Codex, a later start on
+    /// Codex is no switch even before Codex reported a conversation of its own, and a start
+    /// on Claude Code again is a switch back from Codex.
+    #[test]
+    fn a_switch_is_seen_once_even_before_the_new_harness_reports_its_conversation() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-once").unwrap();
+        let id = "3f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        std::fs::write(&record, "").unwrap();
+        let kept = SessionConversation {
+            agent: 1,
+            harness: "claude-code".into(),
+            connection: "local-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record,
+            },
+        };
+        keep_conversation(&connection, &project, session.as_str(), &kept).unwrap();
+        assert_eq!(
+            switched_from(&connection, &project, &session, "codex").unwrap(),
+            Some("claude-code".to_owned())
+        );
+        crate::team::record_switch(
+            &connection,
+            &project,
+            session.as_str(),
+            "codex",
+            crate::team::SwitchMode::Carry,
+        )
+        .unwrap();
+        assert_eq!(
+            switched_from(&connection, &project, &session, "codex").unwrap(),
+            None,
+            "the switch to Codex was applied already"
+        );
+        assert_eq!(
+            switched_from(&connection, &project, &session, "claude-code").unwrap(),
+            Some("codex".to_owned())
+        );
+    }
+
+    /// An engine turn of multi-byte text longer than one handed-over turn is cut with a
+    /// visible "..." where its reply was cut, never silently.
+    #[test]
+    fn a_multi_byte_engine_turn_cut_to_fit_shows_where_it_was_cut() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        crate::team::initialize(&connection).unwrap();
+        let project = ProjectId::new("switch-project").unwrap();
+        let session = SessionId::new("s-wide").unwrap();
+        let body = serde_json::json!({
+            "engine_request": {"line": "検".repeat(300)},
+            "reply": {"text": "答".repeat(600)},
+        });
+        connection
+            .execute(
+                "INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,1,'turn-1',1001,'succeeded',?2)",
+                rusqlite::params![session.as_str(), body.to_string()],
+            )
+            .unwrap();
+        let text = handoff(&connection, &project, &session, None, "Codex").unwrap();
+        let turn = text
+            .find(&format!("Engine: {}", "検".repeat(300)))
+            .expect("the engine turn is handed over");
+        let reply = text[turn..].find("\nYou: 答").expect("its reply starts") + turn;
+        assert!(text[reply..].contains("答..."), "the cut is shown: {text}");
+        assert!(!text.contains(&"答".repeat(600)), "{text}");
+        assert!(text.len() <= HANDOFF_BYTES_MAX + STATE_BYTES_MAX + 2);
+    }
 
     #[test]
     fn listed_lines_hold_no_control_characters_and_stay_bounded() {

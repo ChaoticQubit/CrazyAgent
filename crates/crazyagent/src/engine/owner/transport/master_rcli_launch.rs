@@ -553,6 +553,7 @@ fallback_allowed = false
             worktree_lease: prepared.worktree_lease.clone(),
             lease: prepared.lease.clone(),
             agent_project: prepared.agent_project.clone(),
+            agent_policy: prepared.agent_policy.clone(),
         }
     }
 

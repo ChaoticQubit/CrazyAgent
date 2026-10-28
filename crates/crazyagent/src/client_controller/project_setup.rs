@@ -84,6 +84,23 @@ impl OwnerController {
         }
     }
 
+    /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
+    /// its availability here, and the toolchains its agents may read. Takes the project id.
+    /// Returns the policy view, or the engine's refusal for an unknown project.
+    pub async fn project_agent_policy(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<crate::sandbox::policy::PolicyView, EngineError> {
+        match self
+            .read(OwnerRead::ProjectAgentPolicy { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectAgentPolicy { policy, .. } => Ok(policy),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists a set-up project's files for `@` tags: the tracked and the untracked, not
     /// ignored paths relative to its folder that contain the query in any case.
     /// Takes the project id, the query (at most 256 bytes) and the limit (1 to 200).
@@ -271,6 +288,23 @@ impl OwnerController {
         self.project_read_paths(project_id.clone()).await?;
         self.begin_mutation(
             OwnerMutation::SetProjectReadPaths { project_id, paths },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Replaces a project's agent policy: access level and toolchain choices. Takes the
+    /// project id, the policy and the client generation. Returns the actual owner response;
+    /// a level this computer cannot run is a plain rejection.
+    pub async fn set_project_agent_policy(
+        &mut self,
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::AgentPolicy,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_agent_policy(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectAgentPolicy { project_id, policy },
             generation,
         )?;
         self.send_pending().await

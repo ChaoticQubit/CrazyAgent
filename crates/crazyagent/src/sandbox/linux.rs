@@ -550,7 +550,7 @@ impl LinuxSandbox {
 /// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
 /// plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
-    if sandbox.checkout.is_some() {
+    if sandbox.checkout.is_some() || sandbox.clone.is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
     }
     if matches!(sandbox.network(), SandboxNetwork::Only(_))

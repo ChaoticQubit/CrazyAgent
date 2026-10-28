@@ -2,6 +2,8 @@ use super::*;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
+const SHORT_LINES_READ_TIME: Duration = Duration::from_secs(10);
+
 struct Case {
     root: tempfile::TempDir,
 }
@@ -572,4 +574,27 @@ fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
         Some(LaunchError("launch_resume_unavailable".to_owned()))
     );
     assert!(messages.is_empty());
+}
+
+/// A record an agent fills with a million empty lines in its own home is read in one pass:
+/// each read drains the lines it used once, not once per line, so the engine thread that
+/// polls the record is never stalled, and the line after them is still read.
+#[test]
+fn a_read_of_a_million_short_lines_drains_them_in_one_pass() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &"\n".repeat(READ_BYTES_MAX - prompt.len() - 1));
+    append(&file, &format!("{prompt}\n"));
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let events = reader.read();
+        let _ = sent.send((events, started.elapsed()));
+    });
+    let (events, took) = read
+        .recv_timeout(SHORT_LINES_READ_TIME)
+        .expect("a read of short lines stalls the engine thread");
+    assert_eq!(events.unwrap(), vec![TranscriptEvent::TurnStarted]);
+    assert!(took < SHORT_LINES_READ_TIME, "{took:?}");
 }

@@ -67,6 +67,7 @@ impl Case {
             model: None,
             tools,
             sandbox_profile: Some(self.profile()),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -112,6 +113,13 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
+    let prefix = env
+        .iter()
+        .find(|(name, _)| name == "TMPDIR")
+        .map(|(_, tmp)| crate::sandbox::shell_tmp_prefix(Path::new(tmp)));
+    if let Some(prefix) = prefix {
+        env.push(("TMPPREFIX".to_owned(), prefix.to_str().unwrap().to_owned()));
+    }
     env.extend(
         crate::sandbox::AGENT_GIT_ENV
             .into_iter()

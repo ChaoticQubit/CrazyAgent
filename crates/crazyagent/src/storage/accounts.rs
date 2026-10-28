@@ -407,29 +407,26 @@ fn list(
         )?);
     }
     let wanted = limit - items.len();
-    let mut more = skip + items.len() < unregistered.len();
-    if wanted > 0 {
-        let mut statement = tx
-            .prepare("SELECT id, body FROM accounts WHERE seq>?1 ORDER BY seq LIMIT ?2")
-            .map_err(error)?;
-        let rows = statement
-            .query_map(params![after_seq, wanted as i64 + 1], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(error)?;
-        more = rows.len() > wanted;
-        for (id, body) in rows.into_iter().take(wanted) {
-            let record = decode(&id, &body)?;
-            let connection = catalog
-                .connections
-                .iter()
-                .find(|c| c.id == record.connection.id)
-                .cloned()
-                .unwrap_or(record.connection);
-            items.push(listed(&tx, admission, connection, record.details)?);
-        }
+    let mut statement = tx
+        .prepare("SELECT id, body FROM accounts WHERE seq>?1 ORDER BY seq LIMIT ?2")
+        .map_err(error)?;
+    let rows = statement
+        .query_map(params![after_seq, wanted as i64 + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let more = skip + items.len() < unregistered.len() || rows.len() > wanted;
+    for (id, body) in rows.into_iter().take(wanted) {
+        let record = decode(&id, &body)?;
+        let connection = catalog
+            .connections
+            .iter()
+            .find(|c| c.id == record.connection.id)
+            .cloned()
+            .unwrap_or(record.connection);
+        items.push(listed(&tx, admission, connection, record.details)?);
     }
     let next = if more {
         items.last().map(|item| item.connection.id.clone())

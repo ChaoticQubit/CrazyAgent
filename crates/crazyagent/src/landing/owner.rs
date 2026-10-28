@@ -1,4 +1,5 @@
-use super::diff::{self, plain};
+use super::clone;
+use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
@@ -254,12 +255,15 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
-/// `MESSAGE_BYTES_MAX` bytes and plain text. Input: the text. Output: the message, else
-/// `changes_message_invalid`.
+/// `MESSAGE_BYTES_MAX` bytes and without a character `memory::hidden_text` finds. Input:
+/// the text. Output: the message, else `changes_message_invalid`.
 fn edited(text: &str) -> Result<String, EngineError> {
     let message = text.replace("\r\n", "\n");
     let message = message.trim();
-    if message.is_empty() || message.len() > MESSAGE_BYTES_MAX || plain(message) != message {
+    if message.is_empty()
+        || message.len() > MESSAGE_BYTES_MAX
+        || crate::memory::hidden_text(message)
+    {
         return Err(failure("changes_message_invalid"));
     }
     Ok(message.to_owned())
@@ -267,9 +271,9 @@ fn edited(text: &str) -> Result<String, EngineError> {
 
 /// Lands a change set as one squash commit on the owner's checked-out branch: refuses
 /// an unusable checkout or a configured filter or merge driver, merges with
-/// merge-tree, makes the commit with the owner's identity, records the intent, writes
-/// the index and files with a two-tree read-tree and moves the branch by compare and
-/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
+/// merge-tree, refuses a merge that completes a bare-repository layout (SR1-1), makes
+/// the commit with the owner's identity, records the intent, writes the index and files
+/// with a two-tree read-tree and moves the branch by compare and swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
 /// owner's edited message and where a test stops it. Output: the landed commit and branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
@@ -292,9 +296,9 @@ pub(super) fn accept(
     }
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
-    let owner = Repo::open(&git_dir, Some(&repository))?;
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (reference, tip) = owner_branch(&owner, &repository)?;
-    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
+    verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -311,6 +315,7 @@ pub(super) fn accept(
     if uses_configured_commands(&owner, &paths, &[&tree])? {
         return Err(failure("changes_git_unsupported"));
     }
+    flow::check_layout(&owner, &record.base, &record.head, &tree)?;
     check_clean(&owner, &repository, &tip, &tree)?;
     if tree == owner.tree_of(&tip)? {
         finish(db, &mut record, &tip)?;
@@ -323,7 +328,7 @@ pub(super) fn accept(
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
-    verify_objects(&git_dir, &[&commit], &[&tip, &record.head, &record.base])?;
+    verify_objects(&repository, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
         old: tip.clone(),
@@ -381,14 +386,29 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(db, &record)?;
-    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
-        return Err(failure("changes_agent_busy"));
-    }
     let git_dir = repository.join(".git");
-    let owner = Repo::open(&git_dir, Some(&repository))?;
+    let agent = if flow::in_clone(&record) {
+        flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
+        let fetched = clone::fetch(
+            &shared(&repository)?,
+            &repository,
+            &record.worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?;
+        if fetched != record.head {
+            return Err(failure("changes_agent_busy"));
+        }
+        None
+    } else {
+        let agent = flow::agent(db, &record)?;
+        if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
+            return Err(failure("changes_agent_busy"));
+        }
+        Some(agent)
+    };
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
-    verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
+    verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -396,7 +416,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
-    verify_objects(&git_dir, &[&merged], &[&record.head, &tip, &record.base])?;
+    verify_objects(&repository, &[&merged], &[&record.head, &tip, &record.base])?;
     record.state = ChangeState::Updating;
     record.waiting = true;
     record.base = tip;
@@ -406,6 +426,9 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
+    let Some(agent) = agent else {
+        return store::save(db, &record);
+    };
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });
@@ -461,7 +484,11 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             old,
             new,
         }) => {
-            let owner = Repo::open(&record.repository.join(".git"), Some(&record.repository))?;
+            let owner = Repo::open(
+                &record.repository,
+                &record.repository.join(".git"),
+                Some(&record.repository),
+            )?;
             let tip = owner.commit_of(&reference)?;
             let written = tip.as_deref() == Some(old.as_str())
                 && owner.test(&["diff-index", "--cached", "--quiet", &new, "--"])?;

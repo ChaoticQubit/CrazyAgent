@@ -65,10 +65,10 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run starts installing in the background, and an applied removal sweeps
-/// the folders and secrets it left. Inputs: the engine, its authority, the request, its
-/// reply and the exchange deadline. Output: the reply, with the dependencies filled in
-/// for a setup status read.
+/// applied setup run starts installing in the background, and every removal, applied or
+/// not, sweeps the folders and secrets it moved aside or left. Inputs: the engine, its
+/// authority, the request, its reply and the exchange deadline. Output: the reply, with
+/// the dependencies filled in for a setup status read.
 pub(super) async fn after_owner(
     engine: &Engine,
     authority: &Authority,
@@ -76,6 +76,12 @@ pub(super) async fn after_owner(
     result: Result<OwnerReply, EngineError>,
     deadline: Instant,
 ) -> Result<OwnerReply, EngineError> {
+    if let OwnerOperation::Apply {
+        mutation: OwnerMutation::RemovePackEntry { .. },
+    } = &request.operation
+    {
+        let _ = storage(&engine.storage.sender, Command::Sweep).await;
+    }
     let mut reply = result?;
     match (&request.operation, &mut reply.response) {
         (
@@ -89,19 +95,13 @@ pub(super) async fn after_owner(
                 status.dependencies = dependency_rows(&root, deadline).await;
             }
         }
-        (OwnerOperation::Apply { mutation }, OwnerResponse::Applied { operation })
-            if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) =>
-        {
-            let sender = engine.storage.sender.clone();
-            match mutation {
-                OwnerMutation::RunSetup { pack } => {
-                    start_run(sender, engine_root(authority)?, pack)?;
-                }
-                OwnerMutation::RemovePackEntry { .. } => {
-                    let _ = storage(&sender, Command::Sweep).await;
-                }
-                _ => {}
-            }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::RunSetup { pack },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
         }
         _ => {}
     }

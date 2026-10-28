@@ -83,12 +83,18 @@ fn error(code: &str) -> EngineError {
     EngineError(code.into())
 }
 
-fn folder_names(root: &Path) -> Vec<String> {
+/// The skill folders directly under one skills folder: the first `ROOT_ENTRIES_MAX` by
+/// name, and how many more holding a SKILL.md come after them. Dot, over-long,
+/// control-character and non-UTF-8 names and entries that are not folders are left out
+/// before the bound, so a crowded folder never hides a skill. Input: the skills folder.
+/// Output: the sorted names and the count of the skills past them.
+fn folder_names(root: &Path) -> (Vec<String>, usize) {
     let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let mut names: Vec<String> = entries
-        .take(ROOT_ENTRIES_MAX)
+    let mut kept = std::collections::BinaryHeap::new();
+    let mut more = 0usize;
+    for name in entries
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| {
@@ -96,9 +102,19 @@ fn folder_names(root: &Path) -> Vec<String> {
                 && name.len() <= FOLDER_NAME_BYTES_MAX
                 && !name.chars().any(char::is_control)
         })
-        .collect();
-    names.sort();
-    names
+        .filter(|name| std::fs::metadata(root.join(name)).is_ok_and(|kind| kind.is_dir()))
+    {
+        kept.push(name);
+        if kept.len() > ROOT_ENTRIES_MAX
+            && let Some(last) = kept.pop()
+            && std::fs::symlink_metadata(root.join(last).join("SKILL.md")).is_ok()
+        {
+            more += 1;
+        }
+    }
+    let names = kept.into_sorted_vec();
+    assert!(names.len() <= ROOT_ENTRIES_MAX);
+    (names, more)
 }
 
 fn digest(folder: &Path) -> Option<[u8; 32]> {
@@ -219,13 +235,13 @@ pub fn scan(home: &Path, added: &[SkillInfo]) -> Result<ImportList, EngineError>
         return Err(error("skill_import_home_unknown"));
     }
     let mut all = Vec::new();
+    let mut unlisted = 0usize;
     for from in [ImportFrom::Claude, ImportFrom::Codex] {
         let root = home.join(from.folder());
-        for name in folder_names(&root) {
+        let (names, more) = folder_names(&root);
+        unlisted += more;
+        for name in names {
             let folder = root.join(&name);
-            if !std::fs::metadata(&folder).is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
             if let Some(found) = candidate(from, &folder, &name, added)? {
                 all.push(found);
             }
@@ -244,7 +260,8 @@ pub fn scan(home: &Path, added: &[SkillInfo]) -> Result<ImportList, EngineError>
         cost += size;
         kept += 1;
     }
-    let more = u32::try_from(all.len() - kept).map_err(|_| error("skill_too_many_files"))?;
+    let more =
+        u32::try_from(all.len() - kept + unlisted).map_err(|_| error("skill_too_many_files"))?;
     all.truncate(kept);
     assert!(cost <= LIST_BYTES_MAX);
     Ok(ImportList { found: all, more })
@@ -310,6 +327,44 @@ mod tests {
     fn private_folder(path: &Path) {
         fs::create_dir_all(path).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn skills_past_the_first_1024_folder_entries_are_listed_or_counted_whatever_else_the_folder_holds()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let claude = home.join(".claude/skills");
+        fs::create_dir_all(&claude).unwrap();
+        for index in 0..1500 {
+            fs::write(claude.join(format!("note-{index:04}.md")), "Not a skill.\n").unwrap();
+            fs::create_dir(claude.join(format!(".cache-{index:04}"))).unwrap();
+        }
+        let skills = ROOT_ENTRIES_MAX + 6;
+        for index in 0..skills {
+            let name = format!("skill-{index:04}");
+            skill(&claude.join(&name), &name, "Does one step.");
+        }
+
+        let first = scan(&home, &[]).unwrap();
+        assert_eq!(
+            first.found.len() + first.more as usize,
+            skills,
+            "every skill is listed or counted, however many other entries the folder holds"
+        );
+        assert_eq!(first.found[0].name, "skill-0000");
+        assert!(
+            first
+                .found
+                .windows(2)
+                .all(|pair| pair[0].folder < pair[1].folder),
+            "the listed skills are the first ones by name"
+        );
+        assert_eq!(
+            scan(&home, &[]).unwrap(),
+            first,
+            "the same folder gives the same answer"
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
 pub mod assets;
@@ -13,6 +14,7 @@ pub mod credentials;
 pub mod engine;
 pub mod github;
 pub mod harnesses;
+pub mod instruction_files;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;

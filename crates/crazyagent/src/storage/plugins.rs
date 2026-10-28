@@ -3,7 +3,7 @@ use crate::plugins::{
     EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
     LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
     SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
-    SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
+    SkillView, TOOL_NAME_BYTES_MAX, TOOL_NAMES_BYTES_MAX, TOOLS_MAX, skill_folder,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -48,6 +48,7 @@ pub(crate) enum Command {
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        secrets: Vec<EffectiveSecret>,
     },
     UpdateServer {
         id: String,
@@ -213,7 +214,7 @@ pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, Engin
     let mut path = root.join(STORE);
     private_directory(&path)?;
     for part in parts {
-        assert!(!part.is_empty() && !part.contains('/') && *part != "..");
+        assert!(crate::protocol::single_component(part));
         path.push(part);
         private_directory(&path)?;
     }
@@ -413,6 +414,27 @@ pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineErr
     }
 }
 
+/// Deletes one removed project's skill store folder with everything in it, for the start
+/// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
+/// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
+/// not one store-relative folder name.
+pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
+    if project.is_empty() || project.len() > 128 || project.contains('/') || project.contains("..")
+    {
+        return Err(error("plugin_skill_folder_invalid"));
+    }
+    match std::fs::remove_dir_all(
+        root.join(STORE)
+            .join("skills")
+            .join("project")
+            .join(project),
+    ) {
+        Ok(()) => Ok(()),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("plugin_skill_folder_not_removed")),
+    }
+}
+
 /// Deletes every listed MCP server secret file, going on past one that fails so an
 /// earlier failure leaves none of the others behind. Inputs: the engine root and the
 /// references. Output: Ok when every file is gone, else the first failure.
@@ -421,6 +443,49 @@ pub(crate) fn remove_secrets(root: &Path, references: &[String]) -> Result<(), E
         .iter()
         .map(|reference| remove_secret(root, reference))
         .fold(Ok(()), Result::and)
+}
+
+/// Deletes every plugin item and switch scoped to one project, and trashes each project MCP
+/// server's secret files and check folder and, when the project has skills, its skill store
+/// folder, all swept after commit. A new project that reuses the removed project's id inherits
+/// none of its MCP servers, secrets, skills or per-project switches, and a rolled back removal
+/// keeps every file. Safe to call for an id with no scoped rows, where it changes nothing.
+/// Inputs: the transaction and the project. Output: any SQLite failure.
+pub(crate) fn remove_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    let scope = Scope::Project {
+        project_id: project.clone(),
+    };
+    let key = scope_key(&scope);
+    let servers: Vec<ServerRecord> = all::<ServerRecord>(tx, "server")?
+        .into_iter()
+        .filter(|server| server.scope == scope)
+        .collect();
+    for server in &servers {
+        for secret in &server.secrets {
+            super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
+        }
+        super::trash::put(tx, super::trash::MCP_CHECKS, &server.id)?;
+    }
+    let skills: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE kind='skill' AND scope=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    tx.execute(
+        "DELETE FROM plugin_switches WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    let removed_items = tx
+        .execute("DELETE FROM plugin_items WHERE scope=?1", [&key])
+        .map_err(error)?;
+    assert!(removed_items >= servers.len());
+    if skills > 0 {
+        super::trash::put(tx, super::trash::SKILL_FOLDER, project.as_str())?;
+    }
+    Ok(())
 }
 
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {
@@ -776,9 +841,12 @@ fn add_server(
     scope: Scope,
     name: String,
     spec: ServerSpec,
+    secrets: Vec<EffectiveSecret>,
 ) -> Result<ServerRecord, EngineError> {
     crate::plugins::validate_server_name(&name)?;
     spec.validate()?;
+    let names: Vec<&str> = secrets.iter().map(|secret| secret.name.as_str()).collect();
+    crate::plugins::validate_secret_names(&names)?;
     require_scope(tx, &scope)?;
     let key = scope_key(&scope);
     if count(tx, "server", &key)? >= SERVERS_PER_SCOPE_MAX {
@@ -794,7 +862,7 @@ fn add_server(
         spec,
         enabled: true,
         approved: None,
-        secrets: Vec::new(),
+        secrets,
         check: None,
         checks: 0,
     };
@@ -822,6 +890,7 @@ fn put_server(tx: &Transaction<'_>, record: &ServerRecord) -> Result<(), EngineE
 
 fn valid_tools(tools: Vec<String>) -> Result<Vec<String>, String> {
     if tools.len() > TOOLS_MAX
+        || tools.iter().map(String::len).sum::<usize>() > TOOL_NAMES_BYTES_MAX
         || tools.iter().any(|tool| {
             tool.is_empty()
                 || tool.len() > TOOL_NAME_BYTES_MAX
@@ -1020,8 +1089,13 @@ pub(super) fn run(
                 .map_err(error)?;
             ResultValue::SkillRemoved(root.join(&record.folder))
         }
-        Command::AddServer { scope, name, spec } => {
-            let record = add_server(tx, scope, name, spec)?;
+        Command::AddServer {
+            scope,
+            name,
+            spec,
+            secrets,
+        } => {
+            let record = add_server(tx, scope, name, spec, secrets)?;
             ResultValue::Server(Box::new(server_view(&record, root, None)))
         }
         Command::UpdateServer { id, spec } => {

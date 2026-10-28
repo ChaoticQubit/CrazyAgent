@@ -3,6 +3,7 @@ import type { Failure, Result } from "../../api";
 import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
+import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
 import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
@@ -25,7 +26,8 @@ export function ChangesNotReady() {
 }
 
 /** The Accept dialog: says where the changes land and shows the proposed commit message
- * for the owner to edit first; Accept stays off while the message is empty or too long.
+ * for the owner to edit first, hidden characters as escapes with a warning; Accept stays
+ * off while the message is empty, too long or holds hidden characters.
  * Inputs: the change set, whether the accept runs, and the handlers. Output: the dialog. */
 export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   set: ChangeSet;
@@ -33,15 +35,17 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   onCancel: () => void;
   onAccept: (message: string) => void;
 }) {
-  const [text, setText] = useState(set.message);
+  const shown = displayText(set.message);
+  const [text, setText] = useState(shown);
   const id = useId();
   const message = commitMessage(text);
   return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
       <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message); }}>Accept</Button></>}>
     <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
+    {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
-      error={message === null ? "Write a commit message of up to 4096 bytes to accept." : undefined} />
+      error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />
   </Dialog>;
 }
 

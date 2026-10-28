@@ -108,6 +108,7 @@ export function logoutNativeAuth(ticket: string): Promise<NativeAuthView> {
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 export interface BaselineRow {
@@ -265,7 +266,7 @@ export function errorMessage(error: unknown): string {
     server_limit: "You can add up to 50 MCP servers here.",
     server_not_found: "This MCP server was removed.",
     server_command_invalid: "Enter the full path to the command, starting with /.",
-    server_args_invalid: "Use up to 32 arguments, each on one line.",
+    server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
@@ -400,7 +401,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -720,6 +721,9 @@ export interface TeamAgent {
   stopped_ms: number | null;
   persona?: string | null;
   handle?: string | null;
+  finished?: boolean;
+  wakeable?: boolean;
+  wake_note?: string | null;
 }
 
 export interface TeamTask {
@@ -749,9 +753,26 @@ export interface TeamMessage {
   created_ms: number;
 }
 
+/** What the live master does with the conversation when the master harness changes: carry it
+ * over to the new harness, or start the new harness fresh. */
+export type SwitchMode = "carry" | "fresh";
+
+export interface SessionSwitch {
+  harness: string;
+  mode: SwitchMode;
+  note: string;
+}
+
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
+  turn_limit_secs?: number | null;
+  session_limit_secs?: number | null;
+  idle_stop_secs?: number | null;
+  on_harness_switch?: SwitchMode;
+  show_finished?: boolean;
+  partial?: boolean;
+  live_switch?: SessionSwitch | null;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -860,6 +881,22 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
   return invoke<IntentReceipt>("desktop_team_keep_warm", { id, on, generation });
 }
 
+/** Sets the team's task, session and idle stop time limits. Inputs: the project id, the three
+ * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
+export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
+}
+
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+}
+
+/** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
+ * agents list and team graph) or false for Hide (the Finished fold-out only) and a generation. */
+export function teamFinishedAgents(id: string, show: boolean, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_finished_agents", { id, show, generation });
+}
+
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a
  * generation. Output: the commit receipt; a master with no terminal app is rejected. */
 export function teamLiveMaster(id: string, on: boolean, generation: number): Promise<IntentReceipt> {
@@ -878,6 +915,13 @@ export function teamHandOff(id: string, reply: number, step: number, generation:
  * in kebab case and a generation. Output: the commit receipt; a taken handle is rejected. */
 export function teamRename(id: string, agent: number, handle: string, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_rename", { id, agent, handle, generation });
+}
+
+/** Wakes a finished sub-agent by its team id; the team runtime brings the same agent back in
+ * its own worktree and session. Inputs: project id, team agent id and a generation. Output: the
+ * commit receipt; an agent that cannot wake is rejected with a plain code. */
+export function teamWakeAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
 }
 
 /** Changes a project's name, description, stack, platforms, research, pool and team.
@@ -959,6 +1003,7 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  folder_overview: string | null;
   finished: boolean;
 }
 
@@ -983,6 +1028,7 @@ export interface GitHubRepo {
   private: boolean;
   default_branch: string;
   size_kb: number;
+  refused: string | null;
 }
 
 export interface GitHubRepoPage {

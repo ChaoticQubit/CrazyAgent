@@ -34,7 +34,7 @@ const view = (extra = {}) => ({
   project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
-  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", finished: false, ...extra,
+  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", folder_overview: null, finished: false, ...extra,
 });
 
 test("each folder state has its badge, line and one action", () => {
@@ -484,6 +484,35 @@ test("the repository list shows each repository with Clone and a search", () => 
   assert.match(loading, /<button[^>]*disabled=""[^>]*aria-busy="true"[^>]*>.*Loading more\.\.\.<\/button>/, "a page on its way blocks another Show more");
   assert.doesNotMatch(loading, />Show more<\/button>/);
   assert.match(html(RepoListView, { ...base, repos: notReady }), /Not ready yet/);
+});
+
+test("an overview the engine did not write is shown apart and labelled, never as the mapping agent's", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const engine = html(OnboardingReviewView, { ...base, view: ok(view()) });
+  assert.match(engine, />Overview</);
+  assert.doesNotMatch(engine, /Overview found in the folder|did not write this/);
+  const found = html(OnboardingReviewView, { ...base, view: ok(view({ overview: null, folder_overview: "# Shipped\n\nFrom the repository." })) });
+  assert.match(found, /Overview found in the folder/);
+  assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
+  assert.match(found, /From the repository\./);
+  assert.doesNotMatch(found, />Overview</);
+});
+
+test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
+  const repos = [
+    { full_name: "octo-cat/.github", private: false, default_branch: "main", size_kb: 4, refused: "github_repo_name_unsupported" },
+    { full_name: "octo-cat/notes", private: false, default_branch: "main", size_kb: 4, refused: null },
+  ];
+  const base = { status: { signed_in: true, login: "octo-cat", method: "token", waiting: false, problem: null }, query: "", onQuery: noop, more: false, loadingMore: false, onMore: noop, cloning: null, onClone: noop };
+  const rows = html(RepoListView, { ...base, repos: ok(repos) }).split("<li").slice(1);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /octo-cat\/\.github/);
+  assert.match(rows[0], /CrazyAgent can(&#x27;|')t clone a repository whose name starts with a dot/);
+  assert.match(rows[0], /<button[^>]*disabled=""[^>]*>.*Clone<\/button>/);
+  assert.doesNotMatch(rows[0], /github_repo_name_unsupported/);
+  assert.match(rows[1], /Public, 4 KB, branch main/);
+  assert.doesNotMatch(rows[1], /disabled=""/);
 });
 
 test("the setup review shows the steps, the overview, missing items and a confirm that waits", () => {

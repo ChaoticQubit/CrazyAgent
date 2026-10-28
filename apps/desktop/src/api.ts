@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, PendingIntent } from "./engine-client";
+import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -83,7 +83,7 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
-  native_auth_recovery_required: "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.",
+  native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -123,6 +123,9 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
+  agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
+  agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -206,6 +209,7 @@ async function change(command: string, args: InvokeArgs): Promise<Result<void>> 
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 /** Connects this window to the engine. Output: whether it is connected and whether an earlier
@@ -295,6 +299,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
@@ -536,6 +541,22 @@ export function profileSettledLine(check: ProfileCheck): string | null {
   if (check === "configured") return "The account is set up for agents.";
   if (check === "not_recorded") return "The account set-up for agents never reached the engine. Save the pool again to set it up.";
   return null;
+}
+
+/** The banner line while a sign-in's outcome is unconfirmed. */
+export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
+
+/** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
+ * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
+ * while the engine is still stopping it, or a plain error. */
+export function clearStuckSignIn(): Promise<Result<boolean>> {
+  return call<boolean>("desktop_clear_native_auth");
+}
+
+/** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
+export function stuckClearedLine(result: Result<boolean>): string {
+  if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
+  return result.kind === "error" ? result.message : plainError("unknown");
 }
 
 export interface PoolMember {
@@ -1018,6 +1039,26 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how long one task turn and one agent session of the team may run, and how long a
+ * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
+ * seconds. Output: the engine receipt, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+}
+
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
+ * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
