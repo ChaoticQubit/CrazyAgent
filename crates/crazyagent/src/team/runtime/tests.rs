@@ -1762,14 +1762,14 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
 #[test]
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
-        launch_end(LaunchError("launch_deadline".into())),
+        launch_end(LaunchError("launch_deadline".into(), None)),
         (TurnEnd::TimedOut, None)
     );
     assert_eq!(
-        launch_end(LaunchError("launch_event_limit".into())),
+        launch_end(LaunchError("launch_event_limit".into(), None)),
         (TurnEnd::TooLong, None)
     );
-    let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into()));
+    let (end, cause) = launch_end(LaunchError("launch_protocol_failed".into(), None));
     assert_eq!(end, TurnEnd::Closed);
     assert_eq!(
         with_code(PROCESS_CLOSED, cause.as_deref()),
@@ -6317,4 +6317,24 @@ fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() 
         task_of(f, "Wait for the move").0 == "running"
     });
     assert!(team.shutdown().unwrap().is_empty());
+}
+
+#[test]
+fn an_agent_refused_for_an_mcp_secret_in_its_command_names_the_server_and_the_secret() {
+    let named = LaunchError(
+        "launch_secret_in_command".into(),
+        Some(Box::new(crate::harnesses::launch::SecretInCommand {
+            server: "tools".into(),
+            secret: "API_TOKEN".into(),
+        })),
+    );
+    assert_eq!(
+        start_problem(&named),
+        "The agent could not start. The MCP server \"tools\" secret \"API_TOKEN\" is part of \
+         the launch command, so it cannot be kept hidden. Replace it in Plugins."
+    );
+    assert_eq!(
+        start_problem(&LaunchError("launch_deadline".into(), None)),
+        "The agent could not start. (launch_deadline)"
+    );
 }

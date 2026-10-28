@@ -701,11 +701,27 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
+    let named = LaunchError(
+        "launch_secret_in_command".into(),
+        Some(Box::new(crate::harnesses::launch::SecretInCommand {
+            server: "tools".into(),
+            secret: "TOKEN".into(),
+        })),
+    );
 
     let headless = crate::harnesses::launch::command_with_context(&request(), &context());
+    let refused = headless.err().unwrap();
+    assert_eq!(refused, named);
+    let sentence = secret_in_command_text(&refused).unwrap();
     assert_eq!(
-        headless.err().map(|refused| refused.0).as_deref(),
-        Some("launch_secret_in_command")
+        sentence,
+        "The MCP server \"tools\" secret \"TOKEN\" is part of the launch command, so it cannot \
+         be kept hidden. Replace it in Plugins."
+    );
+    assert!(!sentence.contains(home.to_str().unwrap()));
+    assert_eq!(
+        secret_in_command_text(&LaunchError("launch_home_busy".into(), None)),
+        None
     );
     let tmux =
         crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
@@ -718,10 +734,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         request(),
         Some(context()),
     );
-    assert_eq!(
-        pane.err().map(|refused| refused.0).as_deref(),
-        Some("launch_secret_in_command")
-    );
+    assert_eq!(pane.err(), Some(named));
     assert!(
         !home.join("config.toml").exists(),
         "a refused launch leaves no generated file holding the secret"
@@ -884,4 +897,16 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
         !pane.config.exists(),
         "a pane that is gone keeps no file that holds its MCP secret"
     );
+}
+
+#[test]
+#[should_panic(expected = "launch_secret_in_command")]
+fn secret_names_ride_only_on_a_secret_in_command_refusal() {
+    let _ = secret_in_command_text(&LaunchError(
+        "launch_home_busy".into(),
+        Some(Box::new(SecretInCommand {
+            server: "tools".into(),
+            secret: "TOKEN".into(),
+        })),
+    ));
 }

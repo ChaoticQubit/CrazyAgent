@@ -1,5 +1,5 @@
 use crate::agent_git::Layout;
-use crate::harnesses::launch::LaunchError;
+use crate::harnesses::launch::{LaunchError, SecretInCommand};
 use crate::plugins::{
     EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec,
 };
@@ -78,7 +78,20 @@ const _: () = assert!(
 );
 
 fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
+}
+
+/// The owner's sentence for a launch refused because its command would hold an MCP secret:
+/// names the server and the secret, never the value, and where to replace it. Input: the
+/// refusal. Output: the sentence, or None for any other refusal.
+pub fn secret_in_command_text(problem: &LaunchError) -> Option<String> {
+    let named = problem.1.as_deref()?;
+    assert_eq!(problem.0, "launch_secret_in_command");
+    Some(format!(
+        "The MCP server \"{}\" secret \"{}\" is part of the launch command, so it cannot be \
+         kept hidden. Replace it in Plugins.",
+        named.server, named.secret
+    ))
 }
 
 fn unavailable<E>(_: E) -> LaunchError {
@@ -148,14 +161,15 @@ pub fn for_project(
     let root = engine_root(connection)?;
     let tx = connection.unchecked_transaction().map_err(unavailable)?;
     let plugins = crate::storage::plugins::launch_set(&tx, &root, project)
-        .map_err(|problem| LaunchError(problem.0))?;
+        .map_err(|problem| LaunchError(problem.0, None))?;
     let instructions = project_instructions(&tx, project, layout)?;
     let home_project = agent_project(&tx, project)?;
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
     drop(tx);
-    let given = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
+    let given =
+        crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0, None))?;
     Ok(AgentContext {
         plugins,
         instructions,
@@ -228,7 +242,7 @@ pub fn for_master(
         text.push_str(&master_tools_section(&setup, &available));
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
-            .map_err(|problem| LaunchError(problem.0))?;
+            .map_err(|problem| LaunchError(problem.0, None))?;
         text.push_str(&team_index(&plugins));
     }
     text.push_str(MASTER_LANDING_RULES);
@@ -392,7 +406,7 @@ impl AgentContext {
         let root = engine_root(connection)?;
         let tx = connection.unchecked_transaction().map_err(unavailable)?;
         let plugins = crate::storage::plugins::effective(&tx, &root, project)
-            .map_err(|problem| LaunchError(problem.0))?;
+            .map_err(|problem| LaunchError(problem.0, None))?;
         drop(tx);
         Ok(self.with_index(&plugins))
     }
@@ -406,26 +420,41 @@ impl AgentContext {
     /// Reports whether any MCP secret value occurs in `text`, so launchers can prove a
     /// command line or environment never carries one.
     pub fn exposes_secret(&self, text: &[u8]) -> bool {
-        self.plugins.servers.iter().any(|server| {
-            server.secrets.iter().any(|secret| {
-                let value = secret.value.expose();
-                !value.is_empty() && text.windows(value.len()).any(|window| window == value)
-            })
+        self.exposed(text).is_some()
+    }
+
+    fn exposed(&self, text: &[u8]) -> Option<SecretInCommand> {
+        self.plugins.servers.iter().find_map(|server| {
+            server
+                .secrets
+                .iter()
+                .find(|secret| {
+                    let value = secret.value.expose();
+                    !value.is_empty() && text.windows(value.len()).any(|window| window == value)
+                })
+                .map(|secret| SecretInCommand {
+                    server: server.name.clone(),
+                    secret: secret.name.clone(),
+                })
         })
     }
 
     /// Refuses a launch whose command line or environment would hold an MCP secret of this
     /// context, as when the owner saves a secret that is also part of a path or flag the
     /// launch uses: that is the owner's input, not an engine fault. Input: every argument,
-    /// environment name and value of the command. Output: Ok, or `launch_secret_in_command`.
+    /// environment name and value of the command. Output: Ok, or `launch_secret_in_command`
+    /// naming the server and the secret.
     pub fn refuse_exposed<'a>(
         &self,
         parts: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<(), LaunchError> {
-        if parts.into_iter().any(|part| self.exposes_secret(part)) {
-            return Err(failure("launch_secret_in_command"));
+        match parts.into_iter().find_map(|part| self.exposed(part)) {
+            Some(named) => Err(LaunchError(
+                "launch_secret_in_command".into(),
+                Some(Box::new(named)),
+            )),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
@@ -461,7 +490,7 @@ impl AgentContext {
             let harness = crate::agent_home::Harness::from_id(id)
                 .ok_or_else(|| failure("launch_harness_unsupported"))?;
             crate::agent_home::prepare(home, harness, &process.project, &process.given)
-                .map_err(|problem| LaunchError(problem.0))?;
+                .map_err(|problem| LaunchError(problem.0, None))?;
         }
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
         let skills = tools && !self.plugins.skills.is_empty();
@@ -476,7 +505,7 @@ impl AgentContext {
         };
         if let Some(process) = &self.process {
             crate::agent_home::record_skills(&process.project.data, home, &names)
-                .map_err(|problem| LaunchError(problem.0))?;
+                .map_err(|problem| LaunchError(problem.0, None))?;
         }
         if id == "codex" {
             let config = home.join("config.toml");

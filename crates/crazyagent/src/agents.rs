@@ -60,7 +60,7 @@ CREATE INDEX IF NOT EXISTS agent_runs_project ON agent_runs(project, started_ms)
 const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":'";
 
 fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
 }
 
 fn database<E>(_: E) -> LaunchError {

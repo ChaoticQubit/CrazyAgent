@@ -93,7 +93,7 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
 }
 
 fn host_failure(error: HostError) -> LaunchError {
-    LaunchError(error.0)
+    LaunchError(error.0, None)
 }
 
 impl TerminalSession {

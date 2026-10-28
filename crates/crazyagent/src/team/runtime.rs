@@ -4551,7 +4551,7 @@ fn work(
                             if resume.is_some() && problem.0 == RESUME_REFUSED {
                                 let _ = reports.send(Report::ResumeRefused);
                             }
-                            with_code("The agent could not start", Some(&problem.0))
+                            start_problem(&problem)
                         })
                 })
             }
@@ -4678,7 +4678,7 @@ fn live(
             if resume.is_some() && problem.0 == RESUME_REFUSED {
                 let _ = reports.send(Report::ResumeRefused);
             }
-            Some(with_code("The agent could not start", Some(&problem.0)))
+            Some(start_problem(&problem))
         }
     };
     drop(held);
@@ -5036,7 +5036,7 @@ fn per_turn(
                     end: TurnEnd::Closed,
                     cause: Some(problem.0.clone()),
                 });
-                return Some(with_code("The agent could not start", Some(&problem.0)));
+                return Some(start_problem(&problem));
             }
         };
         let _ = reports.send(Report::Ready {
@@ -5336,6 +5336,16 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
 /// An owner line that names the plain code behind it in the style every window uses, so a
 /// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
 /// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
+/// The owner's line for an agent whose harness could not start: a command that would hold
+/// an MCP secret names its server and secret, any other refusal names its plain code.
+/// Input: the launch error. Output: the line.
+fn start_problem(problem: &LaunchError) -> String {
+    match crate::launch_context::secret_in_command_text(problem) {
+        Some(sentence) => format!("The agent could not start. {sentence}"),
+        None => with_code("The agent could not start", Some(&problem.0)),
+    }
+}
+
 fn with_code(sentence: &str, cause: Option<&str>) -> String {
     match cause {
         Some(code) => {
