@@ -284,6 +284,49 @@ fn two_connections_never_both_win_one_version() {
     assert_eq!(read(&mut first, &shared).version, 1);
 }
 
+/// A retired item moves one version past every version handed out, written or not, so every
+/// holder of an earlier version is refused and re-reads, and other items keep theirs (V2V-1).
+#[test]
+fn a_retired_item_refuses_every_version_read_before() {
+    let (_directory, path) = database();
+    let mut connection = connect(&path);
+    let item = agent_policy_item(&ProjectId::new("tidepool").unwrap());
+    let never = instruction_settings_item(&ProjectId::new("tidepool").unwrap());
+    let other = agent_policy_item(&ProjectId::new("harbor").unwrap());
+    assert_eq!(write(&mut connection, &item, 0, &owner()), Ok(1));
+    assert_eq!(write(&mut connection, &item, 1, &owner()), Ok(2));
+    assert_eq!(write(&mut connection, &other, 0, &owner()), Ok(1));
+
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    assert_eq!(retire(&tx, &item), Ok(3));
+    assert_eq!(
+        retire(&tx, &never),
+        Ok(1),
+        "an item never written still moves on"
+    );
+    tx.commit().unwrap();
+    for held in [0, 1, 2] {
+        assert_eq!(
+            stale(write(&mut connection, &item, held, &owner())).current,
+            3,
+            "a screen holding version {held} re-reads"
+        );
+    }
+    assert_eq!(
+        stale(write(&mut connection, &never, 0, &owner())).current,
+        1
+    );
+    assert_eq!(
+        read(&mut connection, &other).version,
+        1,
+        "other items keep their version"
+    );
+    assert_eq!(write(&mut connection, &item, 3, &owner()), Ok(4));
+    assert_eq!(write(&mut connection, &never, 1, &owner()), Ok(2));
+}
+
 #[test]
 fn a_forgotten_item_starts_again_at_version_0_without_its_records() {
     let (_directory, path) = database();

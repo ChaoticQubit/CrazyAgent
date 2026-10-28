@@ -31,10 +31,11 @@ test("Save sends the level and only the toolchain switches that differ from the 
 });
 
 test("Full access asks for the plain warning first, and the project page names the level and toolchains", () => {
-  assert.equal(access.confirmFirst("sandboxed", "full"), true);
-  assert.equal(access.confirmFirst(null, "full"), true);
-  assert.equal(access.confirmFirst("full", "full"), false);
-  assert.equal(access.confirmFirst("full", "own_branch"), false);
+  assert.equal(access.confirmFirst("full"), true, "Full asks on every save, whatever level the screen showed");
+  assert.equal(access.confirmFirst("own_branch"), false);
+  assert.equal(access.confirmFirst("sandboxed"), false);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /onClick=\{\(\) => confirmFirst\(access\) \? setConfirming\(true\) : void save\(\)\}/);
   assert.equal(access.FULL_ACCESS_WARNING, "Agents run with your user's permissions: they can read your keys and change any file.");
   assert.equal(access.accessSummary(view), "Sandboxed · Rust");
   assert.equal(access.accessSummary({ ...view, access: "full", toolchains: [] }), "Full access · no toolchains");
