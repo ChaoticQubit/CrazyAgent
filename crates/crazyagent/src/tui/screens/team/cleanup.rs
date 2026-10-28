@@ -68,6 +68,15 @@ pub(super) fn words(code: &str) -> &'static str {
         "cleanup_worktree_invalid" => {
             "An agent's working copy is not where the engine recorded it."
         }
+        "cleanup_worktree_leftover" => {
+            "Git removed an agent's worktree but left files the engine could not delete."
+        }
+        "cleanup_worktree_unreadable" => {
+            "Git could not read an agent's working copy, for example because of a leftover lock file."
+        }
+        "cleanup_outcome_unknown" => {
+            "The engine did not answer in time and may still be working. Press c to read the list again."
+        }
         "cleanup_unavailable" | "engine_support_not_ready" => {
             "Cleanup is not available in this engine yet."
         }
@@ -166,6 +175,10 @@ impl Cleanup {
                         )),
                     },
                     Ok(CleanupReply::Finished(_)) => {}
+                    Err(code) if code == "cleanup_outcome_unknown" => ctx.say(Message::warning(
+                        "Could not confirm what cleanup did.",
+                        words(code),
+                    )),
                     Err(code) => ctx.say(Message::warning(
                         "Cleanup kept an agent and stopped there.",
                         words(code),

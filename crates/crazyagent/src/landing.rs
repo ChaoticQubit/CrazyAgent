@@ -497,7 +497,8 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
 
 /// Says why a finished agent's worktree cannot be removed now, as a plain code:
 /// `cleanup_changes_open`, `cleanup_changes_restorable`, `cleanup_worktree_invalid`,
-/// `cleanup_commits_unlanded` or `cleanup_worktree_dirty`. Inputs: the store, the owner's
+/// `cleanup_commits_unlanded`, `cleanup_worktree_dirty` or `cleanup_worktree_unreadable`
+/// when git cannot read this one worktree. Inputs: the store, the owner's
 /// checkout root, the worktree, its git folder and the time now. Output: None when it can
 /// be removed.
 pub fn retire_blocker(
@@ -519,7 +520,8 @@ pub fn retire_blocker(
 /// Removes a finished agent's worktree with the host git, never forcing, after checking
 /// `retire_blocker` again while no landing step can run on its repository. Inputs: the
 /// store, the owner's checkout root, the worktree, its git folder and the time now.
-/// Output: Ok once removed, or the plain code that kept it.
+/// Output: Ok once removed, `cleanup_worktree_leftover` when git deleted its record of the
+/// worktree but left files in it, or the plain code that kept it.
 pub fn retire_worktree(
     db: &Connection,
     repository: &Path,

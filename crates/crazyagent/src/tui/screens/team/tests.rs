@@ -2043,7 +2043,6 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
         if code.starts_with("cleanup_")
             && !code.ends_with("_bounds")
             && *code != "cleanup_request_invalid"
-            && *code != "cleanup_outcome_unknown"
         {
             assert_ne!(
                 super::cleanup::words(code),
@@ -2052,6 +2051,45 @@ fn n_keeps_the_agents_and_an_empty_list_a_refusal_or_another_project_change_noth
             );
         }
     }
+}
+
+#[test]
+fn a_removal_the_engine_could_not_confirm_says_so_and_asks_for_a_fresh_read() {
+    use crate::tui::client::cleanup::{CleanupQuery, CleanupReply};
+    let read = CleanupQuery::Finished { project: project() };
+    let mut shell = team();
+    shell.key(Key::Char('c'));
+    cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        read.clone(),
+        Ok(CleanupReply::Finished(vec![finished(
+            3,
+            "Lin (@docs)",
+            2048,
+        )])),
+    ));
+    shell.key(Key::Char('y'));
+    let sent = cleanup_sent(&mut shell);
+    shell.arrive(cleanup_reply(
+        sent[0].clone(),
+        Err("cleanup_outcome_unknown".into()),
+    ));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Could not confirm what cleanup did.");
+    assert_eq!(
+        message.rest,
+        "The engine did not answer in time and may still be working. Press c to read the list again."
+    );
+
+    shell.key(Key::Char('c'));
+    assert_eq!(cleanup_sent(&mut shell), vec![read.clone()]);
+    shell.arrive(cleanup_reply(read, Err("cleanup_outcome_unknown".into())));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Could not read finished agents.");
+    assert_eq!(
+        message.rest,
+        "The engine did not answer in time and may still be working. Press c to read the list again."
+    );
 }
 
 #[test]
