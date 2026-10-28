@@ -419,13 +419,14 @@ SELECT '{project}','escalation',hex(zeroblob(1000)),i FROM n;
 SELECT count(*) FROM team_tasks WHERE project='{project}';
 "
     );
-    let mut child = Command::new("/usr/bin/sqlite3")
-        .arg(root.join("engine.db"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = crazyagent::spawn_gate::spawn(
+        Command::new("/usr/bin/sqlite3")
+            .arg(root.join("engine.db"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
     child
         .stdin
         .take()
