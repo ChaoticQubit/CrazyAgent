@@ -3213,3 +3213,120 @@ fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
     assert!(!live_framing(&fixture.setup, true, &[], &[]).contains("Finished sub-agents"));
     assert!(!live_framing(&fixture.setup, false, &[], &lines).contains("Finished sub-agents"));
 }
+
+/// The owner's Wake (DEC-102) end to end: a finished sub-agent wakes as a team action by its
+/// id, which the team runtime serves through its one wake. The same agent comes back under
+/// the same id, name, worktree and register entry, its harness given the session id kept for
+/// it, and it leaves Finished. A second Wake while it runs is refused and stops nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_wake_brings_back_the_same_agent_and_session_and_a_stale_wake_stops_nothing() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes its task and keeps its conversation",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Idle && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (conversation, _) = agent_conversation(&fixture, member).unwrap();
+    let worktree = agent_worktree(&fixture, member);
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    let shown = |f: &Fixture| {
+        f.status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == member)
+            .unwrap()
+    };
+    let before = shown(&fixture);
+    assert!(before.finished && before.wakeable, "{before:#?}");
+    assert_eq!(before.wake_note, None);
+
+    let press = || {
+        let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        let outcome = crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: member,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        outcome
+    };
+    assert_eq!(press(), crate::protocol::Outcome::Applied);
+    fixture.until(
+        &mut team,
+        "the same agent starts again in its own session",
+        |f| launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle,
+    );
+    assert!(
+        launches(&fixture, member)[1].ends_with(&format!(" resume {conversation}")),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert_eq!(
+        subs(&fixture),
+        vec![member],
+        "no other sub-agent was started"
+    );
+    assert_eq!(agent_worktree(&fixture, member), worktree);
+    assert_eq!(
+        names::name(&fixture.connection, member)
+            .unwrap()
+            .unwrap()
+            .persona,
+        persona
+    );
+    let after = shown(&fixture);
+    assert!(!after.finished && !after.wakeable, "{after:#?}");
+    let again = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(
+        again[0].id, listed[0].id,
+        "its register entry stays its own"
+    );
+    assert_eq!(again[0].state, crate::agents::AgentState::Running);
+
+    assert_eq!(
+        press(),
+        crate::protocol::Outcome::Rejected {
+            code: "team_agent_running".into()
+        }
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        launches(&fixture, member).len(),
+        2,
+        "a stale Wake starts nothing"
+    );
+    assert_eq!(fixture.agent_status(member).0, AgentStatus::Idle);
+    assert_eq!(host.alive().unwrap(), names(&[member]), "and stops nothing");
+    assert_eq!(team.shutdown().unwrap(), names(&[member]));
+    host.close(&[]).unwrap();
+}
