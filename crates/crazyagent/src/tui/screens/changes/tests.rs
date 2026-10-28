@@ -198,6 +198,8 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
         "changes_not_found",
         "changes_owner_identity_missing",
         "changes_message_invalid",
+        "changes_embedded_repository",
+        "changes_agent_branch_invalid",
         "changes_unavailable",
     ] {
         assert!(
