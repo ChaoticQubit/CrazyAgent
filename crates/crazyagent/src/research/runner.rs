@@ -1878,6 +1878,18 @@ pub(crate) fn add_worktree(
     )))
 }
 
+/// Refuses to add a worktree at a commit, as `add_worktree` does where Seatbelt is missing.
+/// Takes the sandbox, profile, worktree and commit, all unused. Returns the same refusal.
+#[cfg(not(unix))]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    _base: &str,
+) -> Result<(), RunError> {
+    add_worktree(sandbox, profile, worktree)
+}
+
 /// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
 /// git under the installed profile so that no command the repository configures runs: the
 /// worktree is added without a checkout, its effective config is listed in the worktree's
@@ -1889,6 +1901,23 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
+    add_worktree_at(sandbox, profile, worktree, "HEAD")
+}
+
+/// Adds a detached git worktree as `add_worktree` does, checked out at `base`: `HEAD`, or
+/// the full commit id a lead's worktree holds for a worker cut from it (N1).
+/// Takes the sandbox, its installed profile, the new worktree path and the commit.
+#[cfg(unix)]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    base: &str,
+) -> Result<(), RunError> {
+    assert!(
+        base == "HEAD"
+            || (matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
+    );
     let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
@@ -1898,7 +1927,7 @@ pub(crate) fn add_worktree(
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
-        .arg("HEAD");
+        .arg(base);
     setup_step(&mut add, "worktree_add_failed")?;
     let mut listing = worktree_git(sandbox, profile);
     listing

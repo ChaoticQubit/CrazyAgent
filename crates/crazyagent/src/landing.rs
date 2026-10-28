@@ -255,11 +255,40 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
 /// checkout root and the new worktree folder. Output: Ok once checked out, else a plain
 /// `changes_*` code.
 pub fn add_agent_clone(repository: &Path, worktree: &Path) -> Result<(), EngineError> {
+    add_agent_clone_at(repository, worktree, None)
+}
+
+/// Makes an agent's own clone as `add_agent_clone` does, at a lead's commit for a worker
+/// cut from its lead (N1). Inputs: the owner checkout root, the new worktree and the
+/// commit, None for the owner's HEAD. Output: Ok, else as `add_agent_clone`.
+pub fn add_agent_clone_at(
+    repository: &Path,
+    worktree: &Path,
+    base: Option<&str>,
+) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return clone::add(repository, worktree);
+    return clone::add(repository, worktree, base);
     #[cfg(not(unix))]
     {
-        let _ = (repository, worktree);
+        let _ = (repository, worktree, base);
+        Err(unavailable())
+    }
+}
+
+/// The commit a lead's worktree holds now, which its new worker's worktree is cut from
+/// (N1). Inputs: the store, the owner's checkout root, the lead's worktree and its git
+/// metadata folder. Output: the commit id.
+pub fn agent_tip(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::tip(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
         Err(unavailable())
     }
 }

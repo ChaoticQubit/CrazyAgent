@@ -1173,6 +1173,29 @@ pub(super) fn start(
     store::set_base(db, worktree, &head)
 }
 
+/// The commit an agent worktree holds now, for a worker cut from its lead (N1): a linked
+/// worktree's HEAD, or the tip of a clone's branch as fetched into the owner repository,
+/// so the worker's own copy reads it through the owner's objects. Inputs: the store, the
+/// owner checkout, the lead's worktree and its git folder. Output: the commit id.
+pub(super) fn tip(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
+    store::initialize(db)?;
+    let _held = hold(repository);
+    match check_places(repository, worktree, git_dir)? {
+        Layout::Linked => open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head(),
+        Layout::Clone => clone::fetch(
+            &shared(repository)?,
+            repository,
+            worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        ),
+    }
+}
+
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
 /// one above the base recorded for the worktree, else its HEAD, so commits the agent
 /// made itself are part of it. An agent's own clone is never committed in: its change

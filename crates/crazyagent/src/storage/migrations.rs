@@ -60,6 +60,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 7,
         run: widen_hook_kinds,
     },
+    Step {
+        to: 8,
+        run: nest_team_agents,
+    },
 ];
 
 /// Says whether a table of that name exists. Inputs: the open transaction and the name.
@@ -93,6 +97,12 @@ fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
          ALTER TABLE file_trash_new RENAME TO file_trash;",
     )
     .map_err(error)
+}
+
+/// Step 8 (N1): a sub-agent can lead workers of its own, so team tasks and agents record
+/// the lead that started them.
+fn nest_team_agents(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    crate::team::add_parent_columns(tx)
 }
 
 /// Step 7 (H2): hooks are plugin items, and their stored folder copies go through the file

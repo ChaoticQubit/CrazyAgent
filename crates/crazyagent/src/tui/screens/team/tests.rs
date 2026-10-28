@@ -829,6 +829,7 @@ fn finished_team() -> crate::team::TeamStatus {
         finished,
         wakeable: false,
         wake_note: None,
+        parent: None,
     };
     TeamStatus {
         project_id: project(),
@@ -837,6 +838,8 @@ fn finished_team() -> crate::team::TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        sub_agent_depth: crate::team::DEPTH_DEFAULT,
+        child_landing: crate::team::ChildLanding::Lead,
         show_finished: false,
         live_switch: None,
         paused: false,
@@ -1090,6 +1093,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        sub_agent_depth: crate::team::DEPTH_DEFAULT,
+        child_landing: crate::team::ChildLanding::Lead,
         show_finished: false,
         live_switch: None,
         paused: false,
@@ -1121,6 +1126,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 finished: false,
                 wakeable: false,
                 wake_note: None,
+                parent: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -1482,6 +1488,8 @@ fn switched(
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        sub_agent_depth: crate::team::DEPTH_DEFAULT,
+        child_landing: crate::team::ChildLanding::Lead,
         show_finished: false,
         live_switch,
         paused: false,

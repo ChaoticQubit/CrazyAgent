@@ -24,7 +24,8 @@ use crate::master_sessions::ResumePlan;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
-    ResearchAccount, RunError, add_worktree, confined_unavailable, ensure_repository, model_remote,
+    ResearchAccount, RunError, add_worktree_at, confined_unavailable, ensure_repository,
+    model_remote,
 };
 use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
@@ -47,6 +48,7 @@ const RESULT_IN_MESSAGE_BYTES_MAX: usize = 3000;
 /// the text typed into a live master, with its speaker tag, ever loses a line.
 const RESULTS_MESSAGE_BYTES_MAX: usize = super::MESSAGE_BYTES_MAX * 2 - 64;
 const RESULTS_TRAILER: &str = "\nTell the owner what was done.";
+const LEAD_RESULTS_TRAILER: &str = "\nAccept what is ready with accept().";
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
@@ -65,6 +67,14 @@ const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
+/// How streams, leads and their branches work, given to every master (N3).
+const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works in its own git worktree and branch. The sub-agent you start for a stream of work leads it and may start workers of its own, up to the owner's Sub-agent depth setting. Workers' work lands on their lead's branch; the owner accepts a lead's work onto any branch. One harness per stream means one lead agent per stream, on the harness and model the owner chose or the settings default. Never ask the owner how streams share a branch.\n";
+/// What a sub-agent that may lead its own workers is told with each task (N3).
+const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with delegate(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. status(), message(), answer(), wake() and changes() reach only your workers, and accept(change_set) lands a worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
+/// What a lead's worker is told with each task (N3).
+const WORKER_LINE: &str =
+    "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
+const LEAD_UNREAD: &str = "Not answered: the team state could not be read. Try again in a moment.";
 
 /// Which of the owner's time limits bounds an agent's turn, with the limit as the owner set it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +349,7 @@ struct Worker {
     lowered: bool,
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
+    parent: Option<i64>,
 }
 
 impl Worker {
@@ -1081,7 +1092,7 @@ impl TeamRuntime {
                     Err(reason) => Err(reason),
                 }
             }
-            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again)?,
+            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again, None)?,
             Err(reason) => Err(reason),
         };
         match started {
@@ -1266,9 +1277,10 @@ impl TeamRuntime {
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
-        self.serve_agent_calls(project);
+        self.serve_agent_calls(&stored, access);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
+        self.deliver_to_leads(project)?;
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.dispatch(&stored, access, &paused)?;
@@ -1701,6 +1713,7 @@ impl TeamRuntime {
                         &harness,
                         stored.team.master_tools,
                         &account,
+                        None,
                     )?,
                     Err(reason) => Err(reason),
                 };
@@ -2019,7 +2032,7 @@ impl TeamRuntime {
         };
         let started = match started {
             Some(id) => Ok(id),
-            None => self.spawn(stored, AgentRole::Master, harness, tools, account)?,
+            None => self.spawn(stored, AgentRole::Master, harness, tools, account, None)?,
         };
         if started.is_ok()
             && let (Some(session), Some(mode)) = (&session, switch_mode)
@@ -2144,15 +2157,24 @@ impl TeamRuntime {
         super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
     }
 
-    /// Answers the past-conversation and saved-memory calls a project's sub-agents made
-    /// since the last tick, from each running sub-agent's own mailbox, with the sub-agent's
-    /// label as the origin of what it saves; any other call from a sub-agent is refused.
-    /// Takes the project.
-    fn serve_agent_calls(&mut self, project: &ProjectId) {
+    /// Answers the team calls a project's sub-agents made since the last tick, from each
+    /// running sub-agent's own mailbox, with the sub-agent's label as the origin of what it
+    /// saves: past conversations and memory, and the lead calls that reach only the
+    /// workers it started (N1, N2). Takes the setup and live access.
+    fn serve_agent_calls(&mut self, stored: &StoredSetup, access: &ModelAccess) {
         if self.delegation_tool.is_none() {
             return;
         }
+        let project = &stored.project_id;
         let agents = self.state.join("agents");
+        let answering = super::master::Answering {
+            access,
+            stored,
+            landing: &self.root,
+            agents: &agents,
+            events: self.events.as_ref(),
+            host: self.terminal.as_deref(),
+        };
         let subs: Vec<i64> = self
             .workers
             .iter()
@@ -2171,6 +2193,10 @@ impl TeamRuntime {
                 &label,
                 &agents,
                 &mailbox,
+                &mut |connection, call| {
+                    super::master::answer_lead(connection, &answering, id, call)
+                        .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+                },
             );
         }
     }
@@ -2324,7 +2350,7 @@ impl TeamRuntime {
                 .connection
                 .prepare(
                     "SELECT t.id,t.harness,t.status,t.result,t.error FROM team_tasks t
-                     WHERE t.project=?1 AND t.delivered=0 AND t.source='master' AND t.status IN ('done','failed','cancelled')
+                     WHERE t.project=?1 AND t.delivered=0 AND t.source='master' AND t.parent IS NULL AND t.status IN ('done','failed','cancelled')
                      AND (t.session IS NULL OR t.session IS ?2)
                      AND NOT EXISTS (SELECT 1 FROM team_tasks o WHERE o.project=t.project AND o.turn IS t.turn AND t.turn IS NOT NULL
                                      AND o.status IN ('queued','needs_pool','running'))
@@ -2371,6 +2397,84 @@ impl TeamRuntime {
         tx.commit().map_err(error)
     }
 
+    /// The lines a sub-agent's task prompt ends with about its place in a stream (N3): a
+    /// lead's worker hears where its work lands, and an agent with team tools above the
+    /// owner's Sub-agent depth setting hears how to lead workers of its own. Takes the
+    /// project and the agent. Returns the lines, empty for neither, or a SQLite failure.
+    fn lead_lines(&self, project: &ProjectId, agent: i64) -> Result<String, EngineError> {
+        let worker = &self.workers[&agent];
+        let mut text = String::new();
+        if worker.parent.is_some() {
+            text.push_str(WORKER_LINE);
+        }
+        if worker.tools
+            && self.delegation_tool.is_some()
+            && super::agent_depth(&self.connection, agent)?
+                < super::nesting(&self.connection, project)?.depth
+        {
+            text.push_str(LEAD_LINES);
+        }
+        Ok(text)
+    }
+
+    /// Tells each running lead how its workers' tasks ended (N1): the finished tasks it
+    /// handed off, typed into its terminal as one results message, so the lead hears them
+    /// as the master hears its own. A lead that is not running hears them once it runs again.
+    /// Takes the project. Returns any SQLite failure.
+    fn deliver_to_leads(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        let leads: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.role == AgentRole::Sub && !worker.stopping
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for lead in leads {
+            let ready: Vec<ReadyTask> = {
+                let mut statement = self
+                    .connection
+                    .prepare(
+                        "SELECT id,harness,status,result,error FROM team_tasks
+                         WHERE project=?1 AND parent=?2 AND delivered=0 AND status IN ('done','failed','cancelled')
+                         ORDER BY id LIMIT 16",
+                    )
+                    .map_err(error)?;
+                statement
+                    .query_map(params![project.as_str(), lead], |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    })
+                    .map_err(error)?
+                    .collect::<Result<_, _>>()
+                    .map_err(error)?
+            };
+            if ready.is_empty() {
+                continue;
+            }
+            let (text, held) =
+                results_within(&ready, super::events::SEND_BYTES_MAX, LEAD_RESULTS_TRAILER);
+            let sent = super::events::send_to(&self.connection, host.as_ref(), Some(lead), &text)?;
+            if sent.is_err() {
+                continue;
+            }
+            for (id, ..) in &ready[..held] {
+                self.connection
+                    .execute("UPDATE team_tasks SET delivered=1 WHERE id=?1", [id])
+                    .map_err(error)?;
+            }
+        }
+        Ok(())
+    }
+
     fn dispatch(
         &mut self,
         stored: &StoredSetup,
@@ -2378,11 +2482,11 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let queued: Vec<(i64, String, String, Option<i64>, bool)> = {
+        let queued: Vec<QueuedTask> = {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master' FROM team_tasks t
+                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master',t.parent FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
                      WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
                 )
@@ -2395,6 +2499,7 @@ impl TeamRuntime {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 })
                 .map_err(error)?
@@ -2402,7 +2507,7 @@ impl TeamRuntime {
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
-        for (task, harness, prompt, pin, by_master) in queued {
+        for (task, harness, prompt, pin, by_master, parent) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -2427,7 +2532,7 @@ impl TeamRuntime {
                         && w.busy.is_none()
                         && !w.stopping
                         && !paused.contains(&w.connection)
-                        && pin.is_none_or(|pin| pin == **id)
+                        && pin.map_or(w.parent == parent, |pin| pin == **id)
                 })
                 .map(|(id, _)| *id);
             let mut woken_fresh = false;
@@ -2479,7 +2584,14 @@ impl TeamRuntime {
                     let Ok(account) = self.account_for(access, project, &harness, paused) else {
                         continue;
                     };
-                    match self.spawn(stored, AgentRole::Sub, &harness, slot.tools, &account)? {
+                    match self.spawn(
+                        stored,
+                        AgentRole::Sub,
+                        &harness,
+                        slot.tools,
+                        &account,
+                        parent,
+                    )? {
                         Ok(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
@@ -2544,13 +2656,14 @@ impl TeamRuntime {
             let layout = self
                 .agent_layout(&stored.project_id, agent)
                 .map_err(error)?;
-            let prompt = sub_agent_prompt(
+            let mut prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
                 &earlier,
                 &prompt,
                 layout,
             );
+            prompt.push_str(&self.lead_lines(project, agent)?);
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -2603,8 +2716,14 @@ impl TeamRuntime {
                 let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
                     break;
                 };
-                let started =
-                    self.spawn(stored, AgentRole::Sub, &slot.harness, slot.tools, &account)?;
+                let started = self.spawn(
+                    stored,
+                    AgentRole::Sub,
+                    &slot.harness,
+                    slot.tools,
+                    &account,
+                    None,
+                )?;
                 if let Ok(agent) = started {
                     self.workers.get_mut(&agent).expect("worker exists").warm = true;
                 }
@@ -2726,6 +2845,10 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Starts a new agent of the project, a worker of the lead `parent` names when one does
+    /// (N1), so its worktree is cut from that lead's current commit. Takes the setup, role,
+    /// harness, tools switch, account and the lead. Returns the agent, or the plain reason it
+    /// could not start.
     fn spawn(
         &mut self,
         stored: &StoredSetup,
@@ -2733,10 +2856,12 @@ impl TeamRuntime {
         harness: &str,
         tools: bool,
         account: &TeamAccount,
+        parent: Option<i64>,
     ) -> Result<Result<i64, String>, EngineError> {
-        self.spawn_run(stored, role, harness, tools, account, None)
+        self.spawn_run(stored, role, harness, tools, account, None, parent)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_run(
         &mut self,
         stored: &StoredSetup,
@@ -2745,7 +2870,9 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         again: Option<&HostedRestart>,
+        parent: Option<i64>,
     ) -> Result<Result<i64, String>, EngineError> {
+        assert!(parent.is_none() || role == AgentRole::Sub);
         if self.panes(&stored.project_id) >= PANES_PER_PROJECT_MAX {
             return Ok(Err(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents, the most one project may run at once"
@@ -2754,8 +2881,8 @@ impl TeamRuntime {
         let now = now_ms();
         self.connection
             .execute(
-                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6)",
-                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now],
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6,?7)",
+                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now, parent],
             )
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
@@ -3080,6 +3207,14 @@ impl TeamRuntime {
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
+        let parent: Option<i64> = self
+            .connection
+            .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .flatten();
         self.workers.insert(
             id,
             Worker {
@@ -3116,6 +3251,7 @@ impl TeamRuntime {
                 lowered: false,
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
+                parent,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -3149,6 +3285,49 @@ impl TeamRuntime {
             Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
             _ => Layout::Linked,
         }
+    }
+
+    /// The commit a new worker of a lead starts from (N1): the commit the lead's worktree
+    /// holds now, read through landing. Takes the project and the new agent. Returns none for
+    /// an agent the master started, else the commit or the plain reason it cannot be read.
+    fn lead_tip(&self, project: &ProjectId, id: i64) -> Result<Option<String>, String> {
+        let unread = |_| with_code("the agent's lead could not be read", None);
+        let lead: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT parent FROM team_agents WHERE id=?1 AND project=?2",
+                params![id, project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unread)?
+            .flatten();
+        let Some(lead) = lead else {
+            return Ok(None);
+        };
+        let kept: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(unread)?;
+        let Some((repository, worktree, git_dir)) = kept else {
+            return Err("the lead's worktree is no longer known".into());
+        };
+        crate::landing::open(&self.root)
+            .and_then(|db| {
+                crate::landing::agent_tip(
+                    &db,
+                    Path::new(&repository),
+                    Path::new(&worktree),
+                    Path::new(&git_dir),
+                )
+            })
+            .map(Some)
+            .map_err(|e| with_code("the lead's current commit could not be read", Some(&e.0)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3273,6 +3452,11 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
+        let base = if adopt {
+            None
+        } else {
+            self.lead_tip(&stored.project_id, id)?
+        };
         let mut made = NewClone(None);
         match (adopt, layout) {
             (true, Layout::Linked) => {}
@@ -3282,11 +3466,13 @@ impl TeamRuntime {
                     Some(&e.0),
                 )
             })?,
-            (false, Layout::Linked) => {
-                add_worktree(&sandbox, &profile, &worktree).map_err(|e| {
-                    with_code("the agent worktree could not be added", Some(run_code(&e)))
-                })?
-            }
+            (false, Layout::Linked) => add_worktree_at(
+                &sandbox,
+                &profile,
+                &worktree,
+                base.as_deref().unwrap_or("HEAD"),
+            )
+            .map_err(|e| with_code("the agent worktree could not be added", Some(run_code(&e))))?,
             (false, Layout::Clone) => {
                 let worktrees = worktree.parent().ok_or("agent worktrees folder")?;
                 std::fs::create_dir_all(worktrees).map_err(|e| {
@@ -3295,12 +3481,14 @@ impl TeamRuntime {
                         Some(io_code(&e)),
                     )
                 })?;
-                crate::landing::add_agent_clone(&root, &worktree).map_err(|e| {
-                    with_code(
-                        "the agent's own copy of the project could not be made",
-                        Some(&e.0),
-                    )
-                })?;
+                crate::landing::add_agent_clone_at(&root, &worktree, base.as_deref()).map_err(
+                    |e| {
+                        with_code(
+                            "the agent's own copy of the project could not be made",
+                            Some(&e.0),
+                        )
+                    },
+                )?;
                 made = NewClone(Some(worktree.clone()));
             }
         }
@@ -4334,7 +4522,7 @@ fn framing(
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}\nProject brief:\n{}\n\n",
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
         stored.name,
         team,
         crate::launch_context::MASTER_LANDING_RULES,
@@ -4410,7 +4598,7 @@ fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
         how
     };
     let text = format!(
-        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}",
+        "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",
         bound_text(&stored.name, crate::launch_context::NAME_BYTES_MAX),
         crate::launch_context::MASTER_LANDING_RULES
     );
@@ -5132,6 +5320,9 @@ fn conversation_note(ended: &EndedTask) -> String {
 }
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+/// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
+/// whether the master handed it off and the lead whose worker runs it.
+type QueuedTask = (i64, String, String, Option<i64>, bool, Option<i64>);
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
 /// task's line, then its problem and its result on lines of their own, every agent-written
@@ -5139,7 +5330,16 @@ type ReadyTask = (i64, String, String, Option<String>, Option<String>);
 /// tasks, at least one.
 /// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
 fn results_message(ready: &[ReadyTask]) -> (String, usize) {
+    results_within(ready, RESULTS_MESSAGE_BYTES_MAX, RESULTS_TRAILER)
+}
+
+/// Writes one results message as `results_message` does, within `max` bytes and closed by
+/// `trailer`, each problem and result cut to a quarter of `max` at most, so a lead's
+/// message fits what one terminal prompt takes. Takes the ready tasks, at least one, the
+/// bound and the closing line. Returns the text and how many tasks it holds.
+fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, usize) {
     assert!(!ready.is_empty());
+    let each = RESULT_IN_MESSAGE_BYTES_MAX.min(max / 4);
     let mut text = String::from("Results from your sub-agents:\n");
     let mut held = 0;
     for (id, harness, status, result, problem) in ready {
@@ -5148,26 +5348,23 @@ fn results_message(ready: &[ReadyTask]) -> (String, usize) {
         if let Some(problem) = problem {
             part.push_str(&bound_text(
                 &super::events::agent_text(problem.trim()),
-                RESULT_IN_MESSAGE_BYTES_MAX,
+                each,
             ));
             part.push('\n');
         }
         if let Some(result) = result {
-            part.push_str(&bound_text(
-                &super::events::agent_text(result.trim()),
-                RESULT_IN_MESSAGE_BYTES_MAX,
-            ));
+            part.push_str(&bound_text(&super::events::agent_text(result.trim()), each));
             part.push('\n');
         }
-        if held > 0 && text.len() + part.len() + RESULTS_TRAILER.len() > RESULTS_MESSAGE_BYTES_MAX {
+        if held > 0 && text.len() + part.len() + trailer.len() > max {
             break;
         }
         text.push_str(&part);
         held += 1;
     }
-    text.push_str(RESULTS_TRAILER);
+    text.push_str(trailer);
     assert!((1..=ready.len()).contains(&held));
-    assert!(text.len() <= RESULTS_MESSAGE_BYTES_MAX);
+    assert!(text.len() <= max);
     (text, held)
 }
 

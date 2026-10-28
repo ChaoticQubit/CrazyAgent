@@ -33,6 +33,8 @@ fn main() {
         "desktop_team_keep_warm",
         "desktop_team_time_limits",
         "desktop_team_on_harness_switch",
+        "desktop_team_sub_agent_depth",
+        "desktop_team_child_landing",
         "desktop_team_finished_agents",
         "desktop_team_live_master",
         "desktop_team_pause",

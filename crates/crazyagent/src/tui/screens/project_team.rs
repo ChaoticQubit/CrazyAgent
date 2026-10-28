@@ -8,8 +8,8 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, DelegationPath, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource,
-    TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, ChildLanding, DelegationPath, SwitchMode, TASK_PROMPT_BYTES_MAX,
+    TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -250,6 +250,15 @@ impl TeamView {
     /// top, then stopped agents, each oldest first.
     /// Takes the view. Returns the agents, empty before the first read.
     pub fn agents(&self) -> Vec<&TeamAgent> {
+        self.agent_tree()
+            .into_iter()
+            .map(|(agent, _)| agent)
+            .collect()
+    }
+
+    /// Lists the agents as `agents` does, each with its depth under its lead (N2), so a
+    /// lead's workers show right below it. Takes the view. Returns the agents and depths.
+    fn agent_tree(&self) -> Vec<(&TeamAgent, usize)> {
         let mut agents: Vec<&TeamAgent> = self
             .status
             .iter()
@@ -262,7 +271,7 @@ impl TeamView {
                 agent.id,
             )
         });
-        agents
+        crate::team::lead_tree(&agents)
     }
 
     /// Lists the tasks in display order: unfinished first, oldest first, then
@@ -369,6 +378,8 @@ impl TeamView {
             KeyCode::Char('l') => self.time_limit(Limit::Session),
             KeyCode::Char('i') => self.time_limit(Limit::Idle),
             KeyCode::Char('h') => self.harness_switch(),
+            KeyCode::Char('d') => self.sub_agent_depth(),
+            KeyCode::Char('b') => self.child_landing(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -933,6 +944,64 @@ impl TeamView {
         })
     }
 
+    /// Moves the Sub-agent depth setting to its next choice, 1 after 3.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn sub_agent_depth(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let choices = crate::team::DEPTH_CHOICES;
+        let depth = choices
+            .iter()
+            .position(|choice| *choice == status.sub_agent_depth)
+            .map_or(choices[0], |at| choices[(at + 1) % choices.len()]);
+        self.changing = Some(depth_note(depth).to_owned());
+        TeamReply::Change(TeamAction::SubAgentDepth {
+            project_id: self.project.clone(),
+            depth,
+        })
+    }
+
+    /// Flips where a lead's worker lands its change set between the lead's Accept and the
+    /// owner's own. Output: the change to send, or Handled with a notice while loading or
+    /// saving.
+    fn child_landing(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.child_landing {
+            ChildLanding::Lead => ChildLanding::Owner,
+            ChildLanding::Owner => ChildLanding::Lead,
+        };
+        self.changing = Some(
+            match mode {
+                ChildLanding::Lead => {
+                    "A lead's worker now lands on the lead's branch when the lead accepts it."
+                }
+                ChildLanding::Owner => "A lead's worker now lands only when you accept it.",
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::ChildLanding {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -987,7 +1056,8 @@ impl TeamView {
         if wide {
             lines.push(Row::default());
         }
-        let agents = self.agents();
+        let tree = self.agent_tree();
+        let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
         let (panel, caret) = match (&self.draft, self.wake) {
             (Some(draft), _) => {
@@ -1029,8 +1099,14 @@ impl TeamView {
         for (index, agent) in agents.iter().enumerate().skip(first).take(agent_rows) {
             let current = agent.task.and_then(|id| self.task(id));
             let last = current.is_none().then(|| self.last_task(agent)).flatten();
+            let depth = tree[index].1;
+            let shown = if depth == 0 {
+                agent.label.clone()
+            } else {
+                format!("{}\u{21b3} {}", "  ".repeat(depth - 1), agent.label)
+            };
             let mut cells = vec![
-                Row::of(agent.label.clone(), look.fg),
+                Row::of(shown, look.fg),
                 Row::of(harness_name(&agent.harness, None), look.fg),
             ];
             if wide {
@@ -1160,6 +1236,11 @@ impl TeamView {
             setting(
                 "On harness switch",
                 switch_words(status.on_harness_switch).to_owned(),
+            ),
+            setting("Sub-agent depth", status.sub_agent_depth.to_string()),
+            setting(
+                "Worker lands",
+                landing_words(status.child_landing).to_owned(),
             ),
         ];
         let mut rows = Vec::new();
@@ -1371,6 +1452,8 @@ impl TeamView {
             ("l", "Session limit"),
             ("i", "Idle stop"),
             ("h", "On harness switch"),
+            ("d", "Sub-agent depth"),
+            ("b", "Worker lands"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1598,6 +1681,23 @@ fn tools_word(on: bool) -> &'static str {
 
 /// The short words for the On harness switch setting on the team summary row.
 /// Takes the mode. Returns its choice name.
+/// What the owner reads after picking a Sub-agent depth. Input: the depth, 1 to 3.
+/// Output: the sentence.
+fn depth_note(depth: u8) -> &'static str {
+    match depth {
+        1 => "Only the master starts sub-agents now.",
+        2 => "The master's sub-agents can now lead workers of their own.",
+        _ => "Workers can now lead workers of their own, three levels deep.",
+    }
+}
+
+fn landing_words(mode: ChildLanding) -> &'static str {
+    match mode {
+        ChildLanding::Lead => "When the lead accepts",
+        ChildLanding::Owner => "Only when I accept",
+    }
+}
+
 fn switch_words(mode: SwitchMode) -> &'static str {
     match mode {
         SwitchMode::Carry => "Carry over",

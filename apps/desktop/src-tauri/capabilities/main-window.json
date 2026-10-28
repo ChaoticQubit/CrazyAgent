@@ -38,6 +38,8 @@
     "allow-desktop-team-keep-warm",
     "allow-desktop-team-time-limits",
     "allow-desktop-team-on-harness-switch",
+    "allow-desktop-team-sub-agent-depth",
+    "allow-desktop-team-child-landing",
     "allow-desktop-team-finished-agents",
     "allow-desktop-team-live-master",
     "allow-desktop-team-pause",
