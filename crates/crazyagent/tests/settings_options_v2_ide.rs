@@ -197,7 +197,8 @@ impl Hooked {
 
 /// Commits through the IDE's git shim in a folder with the environment the IDE server
 /// gives every git it starts: the forced configuration and the search ceiling at the
-/// project's agents roots. Inputs: the shim, the project folder and where git runs.
+/// project's agents root, the only root it has while the engine records no agent in an
+/// older one. Inputs: the shim, the project folder and where git runs.
 /// Output: git's output; a failed commit fails the test.
 fn ide_commit(shim: &Path, project: &Path, folder: &Path, message: &str) -> Output {
     let mut command = Command::new("/bin/sh");
@@ -217,7 +218,7 @@ fn ide_commit(shim: &Path, project: &Path, folder: &Path, message: &str) -> Outp
         .env("GIT_COMMITTER_EMAIL", "e2e@example.invalid")
         .env(
             ide::git::CEILING_VARIABLE,
-            ide::git::ceiling(project).unwrap(),
+            crazyagent::projects_home::state_folder(project).join("worktrees"),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
