@@ -2,17 +2,28 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { Engine, encodeFrame, FrameReader, handshake } from "../out/engine.js";
-import { GIT_ARGS_MAX, GIT_FORWARD_ENV, GIT_NODE_ENV, GIT_SOCKET_ENV, gitCall, gitOutcome, startRelay } from "../out/git.js";
+import {
+  GIT_ARGS_MAX,
+  GIT_FORWARD_ENV,
+  GIT_NODE_ENV,
+  GIT_SOCKET_ENV,
+  gitCall,
+  gitFailure,
+  gitOutcome,
+  startRelay,
+} from "../out/git.js";
 import { memoryStore, reading, withServer } from "./peer.mjs";
 
 const forwarder = fileURLToPath(new URL("../out/git-forward.js", import.meta.url));
 const TOKEN = "ab".repeat(32);
+const MAY_HAVE_RUN =
+  "fatal: CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.\n";
 
 /** Runs the forwarder as the engine's git shim does: node, the script, then git's arguments. */
 function forward(args, cwd, env) {
@@ -300,9 +311,7 @@ test("a refusal or a lost engine ends git with a fatal line and code 128", { tim
     slow.end(encodeFrame({ kind: "rejected", code: "ide_git_outcome_unknown" }));
     const unconfirmed = await unknown;
     assert.equal(unconfirmed.code, 128);
-    assert.equal(unconfirmed.stderr,
-      "fatal: CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.\n",
-      "a push the engine could not confirm never reads as one that did not run");
+    assert.equal(unconfirmed.stderr, MAY_HAVE_RUN, "a push the engine could not confirm never reads as one that did not run");
 
     const closing = once(server, "connection");
     const lost = forward(["fetch", "origin"], project, env);
@@ -311,7 +320,7 @@ test("a refusal or a lost engine ends git with a fatal line and code 128", { tim
     dropped.destroy();
     const closed = await lost;
     assert.equal(closed.code, 128);
-    assert.match(closed.stderr, /^fatal: CrazyAgent did not run this git command \(ide_engine_closed\)\n$/);
+    assert.equal(closed.stderr, MAY_HAVE_RUN, "a command the engine dropped after it got it never reads as one that did not run");
 
     const odd = once(server, "connection");
     const unreadable = forward(["fetch", "origin"], project, env);
@@ -322,6 +331,47 @@ test("a refusal or a lost engine ends git with a fatal line and code 128", { tim
     assert.equal(answered.code, 128);
     assert.match(answered.stderr, /unreadable answer/);
   });
+});
+
+test("a git command lost after it was sent may have run, and one that was never sent did not", { timeout: 20_000 }, async () => {
+  const project = folder();
+  const relaySocket = join(project, "relay.sock");
+  const relay = createServer((connection) => {
+    void reading(connection).frame().then(() => connection.destroy());
+  });
+  await new Promise((resolve) => relay.listen(relaySocket, resolve));
+  try {
+    const dropped = await forward(["push", "origin", "main"], project, { [GIT_SOCKET_ENV]: relaySocket });
+    assert.equal(dropped.code, 128);
+    assert.equal(dropped.stderr, MAY_HAVE_RUN, "a relay that closes after it read the command never reads as not run");
+
+    const missing = await forward(["push", "origin", "main"], project, { [GIT_SOCKET_ENV]: join(project, "gone.sock") });
+    assert.equal(missing.code, 128);
+    assert.equal(missing.stderr, "fatal: the CrazyAgent IDE relay is not reachable\n");
+
+    const engine = new Engine(join(project, "engine.sock"), join(project, "alpha", "capability"), memoryStore([["crazyagent.session.alpha", TOKEN]]));
+    const env = {};
+    const started = await startRelay(engine, env, forwarder);
+    try {
+      const down = await forward(["push", "origin", "main"], project, env);
+      assert.equal(down.code, 128);
+      assert.equal(down.stderr, "fatal: CrazyAgent did not run this git command (ide_git_bridge_failed)\n",
+        "an engine that is not there never got the command");
+    } finally {
+      started.dispose();
+      engine.dispose();
+    }
+  } finally {
+    relay.close();
+    rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("an engine call that timed out or closed may have run, and one never sent did not", () => {
+  assert.equal(gitFailure(new Error("ide_request_timeout")), "ide_git_outcome_unknown", "an engine that ran past its time may have run it");
+  assert.equal(gitFailure(new Error("ide_engine_closed")), "ide_git_outcome_unknown", "an engine that closed after the call may have run it");
+  assert.equal(gitFailure(new Error("ide_session_missing")), "ide_session_missing", "no session means the call was never sent");
+  assert.equal(gitFailure("not an error"), "ide_git_outcome_unknown");
 });
 
 test("before the extension names its relay, git network commands fail plainly", { timeout: 10_000 }, async () => {

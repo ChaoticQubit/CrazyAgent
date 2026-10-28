@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
-import { GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
+import { GIT_OUTCOME_UNKNOWN, GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
 import { unconfirmed } from "./scm-model.js";
 
 const ANSWER_GRACE_MS = 5_000;
@@ -127,9 +127,9 @@ function local(args: string[], folder: string, stdout: Printer, stderr: Printer)
 /**
  * Hands one git network command to the CrazyAgent extension's relay and prints the
  * engine's answer as git itself would have: its output on the same streams and its exit
- * code. A refusal, a missing relay, an unreadable answer or no answer in time prints one
- * `fatal:` line and exits 128, as git does for a fatal error; a command the engine could
- * not confirm finished says it may have run.
+ * code. A refusal, a missing relay or an unreadable answer prints one `fatal:` line and
+ * exits 128, as git does for a fatal error; a command the engine could not confirm
+ * finished, and one lost or unanswered after it was sent, says it may have run.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -149,6 +149,7 @@ function ask(
     const connection = createConnection(socket);
     const reader = new FrameReader();
     let done = false;
+    let sent = false;
     const finish = (code: number, message?: string): void => {
       if (done) return;
       done = true;
@@ -157,11 +158,18 @@ function ask(
       connection.destroy();
       resolve(code);
     };
-    const timer = setTimeout(
-      () => finish(128, "fatal: the CrazyAgent engine did not answer this git command in time\n"),
-      GIT_REQUEST_MS + ANSWER_GRACE_MS,
-    );
-    connection.on("connect", () => connection.write(encodeFrame({ args, folder })));
+    const lost = (): void =>
+      finish(
+        128,
+        sent
+          ? `fatal: ${unconfirmed(GIT_OUTCOME_UNKNOWN) ?? GIT_OUTCOME_UNKNOWN}\n`
+          : "fatal: the CrazyAgent IDE relay is not reachable\n",
+      );
+    const timer = setTimeout(lost, GIT_REQUEST_MS + ANSWER_GRACE_MS);
+    connection.on("connect", () => {
+      connection.write(encodeFrame({ args, folder }));
+      sent = true;
+    });
     connection.on("data", (chunk: Buffer) => {
       let replies: unknown[];
       try {
@@ -185,8 +193,8 @@ function ask(
       stderr.write(outcome.stderr);
       finish(outcome.code);
     });
-    connection.on("error", () => finish(128, "fatal: the CrazyAgent IDE relay is not reachable\n"));
-    connection.on("close", () => finish(128, "fatal: the CrazyAgent IDE relay closed before it answered\n"));
+    connection.on("error", lost);
+    connection.on("close", lost);
   });
 }
 

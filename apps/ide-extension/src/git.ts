@@ -20,6 +20,9 @@ export const GIT_FORWARD_ENV = "CRAZYAGENT_IDE_GIT_FORWARD";
  */
 export const GIT_REQUEST_MS = 700_000;
 
+/** The refusal for a git command that may have run: the engine got it but never answered. */
+export const GIT_OUTCOME_UNKNOWN = "ide_git_outcome_unknown";
+
 /** The most arguments one forwarded git command carries after `git`. */
 export const GIT_ARGS_MAX = 16;
 
@@ -27,6 +30,8 @@ const ARG_BYTES_MAX = 1024;
 const FOLDER_BYTES_MAX = 4096;
 const CONNECTIONS_MAX = 4;
 const PLAIN_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+const ENGINE_LOST = new Set(["ide_request_timeout", "ide_engine_closed"]);
+const NEVER_CONNECTED = new Set(["ENOENT", "ECONNREFUSED"]);
 
 /** What the relay needs from the engine bridge: one call with its own timer. */
 export interface Requester {
@@ -135,12 +140,22 @@ function relay(engine: Requester, connection: Socket): void {
     }
     engine.request<GitOutcome>("ide.git", { args: call.args, folder: call.folder }, GIT_REQUEST_MS).then(
       (reply) => answer(connection, reply.kind === "ok" ? reply : { kind: "rejected", code: reply.code }),
-      (error: unknown) => {
-        const code = error instanceof Error && PLAIN_CODE.test(error.message) ? error.message : "ide_git_bridge_failed";
-        answer(connection, { kind: "rejected", code });
-      },
+      (error: unknown) => answer(connection, { kind: "rejected", code: gitFailure(error) }),
     );
   });
+}
+
+/**
+ * The refusal git gets when the engine call failed without an answer. An engine that never
+ * took the connection, or a session that was never set up, did not run it; an engine that
+ * timed out, closed or broke the reply after the call was sent may have run it.
+ * Input: the failure. Output: the refusal code.
+ */
+export function gitFailure(error: unknown): string {
+  if (!(error instanceof Error) || ENGINE_LOST.has(error.message)) return GIT_OUTCOME_UNKNOWN;
+  if (PLAIN_CODE.test(error.message)) return error.message;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code !== undefined && NEVER_CONNECTED.has(code) ? "ide_git_bridge_failed" : GIT_OUTCOME_UNKNOWN;
 }
 
 /** Sends the one answer and ends the connection, unless git already went away. */

@@ -92,6 +92,7 @@ function ask(env, args, folder, stdout, stderr) {
         const connection = (0, node_net_1.createConnection)(socket);
         const reader = new engine_js_1.FrameReader();
         let done = false;
+        let sent = false;
         const finish = (code, message) => {
             if (done)
                 return;
@@ -102,8 +103,14 @@ function ask(env, args, folder, stdout, stderr) {
             connection.destroy();
             resolve(code);
         };
-        const timer = setTimeout(() => finish(128, "fatal: the CrazyAgent engine did not answer this git command in time\n"), git_js_1.GIT_REQUEST_MS + ANSWER_GRACE_MS);
-        connection.on("connect", () => connection.write((0, engine_js_1.encodeFrame)({ args, folder })));
+        const lost = () => finish(128, sent
+            ? `fatal: ${(0, scm_model_js_1.unconfirmed)(git_js_1.GIT_OUTCOME_UNKNOWN) ?? git_js_1.GIT_OUTCOME_UNKNOWN}\n`
+            : "fatal: the CrazyAgent IDE relay is not reachable\n");
+        const timer = setTimeout(lost, git_js_1.GIT_REQUEST_MS + ANSWER_GRACE_MS);
+        connection.on("connect", () => {
+            connection.write((0, engine_js_1.encodeFrame)({ args, folder }));
+            sent = true;
+        });
         connection.on("data", (chunk) => {
             let replies;
             try {
@@ -129,8 +136,8 @@ function ask(env, args, folder, stdout, stderr) {
             stderr.write(outcome.stderr);
             finish(outcome.code);
         });
-        connection.on("error", () => finish(128, "fatal: the CrazyAgent IDE relay is not reachable\n"));
-        connection.on("close", () => finish(128, "fatal: the CrazyAgent IDE relay closed before it answered\n"));
+        connection.on("error", lost);
+        connection.on("close", lost);
     });
 }
 if (require.main === module) {
