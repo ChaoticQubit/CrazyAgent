@@ -259,6 +259,9 @@ impl Editor {
         assert!(self.column <= self.width(self.row));
     }
 
+    /// Inserts text at the cursor and leaves the cursor after it. The new lines go in with
+    /// one pass over the lines below, so a many-line paste never shifts them once per line.
+    /// Input: the text, with CR LF and CR read as LF.
     fn insert(&mut self, text: &str) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut parts = text.split('\n');
@@ -267,11 +270,13 @@ impl Editor {
         let rest = self.lines[self.row].split_off(at);
         self.lines[self.row].push_str(first);
         self.column += first.chars().count();
-        for part in parts {
-            self.lines.insert(self.row + 1, part.to_owned());
-            self.row += 1;
-            self.column = part.chars().count();
+        let added: Vec<String> = parts.map(str::to_owned).collect();
+        if let Some(last) = added.last() {
+            self.column = last.chars().count();
         }
+        let below = self.row + 1;
+        self.row += added.len();
+        self.lines.splice(below..below, added);
         self.lines[self.row].push_str(&rest);
     }
 

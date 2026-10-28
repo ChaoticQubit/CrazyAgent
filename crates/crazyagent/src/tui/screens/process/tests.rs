@@ -299,6 +299,33 @@ fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever
 }
 
 #[test]
+fn a_many_line_paste_into_a_long_text_inserts_in_one_pass() {
+    let mut editor = Editor::new(&"\n".repeat(99_999));
+    assert_eq!(editor.lines.len(), 100_000);
+    let started = std::time::Instant::now();
+    editor.key(&Key::Paste("x\n".repeat(50_000)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a 50,000-line paste took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(editor.lines.len(), 150_000);
+    assert_eq!((editor.row, editor.column), (50_000, 0));
+    assert!(editor.lines[..50_000].iter().all(|line| line == "x"));
+    assert!(editor.lines[50_000..].iter().all(String::is_empty));
+    assert_eq!(
+        editor.text(),
+        format!("{}{}", "x\n".repeat(50_000), "\n".repeat(99_999))
+    );
+
+    let mut middle = Editor::new("ab\ncd");
+    middle.key(&Key::Right);
+    middle.key(&Key::Paste("1\r\n2\r3".into()));
+    assert_eq!(middle.text(), "a1\n2\n3b\ncd");
+    assert_eq!((middle.row, middle.column), (2, 1));
+}
+
+#[test]
 fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_preview() {
     let mut shell = opened(Scope::App, "Saved rule.");
     typed(&mut shell, "gd");
