@@ -1,6 +1,6 @@
 use super::AgentKind;
 use super::clone;
-use super::flow::{check_places, hold, holds_only, open_agent, shared};
+use super::flow::{check_places, hold, holds_only, open_agent, set_engine_ref, shared};
 use super::git::{Repo, failure};
 use super::store;
 use crate::agent_git::{self, Layout};
@@ -266,6 +266,12 @@ pub(super) fn remove(
         .to_str()
         .ok_or_else(|| failure("changes_git_failed"))?;
     if in_clone {
+        set_engine_ref(
+            &shared(repository)?,
+            repository,
+            &clone::base_ref(worktree)?,
+            None,
+        )?;
         let removed = std::fs::remove_dir_all(worktree);
         db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
             .map_err(unavailable)?;

@@ -1981,4 +1981,78 @@ fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() 
         )
         .unwrap();
     assert_eq!(stored, None, "no text is stored when the setting is off");
+
+/// The master's status reply keeps its newest events within the reply cap: past the cap the
+/// oldest events are left out with a line saying how many, never the newest, and the
+/// finished list before them stays whole (WKC-3).
+#[test]
+fn a_full_status_keeps_the_newest_events_and_the_finished_list_within_the_reply_cap() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    for n in 0..FINISHED_LISTED_MAX {
+        let agent = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+                params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+            )
+            .unwrap();
+        let task = fixture.task(agent, "owner", "done", Some("Done."));
+        connection
+            .execute(
+                "UPDATE team_tasks SET prompt=?1 WHERE id=?2",
+                params![format!("Finished task {n} {}", "w".repeat(200)), task],
+            )
+            .unwrap();
+    }
+    let workers: Vec<i64> = (0..5)
+        .map(|_| fixture.agent(PROJECT, "sub", "codex", "working"))
+        .collect();
+    for n in 0..STATUS_EVENTS_MAX {
+        let text = format!("event-{n:02} {}", "x".repeat(EVENT_TEXT_BYTES_MAX - 12));
+        let worker = workers[usize::try_from(n).unwrap() % workers.len()];
+        assert!(
+            record(
+                connection,
+                &project(),
+                worker,
+                None,
+                EventKind::Finished,
+                &text,
+                10 + n
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+    let told = status(connection, &project()).unwrap().text();
+    assert!(
+        told.len() <= crate::team::tool::REPLY_TEXT_MAX,
+        "{} bytes",
+        told.len()
+    );
+    assert_eq!(
+        crate::team::bound_text(&told, crate::team::tool::REPLY_TEXT_MAX),
+        told
+    );
+    assert!(
+        told.contains(&format!("event-{:02} ", STATUS_EVENTS_MAX - 1)),
+        "the newest event reaches the master"
+    );
+    assert!(!told.contains("event-00 "), "the oldest event is left out");
+    assert_eq!(
+        told.lines().filter(|line| line.starts_with("- ")).count(),
+        FINISHED_LISTED_MAX,
+        "the finished list stays whole"
+    );
+    let left = told
+        .lines()
+        .find(|line| line.ends_with(" older events left out to fit this reply."))
+        .unwrap_or_else(|| panic!("no left-out line in {told}"));
+    let count: i64 = left.split(' ').next().unwrap().parse().unwrap();
+    let shown = told
+        .lines()
+        .filter(|line| line.starts_with("[team] "))
+        .count();
+    assert_eq!(count + i64::try_from(shown).unwrap(), STATUS_EVENTS_MAX);
 }

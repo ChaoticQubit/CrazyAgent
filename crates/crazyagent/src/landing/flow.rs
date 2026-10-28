@@ -398,6 +398,28 @@ fn new_id() -> Result<ChangeSetId, EngineError> {
     )
 }
 
+/// Stores the commit the next change set of a worktree opens above and, for an agent's own
+/// clone, first points the clone's base ref at it in the owner repository (GA-R5).
+/// Inputs: the store, the owner checkout, the worktree, its git folder and the commit.
+/// Output: Ok once both are stored.
+pub(super) fn set_base(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+    base: &str,
+) -> Result<(), EngineError> {
+    if git_dir == agent_git::git_dir(worktree) {
+        set_engine_ref(
+            &shared(repository)?,
+            repository,
+            &clone::base_ref(worktree)?,
+            Some(base),
+        )?;
+    }
+    store::set_base(db, worktree, base)
+}
+
 pub(super) fn pending_ref(id: &ChangeSetId) -> String {
     format!("refs/crazyagent/pending/{}", id.as_str())
 }
@@ -701,14 +723,26 @@ pub(super) fn reset_if_quiet(
     let (true, Some(agent)) = (quiet, agent) else {
         record.intent = None;
         store::save(db, record)?;
-        return store::set_base(db, &record.worktree, expected);
+        return set_base(
+            db,
+            &record.repository,
+            &record.worktree,
+            &record.git_dir,
+            expected,
+        );
     };
     record.intent = Some(Intent::Reset {
         target: target.to_owned(),
     });
     store::save(db, record)?;
     reset_agent(&agent, target)?;
-    store::set_base(db, &record.worktree, target)?;
+    set_base(
+        db,
+        &record.repository,
+        &record.worktree,
+        &record.git_dir,
+        target,
+    )?;
     record.intent = None;
     store::save(db, record)
 }
@@ -1411,7 +1445,7 @@ pub(super) fn start(
             &crate::worktrees::TREE_BOUNDS,
         )?,
     };
-    store::set_base(db, worktree, &head)
+    set_base(db, repository, worktree, git_dir, &head)
 }
 
 /// Commits an agent worktree's changes and adds them to its open change set, or opens
@@ -1679,13 +1713,26 @@ pub(super) fn discard(
 }
 
 /// Brings a discarded change set back as pending and puts its head back in the agent's
-/// worktree. Inputs: the store, the change set and the time now. Output: Ok once
+/// worktree. An agent's own clone is read by the engine's fetch of its branch, before the
+/// repository hold. Inputs: the store, the change set and the time now. Output: Ok once
 /// pending; refused once the restore window passed, while the worktree has another
-/// open change set, or while it holds unrecorded work or a HEAD other than the commit
-/// the worktree's next change set would open above, so commits made since are kept.
+/// open change set, or while it holds unrecorded work or a HEAD, or a clone a branch tip,
+/// other than the commit the worktree's next change set would open above, so commits
+/// made since are kept and a later turn end cannot replace the restored head (GA-R4).
 pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(), EngineError> {
     store::initialize(db)?;
-    let repository = store::load(db, id)?.repository;
+    let loaded = store::load(db, id)?;
+    let clone_tip = if in_clone(&loaded) && loaded.state == ChangeState::Discarded {
+        Some(clone::fetch(
+            &shared(&loaded.repository)?,
+            &loaded.repository,
+            &loaded.worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?)
+    } else {
+        None
+    };
+    let repository = loaded.repository;
     let _held = hold(&repository);
     let mut record = super::owner::settled(db, id)?;
     if record.state != ChangeState::Discarded {
@@ -1699,6 +1746,9 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
         return Err(failure("changes_agent_has_pending"));
     }
     if in_clone(&record) {
+        if clone_tip.is_none() || store::base_of(db, worktree)? != clone_tip {
+            return Err(failure("changes_agent_busy"));
+        }
         let shared = shared(&record.repository)?;
         set_engine_ref(
             &shared,

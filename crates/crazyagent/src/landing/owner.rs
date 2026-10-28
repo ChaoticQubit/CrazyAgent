@@ -533,7 +533,13 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };
-                store::set_base(db, &record.worktree, start)?;
+                flow::set_base(
+                    db,
+                    &record.repository,
+                    &record.worktree,
+                    &record.git_dir,
+                    start,
+                )?;
             }
             record.intent = None;
             store::save(db, record)?;

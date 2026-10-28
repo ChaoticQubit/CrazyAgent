@@ -4356,13 +4356,21 @@ done
 /// the runtime.
 #[cfg(target_os = "macos")]
 fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
+    switching_runtime_with(fixture, host, RESUMING_CLAUDE)
+}
+
+/// The same runtime as `switching_runtime` with another Claude Code stand-in script.
+/// Takes the fixture, host and script. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn switching_runtime_with(fixture: &Fixture, host: &Arc<dyn Host>, claude: &str) -> TeamRuntime {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let codex = bin.join("codex");
     std::fs::write(&codex, RESUMING_CODEX).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let script = claude;
     let claude = bin.join("claude");
-    std::fs::write(&claude, RESUMING_CLAUDE).unwrap();
+    std::fs::write(&claude, script).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut access = fixture.access.clone();
     let mut endpoint = access.connections[0].clone();
@@ -6466,5 +6474,143 @@ fn a_start_a_home_move_holds_back_waits_without_failing_the_task_or_turning_keep
         ),
         1
     );
+
+/// A task never waits a tick behind an idle sub-agent past its session: dispatch ends that
+/// agent and gives the task to another idle sub-agent of the harness in the same tick
+/// (TLC-2).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_passes_an_idle_agent_past_its_session_and_goes_to_another_idle_agent_at_once() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: fixture.setup.project_id.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: None,
+            },
+            hand_off(&fixture, "Write a.md"),
+            hand_off(&fixture, "Write b.md"),
+        ],
+    );
+    let idle_subs = |f: &Fixture| -> Vec<i64> {
+        f.status()
+            .agents
+            .iter()
+            .filter(|agent| agent.role == AgentRole::Sub && agent.status == AgentStatus::Idle)
+            .map(|agent| agent.id)
+            .collect()
+    };
+    fixture.until(&mut team, "two sub-agents finished and are idle", |f| {
+        task_of(f, "Write a.md").0 == "done"
+            && task_of(f, "Write b.md").0 == "done"
+            && idle_subs(f).len() == 2
+    });
+    let mut subs = idle_subs(&fixture);
+    subs.sort_unstable();
+    let (ended, fresh) = (subs[0], subs[1]);
+    team.workers.get_mut(&ended).unwrap().ran_before = Duration::from_secs(3600);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET session_secs=600 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write notes.md")]);
+    team.tick().unwrap();
+    let taken: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT agent FROM team_tasks WHERE prompt='Write notes.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        taken,
+        Some(fresh),
+        "the idle agent within its session takes the task in the same tick"
+    );
+    fixture.until(&mut team, "the agent past its session stops", |f| {
+        f.agent_status(ended).0 == AgentStatus::Stopped
+    });
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Write notes.md").0 == "done"
+    });
+    team.shutdown().unwrap();
+}
+
+/// With Start fresh, a new master harness that ends before it reports its own conversation
+/// starts fresh again on the next start: it never gets the earlier harness's conversation
+/// the owner chose not to carry over (HSL-1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
+    let exits_first = RESUMING_CLAUDE.replacen(
+        "/launches\"\n",
+        "/launches\"\n[ \"$(/usr/bin/wc -l < \"$CLAUDE_CONFIG_DIR/launches\")\" -gt 1 ] || exit 3\n",
+        1,
+    );
+    assert_ne!(exits_first, RESUMING_CLAUDE);
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime_with(&fixture, &host, &exits_first);
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::OnHarnessSwitch {
+            project_id: project.clone(),
+            mode: crate::team::SwitchMode::Fresh,
+        }],
+    );
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
+        live_turns(&f.connection) == (1, false)
+            && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let first = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(first).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (2, false)
+    });
+    stop_live(&fixture, &mut team);
+    let codex_kept = kept_conversation(&fixture.connection, "s-one");
+
+    set_master(&fixture, "claude-code");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the Claude Code master ends before it reports a conversation",
+        |f| masters(&f.connection).len() == 2 && turned_off(f, "its terminal ended"),
+    );
+    let second = masters(&fixture.connection)[1];
+    assert_eq!(launches(&fixture, second).len(), 1);
+    assert_eq!(
+        kept_conversation(&fixture.connection, "s-one"),
+        codex_kept,
+        "the session still keeps the Codex conversation"
+    );
+
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the Claude Code master starts again and is briefed",
+        |f| launches(f, second).len() == 2 && !typed(f, second).is_empty(),
+    );
+    let briefed = typed(&fixture, second);
+    assert!(!briefed.contains("You: Done."), "{briefed}");
+    assert!(
+        !briefed.contains("earlier harness conversation"),
+        "{briefed}"
+    );
+    assert_eq!(noted(&fixture, crate::master_sessions::FRESH_NOTE), 0);
+    assert_eq!(masters(&fixture.connection), [first, second]);
     team.shutdown().unwrap();
 }

@@ -749,6 +749,37 @@ pub fn switched_from(
     Ok(earlier.filter(|earlier| !crate::harnesses::same(earlier, harness)))
 }
 
+/// Tells whether a session's master starts new because its last switch, to this harness
+/// under Start fresh, is not yet followed by a conversation the new harness reported: the
+/// kept conversation, if any, is still another harness's, which the owner chose not to
+/// carry over (HSL-1). Takes the connection, project, session and the harness about to
+/// start. Returns whether to start new.
+pub fn fresh_after_switch(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    harness: &str,
+) -> Result<bool, EngineError> {
+    let switch: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END, mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((Some(to), mode)) = switch else {
+        return Ok(false);
+    };
+    if !crate::harnesses::same(&to, harness) || SwitchMode::named(&mode) != Some(SwitchMode::Fresh)
+    {
+        return Ok(false);
+    }
+    let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
+    Ok(kept.is_none_or(|kept| !crate::harnesses::same(&kept.harness, harness)))
+}
+
 /// The display name of a harness: its catalog name, or the stored name the catalog does
 /// not know. Takes the stored name. Returns the name.
 pub fn harness_label(harness: &str) -> &str {
