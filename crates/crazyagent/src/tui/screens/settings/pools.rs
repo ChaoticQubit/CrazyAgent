@@ -42,6 +42,7 @@ struct Confirm {
     id: CredentialRef,
     name: String,
     users: Option<String>,
+    projects: usize,
     delete_focused: bool,
 }
 
@@ -154,12 +155,13 @@ impl Pools {
                 confirm.delete_focused = !confirm.delete_focused;
             }
             Key::Enter if confirm.delete_focused => {
-                let id = confirm.id.clone();
+                let change = PoolChange::Remove {
+                    id: confirm.id.clone(),
+                    opened_projects: confirm.projects,
+                };
                 self.deleting = Some(confirm.users.is_some());
                 self.confirm = None;
-                ctx.request(Request::EditPool {
-                    change: PoolChange::Remove { id },
-                });
+                ctx.request(Request::EditPool { change });
             }
             Key::Enter => self.confirm = None,
             _ => {}
@@ -181,6 +183,7 @@ impl Pools {
             id: pool.id.clone(),
             name: pool.name.clone(),
             users: (users != "Not used").then_some(users),
+            projects: pool.project_count,
             delete_focused: false,
         });
     }
@@ -644,7 +647,7 @@ mod tests {
         screen.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                change: PoolChange::Remove { id },
+                change: PoolChange::Remove { id, .. },
             }) => assert_eq!(id.as_str(), "pool-main"),
             other => panic!("unexpected request {other:?}"),
         }
@@ -676,7 +679,7 @@ mod tests {
         screen.key(&Key::Enter, &mut ctx);
         match ctx.next_request() {
             Some(Request::EditPool {
-                change: PoolChange::Remove { id },
+                change: PoolChange::Remove { id, .. },
             }) => assert_eq!(id.as_str(), "pool-spare"),
             other => panic!("unexpected request {other:?}"),
         }

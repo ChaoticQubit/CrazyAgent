@@ -15,7 +15,8 @@ use crate::terminal::{AgentId, TerminalFrame};
 /// changed is applied onto the pool as it is when saved.
 /// Input: built by the pool list, the pool editor and the Project screen.
 /// Output: one model access edit; `Assign` gives the project exactly the chosen
-/// pool, or none, and `Remove` also takes the pool off every project using it.
+/// pool, or none, and `Remove` also takes the pool off every project using it; it
+/// carries how many projects its confirmation showed and is refused when that changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
@@ -34,6 +35,7 @@ pub enum PoolChange {
     },
     Remove {
         id: CredentialRef,
+        opened_projects: usize,
     },
     Assign {
         pool: Option<CredentialRef>,

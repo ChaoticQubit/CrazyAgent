@@ -123,28 +123,11 @@ pub(crate) fn authorize_account_profile_scope(
     let crate::config::ModelEndpoint::Http { url } = &connection.endpoint else {
         return Err(EngineError("account_profile_endpoint_unsupported".into()));
     };
-    let url = url::Url::parse(url)
-        .map_err(|_| EngineError("account_profile_endpoint_unsupported".into()))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.has_host()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(EngineError("account_profile_endpoint_unsupported".into()));
-    }
-    if matches!(connection.auth, ModelAuthentication::None {}) {
-        let local = match url.host() {
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            Some(url::Host::Domain(domain)) => domain == "localhost",
-            None => false,
-        };
-        if !local {
-            return Err(EngineError("account_profile_endpoint_unsupported".into()));
-        }
-    }
+    let checked = match connection.auth {
+        ModelAuthentication::None {} => crate::accounts::local_url(url),
+        _ => crate::accounts::account_url(url),
+    };
+    checked.map_err(|_| EngineError("account_profile_endpoint_unsupported".into()))?;
     Ok(())
 }
 

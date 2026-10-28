@@ -180,3 +180,40 @@ fn imp1035_receipt_is_configured_only_and_contains_none_profile_join() {
     ));
     assert_eq!(receipt.profile_generation, 1);
 }
+
+#[test]
+fn a_keyed_profile_never_binds_a_plain_http_address_on_another_machine() {
+    let bind = |url: &str| {
+        let mut connection = configured_connection(true);
+        connection.endpoint = ModelEndpoint::Http { url: url.into() };
+        let expected = scope(&connection);
+        authorize_account_profile_scope(
+            &expected,
+            &expected.expected_database_instance,
+            &expected.expected_config_id,
+            &expected.expected_source_hash,
+            &connection,
+        )
+        .err()
+        .map(|error| error.0)
+    };
+    for url in [
+        "http://gateway.example/v1",
+        "http://10.0.0.5:8080/v1",
+        "http://[2001:db8::1]/v1",
+    ] {
+        assert_eq!(
+            bind(url).as_deref(),
+            Some("account_profile_endpoint_unsupported"),
+            "{url}"
+        );
+    }
+    for url in [
+        "https://gateway.example/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://localhost:8080/v1",
+        "http://[::1]:8080/v1",
+    ] {
+        assert_eq!(bind(url), None, "{url}");
+    }
+}

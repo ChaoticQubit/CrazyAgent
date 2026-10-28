@@ -787,6 +787,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "pool_exists" => Some("A pool with this id already exists."),
         "pool_not_found" => Some("This pool no longer exists. Refresh and try again."),
+        "pool_users_changed" => {
+            Some("The projects using this pool changed. Review them, then delete again.")
+        }
         "approved_accounts_limit" => Some(
             "Projects can use up to 64 approved accounts. Remove an account you no longer use, then try again.",
         ),
