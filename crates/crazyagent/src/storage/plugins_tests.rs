@@ -6,9 +6,19 @@ fn database() -> (tempfile::TempDir, Connection) {
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let connection = Connection::open(root.path().join("engine.db")).unwrap();
     super::super::initialize_schema(&connection).unwrap();
+    super::super::trash::initialize(&connection).unwrap();
+    super::super::master_session::initialize(&connection).unwrap();
     initialize(&connection).unwrap();
+    let app = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: ProjectId::new("app").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "App".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
     connection
-        .execute("INSERT INTO projects(id, body) VALUES('app', '{}')", [])
+        .execute("INSERT INTO projects(id, body) VALUES('app', ?1)", [app])
         .unwrap();
     (root, connection)
 }

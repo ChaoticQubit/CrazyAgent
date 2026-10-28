@@ -718,7 +718,7 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 6);
     let schema: String = db
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='master_sessions'",
