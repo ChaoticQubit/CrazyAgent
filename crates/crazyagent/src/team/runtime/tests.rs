@@ -1430,7 +1430,7 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     let master = runtime
-        .context(&project, 1, AgentRole::Master, true)
+        .context(&project, 1, AgentRole::Master, true, Layout::Linked)
         .unwrap();
     let delegate: Vec<&crate::plugins::LaunchServer> = master
         .plugins()
@@ -1450,7 +1450,9 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
             runtime.tool_record(1).to_str().unwrap().to_owned()
         ]
     );
-    let sub = runtime.context(&project, 2, AgentRole::Sub, true).unwrap();
+    let sub = runtime
+        .context(&project, 2, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
     assert!(
         sub.plugins()
             .servers
@@ -1461,14 +1463,18 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     let replacement = folder.join("replacement");
     engine_file(&replacement);
     std::fs::rename(&replacement, &engine).unwrap();
-    let Err(swapped) = runtime.context(&project, 1, AgentRole::Master, true) else {
+    let Err(swapped) = runtime.context(&project, 1, AgentRole::Master, true, Layout::Linked) else {
         panic!("a master context was built on a replaced engine");
     };
     assert!(
         swapped.contains("native_auth_host_executable_changed"),
         "{swapped}"
     );
-    assert!(runtime.context(&project, 2, AgentRole::Sub, true).is_ok());
+    assert!(
+        runtime
+            .context(&project, 2, AgentRole::Sub, true, Layout::Linked)
+            .is_ok()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -2751,7 +2757,8 @@ struct LevelRun {
 /// Starts one tools-on sub-agent of a project saved at `access`, through `TeamRuntime`
 /// and real sandbox-exec (none at Full access). The project is a committed tiny crate; the
 /// stand-in codex script edits a file, builds the crate offline with the owner's
-/// toolchain, commits with real git, lists an owner credential folder and writes outside
+/// toolchain, reads its launch instructions and commits with real git as they say, or
+/// tries anyway as a defiant agent, lists an owner credential folder and writes outside
 /// the project, all output to /dev/null, and records only each exit code. Input: the
 /// level. Output: the run, once the script has finished.
 #[cfg(target_os = "macos")]
@@ -2820,8 +2827,11 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         "#!/bin/sh".to_owned(),
         "echo 'Written by the agent.' > page.md".to_owned(),
         "cargo build --offline -q > /dev/null 2>&1; echo build=$? >> codes.txt".to_owned(),
+        "if /usr/bin/grep -q 'Commit your work on the branch checked out in your worktree' \"$CODEX_HOME/config.toml\" 2> /dev/null; then told=0; else told=1; fi; echo told=$told >> codes.txt".to_owned(),
         format!("{git} add page.md > /dev/null 2>&1; echo add=$? >> codes.txt"),
-        format!("{git} commit -q -m work > /dev/null 2>&1; echo commit=$? >> codes.txt"),
+        format!(
+            "if [ $told = 0 ]; then {git} commit -q -m work > /dev/null 2>&1; echo commit=$? >> codes.txt; else {git} commit -q -m work > /dev/null 2>&1; echo defied=$? >> codes.txt; fi"
+        ),
         format!(
             "ls {} > /dev/null 2>&1; echo secret=$? >> codes.txt",
             quoted(&secret)
@@ -2944,7 +2954,12 @@ impl LevelRun {
 fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
     assert_eq!(run.code("build"), 0, "{:?}", run.codes);
-    assert_ne!(run.code("add") + run.code("commit"), 0, "{:?}", run.codes);
+    assert_eq!(
+        run.code("told"),
+        1,
+        "a Sandboxed agent is never told to commit"
+    );
+    assert_ne!(run.code("add") + run.code("defied"), 0, "{:?}", run.codes);
     assert_ne!(run.code("secret"), 0, "{:?}", run.codes);
     assert_ne!(run.code("outside"), 0, "{:?}", run.codes);
     assert!(!run.fixture.base.join("outside").join("planted").exists());
@@ -2962,6 +2977,11 @@ fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets()
 fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
     assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(
+        run.code("told"),
+        0,
+        "its launch instructions tell it to commit"
+    );
     assert_eq!(run.code("add"), 0, "{:?}", run.codes);
     assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
     assert_ne!(run.code("secret"), 0, "{:?}", run.codes);
@@ -3002,6 +3022,11 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
 fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
     assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(
+        run.code("told"),
+        0,
+        "its launch instructions tell it to commit"
+    );
     assert_eq!(run.code("add"), 0, "{:?}", run.codes);
     assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
     assert_eq!(run.code("secret"), 0, "{:?}", run.codes);
@@ -3054,25 +3079,51 @@ fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
                 text.contains(crate::launch_context::MASTER_LANDING_RULES),
                 "{text}"
             );
-            assert!(text.contains("Never ask a sub-agent to create a branch, commit or push"));
+            assert!(text.contains("Never tell a sub-agent how to branch, commit or push"));
+            assert!(!text.contains("never commit"), "{text}");
             assert!(text.contains(
                 "tell the owner to review and accept them in the project's Changes view"
             ));
         }
     }
 
-    let prompt = sub_agent_prompt("Landing", &folder.join("wt-7"), "Fix the login form.");
-    assert!(prompt.contains(&format!(
-        "Work only inside {}.",
-        folder.join("wt-7").display()
-    )));
-    assert!(prompt.contains("Your task: Fix the login form.\n"));
-    for rule in [
-        "Leave your edits as files in that worktree",
-        "never create a branch, commit, push or write inside .git",
-        "never retry a refused command outside the sandbox",
-        "CrazyAgent turns your edits into a change set the owner accepts in Changes.",
+    for (layout, told, never) in [
+        (
+            Layout::Linked,
+            &[
+                "Leave your edits as files in that worktree",
+                "never create a branch, commit, push or write inside .git",
+                "never retry a refused command outside the sandbox",
+                "CrazyAgent turns your edits into a change set the owner accepts in Changes.",
+            ][..],
+            &["Commit your work", "only your commits land"][..],
+        ),
+        (
+            Layout::Clone,
+            &[
+                "Commit your work on the branch checked out there with conventional commit messages before you finish: only your commits land.",
+                "Never create, switch, rename, delete or push a branch, never write inside the project folder's .git, and never retry a refused command outside the sandbox.",
+                "CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes lands your commits.",
+            ][..],
+            &["never create a branch, commit", "Leave your edits as files"][..],
+        ),
     ] {
-        assert!(prompt.contains(rule), "{rule}");
+        let prompt = sub_agent_prompt(
+            "Landing",
+            &folder.join("wt-7"),
+            "Fix the login form.",
+            layout,
+        );
+        assert!(prompt.contains(&format!(
+            "Work only inside {}.",
+            folder.join("wt-7").display()
+        )));
+        assert!(prompt.contains("Your task: Fix the login form.\n"));
+        for rule in told {
+            assert!(prompt.contains(rule), "{layout:?} misses: {rule}");
+        }
+        for rule in never {
+            assert!(!prompt.contains(rule), "{layout:?} is told: {rule}");
+        }
     }
 }

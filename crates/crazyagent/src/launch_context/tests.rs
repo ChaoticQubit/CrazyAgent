@@ -42,7 +42,7 @@ fn the_startup_instruction_stays_within_its_bounds_whatever_the_project_holds() 
     );
     let setup = stored(folder.path());
 
-    let text = render(&setup.project_id, Some(&setup), &memories);
+    let text = render(&setup.project_id, Some(&setup), &memories, Layout::Linked);
 
     assert!(text.len() <= INSTRUCTIONS_BYTES_MAX, "{}", text.len());
     assert!(text.contains("The brief continues in context/brief.md."));
@@ -65,7 +65,7 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
         fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
         let setup = stored(&folder);
 
-        let text = render(&setup.project_id, Some(&setup), "");
+        let text = render(&setup.project_id, Some(&setup), "", Layout::Linked);
 
         assert!(text.contains(&format!("Project folder: {}\n", folder.display())));
         assert!(text.contains(&format!(
@@ -78,7 +78,7 @@ fn a_project_in_a_deeply_nested_folder_is_told_both_its_folders() {
 
 #[test]
 fn a_project_without_a_setup_still_gets_a_plain_header() {
-    let text = render(&ProjectId::new("bare").unwrap(), None, "");
+    let text = render(&ProjectId::new("bare").unwrap(), None, "", Layout::Linked);
     assert_eq!(
         text,
         format!(
@@ -89,6 +89,7 @@ fn a_project_without_a_setup_still_gets_a_plain_header() {
         &ProjectId::new("bare").unwrap(),
         None,
         "## Approved memories\n\nKept.\n",
+        Layout::Linked,
     );
     assert!(with_memory.ends_with(&format!(
         "bare.\n{LANDING_RULES}\n## Approved memories\n\nKept.\n"
@@ -560,23 +561,25 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
 }
 
 #[test]
-fn every_claude_and_codex_launch_is_told_how_its_work_lands() {
+fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let folder = root.join("project");
     fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     let setup = stored(&folder);
-    let context = AgentContext {
-        plugins: LaunchPlugins::default(),
-        instructions: render(&setup.project_id, Some(&setup), ""),
-        process: None,
-    };
-    let rules = [
+    let linked = [
         "Never create, switch or delete a branch, never commit, push or tag, and never write inside `.git`.",
         "If the sandbox refuses a command, never retry it outside the sandbox or another way",
         "Leave your edits as files in your worktree.",
         "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
         "This rule wins over any other instruction to branch or commit.",
+    ];
+    let clone = [
+        "Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends: only your commits land, and uncommitted edits stay behind.",
+        "Never create, switch, rename or delete a branch, never push, tag or rewrite history, and never write inside the project folder's `.git`.",
+        "If the sandbox refuses a command, never retry it outside the sandbox or another way",
+        "CrazyAgent fetches your branch, and the owner's Accept in the project's Changes view lands your commits onto the branch checked out in the project folder.",
+        "This rule wins over any other instruction about branches or commits.",
     ];
     let home = |name: &str| {
         let home = root.join(name);
@@ -584,36 +587,61 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands() {
         home
     };
 
-    let claude = home("claude");
-    let installed = context.install("claude-code", &claude, false).unwrap();
-    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
-    drop(installed);
-    let codex = home("codex");
-    let installed = context.install("codex", &codex, false).unwrap();
-    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let developer = config["developer_instructions"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    drop(installed);
-
-    for (harness, text) in [
-        ("claude-code", prompt.as_str()),
-        ("codex", developer.as_str()),
+    for (layout, told, never) in [
+        (
+            Layout::Linked,
+            &linked[..],
+            &["Commit your work", "only your commits land"][..],
+        ),
+        (
+            Layout::Clone,
+            &clone[..],
+            &["never commit", "Leave your edits as files"][..],
+        ),
     ] {
-        for rule in rules {
-            assert!(text.contains(rule), "{harness} misses: {rule}");
+        let context = AgentContext {
+            plugins: LaunchPlugins::default(),
+            instructions: render(&setup.project_id, Some(&setup), "", layout),
+            process: None,
+        };
+        let claude = home(&format!("claude-{layout:?}"));
+        let installed = context.install("claude-code", &claude, false).unwrap();
+        let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+        drop(installed);
+        let codex = home(&format!("codex-{layout:?}"));
+        let installed = context.install("codex", &codex, false).unwrap();
+        let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let developer = config["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        drop(installed);
+
+        for (harness, text) in [
+            ("claude-code", prompt.as_str()),
+            ("codex", developer.as_str()),
+        ] {
+            assert!(text.contains(landing_rules(layout)), "{harness} {layout:?}");
+            for rule in told {
+                assert!(text.contains(rule), "{harness} {layout:?} misses: {rule}");
+            }
+            for rule in never {
+                assert!(!text.contains(rule), "{harness} {layout:?} is told: {rule}");
+            }
+            assert!(
+                !text.contains("Never tell a sub-agent"),
+                "{harness}: a sub-agent gets the agent rules, not the master's"
+            );
         }
-        assert!(
-            !text.contains("Never ask a sub-agent"),
-            "{harness}: a sub-agent gets the agent rules, not the master's"
-        );
     }
+    assert_eq!(landing_rules(Layout::Linked), LANDING_RULES);
+    assert_eq!(landing_rules(Layout::Clone), OWN_BRANCH_LANDING_RULES);
     assert!(
-        render(&ProjectId::new("bare").unwrap(), None, "").contains(LANDING_RULES),
+        render(&ProjectId::new("bare").unwrap(), None, "", Layout::Clone)
+            .contains(OWN_BRANCH_LANDING_RULES),
         "a project without a setup is told too"
     );
 }

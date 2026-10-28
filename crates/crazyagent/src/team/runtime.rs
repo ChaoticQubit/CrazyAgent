@@ -1388,7 +1388,16 @@ impl TeamRuntime {
                 ));
             }
         };
-        let context = self.context(project, id, self.workers[&id].role, self.workers[&id].tools)?;
+        let layout = self
+            .agent_layout(project, id)
+            .map_err(|_| with_code("the agent worktree record could not be read", None))?;
+        let context = self.context(
+            project,
+            id,
+            self.workers[&id].role,
+            self.workers[&id].tools,
+            layout,
+        )?;
         self.workers.get_mut(&id).expect("worker exists").grants = generation;
         Ok(Some(Box::new(Grant { profile, context })))
     }
@@ -2152,10 +2161,14 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            let layout = self
+                .agent_layout(&stored.project_id, agent)
+                .map_err(error)?;
             let prompt = sub_agent_prompt(
                 &stored.name,
                 &worktree.map_or(folder.clone(), |worktree| folder.join(worktree)),
                 &prompt,
+                layout,
             );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
@@ -2374,12 +2387,7 @@ impl TeamRuntime {
         kept: Option<[String; 3]>,
     ) -> Result<Result<i64, String>, EngineError> {
         let layout = match &kept {
-            Some([_, worktree, git_dir])
-                if Path::new(git_dir) == crate::agent_git::git_dir(Path::new(worktree)) =>
-            {
-                Layout::Clone
-            }
-            Some(_) => Layout::Linked,
+            Some([_, worktree, git_dir]) => recorded_layout(worktree, git_dir),
             None => self.git_layout(&stored.project_id),
         };
         let prepared = self.prepare(
@@ -2576,6 +2584,24 @@ impl TeamRuntime {
     /// Where a new agent of a project keeps its git state (DEC-102): its own clone at the
     /// Own branch and Full access levels, a linked worktree at Sandboxed or when the saved
     /// level cannot be read (launch then refuses it). Input: the project. Output: the layout.
+    /// Reads the git layout a started agent works in from the worktree record the engine
+    /// wrote at its launch, never from the disk the agent can change. Takes the project and
+    /// the agent id. Returns Clone when the recorded git folder is the agent's own clone's,
+    /// Linked otherwise or with no record, or the database error.
+    fn agent_layout(&self, project: &ProjectId, id: i64) -> rusqlite::Result<Layout> {
+        let recorded: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![id, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        Ok(recorded.map_or(Layout::Linked, |(worktree, git_dir)| {
+            recorded_layout(&worktree, &git_dir)
+        }))
+    }
+
     fn git_layout(&self, project: &ProjectId) -> Layout {
         match crate::sandbox::policy::load(&self.connection, project.as_str()) {
             Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
@@ -2645,7 +2671,7 @@ impl TeamRuntime {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
         }
-        let context = self.context(&stored.project_id, id, role, tools)?;
+        let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let network = if tools {
             SandboxNetwork::Open
         } else {
@@ -2819,18 +2845,20 @@ impl TeamRuntime {
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
     /// tool for a master with tools on, served by the captured engine while the file at its
     /// path is still that one, and the team's skill and server names for a master with tools
-    /// off. Takes the project, the agent id, its role and tools switch.
+    /// off. Takes the project, the agent id, its role, tools switch and git layout, which
+    /// picks how its work lands.
     fn context(
         &self,
         project: &ProjectId,
         id: i64,
         role: AgentRole,
         tools: bool,
+        layout: Layout,
     ) -> Result<AgentContext, String> {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
-        let context =
-            crate::launch_context::for_project(&self.connection, project).map_err(unread)?;
+        let context = crate::launch_context::for_project(&self.connection, project, layout)
+            .map_err(unread)?;
         let master = role == AgentRole::Master;
         let live = master
             && self
@@ -3625,11 +3653,19 @@ impl TeamRuntime {
 }
 
 /// The turn a sub-agent gets for one task: the project, the worktree it works in, the task,
-/// and that its edits stay there for CrazyAgent to land. Inputs: the project name, the
-/// worktree and the task. Output: the prompt.
-fn sub_agent_prompt(name: &str, worktree: &Path, task: &str) -> String {
+/// and how its work lands in its git layout. Inputs: the project name, the worktree, the
+/// task and the layout. Output: the prompt.
+fn sub_agent_prompt(name: &str, worktree: &Path, task: &str, layout: Layout) -> String {
+    let lands = match layout {
+        Layout::Linked => {
+            "Leave your edits as files in that worktree: never create a branch, commit, push or write inside .git, and never retry a refused command outside the sandbox. CrazyAgent turns your edits into a change set the owner accepts in Changes."
+        }
+        Layout::Clone => {
+            "Commit your work on the branch checked out there with conventional commit messages before you finish: only your commits land. Never create, switch, rename, delete or push a branch, never write inside the project folder's .git, and never retry a refused command outside the sandbox. CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes lands your commits."
+        }
+    };
     format!(
-        "You are a sub-agent of the project \"{name}\". Work only inside {}.\nYour task: {task}\nLeave your edits as files in that worktree: never create a branch, commit, push or write inside .git, and never retry a refused command outside the sandbox. CrazyAgent turns your edits into a change set the owner accepts in Changes.\nWhen you finish, reply with a short summary of what you did.",
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\nYour task: {task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
         worktree.display()
     )
 }
@@ -4412,6 +4448,18 @@ fn owner_git_identity(root: &Path) -> Option<GitIdentity> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
     let (name, email) = crate::landing::owner_git_identity(root, &home).ok()?;
     GitIdentity::new(name, email).ok()
+}
+
+/// Tells the git layout of a worktree from the git folder the engine recorded for it: an
+/// agent's own clone keeps its git folder at `agent_git::git_dir`, a linked worktree's sits
+/// in the project's `.git/worktrees`. Inputs: the recorded worktree and git folder. Output:
+/// the layout.
+fn recorded_layout(worktree: &str, git_dir: &str) -> Layout {
+    if Path::new(git_dir) == crate::agent_git::git_dir(Path::new(worktree)) {
+        Layout::Clone
+    } else {
+        Layout::Linked
+    }
 }
 
 /// Reads where Git keeps a new agent worktree's metadata while no agent has run in it yet,

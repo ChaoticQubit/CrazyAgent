@@ -941,6 +941,7 @@ impl Agents {
             Some(crate::launch_context::for_project(
                 &*self.db()?,
                 &spec.project,
+                crate::agent_git::Layout::Linked,
             )?)
         } else {
             None

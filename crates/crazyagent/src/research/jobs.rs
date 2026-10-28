@@ -471,14 +471,19 @@ impl ResearchJobs {
     }
 
     /// Reads what every agent launched for `project` receives, its approved
-    /// skills, MCP servers, brief and memories, from the engine database this
+    /// skills, MCP servers, brief and memories with the landing rules of a
+    /// linked worktree, where research runs, from the engine database this
     /// queue lives in. Returns the context, or a plain launch code such as
     /// `plugin_project_unknown` for a project the engine does not know.
     pub fn project_context(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> Result<crate::launch_context::AgentContext, crate::harnesses::launch::LaunchError> {
-        crate::launch_context::for_project(&self.connection, project)
+        crate::launch_context::for_project(
+            &self.connection,
+            project,
+            crate::agent_git::Layout::Linked,
+        )
     }
 
     /// Reads the extra read-only folders the owner saved for a project's agents, see
