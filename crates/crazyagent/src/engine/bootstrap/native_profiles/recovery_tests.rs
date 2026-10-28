@@ -739,3 +739,108 @@ fn account_setup_repins_a_generated_config_whose_times_changed() {
     assert_eq!(second.profile_generation, 2);
     assert_eq!(second.profile_config_sha256, first.profile_config_sha256);
 }
+
+fn rewrite_in_place(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let inode = std::fs::metadata(path).unwrap().ino();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    edit(&mut value);
+    let mut file = File::options()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    file.sync_all().unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+}
+
+fn renumber(value: &mut serde_json::Value, by: u64) {
+    if let serde_json::Value::Object(fields) = value {
+        for (name, field) in fields.iter_mut() {
+            if name == "device" {
+                *field = (field.as_u64().unwrap() + by).into();
+            } else {
+                renumber(field, by);
+            }
+        }
+    }
+}
+
+fn prepared_then_renumbered(root_by: u64, slot_by: u64) -> NativeCase {
+    let case = NativeCase::new();
+    case.custody()
+        .prepare(&case.host, &case.connection)
+        .unwrap();
+    rewrite_in_place(&case.root().join(MANIFEST), |value| {
+        renumber(value, root_by)
+    });
+    rewrite_in_place(&case.slot().join(MANIFEST), |value| {
+        renumber(value, slot_by)
+    });
+    case
+}
+
+#[test]
+fn custody_written_before_a_volume_renumber_stays_usable_without_a_rewrite() {
+    let case = prepared_then_renumbered(1, 1);
+    let root_manifest = case.root().join(MANIFEST);
+    let slot_manifest = case.slot().join(MANIFEST);
+    let written = (
+        std::fs::read(&root_manifest).unwrap(),
+        std::fs::read(&slot_manifest).unwrap(),
+    );
+    let mut custody = case.custody();
+    let (custody_id, key) = custody.prepare(&case.host, &case.connection).unwrap();
+    assert_eq!(key, digest(PROFILE.as_bytes()));
+    assert_eq!(custody_id, digest(&written.1));
+    case.usable(&mut custody, &case.connection);
+    assert_eq!(
+        (
+            std::fs::read(&root_manifest).unwrap(),
+            std::fs::read(&slot_manifest).unwrap()
+        ),
+        written
+    );
+}
+
+#[test]
+fn custody_with_mixed_or_moved_pins_is_still_refused() {
+    let mixed_root = NativeCase::new();
+    mixed_root
+        .custody()
+        .prepare(&mixed_root.host, &mixed_root.connection)
+        .unwrap();
+    rewrite_in_place(&mixed_root.root().join(MANIFEST), |value| {
+        renumber(&mut value["state"], 1)
+    });
+    let refused = mixed_root
+        .custody()
+        .prepare(&mixed_root.host, &mixed_root.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let split = prepared_then_renumbered(1, 2);
+    let refused = split.custody().prepare(&split.host, &split.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let moved = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&moved.slot().join(MANIFEST), |value| {
+        let inode = value["home"]["inode"].as_u64().unwrap();
+        value["home"]["inode"] = (inode + 1).into();
+    });
+    let refused = moved.custody().prepare(&moved.host, &moved.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let moved_root = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&moved_root.root().join(MANIFEST), |value| {
+        let inode = value["database"]["inode"].as_u64().unwrap();
+        value["database"]["inode"] = (inode + 1).into();
+    });
+    let refused = moved_root
+        .custody()
+        .prepare(&moved_root.host, &moved_root.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+}
