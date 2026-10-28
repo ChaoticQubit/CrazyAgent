@@ -421,7 +421,7 @@ fn copy_tree(
             return Err("skill_too_many_files");
         }
         let name = OsStr::from_bytes(entry.file_name().to_bytes());
-        if SKIPPED.iter().any(|skipped| name == *skipped) {
+        if left_out(name) {
             continue;
         }
         let path = from.join(name);
@@ -478,10 +478,7 @@ fn copy_tree(
                 let inside = resolved
                     .strip_prefix(root)
                     .map_err(|_| "skill_link_outside")?;
-                if inside
-                    .iter()
-                    .any(|part| SKIPPED.iter().any(|skipped| part == *skipped))
-                {
+                if inside.iter().any(left_out) {
                     continue;
                 }
                 let opened = open_real(&resolved, PLAIN).map_err(|_| "skill_file_unsupported")?;
@@ -524,6 +521,16 @@ fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
         opened = rustix::fs::openat(&opened, *name, flags, Mode::empty())?;
     }
     Ok(opened)
+}
+
+/// Whether a name is one the copy leaves out, `.git` or `.DS_Store`, in any letter case,
+/// since the default macOS volume opens `.git` by `.GIT` too. Input: the name. Output:
+/// the answer.
+#[cfg(unix)]
+fn left_out(name: &OsStr) -> bool {
+    SKIPPED
+        .iter()
+        .any(|skipped| name.eq_ignore_ascii_case(skipped))
 }
 
 /// The path a link in the folder names, its `.` and `..` worked out as text, kept only when
@@ -1147,6 +1154,43 @@ mod tests {
                 planned
                     .iter()
                     .all(|file| !file.from.iter().any(|part| part == ".git")),
+                "{rules:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_git_folder_or_link_in_any_letter_case_is_left_out() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("store")).unwrap();
+        let source = skill(root.path(), GOOD);
+        fs::create_dir(source.join(".git")).unwrap();
+        fs::write(
+            source.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://owner:token@example.com/owner/repo.git\n",
+        )
+        .unwrap();
+        fs::create_dir(source.join("scripts/.GiT")).unwrap();
+        fs::write(source.join("scripts/.GiT/config"), "[core]\n").unwrap();
+        symlink(".GIT/config", source.join("upper.md")).unwrap();
+        symlink("../.Git/config", source.join("scripts/mixed.md")).unwrap();
+        for (index, rules) in [PICKED, IMPORTED].iter().enumerate() {
+            let destination = root.path().join("store").join(index.to_string());
+            let meta = copy_with(&source, &destination, rules).unwrap();
+            assert_eq!(meta.files, 2, "{rules:?}");
+            for left in ["upper.md", "scripts/mixed.md", "scripts/.GiT"] {
+                assert!(
+                    fs::symlink_metadata(destination.join(left)).is_err(),
+                    "{left} was copied under {rules:?}"
+                );
+            }
+            let (checked, planned) = check_with(&source, rules).unwrap();
+            assert_eq!(checked, meta);
+            assert!(
+                planned.iter().all(|file| !file
+                    .from
+                    .iter()
+                    .any(|part| part.eq_ignore_ascii_case(".git"))),
                 "{rules:?}"
             );
         }
