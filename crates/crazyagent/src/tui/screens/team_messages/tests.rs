@@ -316,26 +316,94 @@ fn a_newest_page_past_the_loaded_entries_replaces_them() {
 }
 
 #[test]
-fn the_list_holds_at_most_the_newest_thousand_entries() {
+fn at_the_thousand_entry_cap_paging_older_and_a_refresh_keep_the_entries_the_owner_reads() {
     let mut list = opened();
-    answer(&mut list, 0, page((1..=200).map(numbered).collect(), false));
-    for round in 1..=5 {
-        let first = round * 200;
-        answer(
+    answer(
+        &mut list,
+        0,
+        page((901..=1100).map(numbered).collect(), true),
+    );
+    for first in [701, 501, 301, 101] {
+        list.key(&Key::Home);
+        let before = answer(
             &mut list,
-            round * REFRESH_MS,
-            page((first..=first + 200).map(numbered).collect(), true),
+            1,
+            page((first..first + 200).map(numbered).collect(), true),
         );
+        assert_eq!(before, Some(numbered(first + 200).cursor()));
     }
     assert_eq!(list.entries.len(), KEPT_MAX);
-    assert_eq!(list.entries[0].id, 201);
-    assert_eq!(list.entries[list.cursor].id, 1200);
-    assert_eq!(texts(&list, 76, 6)[0], "Showing the newest 1000 entries.");
     list.key(&Key::Home);
-    assert!(
-        list.next_query(5 * REFRESH_MS + 1).is_none(),
-        "a full list asks for no older page"
+    assert_eq!(list.entries[list.cursor].id, 101);
+    let query = list.next_query(2);
+    assert_eq!(
+        query,
+        Some(SetupQuery::TeamMessages {
+            project: project(),
+            agent: 2,
+            before: Some(numbered(101).cursor()),
+        }),
+        "Home at the cap reads the page before the oldest entry"
     );
+    let older = page((1..=100).map(numbered).collect(), false);
+    assert!(list.apply(
+        &query.unwrap(),
+        &Ok(SetupView::TeamMessages(Box::new(older)))
+    ));
+    let ids: Vec<i64> = list.entries.iter().map(|entry| entry.id).collect();
+    assert_eq!(
+        ids,
+        (1..=1000).collect::<Vec<_>>(),
+        "the page read stays whole and the newest entries leave instead"
+    );
+    assert_eq!(
+        list.entries[list.cursor].id, 101,
+        "the pick stays on the entry the owner reads"
+    );
+    assert_eq!(
+        texts(&list, 76, 6)[..2],
+        [
+            "Start of the messages.",
+            "Newer messages are not shown. End goes back to the newest.",
+        ]
+    );
+    assert!(list.help().contains(&("End", "Newest")));
+    assert!(
+        list.next_query(10 * REFRESH_MS).is_none(),
+        "the list stops following new entries while the newest are dropped"
+    );
+
+    list.key(&Key::End);
+    assert_eq!(list.entries[list.cursor].id, 1000);
+    answer(
+        &mut list,
+        10 * REFRESH_MS,
+        page((951..=1150).map(numbered).collect(), true),
+    );
+    assert_eq!(list.entries.len(), KEPT_MAX);
+    assert_eq!(list.entries[0].id, 151);
+    assert_eq!(
+        list.entries[list.cursor].id, 1150,
+        "End follows the newest again"
+    );
+    assert!(!list.help().contains(&("End", "Newest")));
+
+    for _ in 0..99 {
+        list.key(&Key::PageUp);
+    }
+    assert_eq!(list.entries[list.cursor].id, 160);
+    answer(
+        &mut list,
+        11 * REFRESH_MS,
+        page((1001..=1200).map(numbered).collect(), true),
+    );
+    assert_eq!(
+        list.entries[list.cursor].id, 160,
+        "a refresh at the cap keeps the entry the owner reads"
+    );
+    assert_eq!(list.entries[0].id, 151);
+    assert_eq!(list.entries.len(), KEPT_MAX);
+    assert!(list.help().contains(&("End", "Newest")));
 }
 
 #[test]

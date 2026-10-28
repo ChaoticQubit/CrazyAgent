@@ -12,7 +12,8 @@ use crate::tui::text::{cut, width, wrap};
 use crate::tui::theme::Role;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The most entries one open list holds; older pages past it stay in the engine.
+/// The most entries one open list holds; entries dropped past it stay in the engine and are
+/// read again when the owner pages back to them.
 pub(in crate::tui) const KEPT_MAX: usize = 1000;
 
 /// What `m` on the master says: its Messages list is a sub-agent's input, and the master's own
@@ -43,7 +44,9 @@ pub(in crate::tui) enum ListKey {
 /// tree: tasks, what the master and the owner said to it and its events, oldest at the top.
 /// Pages come from the engine through `next_query` and `apply`; the newest page is read
 /// again once per refresh period and PgUp at the top reads the page before the oldest entry.
-/// Entries merge by their cursor, at most `KEPT_MAX` stay. Never invents an entry.
+/// Entries merge by their cursor and at most `KEPT_MAX` stay, dropped from the end away from
+/// the pick. Once the newest are dropped the list stops following new entries until End.
+/// Never invents an entry.
 pub(in crate::tui) struct Messages {
     pub project: ProjectId,
     pub agent: i64,
@@ -51,6 +54,7 @@ pub(in crate::tui) struct Messages {
     offset: i64,
     entries: Vec<AgentMessage>,
     older: bool,
+    newer: bool,
     settings: Option<MessageSettings>,
     loaded: bool,
     asked: Option<SetupQuery>,
@@ -74,6 +78,7 @@ impl Messages {
             offset,
             entries: Vec::new(),
             older: false,
+            newer: false,
             settings: None,
             loaded: false,
             asked: None,
@@ -102,6 +107,7 @@ impl Messages {
         }
         let before = match (self.want_older, self.entries.first()) {
             (true, Some(oldest)) => Some(oldest.cursor()),
+            _ if self.newer => return None,
             _ if self.read_ms.is_none_or(|last| now_ms - last >= REFRESH_MS) => None,
             _ => return None,
         };
@@ -179,13 +185,9 @@ impl Messages {
             merged.insert(entry.cursor(), entry.clone());
         }
         self.entries = merged.into_values().collect();
-        if self.entries.len() > KEPT_MAX {
-            self.entries.drain(..self.entries.len() - KEPT_MAX);
-            self.older = true;
-        }
         self.settings = Some(page.settings);
         let last = self.entries.len().saturating_sub(1);
-        self.cursor = match picked {
+        let cursor = match picked {
             Some(picked) if !at_newest || before.is_some() => self
                 .entries
                 .iter()
@@ -193,17 +195,31 @@ impl Messages {
                 .unwrap_or(last),
             _ => last,
         };
+        let over = self.entries.len().saturating_sub(KEPT_MAX);
+        self.cursor = if over == 0 {
+            cursor
+        } else if cursor * 2 < self.entries.len() {
+            self.entries.truncate(KEPT_MAX);
+            self.newer = true;
+            cursor.min(KEPT_MAX - 1)
+        } else {
+            self.entries.drain(..over);
+            self.older = true;
+            cursor.saturating_sub(over)
+        };
+        let last = self.entries.len().saturating_sub(1);
         assert!(self.entries.len() <= KEPT_MAX && self.cursor <= last);
     }
 
     fn ask_older(&mut self) {
-        if self.older && self.entries.len() < KEPT_MAX && self.asked.is_none() {
+        if self.older && self.asked.is_none() {
             self.want_older = true;
         }
     }
 
     /// Handles one key while the list is open: the arrows move, PgUp and PgDn move a page,
-    /// PgUp on the oldest entry or Home asks for the older page, End goes to the newest,
+    /// PgUp on the oldest entry or Home asks for the older page, End goes to the newest and
+    /// reads it again when newer entries were dropped,
     /// Enter opens or closes a task result and Esc closes the list.
     /// Takes the key. Returns whether the list stays open.
     pub fn key(&mut self, key: &Key) -> ListKey {
@@ -213,7 +229,13 @@ impl Messages {
             Key::Up => self.cursor = self.cursor.saturating_sub(1),
             Key::Down => self.cursor = (self.cursor + 1).min(last),
             Key::PageDown => self.cursor = (self.cursor + PAGE_STEP).min(last),
-            Key::End => self.cursor = last,
+            Key::End => {
+                self.cursor = last;
+                if self.newer {
+                    self.newer = false;
+                    self.read_ms = None;
+                }
+            }
             Key::PageUp if self.cursor > 0 => self.cursor = self.cursor.saturating_sub(PAGE_STEP),
             Key::PageUp => self.ask_older(),
             Key::Home => {
@@ -252,6 +274,9 @@ impl Messages {
         {
             help.push(("Enter", "Result"));
         }
+        if self.newer {
+            help.push(("End", "Newest"));
+        }
         help.push(("Esc", "Back"));
         help
     }
@@ -272,13 +297,15 @@ impl Messages {
                 before: Some(_), ..
             }) => Some("Reading older messages...".to_owned()),
             _ if !self.loaded => None,
-            _ if self.older && self.entries.len() >= KEPT_MAX => {
-                Some(format!("Showing the newest {KEPT_MAX} entries."))
-            }
             _ if self.older => Some("PgUp at the top reads older messages.".to_owned()),
             _ => Some("Start of the messages.".to_owned()),
         };
         head.extend(top.as_deref().map(muted));
+        if self.newer {
+            head.push(muted(
+                "Newer messages are not shown. End goes back to the newest.",
+            ));
+        }
         if let Some(problem) = &self.problem {
             head.push(Shown {
                 text: problem.clone(),
