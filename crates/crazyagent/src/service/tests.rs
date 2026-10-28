@@ -300,6 +300,7 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
             "/opt/homebrew/bin:relative:/Users/owner/bin:/usr/bin",
         )),
         Some(Path::new("/Users/owner")),
+        None,
     );
     assert_eq!(
         path,
@@ -308,7 +309,7 @@ fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
         )
     );
     assert_eq!(
-        service_path(None, None),
+        service_path(None, None, None),
         OsString::from("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
     );
 }
@@ -402,7 +403,7 @@ fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
 #[cfg(unix)]
 #[test]
 fn link_cli_links_into_the_bin_folder_and_refuses_a_real_file() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = durable_folder();
     let executable = temp.path().join("app/crazyagent");
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     std::fs::write(&executable, "#!/bin/sh\n").unwrap();
@@ -613,6 +614,17 @@ fn bundle(folder: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn refusal(executable: &Path, entry: &Path) -> String {
+    format!(
+        "{}: other users can change {}, so neither a login service nor the command line \
+         link may run the engine from there; install CrazyAgent in a folder only you and \
+         the system can change",
+        executable.display(),
+        entry.display()
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_link() {
     let temp = durable_folder();
@@ -632,22 +644,20 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
         );
         let inward = shared.join("inward");
         std::os::unix::fs::symlink(&private, &inward).unwrap();
-        assert_eq!(changeable_by_others(&inward), Some(shared));
+        assert_eq!(changeable_by_others(&inward), Some(shared.clone()));
+        assert_eq!(
+            changeable_by_others(&shared.join("gone").join("crazyagent")),
+            Some(shared.clone())
+        );
+        let leads = temp.path().join("private").join(format!("leads-{mode:o}"));
+        std::os::unix::fs::symlink(&shared, &leads).unwrap();
+        assert_eq!(
+            changeable_by_others(&leads.join("gone").join("bin")),
+            Some(std::fs::canonicalize(&shared).unwrap())
+        );
     }
-    let gone = temp
-        .path()
-        .join("private")
-        .join("missing")
-        .join("crazyagent");
-    assert_eq!(
-        changeable_by_others(&gone),
-        Some(
-            temp.path()
-                .join("private")
-                .join("missing")
-                .join("crazyagent")
-        )
-    );
+    let gone = temp.path().join("private").join("gone").join("crazyagent");
+    assert_eq!(changeable_by_others(&gone), None);
 }
 
 #[cfg(unix)]
@@ -662,15 +672,7 @@ fn install_refuses_an_engine_other_users_can_change_before_writing_anything() {
     linux.root = temp.path().join("data").join("engine");
     linux.definition = temp.path().join("units").join(SYSTEMD_UNIT);
     let error = linux.install().unwrap_err();
-    assert_eq!(
-        error.0,
-        format!(
-            "{}: other users can change {}, so a login service must not run the engine \
-             from there; install CrazyAgent in a folder only you and the system can change",
-            planted.display(),
-            shared.display()
-        )
-    );
+    assert_eq!(error.0, refusal(&planted, &shared));
     assert!(!linux.definition.exists());
     assert!(!linux.root.exists());
     assert!(!temp.path().join("units").exists());
@@ -678,33 +680,32 @@ fn install_refuses_an_engine_other_users_can_change_before_writing_anything() {
 
 #[cfg(unix)]
 #[test]
-fn installable_runs_a_private_engine_in_place_and_copies_one_from_the_appimage_mount() {
+fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the_appimage_mount() {
     let temp = durable_folder();
     let mount = temp.path().join(".mount_Ab12Cd");
     let bundled = bundle(&mount.join("usr").join("bin"));
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    assert_eq!(persistable(&bundled, &layout, None).unwrap(), bundled);
+    let elsewhere = temp.path().join("elsewhere");
     assert_eq!(
-        installable(&bundled, &layout, "1.2.3", None).unwrap(),
+        persistable(&bundled, &layout, Some(&elsewhere)).unwrap(),
         bundled
     );
     assert!(!layout.root().exists());
-    let elsewhere = temp.path().join("elsewhere");
-    assert_eq!(
-        installable(&bundled, &layout, "1.2.3", Some(&elsewhere)).unwrap(),
-        bundled
-    );
     let copies = layout.root().join("bin");
-    let target = copies.join("1.2.3");
-    let installed = installable(&bundled, &layout, "1.2.3", Some(&mount)).unwrap();
-    assert_eq!(installed, target.join("crazyagent"));
+    let installed = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    assert_eq!(installed, copies.join("crazyagent"));
     assert_eq!(changeable_by_others(&installed), None);
     assert_eq!(mode_of(&copies), 0o700);
-    assert_eq!(mode_of(&target), 0o700);
-    let mut names: Vec<String> = std::fs::read_dir(&target)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    names.sort();
+    let listed = || {
+        let mut names: Vec<String> = std::fs::read_dir(&copies)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let names = listed();
     assert_eq!(
         names,
         [
@@ -716,10 +717,10 @@ fn installable_runs_a_private_engine_in_place_and_copies_one_from_the_appimage_m
     );
     for name in &names {
         assert_eq!(
-            std::fs::read_to_string(target.join(name)).unwrap(),
+            std::fs::read_to_string(copies.join(name)).unwrap(),
             format!("{name} bytes")
         );
-        assert_eq!(mode_of(&target.join(name)), 0o700);
+        assert_eq!(mode_of(&copies.join(name)), 0o700);
     }
     let mut linux = service(Platform::Linux);
     linux.executable = installed.clone();
@@ -731,72 +732,114 @@ fn installable_runs_a_private_engine_in_place_and_copies_one_from_the_appimage_m
     );
     assert!(!unit.contains(".mount_"), "{unit}");
 
-    write_mode(&target.join("crazyagent-rcli"), "planted", 0o700);
+    write_mode(&copies.join("crazyagent-rcli"), "planted", 0o700);
     write_mode(
-        &target.join("crazyagent-runner"),
+        &copies.join("crazyagent-runner"),
         "crazyagent-runner bytes",
         0o755,
     );
+    write_mode(
+        &mount.join("usr").join("bin").join("crazyagent"),
+        "crazyagent newer bytes",
+        0o755,
+    );
     assert_eq!(
-        installable(&bundled, &layout, "1.2.3", Some(&mount)).unwrap(),
+        persistable(&bundled, &layout, Some(&mount)).unwrap(),
         installed
     );
     assert_eq!(
-        std::fs::read_to_string(target.join("crazyagent-rcli")).unwrap(),
+        std::fs::read_to_string(copies.join("crazyagent-rcli")).unwrap(),
         "crazyagent-rcli bytes"
     );
-    assert_eq!(mode_of(&target.join("crazyagent-runner")), 0o700);
-
-    for version in ["", ".", "..", ".staging-1", "1.2/3", "../1"] {
-        assert!(
-            installable(&bundled, &layout, version, Some(&mount)).is_err(),
-            "{version}"
-        );
-    }
+    assert_eq!(
+        std::fs::read_to_string(&installed).unwrap(),
+        "crazyagent newer bytes"
+    );
+    assert_eq!(mode_of(&copies.join("crazyagent-runner")), 0o700);
+    assert_eq!(listed(), names);
     let stranger = mount.join("usr").join("bin").join("notes.txt");
-    assert!(installable(&stranger, &layout, "1.2.3", Some(&mount)).is_err());
+    assert!(persistable(&stranger, &layout, Some(&mount)).is_err());
 }
 
 #[cfg(unix)]
 #[test]
-fn installable_copies_an_engine_other_users_can_change_and_the_copy_installs_cleanly() {
+fn persistable_never_copies_from_a_folder_other_users_can_change_and_install_refuses_it() {
     let temp = durable_folder();
     let shared = shared_folder(&temp.path().join("shared"), 0o777);
     let bundled = bundle(&shared);
     let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
-    let installed = installable(&bundled, &layout, "2.0.0", None).unwrap();
+    assert_eq!(persistable(&bundled, &layout, None).unwrap(), bundled);
+    assert!(!layout.root().exists());
+    let mut linux = service(Platform::Linux);
+    linux.executable = bundled.clone();
+    linux.root = layout.root().to_path_buf();
+    linux.definition = temp.path().join("units").join(SYSTEMD_UNIT);
+    assert_eq!(linux.install().unwrap_err().0, refusal(&bundled, &shared));
+    assert!(!layout.root().exists());
+    assert!(!linux.definition.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn link_cli_refuses_an_engine_other_users_can_change_and_links_the_private_copy() {
+    let temp = durable_folder();
+    let shared = shared_folder(&temp.path().join(".mount_Ab12Cd"), 0o1777);
+    let planted = shared.join("usr").join("bin").join("crazyagent");
+    write_mode(&planted, "engine", 0o755);
+    let bin = temp.path().join("home").join(".local").join("bin");
     assert_eq!(
-        installed,
-        layout.root().join("bin").join("2.0.0").join("crazyagent")
+        link_cli(&planted, &bin).unwrap_err().0,
+        refusal(&planted, &shared)
     );
-    assert_eq!(changeable_by_others(&installed), None);
+    assert!(!bin.exists());
+    let mount = temp.path().join("private").join(".mount_Ef34Gh");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    let copy = persistable(&bundled, &layout, Some(&mount)).unwrap();
+    let link = link_cli(&copy, &bin).unwrap();
     assert_eq!(
-        std::fs::read_to_string(&installed).unwrap(),
-        "crazyagent bytes"
+        std::fs::read_link(&link).unwrap(),
+        layout.root().join("bin").join("crazyagent")
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn prune_copies_keeps_only_the_folder_of_the_installed_engine() {
+fn service_path_drops_the_appimage_mount_and_folders_other_users_can_change() {
     let temp = durable_folder();
     let mount = temp.path().join(".mount_Ab12Cd");
-    let bundled = bundle(&mount.join("usr").join("bin"));
-    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
-    let copies = layout.root().join("bin");
-    let old = installable(&bundled, &layout, "1.0.0", Some(&mount)).unwrap();
-    let new = installable(&bundled, &layout, "2.0.0", Some(&mount)).unwrap();
-    write_mode(&copies.join(".staging-1").join("crazyagent"), "left", 0o700);
-    prune_copies(&layout, &bundled);
-    prune_copies(&layout, &copies.join("crazyagent"));
-    assert!(old.is_file());
-    prune_copies(&layout, &new);
-    let left: Vec<String> = std::fs::read_dir(&copies)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(left, ["2.0.0"]);
-    assert!(new.is_file());
+    std::fs::create_dir_all(mount.join("usr").join("bin")).unwrap();
+    let shared = shared_folder(&temp.path().join("shared"), 0o1777);
+    let home = temp.path().join("home");
+    let tools = temp.path().join("tools");
+    let current = std::env::join_paths([
+        mount.join("usr").join("bin"),
+        shared.join("bin"),
+        tools.clone(),
+        mount.join("usr").join("sbin"),
+        PathBuf::from("/usr/bin"),
+    ])
+    .unwrap();
+    let path = service_path(Some(&current), Some(&home), Some(&mount));
+    let kept: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    assert_eq!(
+        kept[..3],
+        [
+            tools,
+            PathBuf::from("/usr/bin"),
+            home.join(".local").join("bin")
+        ]
+    );
+    assert!(
+        !kept
+            .iter()
+            .any(|folder| folder.starts_with(&mount) || folder.starts_with(&shared)),
+        "{kept:?}"
+    );
+    let unmounted = service_path(Some(&current), Some(&home), None);
+    let kept: Vec<PathBuf> = std::env::split_paths(&unmounted).collect();
+    assert_eq!(kept[0], mount.join("usr").join("bin"));
+    assert!(!kept.iter().any(|folder| folder.starts_with(&shared)));
 }
 
 #[test]
@@ -829,5 +872,40 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
         assert!(!moved.current());
         std::fs::write(&wanted.definition, wanted.definition_text().unwrap() + "\n").unwrap();
         assert!(!wanted.current());
+    }
+}
+
+#[test]
+fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp.path().join("CrazyAgent.app").join("crazyagent");
+    let copy = temp.path().join("engine").join("bin").join("crazyagent");
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut installed = service(platform);
+        installed.root = temp.path().join("engine");
+        installed.executable = bundled.clone();
+        installed.path = OsString::from("/usr/bin:/bin");
+        installed.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(
+            &installed.definition,
+            &installed.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        let mut launched = installed.clone();
+        launched.path = OsString::from("/opt/homebrew/bin:/usr/bin:/bin");
+        assert!(!launched.current());
+        assert!(!launched.stale(&bundled));
+        assert!(!installed.stale(&bundled));
+        let mut copied = launched.clone();
+        copied.executable = copy.clone();
+        assert!(copied.stale(&bundled));
+        write_definition(
+            &copied.definition,
+            &copied.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!copied.stale(&bundled));
     }
 }

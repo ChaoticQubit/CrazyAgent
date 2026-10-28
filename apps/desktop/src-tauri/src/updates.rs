@@ -230,9 +230,9 @@ pub async fn install(
     })
 }
 
-/// Links the bundled `crazyagent` onto the owner's PATH through
-/// `crazyagent service link-cli`. Output: the tool's own one-line report, or
-/// `update_link_cli_failed` / `sidecar_missing`.
+/// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
+/// mount, onto the owner's PATH through `crazyagent service link-cli`. Output: the tool's
+/// own one-line report, or `update_link_cli_failed` / `sidecar_missing`.
 pub async fn link_cli() -> Result<String, BridgeError> {
     service(sidecar()?, "link-cli")
         .await
