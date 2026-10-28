@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 const GIT: &str = "/usr/bin/git";
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
-const LISTING_BYTES_MAX: usize = 64 * 1024;
+pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
