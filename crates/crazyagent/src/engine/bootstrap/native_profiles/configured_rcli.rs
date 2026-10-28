@@ -328,11 +328,30 @@ impl NativeProfileCustody {
         let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
         let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("rcli_profile_binding_conflict"))?;
+        let [state, database, root_directory, root_manifest] = actual.root.files();
+        let [live_state, live_database, live_root, live_root_manifest] = root_identity.files();
         if actual.version != 2
-            || actual.root != *root_identity
+            || actual.root.version != root_identity.version
+            || actual.root.database_instance != root_identity.database_instance
             || actual.profile_ref != *target_profile_ref
-            || actual.directory != profile.identity
-            || actual.manifest != manifest.identity
+            || !same_files(
+                &[
+                    state,
+                    database,
+                    root_directory,
+                    root_manifest,
+                    actual.directory,
+                    actual.manifest,
+                ],
+                &[
+                    live_state,
+                    live_database,
+                    live_root,
+                    live_root_manifest,
+                    profile.identity,
+                    manifest.identity,
+                ],
+            )
             || actual.generation == 0
             || slots.get(key) != Some(&profile.identity)
             || self
