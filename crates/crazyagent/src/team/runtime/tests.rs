@@ -4515,6 +4515,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         pane: None,
         live: false,
         resume: None,
+        continues: true,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -4701,7 +4702,7 @@ fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
     };
     for team_tool in [true, false] {
         for text in [
-            framing(&setup, team_tool, &[]),
+            framing(&setup, team_tool, &[], &[]),
             live_framing(&setup, team_tool, &[], &[]),
         ] {
             assert!(
