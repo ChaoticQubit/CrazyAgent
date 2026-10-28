@@ -116,3 +116,27 @@ test("refusals read as plain sentences and unknown codes keep their code", () =>
     assert.ok(codes.includes(code), `${code} is an engine code`);
   }
 });
+
+test("a failed read keeps the last banner in view and the reads going, and a failed first read offers Try again", () => {
+  const resuming = { runs: [run(5, "Grace", "resuming")], notices: [], more: 0 };
+  const busy = { kind: "error", code: "owner_busy", message: "" };
+  assert.deepEqual(banner.latestBanner({ kind: "ok", value: full }, resuming), { banner: full, problem: "" }, "a good read replaces the last one");
+  assert.deepEqual(banner.latestBanner({ kind: "loading" }, null), { banner: null, problem: "" });
+  const kept = banner.latestBanner(busy, resuming);
+  assert.equal(kept.banner, resuming, "the runs still resuming stay in view after one failed read");
+  assert.equal(kept.problem, "Interrupted work couldn't be read. CrazyAgent is busy with other requests. Try again in a moment.");
+  assert.equal(banner.stillResuming(kept.banner), true, "so the banner keeps reading until their resume settles");
+  const first = banner.latestBanner(busy, null);
+  assert.equal(first.banner, null);
+  assert.match(first.problem, /CrazyAgent is busy with other requests/);
+  for (const code of ["engine_unreachable", "not_connected"]) {
+    assert.deepEqual(banner.latestBanner({ kind: "error", code, message: "" }, resuming), { banner: null, problem: "" }, `${code} is quiet; the reconnect reads again`);
+  }
+  assert.match(banner.latestBanner({ kind: "not_ready" }, null).problem, /Recovery isn't ready in this engine yet\./);
+
+  const page = readFileSync(new URL("../src/screens/project/recovery-banner.tsx", import.meta.url), "utf8");
+  assert.match(page, /const \{ banner, problem \} = latestBanner\(loaded, last\);\n  const polling = banner !== null && stillResuming\(banner\);/);
+  assert.match(page, /useEffect\(\(\) => \{ if \(loaded\.kind === "ok"\) setLast\(loaded\.value\); \}, \[loaded\]\);/);
+  assert.match(page, /<Button size="small" icon="refresh-cw" onClick=\{reload\}>Try again<\/Button>/);
+  assert.match(page, /note=\{\[note, problem\]\.filter\(Boolean\)\.join\(" "\)\}/);
+});

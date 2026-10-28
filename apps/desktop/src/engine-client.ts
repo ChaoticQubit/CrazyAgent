@@ -822,6 +822,7 @@ export interface TeamEventsView {
     project: WakeRule | null;
     project_version: number;
     agents: { agent: number; rule: WakeRule; version: number }[];
+    cleared: { agent: number; version: number }[];
     effective: WakeRule;
     level: WakeRuleLevel;
   };

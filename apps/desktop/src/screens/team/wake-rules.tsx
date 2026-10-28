@@ -6,7 +6,7 @@ import { Button, Notice, Select, StatusBadge, Switch, TextField, formatRoute } f
 import { displayText } from "../conversation";
 import { ago } from "../project/research";
 import { changeNote } from "./controls";
-import { WAKE_KINDS, capInput, eventLine, eventState, ruleSource, wakeRuleView, wakeSaveBlocked, withKind } from "./wake";
+import { WAKE_KINDS, agentRuleVersion, capInput, eventLine, eventState, ruleSource, wakeRuleView, wakeSaveBlocked, withKind } from "./wake";
 
 const RECENT_SHOWN = 10;
 
@@ -112,8 +112,7 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
     const found = status.agents.find((item) => item.id === id);
     return found ? found.label : `Agent ${id}`;
   };
-  const stored = chosen ? events.wake.agents.find((item) => item.agent === chosen.id) : undefined;
-  const own = stored?.rule ?? null;
+  const own = chosen ? events.wake.agents.find((item) => item.agent === chosen.id)?.rule ?? null : null;
   const above: WakeRuleLevel = events.wake.project ? "project" : events.wake.app ? "app" : "shipped";
   return <section className="tg-events" aria-label="Sub-agent events">
     <h3>Sub-agent events</h3>
@@ -132,7 +131,7 @@ export function TeamEventsPanel({ projectId, status, reload }: { projectId: stri
       <h4>Wake rule of one agent</h4>
       <Select id={`tg-wake-agent-${projectId}`} label="Agent" value={agent} onValue={setAgent}
         options={[{ value: "", label: "Pick an agent" }, ...subs.map((item) => ({ value: String(item.id), label: label(item.id) }))]} />
-      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own} version={stored?.version ?? 0}
+      {chosen && <WakeRuleEditor target={{ level: "agent", project_id: projectId, agent: chosen.id }} own={own} version={agentRuleVersion(events.wake, chosen.id)}
         effective={own ?? events.wake.effective} fallback={above} reload={reload} />}
     </>}
   </section>;

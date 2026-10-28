@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { Result } from "../../api";
 import { dismissRecovery, loadRecovery, recoveryMessage, retryRecovery } from "../../api-recovery";
 import type { RecoveryBanner as Banner, RecoveryNotice, RecoveryRun } from "../../api-recovery";
-import { useLoad } from "../../state";
+import { useLoad, type Loaded } from "../../state";
 import { Button, Notice } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -114,14 +114,28 @@ export function RecoveryBannerView({ banner, busy, note, onRetry, onDismiss }: {
   </Notice>;
 }
 
+/** What the banner shows after the latest read: the banner it returned, or after a failed read
+ * the last banner read, kept so its runs stay in view and the reads go on, with the failure as
+ * a line. A quiet failure, the engine down or not connected, shows nothing; the session reads
+ * again once it reconnects. Inputs: the latest read and the last banner read, if any. Output:
+ * the banner or null, and the failure line, empty when there is none to show. */
+export function latestBanner(loaded: Loaded<Banner>, last: Banner | null): { banner: Banner | null; problem: string } {
+  if (loaded.kind === "ok") return { banner: loaded.value, problem: "" };
+  if (loaded.kind === "loading") return { banner: last, problem: "" };
+  if (loaded.kind === "error" && QUIET_CODES.includes(loaded.code)) return { banner: null, problem: "" };
+  return { banner: last, problem: `Interrupted work couldn't be read. ${recoveryMessage(loaded)}` };
+}
+
 /** One project's recovery banner: reads the engine's list, reads again while a run waits to
- * resume, and sends Retry and Dismiss to the engine, reading the list again after each.
- * Input: the project id. */
+ * resume, also after a failed read, and sends Retry and Dismiss to the engine, reading the list
+ * again after each. A failed first read offers Try again. Input: the project id. */
 export function RecoveryBanner({ project }: { project: string }) {
   const [loaded, reload] = useLoad(() => loadRecovery(project), [project]);
+  const [last, setLast] = useState<Banner | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
-  const banner = loaded.kind === "ok" ? loaded.value : null;
+  useEffect(() => { if (loaded.kind === "ok") setLast(loaded.value); }, [loaded]);
+  const { banner, problem } = latestBanner(loaded, last);
   const polling = banner !== null && stillResuming(banner);
   useEffect(() => {
     if (!polling) return undefined;
@@ -138,12 +152,13 @@ export function RecoveryBanner({ project }: { project: string }) {
     reload();
   };
 
-  if (loaded.kind === "loading") return null;
-  if (loaded.kind !== "ok") {
-    if (loaded.kind === "error" && QUIET_CODES.includes(loaded.code)) return null;
-    return <Notice tone="warn">{`Interrupted work couldn't be read. ${recoveryMessage(loaded)}`}</Notice>;
+  if (banner === null) {
+    if (!problem) return null;
+    return <Notice tone="warn">
+      <span className="row"><span>{problem}</span><Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button></span>
+    </Notice>;
   }
-  return <RecoveryBannerView banner={loaded.value} busy={busy} note={note}
+  return <RecoveryBannerView banner={banner} busy={busy} note={[note, problem].filter(Boolean).join(" ")}
     onRetry={(agent) => void choose(choiceKey({ agent }), () => retryRecovery(agent), "It will try to resume again.")}
     onDismiss={(notice) => void choose(choiceKey(notice), () => dismissRecovery(notice), "Dismissed.")} />;
 }

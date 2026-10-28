@@ -2,7 +2,7 @@ import { createRef, useRef, useState, type RefObject } from "react";
 import {
   addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret, removeMcpServer,
   removeSkill, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type ImportCandidate, type ImportedSkill,
-  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView,
+  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
@@ -25,6 +25,13 @@ const ARGS_COPY = "Use up to 32 arguments, each on one line.";
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
+
+/** Whether a refused skill or server change means what the screen shows is out of date, so it
+ * is read again: the item changed since it was shown, went away, or moved on to a newer
+ * version. Input: the refusal. Output: true to read again. */
+export function readsAgain(failure: Failure): boolean {
+  return failure.kind === "error" && /changed|not_found|stale_revision/.test(failure.code);
+}
 
 const WORDS: Record<McpServerView["status"], string> = {
   approved: "Approved", waiting_for_approval: "Needs approval", off: "Turned off", cant_start: "Can't start",
@@ -238,7 +245,10 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
     const target = pluginSwitch(skill, projectId);
     const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on, skill.version) : await setSkillEnabled(skill.id, on, skill.version));
     if (result.kind === "ok") { session.showToast(on ? "Skill turned on." : "Skill turned off."); reload(); onChanged(); }
-    else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+    else {
+      setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+      if (readsAgain(result)) { reload(); onChanged(); }
+    }
   };
   const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
@@ -635,7 +645,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     const result = session.noteResult(await action());
     setBusy(null);
     if (result.kind === "ok") { session.showToast(done(result.value)); reload(); }
-    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (result.kind === "error" && /changed|not_found/.test(result.code)) reload(); }
+    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (readsAgain(result)) reload(); }
   }
 
   const addSkillFromChooser = async () => {

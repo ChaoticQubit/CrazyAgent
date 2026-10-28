@@ -1309,3 +1309,43 @@ async fn a_real_engine_keeps_the_wake_rules_the_owner_sets_at_each_level() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(view.wake.is_none());
 }
+
+#[test]
+fn an_agent_level_the_owner_cleared_sends_the_version_its_reset_left() {
+    let switch = |agent: i64, cleared: Vec<crate::team::events::ClearedRule>| {
+        let mut view = loaded();
+        view.status.as_mut().unwrap().events.wake.cleared = cleared;
+        view.wake = Some(WakeEdit {
+            level: WakeLevel::Agent(agent),
+            agent: Some(agent),
+            row: 0,
+        });
+        let TeamReply::Change(TeamAction::Wake {
+            target,
+            rule,
+            version,
+        }) = view.key(press(KeyCode::Char(' ')))
+        else {
+            panic!("a switch on an agent level asks the engine");
+        };
+        assert_eq!(
+            target,
+            RuleTarget::Agent {
+                project_id: project(),
+                agent
+            }
+        );
+        assert!(rule.is_some());
+        version
+    };
+    let reset = vec![crate::team::events::ClearedRule {
+        agent: 2,
+        version: 4,
+    }];
+    assert_eq!(
+        switch(2, reset.clone()),
+        4,
+        "the cleared level's version, not 0, so the engine takes the change"
+    );
+    assert_eq!(switch(4, reset), 0, "a level never set is at version 0");
+}

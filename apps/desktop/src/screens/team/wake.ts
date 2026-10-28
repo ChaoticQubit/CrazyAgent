@@ -1,4 +1,4 @@
-import type { AppTeamEvents, TeamEvent, TeamEventKind, TeamNotification, WakeRule, WakeRuleLevel } from "../../engine-client";
+import type { AppTeamEvents, TeamEvent, TeamEventKind, TeamEventsView, TeamNotification, WakeRule, WakeRuleLevel } from "../../engine-client";
 
 export const HOURLY_CAP_MAX = 500;
 
@@ -63,6 +63,13 @@ export function wakeRuleView(key: string, own: WakeRule | null, effective: WakeR
  * Output: true while edits wait. */
 export function wakeSaveBlocked(savedFrom: string | null, view: string, saving: boolean): boolean {
   return saving || (savedFrom !== null && savedFrom === view);
+}
+
+/** The version a change of one agent's wake rule sends: its own rule's, else the version the
+ * owner's Reset left on that level, else 0 for a level never set. Inputs: the project's wake
+ * view and the agent. Output: the version. */
+export function agentRuleVersion(wake: Pick<TeamEventsView["wake"], "agents" | "cleared">, agent: number): number {
+  return wake.agents.find((item) => item.agent === agent)?.version ?? wake.cleared.find((item) => item.agent === agent)?.version ?? 0;
 }
 
 /** Where the rule shown at one level comes from, for the line under its title. Inputs: whether

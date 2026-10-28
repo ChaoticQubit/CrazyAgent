@@ -2013,3 +2013,93 @@ fn stale_team_rule_write_is_refused() {
     assert_eq!((everywhere.rule, everywhere.rule_version), (Some(quiet), 1));
     assert_eq!(view(connection, &project()).unwrap().wake.app_version, 1);
 }
+
+#[test]
+fn a_cleared_agent_level_shows_its_version_so_the_owner_can_set_it_again() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "working");
+    let bo = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let master = fixture.agent(PROJECT, "master", "codex", "working");
+    let elsewhere = fixture.agent(OTHER, "sub", "codex", "working");
+    let level = |project_id: &str, agent: i64| RuleTarget::Agent {
+        project_id: ProjectId::new(project_id).unwrap(),
+        agent,
+    };
+    let quiet = WakeRule {
+        progress: false,
+        ..WakeRule::default()
+    };
+    let loud = WakeRule {
+        hourly_cap: 9,
+        ..WakeRule::default()
+    };
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty()
+    );
+
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 0),
+        Ok(())
+    );
+    assert!(
+        view(connection, &project())
+            .unwrap()
+            .wake
+            .cleared
+            .is_empty(),
+        "a level with its own rule is listed with the rules"
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), None, 1),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), Some(&quiet), 0),
+        Ok(())
+    );
+    assert_eq!(
+        write_rule(connection, &level(OTHER, elsewhere), None, 1),
+        Ok(())
+    );
+
+    let shown = view(connection, &project()).unwrap().wake;
+    assert!(shown.agents.is_empty());
+    assert_eq!(
+        shown.cleared,
+        vec![ClearedRule {
+            agent: ada,
+            version: 2
+        }],
+        "only this project's cleared sub-agent levels, never {bo}, the master {master} or another project's {elsewhere}"
+    );
+    assert_eq!(
+        write_rule(
+            connection,
+            &level(PROJECT, ada),
+            Some(&loud),
+            shown.cleared[0].version
+        ),
+        Ok(()),
+        "the version the view showed sets the cleared level again"
+    );
+    let again = view(connection, &project()).unwrap().wake;
+    assert!(again.cleared.is_empty());
+    assert_eq!(
+        again.agents,
+        vec![AgentRule {
+            agent: ada,
+            rule: loud,
+            version: 3
+        }]
+    );
+    assert_eq!(
+        write_rule(connection, &level(PROJECT, ada), Some(&quiet), 2),
+        Err("stale_revision"),
+        "the cleared version is spent once the level is set again"
+    );
+}
