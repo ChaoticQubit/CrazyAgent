@@ -432,11 +432,19 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
                 step: UsageStep::Poll,
                 panics: 1,
                 last_ms: NOW - 30_000,
+                recovered_ms: None,
             },
             StepHealth {
                 step: UsageStep::Team,
                 panics: 3,
                 last_ms: NOW - 4 * MINUTE,
+                recovered_ms: None,
+            },
+            StepHealth {
+                step: UsageStep::Runs,
+                panics: 2,
+                last_ms: NOW - 4 * MINUTE,
+                recovered_ms: Some(NOW - MINUTE),
             },
         ],
         ..report()
@@ -456,7 +464,11 @@ fn a_usage_step_that_panicked_shows_one_plain_line_with_its_count_and_last_time(
     );
     assert_eq!(
         lines[3],
-        "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent token totals may be low."
+        "Counting agent tokens hit an internal error 3 times since the engine started, last 4 min ago. CrazyAgent keeps retrying; agent and research run token totals may be low."
     );
-    assert_eq!(lines[5], "Account limits");
+    assert_eq!(
+        lines[4],
+        "Counting research run tokens hit an internal error 2 times since the engine started, last 4 min ago. It worked again 1 min ago."
+    );
+    assert_eq!(lines[6], "Account limits");
 }

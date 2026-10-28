@@ -1,5 +1,5 @@
 use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
-use super::health::{UsageStep, clear, record_panic};
+use super::health::{UsageStep, clear, record_panic, record_recovered};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
 use super::report::{mark_unreported, reports_usage};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
@@ -10,7 +10,7 @@ use crate::engine::{EngineError, NativeProfileCustody};
 use crate::pools::MemberKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -124,7 +124,8 @@ pub fn pool_of(
 
 /// One engine's usage upkeep: it counts what every team agent and research run's records
 /// gained and polls every signed-in subscription account's limits. `doing` names the part
-/// of the step running now, so a panic is counted against it.
+/// of the step running now, so a panic is counted against it, and `unrecovered` holds the
+/// parts that panicked and have not completed since.
 pub struct Usage {
     db: Connection,
     team: PathBuf,
@@ -135,6 +136,7 @@ pub struct Usage {
     polled_ms: Option<i64>,
     polls: u64,
     doing: UsageStep,
+    unrecovered: BTreeSet<UsageStep>,
 }
 
 impl Usage {
@@ -171,6 +173,7 @@ impl Usage {
             polled_ms: None,
             polls: 0,
             doing: UsageStep::Poll,
+            unrecovered: BTreeSet::new(),
         })
     }
 
@@ -199,15 +202,27 @@ impl Usage {
         if due {
             self.polled_ms = Some(now_ms);
             self.poll_all(&access, now_ms)?;
+            self.completed(UsageStep::Poll, now_ms)?;
         }
         self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
+        self.completed(UsageStep::Team, now_ms)?;
         self.doing = UsageStep::Runs;
         scan_runs(
             &self.db,
             |project, account| pool_of(&access, project, account),
             now_ms,
         )?;
+        self.completed(UsageStep::Runs, now_ms)
+    }
+
+    /// Marks a part that panicked earlier as working again once it completes, writing only
+    /// on that change. Inputs: the part and the time. Output: done, or `usage_unavailable`.
+    fn completed(&mut self, part: UsageStep, now_ms: i64) -> Result<(), EngineError> {
+        if self.unrecovered.contains(&part) {
+            record_recovered(&self.db, part, now_ms)?;
+            self.unrecovered.remove(&part);
+        }
         Ok(())
     }
 
@@ -407,18 +422,20 @@ fn guarded(step: impl FnOnce() -> Result<(), EngineError>) -> Option<String> {
 }
 
 /// Runs one upkeep step under `guarded` and counts a panic against the step kind that was
-/// running, so the usage pages can say counting is degraded. Inputs: the upkeep, the step
-/// and the time. Output: the step's problem code, none when it succeeded.
+/// running, which stays unrecovered until that kind completes again, so the usage pages can
+/// say counting is degraded. Inputs: the upkeep, the step and the time. Output: the step's
+/// problem code, none when it succeeded.
 fn counted_step(
     usage: &mut Usage,
     step: impl FnOnce(&mut Usage) -> Result<(), EngineError>,
     now_ms: i64,
 ) -> Option<String> {
     let problem = guarded(|| step(usage));
-    if problem.as_deref() == Some(STEP_PANICKED)
-        && let Err(fault) = record_panic(&usage.db, usage.doing, now_ms)
-    {
-        eprintln!("usage: {}", fault.0);
+    if problem.as_deref() == Some(STEP_PANICKED) {
+        usage.unrecovered.insert(usage.doing);
+        if let Err(fault) = record_panic(&usage.db, usage.doing, now_ms) {
+            eprintln!("usage: {}", fault.0);
+        }
     }
     problem
 }

@@ -239,7 +239,7 @@ fn a_step_that_keeps_panicking_is_logged_once_and_waits_longer_each_time() {
 }
 
 #[test]
-fn a_panicking_step_is_counted_against_its_kind_and_a_new_engine_run_forgets_it() {
+fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restart() {
     let root = tempfile::tempdir().unwrap();
     let root = root.path().canonicalize().unwrap();
     let database = root.join("engine.db");
@@ -278,8 +278,45 @@ fn a_panicking_step_is_counted_against_its_kind_and_a_new_engine_run_forgets_it(
             step: UsageStep::Team,
             panics: 2,
             last_ms: NOW + 5_000,
+            recovered_ms: Some(NOW + 10_000),
         }],
-        "a later step that succeeds keeps the count for this engine run"
+        "a later step that completes the kind marks it working again and keeps the count"
+    );
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 15_000), NOW + 15_000),
+        None
+    );
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 10_000),
+        "the first time it worked again is kept"
+    );
+    let problem = counted_step(
+        &mut usage,
+        |usage| {
+            usage.doing = UsageStep::Team;
+            panic!("the team scan broke again");
+        },
+        NOW + 20_000,
+    );
+    assert_eq!(problem.as_deref(), Some("usage_step_panicked"));
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap(),
+        [crate::usage::health::StepHealth {
+            step: UsageStep::Team,
+            panics: 3,
+            last_ms: NOW + 20_000,
+            recovered_ms: None,
+        }],
+        "a new panic makes the kind failing again"
+    );
+    assert_eq!(
+        counted_step(&mut usage, |usage| usage.step(NOW + 25_000), NOW + 25_000),
+        None
+    );
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 25_000)
     );
     drop(usage);
     Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();

@@ -102,16 +102,20 @@ export function agoText(atMs: number, nowMs: number): string {
 
 const STEP_WORDS: Record<StepHealth["step"], [string, string]> = {
   poll: ["Checking account limits", "limits shown may be out of date"],
-  team: ["Counting agent tokens", "agent token totals may be low"],
+  team: ["Counting agent tokens", "agent and research run token totals may be low"],
   runs: ["Counting research run tokens", "research token totals may be low"],
 };
 
-/** One plain sentence for a usage step kind that panicked since the engine started.
- * Inputs: the step's health and now. Output: the sentence. */
+/** One plain sentence for a usage step kind that panicked since the engine started: what
+ * may be missing while it keeps failing, or when it worked again. Inputs: the step's health
+ * and now. Output: the sentence. */
 export function healthText(health: StepHealth, nowMs: number): string {
   const [what, missing] = STEP_WORDS[health.step];
   const times = health.panics === 1 ? "once" : `${health.panics} times`;
-  return `${what} hit an internal error ${times} since the engine started, last ${agoText(health.last_ms, nowMs)}. CrazyAgent keeps retrying; ${missing}.`;
+  const said = `${what} hit an internal error ${times} since the engine started, last ${agoText(health.last_ms, nowMs)}.`;
+  return health.recovered_ms === null
+    ? `${said} CrazyAgent keeps retrying; ${missing}.`
+    : `${said} It worked again ${agoText(health.recovered_ms, nowMs)}.`;
 }
 
 /** Where and when an account's limits were last read, and whether the last check failed.
@@ -339,7 +343,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
     <p className="secondary">Tokens your agents used and each account's limits. Counts come from each run's own record; limits are checked every 10 minutes.</p>
     {head}
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    {(value.health ?? []).map((item) => <Notice key={item.step}>{healthText(item, nowMs)}</Notice>)}
+    {(value.health ?? []).map((item) => <Notice key={item.step} tone={item.recovered_ms === null ? "warn" : "info"}>{healthText(item, nowMs)}</Notice>)}
     <Totals report={value} />
     <Panel title="Account limits">
       {value.limits.length === 0

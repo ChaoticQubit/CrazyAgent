@@ -523,6 +523,6 @@ fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
     assert!(read.health.is_empty());
     assert_eq!(
         serde_json::to_value(&report.health).unwrap(),
-        serde_json::json!([{"step": "poll", "panics": 1, "last_ms": 7}])
+        serde_json::json!([{"step": "poll", "panics": 1, "last_ms": 7, "recovered_ms": null}])
     );
 }
