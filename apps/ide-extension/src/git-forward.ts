@@ -51,7 +51,8 @@ export async function forward(
  * only from the current branch's upstream (its remote-tracking ref), never from another
  * fetched branch: a pull on a detached HEAD, of a branch with no upstream or naming another
  * remote branch is refused. With `-r`, or the branch's `rebase` or else `pull.rebase`
- * setting on, a rebase onto the upstream (`merges` keeps merges); otherwise a merge, fast-forward as `pull.ff` says and only fast-forward when
+ * setting on and `pull.ff` not `only`, a rebase onto the upstream from the fork point
+ * found before the fetch, as git's own pull does (`merges` keeps merges); otherwise a merge, fast-forward as `pull.ff` says and only fast-forward when
  * neither setting is set. `--autostash` is kept.
  * Inputs: git's pull arguments and the folder. Output: the step, or why it is refused.
  */
@@ -71,13 +72,14 @@ export async function pullStep(args: string[], folder: string): Promise<PullStep
   const autostash = args.includes("--autostash") ? ["--autostash"] : [];
   const ofBranch = await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
   const rebase = (ofBranch ?? (await setting(folder, ["config", "--get", "pull.rebase"])))?.toLowerCase();
-  if (args.includes("-r") || (rebase !== undefined && REBASES.has(rebase))) {
-    return { argv: ["rebase", ...autostash, upstream] };
-  }
-  if (rebase !== undefined && REBASE_MERGES.has(rebase)) {
-    return { argv: ["rebase", "--rebase-merges", ...autostash, upstream] };
-  }
   const ff = (await setting(folder, ["config", "--get", "pull.ff"]))?.toLowerCase();
+  const configured = ff !== "only" && rebase !== undefined;
+  const merges = configured && REBASE_MERGES.has(rebase) && !args.includes("-r");
+  if (args.includes("-r") || merges || (configured && REBASES.has(rebase))) {
+    const fork = await setting(folder, ["merge-base", "--fork-point", upstream]);
+    const from = fork === undefined || fork === "" ? [upstream] : ["--onto", upstream, fork];
+    return { argv: ["rebase", ...(merges ? ["--rebase-merges"] : []), ...autostash, ...from] };
+  }
   const mode =
     ff === "only"
       ? ["--ff-only"]

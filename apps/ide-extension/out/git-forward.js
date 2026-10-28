@@ -43,13 +43,14 @@ async function pullStep(args, folder) {
     const autostash = args.includes("--autostash") ? ["--autostash"] : [];
     const ofBranch = await setting(folder, ["config", "--get", `branch.${branch}.rebase`]);
     const rebase = (ofBranch ?? (await setting(folder, ["config", "--get", "pull.rebase"])))?.toLowerCase();
-    if (args.includes("-r") || (rebase !== undefined && REBASES.has(rebase))) {
-        return { argv: ["rebase", ...autostash, upstream] };
-    }
-    if (rebase !== undefined && REBASE_MERGES.has(rebase)) {
-        return { argv: ["rebase", "--rebase-merges", ...autostash, upstream] };
-    }
     const ff = (await setting(folder, ["config", "--get", "pull.ff"]))?.toLowerCase();
+    const configured = ff !== "only" && rebase !== undefined;
+    const merges = configured && REBASE_MERGES.has(rebase) && !args.includes("-r");
+    if (args.includes("-r") || merges || (configured && REBASES.has(rebase))) {
+        const fork = await setting(folder, ["merge-base", "--fork-point", upstream]);
+        const from = fork === undefined || fork === "" ? [upstream] : ["--onto", upstream, fork];
+        return { argv: ["rebase", ...(merges ? ["--rebase-merges"] : []), ...autostash, ...from] };
+    }
     const mode = ff === "only"
         ? ["--ff-only"]
         : ff !== undefined && FALSE.has(ff)

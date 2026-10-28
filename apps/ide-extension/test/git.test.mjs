@@ -247,6 +247,40 @@ test("a pull naming a remote branch other than the upstream is refused", { timeo
   });
 });
 
+test("a pull rebases from the fork point, so a commit upstream rewrote is not replayed", { timeout: 30_000 }, async () => {
+  await withUpstream(async (pull, project, upstream) => {
+    const old = commit(upstream, "beds.md", "Six beds.\n");
+    git(project, "fetch", "-q", "origin");
+    git(project, "merge", "-q", "--ff-only", "origin/main");
+    commit(project, "notes.md", "Planting notes.\n");
+    writeFileSync(join(upstream, "beds.md"), "Eight beds.\n");
+    git(upstream, "commit", "-q", "--amend", "-a", "-m", "Write beds.md");
+    const amended = git(upstream, "rev-parse", "HEAD");
+    const rebased = await pull(["pull", "-r"]);
+    assert.equal(rebased.code, 0, rebased.stderr);
+    assert.equal(git(project, "rev-parse", "HEAD~1"), amended);
+    assert.equal(git(project, "log", "-1", "--format=%s"), "Write notes.md");
+    assert.throws(() => git(project, "merge-base", "--is-ancestor", old, "HEAD"), "the commit upstream rewrote is not replayed");
+  });
+});
+
+test("pull.ff=only beats a configured rebase of diverged branches, and -r still rebases", { timeout: 30_000 }, async () => {
+  await withUpstream(async (pull, project, upstream) => {
+    const mine = commit(project, "paths.md", "Gravel.\n");
+    const theirs = commit(upstream, "seeds.md", "Tomatoes.\n");
+    git(project, "config", "pull.rebase", "true");
+    git(project, "config", "pull.ff", "only");
+    const configured = await pull(["pull"]);
+    assert.equal(git(project, "rev-parse", "HEAD"), mine, "pull.ff=only refuses to rebase diverged branches");
+    assert.notEqual(configured.code, 0);
+    assert.match(configured.stderr, /Not possible to fast-forward/);
+
+    const asked = await pull(["pull", "-r"]);
+    assert.equal(asked.code, 0, asked.stderr);
+    assert.equal(git(project, "rev-parse", "HEAD~1"), theirs, "-r on the command line still rebases");
+  });
+});
+
 test("a refusal or a lost engine ends git with a fatal line and code 128", { timeout: 20_000 }, async () => {
   await withRelay(async (server, env, project) => {
     const called = once(server, "connection");
