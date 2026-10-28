@@ -360,7 +360,11 @@ impl ManagedAgent {
         orders
             .send(Order::Turn(
                 prompt.to_owned(),
-                Some(Box::new(Grant { profile, context })),
+                Some(Box::new(Grant {
+                    profile,
+                    context,
+                    access: crate::sandbox::policy::AgentAccess::Sandboxed,
+                })),
             ))
             .unwrap();
         drop(orders);

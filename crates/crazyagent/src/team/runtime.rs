@@ -117,10 +117,12 @@ enum Order {
 }
 
 /// What one turn of an agent on a signed-in managed account needs: the profile, held
-/// under the engine's custody lock for that turn only, and the project's launch context.
+/// under the engine's custody lock for that turn only, the project's launch context, and
+/// the access level the owner has saved now, read again for every turn (AL-2).
 struct Grant {
     profile: NativeProfileUse,
     context: AgentContext,
+    access: AgentAccess,
 }
 
 /// Everything about an agent's harness launch except the account, so a managed agent
@@ -135,6 +137,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -143,20 +146,45 @@ struct Plan {
 }
 
 impl Plan {
-    fn request(&self, account: AccountBinding) -> LaunchRequest {
-        LaunchRequest {
+    /// Builds one start of the plan at `access`, the level the owner saved when this start
+    /// happens (AL-2): Full access runs without Seatbelt, any other level in the agent's
+    /// profile, and a clone at Sandboxed is refused, see [`confinement`]. Takes the account
+    /// and the level. Returns the request, or the plain refusal.
+    fn request(
+        &self,
+        account: AccountBinding,
+        access: AgentAccess,
+    ) -> Result<LaunchRequest, String> {
+        let unconfined = confinement(self.layout, access)?;
+        Ok(LaunchRequest {
             harness: self.harness.clone(),
             executable: self.executable.clone(),
             working_dir: self.working_dir.clone(),
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: (self.access != AgentAccess::Full)
-                .then(|| self.sandbox_profile.clone()),
-            unconfined: self.access == AgentAccess::Full,
+            sandbox_profile: (!unconfined).then(|| self.sandbox_profile.clone()),
+            unconfined,
             git_identity: self.git_identity.clone(),
             limits: self.limits,
-        }
+        })
+    }
+}
+
+/// Decides how an agent in `layout` starts at `access`, the one rule every launch, wake and
+/// per-turn start follows: a clone at Sandboxed is refused, since the owner lowered the
+/// level after the agent began on its own branch and its changes still wait in Changes;
+/// Full access runs without Seatbelt; every other pair runs in the agent's profile.
+/// Inputs: the agent's layout and the saved level. Output: true to run unconfined, or the
+/// plain refusal with `agent_access_lowered`.
+fn confinement(layout: Layout, access: AgentAccess) -> Result<bool, String> {
+    match (layout, access) {
+        (Layout::Clone, AgentAccess::Sandboxed) => Err(with_code(
+            "this agent started with its own branch, but the project is Sandboxed now; its changes are still in Changes",
+            Some("agent_access_lowered"),
+        )),
+        (_, AgentAccess::Full) => Ok(true),
+        (_, AgentAccess::Sandboxed | AgentAccess::OwnBranch) => Ok(false),
     }
 }
 
@@ -296,6 +324,8 @@ struct Worker {
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
+    access: AgentAccess,
+    lowered: bool,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -1073,6 +1103,7 @@ impl TeamRuntime {
         }
         let paused = self.paused()?;
         self.retire_rejected(project, access);
+        self.retire_lowered(project);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
@@ -1309,6 +1340,38 @@ impl TeamRuntime {
         }
     }
 
+    /// Stops the project's agents whose running process started at a wider access level
+    /// than the one the owner saved now (AL-2): a kept or live agent at once, a per-turn
+    /// agent while its turn runs. An idle per-turn agent has no process; its next turn reads
+    /// the saved level in its grant. Every next start reads the level again, so a lowered
+    /// level reaches each agent's next launch. An unreadable level counts as Sandboxed.
+    /// Takes the project.
+    fn retire_lowered(&mut self, project: &ProjectId) {
+        if !self.workers.values().any(|worker| {
+            &worker.project == project
+                && !worker.stopping
+                && worker.access != AgentAccess::Sandboxed
+        }) {
+            return;
+        }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentAccess::Sandboxed, |policy| policy.access);
+        let lowered: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| &w.project == project && !w.stopping && w.access.wider_than(saved))
+            .filter(|(_, w)| !w.managed || w.live || w.busy.is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in lowered {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            worker.lowered = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
     /// Proves a managed pool account is signed in for this engine run, and that the
     /// provider did not reject that sign-in, with the same check every master turn uses.
     /// Takes the live access and the pool member.
@@ -1398,8 +1461,20 @@ impl TeamRuntime {
             self.workers[&id].tools,
             layout,
         )?;
-        self.workers.get_mut(&id).expect("worker exists").grants = generation;
-        Ok(Some(Box::new(Grant { profile, context })))
+        let access = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_err(|_| with_code("the project's agent access could not be read", None))?
+            .access;
+        if let Some(reason) = access.unavailable() {
+            return Err(with_code(reason, Some("agent_access_unavailable")));
+        }
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        worker.grants = generation;
+        worker.access = access;
+        Ok(Some(Box::new(Grant {
+            profile,
+            context,
+            access,
+        })))
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -2542,6 +2617,13 @@ impl TeamRuntime {
             Launch::Fresh(plan, _) => (plan.live, false),
             Launch::Adopt(adoption) => (adoption.live, adoption.managed.is_none()),
         };
+        let access = match &launch {
+            Launch::Fresh(plan, _) => plan.access,
+            Launch::Adopt(_) => {
+                crate::sandbox::policy::load(&self.connection, seat.project.as_str())
+                    .map_or(AgentAccess::Sandboxed, |policy| policy.access)
+            }
+        };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
             .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, turn_time))
@@ -2577,6 +2659,8 @@ impl TeamRuntime {
                 turn_started: None,
                 session: None,
                 seed: None,
+                access,
+                lowered: false,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -2758,17 +2842,10 @@ impl TeamRuntime {
             return Err("the agent worktree is not a plain folder in the project".into());
         }
         assert!(working_dir.starts_with(&root) && working_dir != root);
-        sandbox = match (layout, policy.access) {
-            (Layout::Linked, _) => sandbox.confine_to_worktree(&working_dir),
-            (Layout::Clone, AgentAccess::Sandboxed) => {
-                return Err(with_code(
-                    "this agent started with its own branch, but the project is Sandboxed now; its changes are still in Changes",
-                    Some("agent_access_lowered"),
-                ));
-            }
-            (Layout::Clone, AgentAccess::OwnBranch | AgentAccess::Full) => {
-                sandbox.confine_to_clone(&working_dir)
-            }
+        confinement(layout, policy.access)?;
+        sandbox = match layout {
+            Layout::Linked => sandbox.confine_to_worktree(&working_dir),
+            Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
         if let Some(engine) = self
@@ -2793,6 +2870,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
@@ -3236,6 +3314,14 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
+                let problem = problem.or_else(|| {
+                    worker.lowered.then(|| {
+                        with_code(
+                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                            Some("agent_access_lowered"),
+                        )
+                    })
+                });
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed
@@ -3836,8 +3922,10 @@ fn work(
     let started = match launch {
         Launch::Fresh(plan, mode) => match *mode {
             Mode::Kept { account, context } => {
-                AgentSession::start(plan.request(account), context, plan.pane.clone())
-                    .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
+                plan.request(account, plan.access).and_then(|request| {
+                    AgentSession::start(request, context, plan.pane.clone())
+                        .map_err(|problem| with_code("The agent could not start", Some(&problem.0)))
+                })
             }
             Mode::PerTurn { home } => {
                 let problem = per_turn(
@@ -3893,16 +3981,31 @@ fn live(
     };
     let resume = plan.resume.as_ref();
     let (started, held, keep) = match mode {
-        Mode::Kept { account, context } => (
-            AgentSession::start_resuming(plan.request(account), context, plan.pane.clone(), resume),
-            None,
-            true,
-        ),
+        Mode::Kept { account, context } => {
+            let request = match plan.request(account, plan.access) {
+                Ok(request) => request,
+                Err(problem) => return Some(problem),
+            };
+            (
+                AgentSession::start_resuming(request, context, plan.pane.clone(), resume),
+                None,
+                true,
+            )
+        }
         Mode::PerTurn { home } => {
             let Some(grant) = grant else {
                 return Some("The live master was started without its signed-in account".into());
             };
-            let Grant { profile, context } = *grant;
+            let Grant {
+                profile,
+                context,
+                access,
+            } = *grant;
+            let request =
+                match plan.request(AccountBinding::Subscription { home: home.clone() }, access) {
+                    Ok(request) => request,
+                    Err(problem) => return Some(problem),
+                };
             let credential =
                 match profile.hand_to_agent(&home, plan.limits.run_time, &plan.executable) {
                     Ok(credential) => credential,
@@ -3913,7 +4016,6 @@ fn live(
                         ));
                     }
                 };
-            let request = plan.request(AccountBinding::Subscription { home });
             (
                 AgentSession::start_resuming(request, context, plan.pane.clone(), resume),
                 Some((credential, profile)),
@@ -4212,7 +4314,27 @@ fn per_turn(
             });
             return Some("The agent was given a turn without its signed-in account".into());
         };
-        let Grant { profile, context } = *grant;
+        let Grant {
+            profile,
+            context,
+            access,
+        } = *grant;
+        let request = match plan.request(
+            AccountBinding::Subscription {
+                home: home.to_path_buf(),
+            },
+            access,
+        ) {
+            Ok(request) => request,
+            Err(problem) => {
+                let _ = reports.send(Report::Finished {
+                    text: String::new(),
+                    end: TurnEnd::Closed,
+                    cause: Some(problem.clone()),
+                });
+                return Some(problem);
+            }
+        };
         let credential = match profile.hand_to_agent(home, turn_time, &plan.executable) {
             Ok(credential) => credential,
             Err(problem) => {
@@ -4227,9 +4349,6 @@ fn per_turn(
                 ));
             }
         };
-        let request = plan.request(AccountBinding::Subscription {
-            home: home.to_path_buf(),
-        });
         let mut session = match AgentSession::start(request, context, plan.pane.clone()) {
             Ok(session) => session,
             Err(problem) => {

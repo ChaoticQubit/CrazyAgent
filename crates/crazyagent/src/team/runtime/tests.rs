@@ -2921,6 +2921,25 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
     .with_agents(agents.clone())
     .with_terminal(host)
     .unwrap();
+    let (member, worktree, codes) = delegated_run(&mut fixture, &mut team);
+    LevelRun {
+        fixture,
+        team,
+        agents,
+        member,
+        worktree,
+        codes,
+    }
+}
+
+/// Hands the level-test project one task and waits for the sub-agent that starts on it to
+/// finish its stand-in script. Inputs: the fixture and the runtime. Output: the agent id,
+/// its worktree and the exit codes the script recorded there.
+#[cfg(target_os = "macos")]
+fn delegated_run(
+    fixture: &mut Fixture,
+    team: &mut TeamRuntime,
+) -> (i64, PathBuf, BTreeMap<String, i32>) {
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
     assert_eq!(
@@ -2937,13 +2956,19 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         crate::protocol::Outcome::Applied
     );
     tx.commit().unwrap();
-    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+    fixture.until(team, "a sub-agent works on the task", |f| {
         f.status()
             .agents
             .iter()
             .any(|agent| agent.status == AgentStatus::Working && agent.process_group.is_some())
     });
-    let member = fixture.status().agents.remove(0).id;
+    let member = fixture
+        .status()
+        .agents
+        .into_iter()
+        .find(|agent| agent.status == AgentStatus::Working)
+        .unwrap()
+        .id;
     let worktree: String = fixture
         .connection
         .query_row(
@@ -2952,7 +2977,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
             |row| row.get(0),
         )
         .unwrap();
-    let worktree = project.join(worktree);
+    let worktree = fixture.base.join("project").join(worktree);
     let file = worktree.join("codes.txt");
     let deadline = Instant::now() + Duration::from_secs(180);
     let text = loop {
@@ -2971,14 +2996,114 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         .filter_map(|line| line.split_once('='))
         .map(|(name, code)| (name.to_owned(), code.trim().parse::<i32>().unwrap()))
         .collect();
-    LevelRun {
-        fixture,
-        team,
-        agents,
-        member,
-        worktree,
-        codes,
+    (member, worktree, codes)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
+    assert_eq!(run.code("outside"), 0, "{:?}", run.codes);
+    let planted = run.fixture.base.join("outside").join("planted");
+    std::fs::remove_file(&planted).unwrap();
+    std::fs::remove_file(run.worktree.join("codes.txt")).unwrap();
+    crate::sandbox::policy::save(
+        &run.fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            toolchains: Vec::new(),
+        },
+    )
+    .unwrap();
+    let member = run.member;
+    run.fixture
+        .until(&mut run.team, "the Full access agent is stopped", |f| {
+            f.agent_status(member).0 == AgentStatus::Stopped
+        });
+    let reason: Option<String> = run
+        .fixture
+        .connection
+        .query_row(
+            "SELECT error FROM team_agents WHERE id=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("the project's agent access was lowered")),
+        "{reason:?}"
+    );
+
+    let (next, _, codes) = delegated_run(&mut run.fixture, &mut run.team);
+    run.member = next;
+    assert_eq!(codes["build"], 0, "{codes:?}");
+    assert_eq!(
+        codes["told"], 0,
+        "the next start is told the Own branch rules"
+    );
+    assert_ne!(codes["secret"], 0, "{codes:?}");
+    assert_ne!(
+        codes["outside"], 0,
+        "the next start runs in Seatbelt: {codes:?}"
+    );
+    assert!(!planted.exists());
+    run.stop();
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
+#[test]
+fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
+    let plan = |layout: Layout| Plan {
+        harness: "codex".into(),
+        executable: PathBuf::from("/bin/sh"),
+        working_dir: PathBuf::from("/tmp"),
+        model: None,
+        tools: true,
+        sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        access: AgentAccess::Full,
+        layout,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+        pane: None,
+        live: false,
+        resume: None,
+    };
+    let account = || AccountBinding::Subscription {
+        home: PathBuf::from("/tmp/home"),
+    };
+    for layout in [Layout::Linked, Layout::Clone] {
+        let full = plan(layout).request(account(), AgentAccess::Full).unwrap();
+        assert!(
+            full.unconfined && full.sandbox_profile.is_none(),
+            "{layout:?}"
+        );
+        let own = plan(layout)
+            .request(account(), AgentAccess::OwnBranch)
+            .unwrap();
+        assert!(
+            !own.unconfined,
+            "{layout:?}: a plan started at Full is lowered"
+        );
+        assert_eq!(
+            own.sandbox_profile.as_deref(),
+            Some(Path::new("/tmp/agent-1.sb"))
+        );
     }
+    let linked = plan(Layout::Linked)
+        .request(account(), AgentAccess::Sandboxed)
+        .unwrap();
+    assert!(!linked.unconfined && linked.sandbox_profile.is_some());
+    let refused = plan(Layout::Clone)
+        .request(account(), AgentAccess::Sandboxed)
+        .unwrap_err();
+    assert!(
+        refused.contains("the project is Sandboxed now"),
+        "{refused}"
+    );
+    assert!(refused.contains(&crate::protocol::plain_code("agent_access_lowered")));
 }
 
 #[cfg(target_os = "macos")]
