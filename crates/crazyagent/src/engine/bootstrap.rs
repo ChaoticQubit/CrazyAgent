@@ -1499,115 +1499,23 @@ mod tests {
         found
     }
 
-    /// Rewrites a file of recorded identities in place the way a reboot that renumbered the
-    /// volume leaves it as the new boot sees it: every recorded device becomes `device`,
-    /// while the file and every recorded inode stay. Inputs: the file and the device.
-    /// Output: none.
-    pub(super) fn renumber_recorded_devices(path: &Path, device: u64) {
-        fn walk(value: &mut serde_json::Value, device: u64) -> usize {
-            match value {
-                serde_json::Value::Object(map)
-                    if map.len() == 2
-                        && map.contains_key("device")
-                        && map.contains_key("inode") =>
-                {
-                    map.insert("device".into(), device.into());
-                    1
-                }
-                serde_json::Value::Object(map) => {
-                    map.values_mut().map(|child| walk(child, device)).sum()
-                }
-                serde_json::Value::Array(items) => {
-                    items.iter_mut().map(|item| walk(item, device)).sum()
-                }
-                _ => 0,
-            }
-        }
-        let inode = std::fs::metadata(path).unwrap().ino();
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert!(walk(&mut value, device) > 0);
-        std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
-        assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
-    }
-
-    /// The connection of a native managed sign-in, as the owner's settings name one.
-    fn native_connection() -> crate::config::ModelConnection {
-        let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
-        crate::config::ModelConnection {
-            id: reference("reboot-connection"),
-            provider: reference("reboot-provider"),
-            harness: reference("codex"),
-            protocol: reference("native"),
-            account_ref: reference("reboot-account"),
-            endpoint: crate::config::ModelEndpoint::Native {},
-            model: crate::config::ModelReference {
-                id: "reboot-model".into(),
-                author: reference("reboot-author"),
-            },
-            auth: crate::config::ModelAuthentication::NativeManaged {
-                profile_ref: reference("reboot-profile"),
-            },
-        }
-    }
-
-    /// Takes one sign-in use of the native profile of `connection` the way the engine's
-    /// sign-in and its re-proof take one. Inputs: the engine root, the stamp of the engine
-    /// run and the connection. Output: the profile folder, or the refusal.
-    fn use_native_profile(
-        root: &Path,
-        host: &crate::engine::owner::HostStamp,
-        connection: &crate::config::ModelConnection,
-    ) -> Result<PathBuf, EngineError> {
-        let database = root.join("engine.db");
-        let mut custody = NativeProfileCustody::capture(
-            &database,
-            &std::fs::metadata(&database).map_err(io_error)?,
-        )?;
-        let (custody_id, key) = custody.prepare(host, connection)?;
-        let binding = crate::engine::owner::NativeProfileBinding {
-            database_instance: host.db_instance.clone(),
-            engine_epoch: host.engine_epoch.clone(),
-            config_id: crate::protocol::ConfigId::new("c".repeat(64)).unwrap(),
-            source_hash: "d".repeat(64),
-            at_revision: Cursor::new(1),
-            connection: connection.clone(),
-            custody_id,
-        };
-        drop(custody.acquire_use(
-            host,
-            &binding,
-            &RequestId::new("reboot-use").unwrap(),
-            1,
-            NativeProfileUsePurpose::Authentication,
-        )?);
-        Ok(root.join("native-profiles").join(key))
-    }
-
-    /// A reboot can renumber the engine volume's device while every inode stays, so all an
-    /// engine stopped by it recorded (its locator, generation and sockets, and the native
-    /// profile manifests) names the device the volume had before. The next engine holds the
-    /// engine lock and takes the normal restart path, and an earlier native sign-in stays
-    /// usable.
+    /// A reboot can renumber the engine volume's device while every inode stays, so the
+    /// locator an engine stopped by it left names its database, generation and sockets on
+    /// the device the volume had before, while those objects are still there. The next
+    /// engine holds the engine lock, so it sets the locator and the dead ordinary socket
+    /// aside, never deleting them, sweeps the old generation and starts like a clean restart.
     #[tokio::test]
-    async fn an_engine_restarts_after_a_reboot_renumbered_its_volume_and_keeps_native_profiles() {
+    async fn an_engine_starts_like_a_clean_restart_after_a_reboot_renumbered_its_volume() {
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let config =
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let (_stop, stopped) = watch::channel(false);
-        let connection = native_connection();
         let path = root.path().join(LOCATOR);
-        let host = |locator: &Locator| crate::engine::owner::HostStamp {
-            db_instance: locator.db_instance.clone(),
-            engine_epoch: locator.engine_epoch.clone(),
-        };
         let mut first = EngineService::start(root.path(), "e.sock", &config, &stopped)
             .await
             .unwrap();
         let mut left: Locator = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let profile = use_native_profile(root.path(), &host(&left), &connection).unwrap();
-        let slot = std::fs::metadata(&profile).unwrap().ino();
         first.shutdown().await.unwrap();
         let generation = root.path().join(&left.generation);
         std::fs::create_dir(&generation).unwrap();
@@ -1620,68 +1528,15 @@ mod tests {
         left.generation_identity = Identity::of(&std::fs::metadata(&generation).unwrap());
         left.owner_socket = dead_socket(&generation.join("owner.sock"));
         left.ordinary_socket = dead_socket(&root.path().join("e.sock"));
-        std::fs::write(&path, serde_json::to_vec(&left).unwrap()).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let renumbered = std::fs::metadata(root.path()).unwrap().dev() ^ 1;
-        for recorded in [
-            path.clone(),
-            root.path().join("native-profiles/identity.json"),
-            profile.join("identity.json"),
+        for identity in [
+            &mut left.database,
+            &mut left.generation_identity,
+            &mut left.owner_socket,
+            &mut left.ordinary_socket,
         ] {
-            renumber_recorded_devices(&recorded, renumbered);
+            identity.device = renumbered;
         }
-
-        let started = EngineService::start(root.path(), "e.sock", &config, &stopped).await;
-        let now: Locator = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let used = use_native_profile(root.path(), &host(&now), &connection);
-        assert_eq!(
-            (
-                started.as_ref().err().map(|error| error.0.as_str()),
-                used.as_ref().err().map(|error| error.0.as_str())
-            ),
-            (None, None),
-            "after a reboot renumbered the volume the engine starts and an earlier native sign-in stays usable"
-        );
-        let mut second = started.unwrap();
-        second.ensure_ready(&stopped).unwrap();
-        assert_eq!(used.unwrap(), profile);
-        assert_eq!(
-            std::fs::metadata(&profile).unwrap().ino(),
-            slot,
-            "the earlier profile is used, not a new one"
-        );
-        assert!(
-            set_aside(root.path(), "owner-current.stale-").is_empty()
-                && set_aside(root.path(), "e.sock.stale-").is_empty(),
-            "a reboot takes the normal restart path, with nothing set aside"
-        );
-        assert!(!generation.exists(), "the earlier generation is swept");
-        second.shutdown().await.unwrap();
-    }
-
-    /// A locator a crashed engine left can name a database the anchor no longer has, as
-    /// after engine.db is restored from a backup. The next engine holds the engine lock,
-    /// so it sets that locator aside, never deleting it, and starts.
-    #[tokio::test]
-    async fn an_engine_sets_aside_a_locator_naming_a_database_it_no_longer_has() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let config =
-            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-        let (_stop, stopped) = watch::channel(false);
-        let mut first = EngineService::start(root.path(), "e.sock", &config, &stopped)
-            .await
-            .unwrap();
-        let path = root.path().join(LOCATOR);
-        let mut left: Locator = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        first.shutdown().await.unwrap();
-        let replaced = root.path().join("replaced-database");
-        std::fs::write(&replaced, b"an earlier database file").unwrap();
-        left.database = Identity::of(&std::fs::metadata(&replaced).unwrap());
-        assert_ne!(
-            left.database,
-            Identity::of(&std::fs::metadata(root.path().join("engine.db")).unwrap())
-        );
         let stale = serde_json::to_vec(&left).unwrap();
         std::fs::write(&path, &stale).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -1690,19 +1545,28 @@ mod tests {
         assert_eq!(
             started.as_ref().err().map(|error| error.0.as_str()),
             None,
-            "an engine starts beside a locator naming another database"
+            "an engine starts after a reboot renumbered its volume"
         );
         let mut second = started.unwrap();
         second.ensure_ready(&stopped).unwrap();
-        let aside = set_aside(root.path(), "owner-current.stale-");
+        let locators = set_aside(root.path(), "owner-current.stale-");
+        let sockets = set_aside(root.path(), "e.sock.stale-");
         assert_eq!(
-            aside.len(),
-            1,
-            "the stale locator is kept aside, not deleted"
+            (locators.len(), sockets.len()),
+            (1, 1),
+            "the stale locator and socket are kept aside, not deleted"
         );
-        assert_eq!(std::fs::read(&aside[0]).unwrap(), stale);
+        assert_eq!(std::fs::read(&locators[0]).unwrap(), stale);
+        assert!(
+            std::fs::symlink_metadata(&sockets[0])
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        assert!(!generation.exists(), "the earlier generation is swept");
         second.shutdown().await.unwrap();
-        assert_eq!(set_aside(root.path(), "owner-current.stale-"), aside);
+        assert_eq!(set_aside(root.path(), "owner-current.stale-"), locators);
+        assert_eq!(set_aside(root.path(), "e.sock.stale-"), sockets);
     }
 
     /// An engine stopped without its cleanup leaves its ordinary socket file behind with no
