@@ -674,3 +674,71 @@ fn a_marked_file_past_the_preview_limit_is_named_with_its_marks_before_plain_fil
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
 }
+
+/// Every page of an open diff is read at the head it opened on. When the set moves on, a
+/// page the engine refuses as stale, or a reread list naming a new head, sends the owner
+/// back to the top of the new head; Accept and Discard wait for its last page and then
+/// name that head (RV-DS-79).
+#[test]
+fn a_diff_that_moves_on_is_read_again_from_the_top_before_accept_or_discard() {
+    let (first, second, third) = ("1".repeat(40), "2".repeat(40), "3".repeat(40));
+    let page = |text: &str, next: Option<u16>| ChangeDiff {
+        files: Vec::new(),
+        text: text.into(),
+        next,
+        truncated: false,
+    };
+    let at = |head: &str| {
+        let mut moved = set('1', ChangeState::Pending);
+        moved.head = head.to_owned();
+        moved
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let asked = reply(&mut view, Ok(ChangesView::Diff(page("+one", Some(1)))));
+    assert!(format!("{asked:?}").contains(&first), "{asked:?}");
+
+    let asked = reply(&mut view, Err("changes_stale".into()));
+    assert!(
+        matches!(asked, ChangesQuery::Diff { page: 1, .. }),
+        "{asked:?}"
+    );
+    let shown = text(&view);
+    assert!(shown.contains("moved on since you opened them"), "{shown}");
+    assert!(
+        !shown.contains("+one"),
+        "a page of the old head stays shown: {shown}"
+    );
+    let asked = reply(&mut view, Ok(ChangesView::List(vec![at(&second)])));
+    assert!(matches!(asked, ChangesQuery::List { .. }), "{asked:?}");
+    let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+    assert!(
+        !help.contains(&("a", "Accept")) && !help.contains(&("d", "Discard")),
+        "{help:?}"
+    );
+    assert!(!view.key(key(KeyCode::Char('a')), NOW));
+    assert!(!view.key(key(KeyCode::Char('d')), NOW));
+    let asked = reply(&mut view, Ok(ChangesView::Diff(page("+two", None))));
+    assert!(
+        matches!(asked, ChangesQuery::Diff { page: 0, .. })
+            && format!("{asked:?}").contains(&second),
+        "{asked:?}"
+    );
+    assert!(text(&view).contains("+two"));
+
+    view.refresh();
+    reply(&mut view, Ok(ChangesView::List(vec![at(&third)])));
+    assert!(
+        !view.key(key(KeyCode::Char('a')), NOW),
+        "a second move needs a second read"
+    );
+    let asked = reply(&mut view, Ok(ChangesView::Diff(page("+three", None))));
+    assert!(format!("{asked:?}").contains(&third), "{asked:?}");
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let asked = view.next_query(NOW).expect("the accept is sent");
+    assert!(
+        matches!(asked, ChangesQuery::Accept { .. }) && format!("{asked:?}").contains(&third),
+        "{asked:?}"
+    );
+}
