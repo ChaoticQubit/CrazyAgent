@@ -214,10 +214,15 @@ impl TerminalSession {
             },
         )?;
         #[cfg(target_os = "macos")]
-        let command = interactive::InteractiveCommand {
-            argv: crate::sandbox::kept_pane(command.argv)
-                .ok_or_else(|| failure("launch_sandbox_required"))?,
-            ..command
+        let command = if request.unconfined {
+            assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
+            command
+        } else {
+            interactive::InteractiveCommand {
+                argv: crate::sandbox::kept_pane(command.argv)
+                    .ok_or_else(|| failure("launch_sandbox_required"))?,
+                ..command
+            }
         };
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
@@ -417,11 +422,11 @@ impl TerminalSession {
     }
 
     /// Ends the pane and every process its harness started, then removes the key file and
-    /// the generated context. On macOS the pane's keeper first has the run's warden kill every
-    /// process in the sandbox, sessions of their own included; then every process left in the
-    /// pane's process group is killed, as a dev server started in the background. A Full
-    /// access pane has no Seatbelt, so the processes found in its lineage before the end are
-    /// checked after it. Output: none, since a pane reports no exit code,
+    /// the generated context. On macOS a sandboxed pane's keeper first has the run's warden
+    /// kill every process in the sandbox, sessions of their own included; then every process
+    /// left in the pane's process group is killed, as a dev server started in the background.
+    /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
+    /// sandbox, so the processes found in its lineage before the end are checked after it. Output: none, since a pane reports no exit code,
     /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
     /// the wait or was found by an id no longer proven to be this pane's, or
     /// [`Unstopped::Left`] naming what a Full access pane left running.
@@ -563,7 +568,7 @@ impl TerminalSession {
                     .alive()
                     .is_ok_and(|alive| alive.contains(&self.agent)));
         #[cfg(target_os = "macos")]
-        if seen && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
+        if seen && !self.unconfined && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
             self.uncertain = true;
         }
         let _ = self.host.kill(&self.agent);
