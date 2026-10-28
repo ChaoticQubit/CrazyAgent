@@ -3175,15 +3175,21 @@ fn a_master_is_not_stopped_as_idle_while_a_sub_agent_works() {
 #[test]
 fn a_master_turn_cut_by_the_task_limit_names_the_limit_and_the_setting() {
     assert_eq!(
-        limit_note(Some(TURN_LIMIT), Some(Duration::from_secs(3600)), None),
+        limit_note(
+            Some(TURN_LIMIT),
+            Some(TurnBound::Task(Duration::from_secs(3600)))
+        ),
         "stopped by the 1 h task limit; change it in Team settings"
     );
     assert_eq!(
-        limit_note(Some("launch_deadline"), None, Some(1800)),
+        limit_note(
+            Some(TURN_LIMIT),
+            Some(TurnBound::Session(Duration::from_secs(1800)))
+        ),
         "stopped by the 30 min session limit; change it in Team settings"
     );
     assert_eq!(
-        limit_note(Some("launch_deadline"), None, None),
+        limit_note(Some("launch_deadline"), None),
         "stopped after 24 h, the longest one agent process may run"
     );
     let fixture = Fixture::new(1);
@@ -4485,4 +4491,150 @@ fn the_owners_wake_brings_back_the_same_agent_and_session_and_a_stale_wake_stops
     assert_eq!(host.alive().unwrap(), names(&[member]), "and stops nothing");
     assert_eq!(team.shutdown().unwrap(), names(&[member]));
     host.close(&[]).unwrap();
+}
+
+/// Starts one sub-agent with every time limit Off and lets it finish "Write page.md".
+/// Takes the fixture and its runtime. Returns the idle sub-agent's id.
+fn idle_sub_agent(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    owner(
+        fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: fixture.setup.project_id.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: None,
+            },
+            hand_off(fixture, "Write page.md"),
+        ],
+    );
+    fixture.until(team, "the sub-agent finished and is idle", |f| {
+        task_of(f, "Write page.md").0 == "done"
+            && f.status()
+                .agents
+                .iter()
+                .any(|agent| agent.role == AgentRole::Sub && agent.status == AgentStatus::Idle)
+    });
+    fixture
+        .status()
+        .agents
+        .into_iter()
+        .find(|agent| agent.role == AgentRole::Sub)
+        .unwrap()
+        .id
+}
+
+/// The session limit counts from the agent's start and is read when it applies: an idle
+/// sub-agent kept between turns, started with the limit Off, is stopped once the owner sets
+/// a limit it has already run past.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_idle_agent_past_a_session_limit_set_after_it_started_is_stopped() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let id = idle_sub_agent(&fixture, &mut team);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET session_secs=1 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the session limit ends the idle sub-agent",
+        |f| f.agent_status(id).0 == AgentStatus::Stopped,
+    );
+    team.shutdown().unwrap();
+}
+
+/// A turn never goes to an agent past its session limit: once the limit passes for a
+/// sub-agent that finished a task, the next task goes to a fresh sub-agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_next_task_after_a_session_limit_passed_goes_to_a_fresh_agent() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LIVE_CODEX, TeamLimits::default());
+    let first = idle_sub_agent(&fixture, &mut team);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_time_limits SET session_secs=1 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write notes.md")]);
+    fixture.until(&mut team, "the next task is done", |f| {
+        task_of(f, "Write notes.md").0 == "done"
+    });
+    let agent: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT agent FROM team_tasks WHERE prompt='Write notes.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(agent, first, "a fresh sub-agent took the task");
+    assert_eq!(fixture.agent_status(first).0, AgentStatus::Stopped);
+    team.shutdown().unwrap();
+}
+
+/// A turn that outlasts what is left of its agent's session is stopped by the session limit,
+/// and the task names that limit and the setting.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_past_the_session_limit_is_stopped_and_names_the_limit() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,NULL,5,0)",
+            [PROJECT],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the session limit ends the task", |f| {
+        task_of(f, "Write page.md").0 == "failed"
+    });
+    assert_eq!(
+        task_of(&fixture, "Write page.md").1.as_deref(),
+        Some("The sub-agent was stopped by the 5 s session limit; change it in Team settings")
+    );
+    team.shutdown().unwrap();
+}
+
+/// The session rule for agents kept between turns and agents started for each turn alike: a
+/// turn may take the task limit or what is left of the session, whichever is sooner, and the
+/// session counts from the agent's start, so many short tasks in a row cannot outrun it.
+#[test]
+fn a_turn_takes_the_task_limit_or_what_is_left_of_the_session() {
+    let limits = |turn, session| crate::team::TimeLimits {
+        turn,
+        session,
+        idle: None,
+    };
+    let min = |minutes: u64| Duration::from_secs(minutes * 60);
+    assert_eq!(turn_bound(limits(None, None), min(500)), None);
+    assert_eq!(
+        turn_bound(limits(Some(1800), Some(7200)), min(10)),
+        Some((min(30), TurnBound::Task(min(30))))
+    );
+    assert_eq!(
+        turn_bound(limits(Some(1800), Some(7200)), min(105)),
+        Some((min(15), TurnBound::Session(min(120)))),
+        "after 1 h 45 min of short tasks the next turn gets the 15 min left of a 2 h session"
+    );
+    assert_eq!(
+        turn_bound(limits(None, Some(7200)), min(250)),
+        Some((Duration::ZERO, TurnBound::Session(min(120))))
+    );
+    assert_eq!(
+        turn_bound(limits(Some(1800), None), min(250)),
+        Some((min(30), TurnBound::Task(min(30))))
+    );
 }

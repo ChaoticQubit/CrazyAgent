@@ -65,6 +65,13 @@ const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
+
+/// Which of the owner's time limits bounds an agent's turn, with the limit as the owner set it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnBound {
+    Task(Duration),
+    Session(Duration),
+}
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
@@ -292,8 +299,8 @@ struct Worker {
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
-    turn_limit: Option<Duration>,
-    session_limit: Option<u32>,
+    bound: Option<TurnBound>,
+    spawned: Instant,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -642,7 +649,7 @@ impl TeamRuntime {
             host: host.clone(),
             agent,
             record: record.clone(),
-            limits: self.launch_limits(&project)?,
+            limits: self.launch_limits(),
             live,
             managed,
         };
@@ -1557,6 +1564,9 @@ impl TeamRuntime {
                 }
             }
         };
+        if !fresh && self.end_session(id)? {
+            return Ok(());
+        }
         let grant = if self.workers[&id].managed {
             match self.grant(access, id, project) {
                 Ok(Some(grant)) => Some(grant),
@@ -1611,16 +1621,19 @@ impl TeamRuntime {
         if team_tool {
             tool::clear(&self.tool_record(id));
         }
-        let limit = super::time_limits(&self.connection, project)?.turn_time();
+        let bound = turn_bound(
+            super::time_limits(&self.connection, project)?,
+            self.workers[&id].spawned.elapsed(),
+        );
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker
             .orders
-            .send(Order::Turn(prompt, grant, limit))
+            .send(Order::Turn(prompt, grant, bound.map(|(limit, _)| limit)))
             .is_err()
         {
             return Ok(());
         }
-        worker.turn_limit = limit;
+        worker.bound = bound.map(|(_, by)| by);
         worker.busy = Some(Busy::Message(message));
         self.connection
             .execute(
@@ -2216,6 +2229,7 @@ impl TeamRuntime {
                 .map(|(id, _)| *id);
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
+                (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
                 (None, Some(pinned)) => {
@@ -2321,16 +2335,19 @@ impl TeamRuntime {
                 &earlier,
                 &prompt,
             );
-            let limit = super::time_limits(&self.connection, &stored.project_id)?.turn_time();
+            let bound = turn_bound(
+                super::time_limits(&self.connection, &stored.project_id)?,
+                self.workers[&agent].spawned.elapsed(),
+            );
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker
                 .orders
-                .send(Order::Turn(prompt, grant, limit))
+                .send(Order::Turn(prompt, grant, bound.map(|(limit, _)| limit)))
                 .is_err()
             {
                 continue;
             }
-            worker.turn_limit = limit;
+            worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
             self.connection
                 .execute(
@@ -2395,10 +2412,29 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Stops an agent past its session limit, so its next turn goes to a fresh agent. The
+    /// session counts from the agent's start and the limit is read now; a live master is never
+    /// stopped by it. Takes the agent. Returns whether it was stopped, or a failed read.
+    fn end_session(&mut self, id: i64) -> Result<bool, EngineError> {
+        let worker = &self.workers[&id];
+        if worker.live {
+            return Ok(false);
+        }
+        let session = super::time_limits(&self.connection, &worker.project)?.session_time();
+        if session.is_none_or(|limit| worker.spawned.elapsed() < limit) {
+            return Ok(false);
+        }
+        let worker = self.workers.get_mut(&id).expect("worker exists");
+        worker.stopping = true;
+        let _ = worker.orders.send(Order::Stop);
+        Ok(true)
+    }
+
     /// Stops agents idle past their bound, except the sub-agents the owner keeps warm and,
-    /// with the owner's idle stop Off, every idle sub-agent. A master is never idle while its
-    /// project has work in flight, so its idle time counts from the moment the last of that
-    /// work ended. Takes the project. Returns any SQLite failure.
+    /// with the owner's idle stop Off, every idle sub-agent. An agent past its session limit
+    /// stops even when kept warm. A master is never idle while its project has work in
+    /// flight, so its idle time counts from the moment the last of that work ended and its
+    /// session is ended at its next turn. Takes the project. Returns any SQLite failure.
     fn reap_idle(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let warm = super::keep_warm(&self.connection, project)?;
@@ -2410,36 +2446,38 @@ impl TeamRuntime {
             .filter(|(_, w)| &w.project == project && w.busy.is_none() && !w.stopping && !w.live)
             .map(|(id, _)| *id)
             .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
         let masters = ids
             .iter()
             .any(|id| self.workers[id].role == AgentRole::Master);
         let in_flight = masters && self.work_in_flight(project)?;
-        let subs = ids.iter().any(|id| self.workers[id].role == AgentRole::Sub);
-        let idle_stop = if subs {
-            super::time_limits(&self.connection, project)?.idle_time()
-        } else {
-            None
-        };
+        let limits = super::time_limits(&self.connection, project)?;
         for id in ids {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             if worker.role == AgentRole::Master && in_flight {
                 worker.idle_since = Instant::now();
                 continue;
             }
-            let limit = match worker.role {
-                AgentRole::Master => self.limits.master_idle_stop,
-                AgentRole::Sub => match idle_stop {
-                    Some(limit) => limit,
-                    None => continue,
-                },
-            };
-            if worker.idle_since.elapsed() < limit {
-                continue;
-            }
-            if worker.role == AgentRole::Sub {
-                if warm && live_subs <= floor {
+            let ended = limits
+                .session_time()
+                .is_some_and(|session| worker.spawned.elapsed() >= session);
+            if !ended {
+                let limit = match worker.role {
+                    AgentRole::Master => self.limits.master_idle_stop,
+                    AgentRole::Sub => match limits.idle_time() {
+                        Some(limit) => limit,
+                        None => continue,
+                    },
+                };
+                if worker.idle_since.elapsed() < limit
+                    || (worker.role == AgentRole::Sub && warm && live_subs <= floor)
+                {
                     continue;
                 }
+            }
+            if worker.role == AgentRole::Sub {
                 live_subs -= 1;
             }
             worker.stopping = true;
@@ -2811,7 +2849,6 @@ impl TeamRuntime {
         let cancel = Arc::new(AtomicBool::new(false));
         let leave = Arc::new(AtomicBool::new(false));
         let (flag, kept) = (cancel.clone(), leave.clone());
-        let session_limit = super::time_limits(&self.connection, &seat.project)?.session;
         let managed = match &launch {
             Launch::Fresh(_, mode) => matches!(**mode, Mode::PerTurn { .. }),
             Launch::Adopt(adoption) => adoption.managed.is_some(),
@@ -2855,8 +2892,8 @@ impl TeamRuntime {
                 turn_started: None,
                 session: None,
                 seed: None,
-                turn_limit: None,
-                session_limit,
+                bound: None,
+                spawned: Instant::now(),
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -3063,9 +3100,7 @@ impl TeamRuntime {
             sandbox_profile: profile,
             access: policy.access,
             git_identity: owner_git_identity(&root),
-            limits: self
-                .launch_limits(&stored.project_id)
-                .map_err(|e| with_code("its time limits could not be read", Some(&e.0)))?,
+            limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
             live,
             resume: None,
@@ -3085,19 +3120,17 @@ impl TeamRuntime {
         Ok((root, plan, mode))
     }
 
-    /// The bounds of one agent process of a project: the owner's session time limit, or the
-    /// longest a launched harness may run when the owner set none. Takes the project.
-    /// Returns the bounds, or `team_time_limits_invalid` for a corrupt stored limit.
-    fn launch_limits(&self, project: &ProjectId) -> Result<LaunchLimits, EngineError> {
-        let session = super::time_limits(&self.connection, project)?.session_time();
-        let run_time = session.unwrap_or(RUN_TIME_MAX).min(RUN_TIME_MAX);
-        assert!(!run_time.is_zero() && run_time <= RUN_TIME_MAX);
-        Ok(LaunchLimits {
-            run_time,
+    /// The bounds of one agent process: the longest a launched harness may run. The owner's
+    /// session limit is the engine's own clock on the agent, checked per turn and while it is
+    /// idle, so it means the same for agents kept between turns and agents started for each
+    /// turn. Returns the bounds.
+    fn launch_limits(&self) -> LaunchLimits {
+        LaunchLimits {
+            run_time: RUN_TIME_MAX,
             stop_grace: self.limits.stop_grace,
             output_bytes: self.limits.output_bytes,
             events: SESSION_EVENTS_MAX,
-        })
+        }
     }
 
     fn agent_folder(&self, id: i64) -> PathBuf {
@@ -3361,10 +3394,10 @@ impl TeamRuntime {
             Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
-                let cut = (end == TurnEnd::TimedOut)
-                    .then(|| limit_note(cause.as_deref(), worker.turn_limit, worker.session_limit));
+                let cut =
+                    (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
                 let cause = cut.or(cause);
-                worker.turn_limit = None;
+                worker.bound = None;
                 if let Some(hosted) = &worker.hosted {
                     hosted.text(&text);
                     hosted.set_busy(false);
@@ -4866,30 +4899,48 @@ const LIVE_STARTS_WINDOW: Duration = Duration::from_secs(10 * 60);
 const LIVE_STOPPED: &str = "The live master was turned off";
 const WARM_STOPPED: &str = "Keeping sub-agents warm was turned off because a warm sub-agent stopped before it did any work";
 
-/// An owner line that names the plain code behind it in the style every window uses, so a
-/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
-/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 /// Says which of the owner's time limits cut a turn and where to change it. Inputs: the
-/// turn's end code, the task limit of that turn and its agent's session limit in seconds.
-/// Output: plain words, such as "stopped by the 1 h task limit; change it in Team settings".
-fn limit_note(cause: Option<&str>, turn: Option<Duration>, session: Option<u32>) -> String {
-    match (cause, turn, session) {
-        (Some(TURN_LIMIT), Some(turn), _) => format!(
-            "stopped by the {} task limit; change it in Team settings",
-            super::span_words(turn.as_secs())
-        ),
-        (Some("launch_deadline"), _, Some(secs)) => format!(
-            "stopped by the {} session limit; change it in Team settings",
-            super::span_words(secs.into())
-        ),
-        (Some("launch_deadline"), _, None) => format!(
-            "stopped after {}, the longest one agent process may run",
-            super::span_words(RUN_TIME_MAX.as_secs())
-        ),
-        _ => TIME_LIMIT_NOTE.to_owned(),
+/// turn's end code and the limit that bounded the turn. Output: plain words, such as
+/// "stopped by the 1 h task limit; change it in Team settings".
+fn limit_note(cause: Option<&str>, bound: Option<TurnBound>) -> String {
+    let (kind, limit) = match (cause, bound) {
+        (Some(TURN_LIMIT), Some(TurnBound::Task(limit))) => ("task", limit),
+        (Some(TURN_LIMIT), Some(TurnBound::Session(limit))) => ("session", limit),
+        (Some("launch_deadline"), _) => {
+            return format!(
+                "stopped after {}, the longest one agent process may run",
+                super::span_words(RUN_TIME_MAX.as_secs())
+            );
+        }
+        _ => return TIME_LIMIT_NOTE.to_owned(),
+    };
+    format!(
+        "stopped by the {} {kind} limit; change it in Team settings",
+        super::span_words(limit.as_secs())
+    )
+}
+
+/// The deadline of an agent's next turn: the owner's task limit, or what is left of the
+/// agent's session limit when that is sooner. The session counts from the agent's start for
+/// agents kept between turns and agents started for each turn alike. Inputs: the owner's
+/// limits and how long the agent has run. Output: none for no limit, or how long the turn
+/// may take and the limit behind it.
+fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, TurnBound)> {
+    let task = limits
+        .turn_time()
+        .map(|limit| (limit, TurnBound::Task(limit)));
+    let session = limits
+        .session_time()
+        .map(|limit| (limit.saturating_sub(ran), TurnBound::Session(limit)));
+    match (task, session) {
+        (Some(task), Some(session)) => Some(if session.0 < task.0 { session } else { task }),
+        (task, session) => task.or(session),
     }
 }
 
+/// An owner line that names the plain code behind it in the style every window uses, so a
+/// closed or failed agent is never opaque. Inputs: the sentence and the code, if any.
+/// Output: "Sentence. (code)" with the code made plain by `plain_code`, or the sentence alone.
 fn with_code(sentence: &str, cause: Option<&str>) -> String {
     match cause {
         Some(code) => {

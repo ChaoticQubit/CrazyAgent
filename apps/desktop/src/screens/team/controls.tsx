@@ -176,7 +176,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
         onValue={(value) => void limit("turn", value)} />
       <Select id={`tg-session-limit-${projectId}`} label="Each agent session may run" value={shown.session === null ? NO_LIMIT : String(shown.session)} options={limitOptions(shown.session)}
         onValue={(value) => void limit("session", value)}
-        helper="Off lets agents work as long as they need. A limit stops the agent's turn, and the conversation names the limit." />
+        helper="Off lets agents work as long as they need. A task limit stops one turn. A session counts from when the agent started; once it passes, the next task goes to a fresh agent. The conversation names the limit that stopped a turn." />
       <Select id={`tg-idle-stop-${projectId}`} label="Stop an idle sub-agent after" value={shown.idle === null ? NO_LIMIT : String(shown.idle)} options={limitOptions(shown.idle, IDLE_CHOICES_SECS)}
         onValue={(value) => void limit("idle", value)}
         helper="Off keeps an idle sub-agent running until the team stops. The master is never stopped while its work is still going." />
