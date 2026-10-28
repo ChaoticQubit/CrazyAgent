@@ -64,6 +64,12 @@ export function noticeLine(notice: RecoveryNotice): string {
   return `${subject} has an unknown outcome.`;
 }
 
+/** One run's row key: its agent and the time it was cut short, which the engine keeps unique
+ * per run, since one agent can have several runs. Input: the run. Output: the key. */
+export function runKey(run: RecoveryRun): string {
+  return `${run.agent}-${run.at_ms}`;
+}
+
 /** The busy key of one choice, so only its button shows progress. */
 export function choiceKey(choice: { agent: number } | RecoveryNotice): string {
   return "action_kind" in choice ? `dismiss-${choice.action_kind}-${choice.id}` : `retry-${choice.agent}`;
@@ -88,15 +94,15 @@ export function RecoveryBannerView({ banner, busy, note, onRetry, onDismiss }: {
       <strong>{`Work was interrupted when CrazyAgent stopped. ${waiting} to resolve.`}</strong>
       {groups.interrupted.length > 0 && <section className="stack-small" aria-label="Interrupted">
         <span className="secondary">Interrupted</span>
-        <ul>{groups.interrupted.map((run) => <li key={run.agent}>{runLine(run)}</li>)}</ul>
+        <ul>{groups.interrupted.map((run) => <li key={runKey(run)}>{runLine(run)}</li>)}</ul>
       </section>}
       {groups.resumed.length > 0 && <section className="stack-small" aria-label="Resumed">
         <span className="secondary">Resumed</span>
-        <ul>{groups.resumed.map((run) => <li key={run.agent}>{`${displayText(run.label)} (${run.harness}) runs again.`}</li>)}</ul>
+        <ul>{groups.resumed.map((run) => <li key={runKey(run)}>{`${displayText(run.label)} (${run.harness}) runs again.`}</li>)}</ul>
       </section>}
       {groups.failed.length > 0 && <section className="stack-small" aria-label="Failed">
         <span className="secondary">Failed</span>
-        <ul>{groups.failed.map((run) => <li key={run.agent} className="row">
+        <ul>{groups.failed.map((run) => <li key={runKey(run)} className="row">
           <span>{`${displayText(run.label)} (${run.harness}) didn't resume. ${displayText(run.reason ?? "No reason was recorded.")}`}</span>
           <Button size="small" pending={busy === choiceKey(run)} pendingLabel="Retrying..." disabled={busy !== null} onClick={() => onRetry(run.agent)}>Retry</Button>
         </li>)}</ul>

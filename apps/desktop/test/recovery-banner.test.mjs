@@ -92,6 +92,18 @@ test("Retry and Dismiss call the engine for the item shown, and one choice runs 
   assert.match(index, /<RecoveryBanner key=\{projectId\} project=\{projectId\} \/>/);
 });
 
+test("one agent's several runs each get their own row key in every group", () => {
+  const twice = (state, extra = {}) => [run(3, "Sub-agent 3", state, { at_ms: 1_800_000_000_000, ...extra }), run(3, "Sub-agent 3", state, { at_ms: 1_800_000_060_000, ...extra })];
+  const runs = [...twice("interrupted"), ...twice("resumed"), ...twice("failed", { reason: "The account is unavailable." })];
+  const lists = elements(rendered({ banner: { runs, notices: [], more: 0 } })).filter((element) => element.type === "ul");
+  assert.equal(lists.length, 3, "Interrupted, Resumed and Failed");
+  for (const list of lists) {
+    const keys = list.props.children.map((item) => item.key);
+    assert.equal(keys.length, 2);
+    assert.equal(new Set(keys).size, 2, `rows of one agent's two runs share a key: ${keys}`);
+  }
+});
+
 test("an empty banner, or one where everything resumed, shows nothing and stops reading", () => {
   for (const quiet of [{ runs: [], notices: [], more: 0 }, { runs: [run(4, "Sub-agent 4", "resumed")], notices: [], more: 0 }]) {
     assert.equal(rendered({ banner: quiet }), null);
