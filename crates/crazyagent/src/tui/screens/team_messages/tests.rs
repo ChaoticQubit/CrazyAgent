@@ -458,6 +458,68 @@ fn at_the_thousand_entry_cap_paging_older_and_a_refresh_keep_the_entries_the_own
 }
 
 #[test]
+fn a_redraw_wraps_only_the_entries_in_view_it_has_not_drawn_at_that_width() {
+    let mut list = opened();
+    answer(
+        &mut list,
+        0,
+        page((801..=1000).map(numbered).collect(), true),
+    );
+    for first in [601, 401, 201, 1] {
+        list.key(&Key::Home);
+        answer(
+            &mut list,
+            1,
+            page((first..first + 200).map(numbered).collect(), first > 1),
+        );
+    }
+    assert_eq!(list.entries.len(), KEPT_MAX);
+    list.key(&Key::End);
+    list.wraps.set(0);
+    let shown = texts(&list, 76, 10);
+    assert!(
+        list.wraps.get() <= shown.len(),
+        "a draw wraps only the entries in view, not all {KEPT_MAX}: {} wrapped",
+        list.wraps.get()
+    );
+    list.wraps.set(0);
+    assert_eq!(texts(&list, 76, 10), shown);
+    assert_eq!(
+        list.wraps.get(),
+        0,
+        "a redraw at the same width wraps nothing again"
+    );
+    list.key(&Key::Up);
+    list.wraps.set(0);
+    texts(&list, 76, 10);
+    assert_eq!(
+        list.wraps.get(),
+        2,
+        "a move wraps the newly picked entry and the one that came into view"
+    );
+    list.wraps.set(0);
+    let narrow = texts(&list, 50, 10);
+    assert!(
+        (1..=narrow.len()).contains(&list.wraps.get()),
+        "a new width wraps the entries in view again: {} wrapped",
+        list.wraps.get()
+    );
+
+    list.key(&Key::End);
+    texts(&list, 50, 10);
+    let mut changed = numbered(1000);
+    changed.text = Some("Step 1000 again".into());
+    answer(&mut list, REFRESH_MS, page(vec![changed], true));
+    let shown = texts(&list, 50, 10);
+    assert!(
+        shown
+            .last()
+            .is_some_and(|line| line.ends_with("Step 1000 again")),
+        "an entry the engine changed is wrapped again: {shown:?}"
+    );
+}
+
+#[test]
 fn enter_opens_a_task_result_and_the_full_setting_shows_it_whole() {
     let mut done = entry(
         1,

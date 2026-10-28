@@ -10,6 +10,9 @@ use crate::team::events::EventState;
 use crate::tui::keys::Key;
 use crate::tui::text::{cut, width, wrap};
 use crate::tui::theme::Role;
+#[cfg(test)]
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The most entries one open list holds; entries dropped past it stay in the engine and are
@@ -26,6 +29,15 @@ const TEXT_MIN: usize = 12;
 /// What a narrow box draws before each line of an entry's text and result, which start on their
 /// own lines there. A row starts with its time, so no line of text can pass as a row.
 const TEXT_GUTTER: &str = "  | ";
+
+/// The lines each entry drew as at one width and one results setting, keyed by the entry's
+/// cursor and whether it was the picked one, so a redraw wraps only entries it has not drawn.
+#[derive(Default)]
+struct Drawn {
+    limit: usize,
+    full: bool,
+    lines: BTreeMap<(Cursor, bool), Vec<Shown>>,
+}
 
 /// One drawn line of a Messages list: plain text fitted to the width and the color role it
 /// draws in, none for the plain style. Each host turns it into its own line type.
@@ -48,7 +60,7 @@ pub(in crate::tui) enum ListKey {
 /// again once per refresh period and PgUp at the top reads the page before the oldest entry.
 /// Entries merge by their cursor and at most `KEPT_MAX` stay, dropped from the end away from
 /// the pick. Once the newest are dropped the list stops following new entries until End.
-/// Never invents an entry.
+/// A draw wraps only the entries in view, each once per width. Never invents an entry.
 pub(in crate::tui) struct Messages {
     pub project: ProjectId,
     pub agent: i64,
@@ -66,6 +78,9 @@ pub(in crate::tui) struct Messages {
     problem: Option<String>,
     cursor: usize,
     opened: BTreeSet<(Source, i64)>,
+    drawn: RefCell<Drawn>,
+    #[cfg(test)]
+    wraps: Cell<usize>,
 }
 
 impl Messages {
@@ -90,6 +105,9 @@ impl Messages {
             problem: None,
             cursor: 0,
             opened: BTreeSet::new(),
+            drawn: RefCell::default(),
+            #[cfg(test)]
+            wraps: Cell::new(0),
         }
     }
 
@@ -183,8 +201,14 @@ impl Messages {
             .drain(..)
             .map(|entry| (entry.cursor(), entry))
             .collect();
+        let mut changed = BTreeSet::new();
         for entry in &page.entries {
-            merged.insert(entry.cursor(), entry.clone());
+            if merged
+                .insert(entry.cursor(), entry.clone())
+                .is_some_and(|kept| kept != *entry)
+            {
+                changed.insert(entry.cursor());
+            }
         }
         self.entries = merged.into_values().collect();
         self.settings = Some(page.settings);
@@ -209,6 +233,13 @@ impl Messages {
             self.older = true;
             cursor.saturating_sub(over)
         };
+        let entries = &self.entries;
+        self.drawn.get_mut().lines.retain(|(at, _), _| {
+            !changed.contains(at)
+                && entries
+                    .binary_search_by_key(at, AgentMessage::cursor)
+                    .is_ok()
+        });
         let last = self.entries.len().saturating_sub(1);
         assert!(self.entries.len() <= KEPT_MAX && self.cursor <= last);
     }
@@ -257,9 +288,13 @@ impl Messages {
         if entry.result.is_none() {
             return;
         }
-        let key = (entry.source, entry.id);
+        let (key, cursor) = ((entry.source, entry.id), entry.cursor());
         if !self.opened.remove(&key) {
             self.opened.insert(key);
+        }
+        let drawn = self.drawn.get_mut();
+        for picked in [false, true] {
+            drawn.lines.remove(&(cursor, picked));
         }
     }
 
@@ -328,26 +363,63 @@ impl Messages {
             .collect();
         head.truncate(room);
         let body = room - head.len();
-        let mut picked = (0, 0);
-        let mut drawn = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            let start = drawn.len();
-            drawn.extend(self.entry_lines(entry, index == self.cursor, limit));
-            if index == self.cursor {
-                picked = (start, drawn.len());
-            }
-        }
-        let first = picked
-            .1
-            .saturating_sub(body)
-            .min(picked.0)
-            .min(drawn.len().saturating_sub(body));
-        head.extend(drawn.into_iter().skip(first).take(body));
+        head.extend(self.window(limit, body));
         assert!(head.len() <= room);
         head
     }
 
+    /// The entry lines that fill `body` rows with the picked entry in view: the entries above
+    /// it up to the top, then the ones below it when the top comes first. Wraps only the
+    /// entries it shows, each once per width and results setting through the drawn cache.
+    /// Takes the line width and the rows for entries. Returns at most `body` lines.
+    fn window(&self, limit: usize, body: usize) -> Vec<Shown> {
+        if body == 0 || self.entries.is_empty() {
+            return Vec::new();
+        }
+        let mut drawn = self.drawn.borrow_mut();
+        let full = self
+            .settings
+            .is_some_and(|settings| settings.results == ResultsShown::Full);
+        if (drawn.limit, drawn.full) != (limit, full) {
+            *drawn = Drawn {
+                limit,
+                full,
+                lines: BTreeMap::new(),
+            };
+        }
+        let mut shown = self.drawn_lines(&mut drawn, self.cursor, limit);
+        shown.truncate(body);
+        let mut index = self.cursor;
+        while shown.len() < body && index > 0 {
+            index -= 1;
+            let lines = self.drawn_lines(&mut drawn, index, limit);
+            let keep = lines.len().min(body - shown.len());
+            shown.splice(0..0, lines[lines.len() - keep..].iter().cloned());
+        }
+        let mut index = self.cursor + 1;
+        while shown.len() < body && index < self.entries.len() {
+            let lines = self.drawn_lines(&mut drawn, index, limit);
+            let keep = lines.len().min(body - shown.len());
+            shown.extend(lines.into_iter().take(keep));
+            index += 1;
+        }
+        assert!(shown.len() <= body);
+        shown
+    }
+
+    fn drawn_lines(&self, drawn: &mut Drawn, index: usize, limit: usize) -> Vec<Shown> {
+        let entry = &self.entries[index];
+        let picked = index == self.cursor;
+        drawn
+            .lines
+            .entry((entry.cursor(), picked))
+            .or_insert_with(|| self.entry_lines(entry, picked, limit))
+            .clone()
+    }
+
     fn entry_lines(&self, entry: &AgentMessage, picked: bool, limit: usize) -> Vec<Shown> {
+        #[cfg(test)]
+        self.wraps.set(self.wraps.get() + 1);
         let mark = if picked { "> " } else { "  " };
         let lead = format!(
             "{}  {}:",
