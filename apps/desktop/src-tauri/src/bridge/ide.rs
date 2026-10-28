@@ -5,21 +5,12 @@ use crazyagent::protocol::ProjectId;
 use serde::Serialize;
 use std::sync::Arc;
 
-/// The switch that shows the IDE tab until IDE-15 makes it the default: `1` in the desktop
-/// app's environment turns it on.
-pub const IDE_TAB_FLAG: &str = "CRAZYAGENT_IDE_TAB";
-
-/// What the IDE tab shows: nothing while the `ide_tab` flag is off, else where the engine's
-/// IDE stands.
+/// What the project page shows for the IDE: where the engine's IDE stands and the platform
+/// this desktop runs on, which the engine shares, so an unavailable IDE names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "tab", rename_all = "snake_case")]
-pub enum IdeView {
-    Off,
-    On { state: IdeTabState },
-}
-
-fn ide_tab_on() -> bool {
-    std::env::var_os(IDE_TAB_FLAG).is_some_and(|value| value == "1")
+pub struct IdeView {
+    pub state: IdeTabState,
+    pub platform: &'static str,
 }
 
 fn ide_error(error: EngineError) -> BridgeError {
@@ -53,26 +44,23 @@ impl NativeBridge {
             .map_err(ide_error)
     }
 
-    /// Reads what the IDE tab shows, run without the bridge lock: Off while the flag is off,
-    /// without asking the engine, else the build state, after starting the fetch again when
-    /// `retry`. Input: whether to retry. Output: the view.
+    /// Reads what the project page shows for the IDE, run without the bridge lock: the build
+    /// state, after starting the fetch again when `retry`, and this platform. Input: whether
+    /// to retry. Output: the view.
     pub fn ide_state(&self, retry: bool) -> Result<Unlocked<IdeView>, BridgeError> {
-        if !ide_tab_on() {
-            return Ok(Box::pin(async { Ok(IdeView::Off) }));
-        }
         let client = self.ide_client()?;
         Ok(Box::pin(async move {
             let state = client.ide_tab_state(retry).await.map_err(ide_error)?;
-            Ok(IdeView::On { state })
+            Ok(IdeView {
+                state,
+                platform: std::env::consts::OS,
+            })
         }))
     }
 
     /// Opens a project's IDE server, run without the bridge lock. Input: the project.
-    /// Output: where its IDE is reached; `ide_tab_off` while the flag is off.
+    /// Output: where its IDE is reached.
     pub fn ide_open(&self, project: ProjectId) -> Result<Unlocked<IdeTabServer>, BridgeError> {
-        if !ide_tab_on() {
-            return Err(failure("ide_tab_off"));
-        }
         let client = self.ide_client()?;
         Ok(Box::pin(async move {
             client.ide_tab_open(project).await.map_err(ide_error)

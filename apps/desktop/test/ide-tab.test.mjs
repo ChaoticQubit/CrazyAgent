@@ -58,17 +58,17 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   }
 });
 
-test("the tab is absent when ide_tab is off and last when it is on", () => {
+test("the IDE tab takes the place of Changes and Context once the engine's IDE can open", () => {
   const ids = (tabs) => tabs.map((tab) => tab.id);
   const base = ids(page.TABS);
   assert.ok(!base.includes("ide"));
-  assert.deepEqual(ids(page.projectTabs(undefined)), base, "while the flag is unread, no IDE tab");
-  assert.deepEqual(ids(page.projectTabs({ tab: "off" })), base);
-  assert.deepEqual(ids(page.projectTabs({ tab: "on", state: state({ state: "missing" }) })), [...base, "ide"]);
-  assert.equal(page.projectTabs({ tab: "on", state: state({ state: "missing" }) }).at(-1).label, "IDE");
+  assert.deepEqual(ids(page.projectTabs(undefined)), base, "until the engine answers, no IDE tab");
+  const ready = page.projectTabs({ state: state({ state: "ready", version: "1.143.17183", root: "/x" }), platform: "macos" });
+  assert.equal(ids(ready).indexOf("ide"), base.indexOf("changes"));
+  assert.ok(!ids(ready).includes("changes") && !ids(ready).includes("context"));
+  assert.equal(ready.find((tab) => tab.id === "ide").label, "IDE");
   const lib = read("src-tauri/src/bridge/ide.rs");
-  assert.match(lib, /IDE_TAB_FLAG: &str = "CRAZYAGENT_IDE_TAB"/, "the flag is the desktop's own switch until IDE-15");
-  assert.match(lib, /return Ok\(Box::pin\(async \{ Ok\(IdeView::Off\) \}\)\);/, "with the flag off the engine is never asked");
+  assert.doesNotMatch(lib, /IDE_TAB_FLAG|CRAZYAGENT_IDE_TAB/, "IDE-15 removed the desktop's own switch");
 });
 
 test("the app menu the IDE tab uses owns none of Cmd+Z, W, N, P, F or comma", () => {
@@ -199,16 +199,17 @@ test("closing a project page stops its IDE server, ordered with any open of the 
 test("a loaded IDE hears the heartbeat on every tab of its project page, and only a loaded one reaches the engine", () => {
   const index = read("src/screens/project/index.tsx");
   assert.match(index, /window\.setInterval\(\(\) => void touchIde\(projectId\), HEARTBEAT_MS\)/, "the page beats while open, not only while the IDE is shown");
-  assert.match(index, /if \(ide\?\.tab !== "on"\) return;/, "no beat with the IDE tab off");
+  assert.match(index, /const replaces = ideReplacesTabs\(view\);/);
+  assert.match(index, /if \(!replaces\) return;/, "no beat while the IDE cannot open");
   const touch = command(read("src-tauri/src/lib.rs"), "desktop_ide_touch");
   assert.match(touch, /if !views\.loaded\(&project\) \{\s*return Ok\(false\);\s*\}/);
   assert.ok(touch.indexOf("views.loaded(&project)") < touch.indexOf("ide_touch(project)"), "a project with no IDE loaded never asks the engine");
 });
 
-test("the IDE ask polls run only with the IDE tab on, and reach the engine only while an IDE is loaded", () => {
+test("the IDE ask polls run only while the IDE can open, and reach the engine only while an IDE is loaded", () => {
   const index = read("src/screens/project/index.tsx");
-  assert.match(index, /\{ide\?\.tab === "on" && <IdeConfirm data=\{data\} \/>\}/);
-  assert.match(index, /\{ide\?\.tab === "on" && <IdeExtensionConfirm data=\{data\} \/>\}/);
+  assert.match(index, /\{replaces && <IdeConfirm data=\{data\} \/>\}/);
+  assert.match(index, /\{replaces && <IdeExtensionConfirm data=\{data\} \/>\}/);
   const lib = read("src-tauri/src/lib.rs");
   for (const [name, engine] of [["desktop_ide_asks", "ide_asks(&id)"], ["desktop_ide_extension_asks", "ide_extension_asks(project_id)"]]) {
     const body = command(lib, name);

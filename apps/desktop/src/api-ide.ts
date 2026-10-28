@@ -1,6 +1,7 @@
 import { call } from "./api";
-import type { Result } from "./api";
+import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
+import { isMac } from "./ui/keys";
 
 /** How often a project page with its IDE loaded tells the engine the owner still uses it, in
  * milliseconds. */
@@ -18,8 +19,9 @@ export type BuildState =
  * cannot run on it. */
 export type IdeTabState = { build: BuildState; unqualified: string | null };
 
-/** What the IDE tab shows: nothing while the `ide_tab` flag is off, else the engine's IDE. */
-export type IdeView = { tab: "off" } | { tab: "on"; state: IdeTabState };
+/** What the project page shows for the IDE: the engine's IDE state and the platform the
+ * desktop runs on. */
+export type IdeView = { state: IdeTabState; platform: string };
 
 /** The panel the IDE webview covers, in the window's CSS pixels. */
 export type IdeBounds = { x: number; y: number; width: number; height: number };
@@ -33,6 +35,9 @@ const MEGABYTE = 1024 * 1024;
 const UNQUALIFIED = "The IDE is unavailable on this platform.";
 const EXTENSIONS_FAILED = "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.";
 const LINK_FAILED = "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.";
+const NOT_SUPPORTED = "The IDE isn't supported on this platform yet.";
+const NO_BUILD = "This CrazyAgent version has no IDE build for this platform.";
+const ENGINE_NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
 
 const BUILD_FAILURES: Record<string, string> = {
   ide_build_hash_mismatch: "The IDE download didn't match its published checksum, so it was deleted and never run.",
@@ -57,7 +62,6 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_server_port_taken: "Another program took the IDE's port. Try again.",
   ide_port_unavailable: "No free port was found for the IDE. Try again.",
   ide_token_unreadable: "The IDE's sign-in file couldn't be read. Try again.",
-  ide_tab_off: "The IDE tab is turned off.",
 };
 
 /** Says what the IDE tab shows for the engine's IDE state. Input: the state. Output: the
@@ -87,6 +91,52 @@ export function ideStatus(state: IdeTabState): IdeStatus {
   }
 }
 
+/** Whether the IDE takes the place of Context and Changes: the platform is qualified and the
+ * build is ready, so the IDE can open. Input: the view, undefined until read. Output: true then. */
+export function ideReplacesTabs(view: IdeView | undefined): boolean {
+  return view !== undefined && ideStatus(view.state).ready;
+}
+
+/** Whether a qualified platform's build is downloading or being checked, so the page keeps
+ * reading until it is Ready or Failed. Input: the view, undefined until read. Output: true then. */
+export function ideFetching(view: IdeView | undefined): boolean {
+  if (view === undefined || view.state.unqualified !== null) return false;
+  return view.state.build.state === "downloading" || view.state.build.state === "verifying";
+}
+
+/** The page's line when the IDE state couldn't be read: the platform, the reason and Retry.
+ * Inputs: the failed read and this desktop's platform. Output: the line and its action. */
+export function ideReadFailed(failure: Failure, platform: string): { line: string; action: "retry" } {
+  const reason = failure.kind === "error" ? failureCopy(failure) : ENGINE_NOT_READY;
+  return { line: `IDE unavailable on ${PLATFORMS[platform] ?? platform}: ${reason}`, action: "retry" };
+}
+
+/** This desktop's platform in the engine's names, for a line the engine couldn't give one.
+ * Input: the browser's platform string, by default the window's. Output: macos, windows,
+ * linux, or the string itself. */
+export function desktopPlatform(platform: string = typeof navigator === "undefined" ? "" : navigator.platform): string {
+  if (isMac(platform)) return "macos";
+  if (/^Win/i.test(platform)) return "windows";
+  if (/^Linux/i.test(platform)) return "linux";
+  return platform;
+}
+
+/** The page's line while Context and Changes stay: the build's progress while it downloads
+ * or is checked, else why the IDE can't open on this platform and the build's one action.
+ * Input: the view, undefined until read. Output: the line and action, or null while unread
+ * or when the IDE replaces the tabs. */
+export function ideUnavailable(view: IdeView | undefined): { line: string; action: IdeStatus["action"] } | null {
+  if (view === undefined || ideReplacesTabs(view)) return null;
+  const { build, unqualified } = view.state;
+  const platform = unqualified ?? view.platform;
+  const unavailable = `IDE unavailable on ${PLATFORMS[platform] ?? platform}:`;
+  if (unqualified !== null) return { line: `${unavailable} ${NOT_SUPPORTED}`, action: null };
+  if (build.state === "failed" && build.code === "ide_build_unsupported_platform") return { line: `${unavailable} ${NO_BUILD}`, action: null };
+  const status = ideStatus(view.state);
+  if (ideFetching(view)) return { line: status.line, action: null };
+  return { line: `${unavailable} ${status.line}`, action: status.action };
+}
+
 /** Says why the IDE didn't open; every refusal of the extension install before the server
  * starts reads as one sentence. Input: the refusal code. Output: the plain sentence. */
 export function openFailure(code: string): string {
@@ -109,8 +159,8 @@ export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
   return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height;
 }
 
-/** Reads what the IDE tab shows; with `retry` the engine first starts the build download
- * again. Input: whether to retry. Output: the view. */
+/** Reads what the project page shows for the IDE; with `retry` the engine first starts the
+ * build download again. Input: whether to retry. Output: the view. */
 export function ideView(retry = false): Promise<Result<IdeView>> {
   return call<IdeView>("desktop_ide_state", { retry });
 }
