@@ -1,6 +1,6 @@
 use super::{
-    ASKED_BYTES_MAX, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX, RunState,
-    unavailable,
+    ASKED_BYTES_MAX, HeldItem, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX,
+    RunState, unavailable,
 };
 use crate::engine::EngineError;
 use crate::harnesses::interactive::Transcript;
@@ -8,7 +8,8 @@ use crate::harnesses::terminal_session::{PaneRecord, RecordSource};
 use crate::harnesses::transcript::TranscriptReader;
 use crate::protocol::ProjectId;
 use crate::team::{AgentRole, bound_text, now_ms};
-use rusqlite::{Connection, Row, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -31,7 +32,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS recovery_runs (
     paused INTEGER NOT NULL DEFAULT 0 CHECK(paused IN (0,1)),
     state TEXT NOT NULL CHECK(state IN ('stopped','interrupted','resuming','resumed','failed')),
     recorded_ms INTEGER,
-    reason TEXT
+    reason TEXT,
+    retried INTEGER NOT NULL DEFAULT 0 CHECK(retried IN (0,1))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS recovery_runs_once ON recovery_runs(agent, at_ms);
 CREATE INDEX IF NOT EXISTS recovery_runs_state ON recovery_runs(state, project, id);
@@ -88,10 +90,29 @@ fn invalid() -> EngineError {
     EngineError("recovery_record_invalid".into())
 }
 
-/// Adds the recovery table to the engine database when missing.
-/// Input: the connection. Output: done, or `recovery_unavailable`.
+/// Adds the recovery table to the engine database when missing, and the `retried` column
+/// to a table made before it. Input: the connection. Output: done, or `recovery_unavailable`.
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(SCHEMA).map_err(storage)
+    db.execute_batch(SCHEMA).map_err(storage)?;
+    let has = || {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('recovery_runs') WHERE name='retried')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(storage)
+    };
+    if !has()?
+        && db
+            .execute_batch(
+                "ALTER TABLE recovery_runs ADD COLUMN retried INTEGER NOT NULL DEFAULT 0 CHECK(retried IN (0,1))",
+            )
+            .is_err()
+        && !has()?
+    {
+        return Err(unavailable());
+    }
+    Ok(())
 }
 
 /// Keeps the first non-empty line of what a turn was asked, trimmed and bounded.
@@ -208,8 +229,9 @@ pub(super) fn capture(db: &Connection, stopped_ms: Option<i64>) -> Result<(), En
 }
 
 /// Settles every `stopped` run: dropped when its agent runs again, as an agent the team
-/// runtime took over in its live pane does, else recorded `interrupted` with the session
-/// record file its pane names and whether its project's team is paused now. Keeps the
+/// runtime took over in its live pane does, unless it is a sub-agent's run holding a task,
+/// which its agent resumes in that pane; every kept run is recorded `interrupted` with the
+/// session record file its pane names and whether its project's team is paused now. Keeps the
 /// newest `RUNS_PER_PROJECT_MAX` resumed runs of each project; a run still open or failed
 /// is kept until it resumes, since it holds its task or message back.
 /// Input: the engine database with the team tables. Output: done.
@@ -239,7 +261,8 @@ pub(super) fn settle(db: &Connection) -> Result<(), EngineError> {
         .collect();
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     tx.execute(
-        "DELETE FROM recovery_runs WHERE state='stopped' AND agent IN (
+        "DELETE FROM recovery_runs WHERE state='stopped'
+             AND (kind='master' OR task IS NULL) AND agent IN (
              SELECT id FROM team_agents WHERE status IN ('starting','idle','working'))",
         [],
     )
@@ -427,17 +450,104 @@ pub(super) fn mark(
     Ok(changed == 1)
 }
 
-/// Sets the agent's newest failed run waiting to resume again, without its reason.
-/// Inputs: the store and the agent. Output: whether a failed run was found.
+/// Sets the agent's newest failed run waiting to resume again, without its reason, marked
+/// retried. Inputs: the store and the agent. Output: whether a failed run was found.
 pub(super) fn retry(db: &Connection, agent: i64) -> Result<bool, EngineError> {
     let changed = db
         .execute(
-            "UPDATE recovery_runs SET state='interrupted', reason=NULL
+            "UPDATE recovery_runs SET state='interrupted', reason=NULL, retried=1
              WHERE id=(SELECT MAX(id) FROM recovery_runs WHERE agent=?1 AND state='failed')",
             [agent],
         )
         .map_err(storage)?;
     Ok(changed == 1)
+}
+
+/// Tells whether the owner retried the run. Inputs: the store and the run.
+/// Output: the answer, false for a run the store no longer has.
+pub(super) fn retried(db: &Connection, run: i64) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT retried FROM recovery_runs WHERE id=?1",
+        [run],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|retried| retried.unwrap_or(false))
+    .map_err(storage)
+}
+
+fn column(item: HeldItem) -> (&'static str, i64) {
+    match item {
+        HeldItem::Task(task) => ("task", task),
+        HeldItem::Message(message) => ("message", message),
+    }
+}
+
+/// Tells whether a run holds the item: one in an open or failed resume state, or a
+/// `stopped` one `settle` keeps: a sub-agent's, or one whose agent does not run again.
+/// Inputs: the store and the item. Output: the answer, or `recovery_unavailable`.
+pub(super) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
+    initialize(db)?;
+    let (column, id) = column(item);
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM recovery_runs r WHERE r.{column}=?1 AND (
+                 r.state IN ('interrupted','resuming','failed')
+                 OR (r.state='stopped' AND (r.kind='sub' OR NOT EXISTS(
+                     SELECT 1 FROM team_agents a WHERE a.id=r.agent
+                     AND a.status IN ('starting','idle','working'))))))"
+        ),
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(storage)
+}
+
+/// Drops every `stopped` run holding the item and clears the item from every other run, in
+/// the caller's transaction when it has one. Inputs: the store and the item. Output: done.
+pub(super) fn release(db: &Connection, item: HeldItem) -> Result<(), EngineError> {
+    initialize(db)?;
+    let (column, id) = column(item);
+    db.execute(
+        &format!("DELETE FROM recovery_runs WHERE {column}=?1 AND state='stopped'"),
+        [id],
+    )
+    .map_err(storage)?;
+    db.execute(
+        &format!("UPDATE recovery_runs SET {column}=NULL WHERE {column}=?1"),
+        [id],
+    )
+    .map_err(storage)?;
+    assert!(!holds(db, item)?);
+    Ok(())
+}
+
+/// Reads the kept per-turn session records, of one agent or of all, at most `SCANNED_MAX`;
+/// a record that does not decode is left out. Inputs: the store and the agent or none.
+/// Output: the records by agent.
+pub(super) fn sessions(
+    db: &Connection,
+    agent: Option<i64>,
+) -> Result<BTreeMap<i64, PaneRecord>, EngineError> {
+    initialize(db)?;
+    let limit = i64::try_from(super::SCANNED_MAX).map_err(|_| unavailable())?;
+    let mut statement = db
+        .prepare(
+            "SELECT agent,record FROM recovery_sessions WHERE ?1 IS NULL OR agent=?1
+             ORDER BY agent LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![agent, limit], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, text)| PaneRecord::decode(&text).map(|record| (id, record)))
+        .collect())
 }
 
 /// Keeps the session record of the agent's running per-turn harness session.

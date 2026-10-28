@@ -3,6 +3,7 @@ use crate::harnesses::terminal_session::PaneRecord;
 use crate::protocol::ProjectId;
 use crate::team::AgentRole;
 use rusqlite::Connection;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -125,8 +126,9 @@ pub fn scan(runtime: &Path) -> Result<Vec<Interrupted>, EngineError> {
 }
 
 /// Settles the runs the last engine stop cut short: a run whose agent the starting team
-/// runtime took over again in its live pane is dropped, every other one is recorded
-/// interrupted once, with whether its team is paused now; a paused team stays paused.
+/// runtime took over again in its live pane is dropped, unless a sub-agent's run holds a
+/// task it resumes there; every other one is recorded interrupted once, with whether its
+/// team is paused now; a paused team stays paused.
 /// Input: the team runtime's connection, after it adopted the panes it can and before it
 /// runs anything else. Output: done, or `recovery_unavailable`.
 pub(crate) fn settle(db: &Connection) -> Result<(), EngineError> {
@@ -142,7 +144,8 @@ pub fn list(runtime: &Path, project: &ProjectId) -> Result<Vec<Interrupted>, Eng
 }
 
 /// Starts a failed resume again: the agent's newest failed run waits to resume once more,
-/// on the team runtime's next tick, without its old reason.
+/// on the team runtime's next tick, without its old reason; if that resume fails too, the
+/// run gives up and lets go of its task or message ([`retried`]).
 /// Inputs: the engine root and the team agent. Output: whether a failed run was waiting.
 pub fn retry(runtime: &Path, agent: i64) -> Result<bool, EngineError> {
     let db = open(runtime)?;
@@ -181,6 +184,46 @@ pub(crate) fn mark(
     reason: Option<&str>,
 ) -> Result<bool, EngineError> {
     store::mark(db, run, from, to, reason)
+}
+
+/// Tells whether the owner retried the run, so a failure of its resume gives it up rather
+/// than holding its task or message for one more retry that would fail the same way.
+/// Inputs: the team runtime's connection and the run. Output: the answer.
+pub(crate) fn retried(db: &Connection, run: i64) -> Result<bool, EngineError> {
+    store::retried(db, run)
+}
+
+/// One team task or owner message an interrupted run can hold back for its resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeldItem {
+    Task(i64),
+    Message(i64),
+}
+
+/// Tells whether a run still holds an item back for its resume: a run waiting, resuming or
+/// failed, or one just noted that `settle` keeps: a sub-agent's, or one whose agent does
+/// not run again.
+/// Inputs: the team runtime's connection and the item. Output: the answer.
+pub(crate) fn holds(db: &Connection, item: HeldItem) -> Result<bool, EngineError> {
+    store::holds(db, item)
+}
+
+/// Lets go of an item whose delivery never reached its agent, so it is handed out as usual
+/// and never resumed: a run just noted for it is dropped, any other run keeps its record
+/// without the item, in the caller's transaction when it has one. Inputs: the connection and
+/// the item. Output: done.
+pub(crate) fn release(db: &Connection, item: HeldItem) -> Result<(), EngineError> {
+    store::release(db, item)
+}
+
+/// Reads the session record each agent that starts its harness for each turn keeps for its
+/// running turn ([`remember`]). Inputs: the connection and the team agent, none for all.
+/// Output: the records by team agent, at most `SCANNED_MAX`.
+pub(crate) fn sessions(
+    db: &Connection,
+    agent: Option<i64>,
+) -> Result<BTreeMap<i64, PaneRecord>, EngineError> {
+    store::sessions(db, agent)
 }
 
 /// Keeps the session record of an agent that starts its harness for each turn while that

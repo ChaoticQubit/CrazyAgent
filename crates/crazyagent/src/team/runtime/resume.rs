@@ -1,4 +1,4 @@
-use super::{Busy, Order, Report, TeamRuntime, error, full_stop};
+use super::{Busy, Grant, Order, Report, TeamRuntime, error, full_stop};
 use crate::agents::Agents;
 use crate::config::ModelAccess;
 use crate::engine::EngineError;
@@ -7,7 +7,7 @@ use crate::harnesses::terminal_session::{RecordSource, Resume};
 use crate::harnesses::transcript::{TranscriptReader, pending};
 use crate::project_setup::StoredSetup;
 use crate::protocol::CredentialRef;
-use crate::recovery::{self, Interrupted, RunState};
+use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
 use crate::team::{AgentRole, AgentStatus, launch_harness, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
@@ -26,6 +26,10 @@ const NO_TERMINAL: &str = "its harness cannot resume in a terminal pane here";
 const STOPPED: &str = "it stopped before its session resumed";
 const NOTHING_WAITING: &str = "its task or message is no longer waiting";
 const LIVE_OFF: &str = "the live master is turned off";
+const LET_GO: &str = "Its task or message was let go, so it is never typed twice";
+const RETRY_ONCE: &str =
+    "Its task or message waits for the owner's retry; if the retry fails too, it is let go";
+const RETRY_LATER: &str = "Its task or message waits until a retry resumes it";
 
 /// Where the work an interrupted run was doing stands: still waiting for the resume to
 /// hand it back, already handed to the resumed agent, or no longer the run's to finish.
@@ -62,10 +66,12 @@ pub(super) fn conversation(run: &Interrupted) -> Result<Resume, &'static str> {
 
 /// Writes the note an interrupted agent resumes with: when it was cut short, each command
 /// its session record started without a result, and that it verifies before it goes on,
-/// then finishes the task or answers the message it had. The commands may name secrets the
-/// agent itself used, so the note goes only to that agent and is never logged or stored.
-/// Takes the run. Returns the note, one paragraph of plain text.
-pub(super) fn note(run: &Interrupted) -> String {
+/// then finishes the task or answers the message it had, quoted whole, since its session
+/// may not show it when the stop came as it was handed over. The commands may name secrets
+/// the agent itself used, so the note goes only to that agent and is never logged or
+/// stored. Takes the run and the task's prompt or the message's text, when it still waits.
+/// Returns the note, plain text.
+pub(super) fn note(run: &Interrupted, item: Option<&str>) -> String {
     let at = u64::try_from(run.at)
         .ok()
         .and_then(|ms| UNIX_EPOCH.checked_add(Duration::from_millis(ms)))
@@ -86,12 +92,19 @@ pub(super) fn note(run: &Interrupted) -> String {
             listed.join("; ")
         )
     };
-    let then = match (run.last_turn.task, run.last_turn.message) {
-        (Some(_), _) => {
+    let then = match (run.last_turn.task, run.last_turn.message, item) {
+        (Some(_), _, Some(prompt)) => format!(
+            " Then finish the task you were given and reply with a short summary of what you did. The task, in case your session does not show it:\n{prompt}"
+        ),
+        (Some(_), _, None) => {
             " Then finish the task you were given and reply with a short summary of what you did."
+                .to_owned()
         }
-        (None, Some(_)) => " Then answer the message you were answering.",
-        (None, None) => "",
+        (None, Some(_), Some(text)) => format!(
+            " Then answer the message you were answering. The message, in case your session does not show it:\n{text}"
+        ),
+        (None, Some(_), None) => " Then answer the message you were answering.".to_owned(),
+        (None, None, _) => String::new(),
     };
     format!(
         "You were interrupted at {}. {outcomes}. Verify before continuing.{then}",
@@ -157,7 +170,7 @@ impl TeamRuntime {
             host.as_ref(),
             self.agents.as_deref().map(Agents::typing),
             project,
-            &note(run),
+            &note(run, None),
         );
         match typed {
             Ok(()) => {
@@ -185,8 +198,10 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id, worktree and home, resuming the
-    /// harness session its run recorded, then hands it the run's work. Waits while the
-    /// agent still runs or the team has no room; fails the run when it cannot resume.
+    /// harness session its run recorded, then hands it the run's work. A sub-agent that
+    /// still runs in the pane this engine took over gets its work there instead. Waits
+    /// while any other agent still runs or the team has no room; fails the run when it
+    /// cannot resume.
     /// Takes the setup, live access, paused accounts and the run. Returns any SQLite failure.
     fn restart(
         &mut self,
@@ -197,19 +212,23 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         if self.workers.contains_key(&run.agent) {
-            return Ok(());
+            return self.resume_in_pane(paused, run);
         }
         let resume = match conversation(run) {
             Ok(resume) => resume,
+            Err(NOT_RESUMABLE) => return self.give_up(run, RunState::Interrupted, NOT_RESUMABLE),
             Err(reason) => return self.fail(run, RunState::Interrupted, reason),
         };
         let terminal = launch_harness(&run.harness)
             .is_some_and(|launch| interactive::support(launch) == Support::Terminal);
-        if self.terminal.is_none() || !terminal {
+        if !terminal {
+            return self.give_up(run, RunState::Interrupted, NO_TERMINAL);
+        }
+        if self.terminal.is_none() {
             return self.fail(run, RunState::Interrupted, NO_TERMINAL);
         }
         let Work::Waiting(busy) = self.work(run)? else {
-            return self.fail(run, RunState::Interrupted, NOTHING_WAITING);
+            return self.give_up(run, RunState::Interrupted, NOTHING_WAITING);
         };
         let tools = match run.kind {
             AgentRole::Sub => {
@@ -252,7 +271,7 @@ impl TeamRuntime {
         let account = match self.account_for(access, project, &run.harness, paused) {
             Ok(account) => account,
             Err(reason) => {
-                return self.fail(
+                return self.fail_for_now(
                     run,
                     RunState::Interrupted,
                     &format!("no account can run it: {reason}"),
@@ -305,7 +324,7 @@ impl TeamRuntime {
             Work::Handed => return Ok(()),
             Work::Gone => {
                 self.stop(run.agent);
-                return self.fail(run, RunState::Resuming, NOTHING_WAITING);
+                return self.give_up(run, RunState::Resuming, NOTHING_WAITING);
             }
         };
         let grant = if managed {
@@ -314,7 +333,7 @@ impl TeamRuntime {
                 Ok(None) => return Ok(()),
                 Err(reason) => {
                     self.stop(run.agent);
-                    return self.fail(
+                    return self.fail_for_now(
                         run,
                         RunState::Resuming,
                         &format!("its account could not be handed to it: {reason}"),
@@ -324,13 +343,87 @@ impl TeamRuntime {
         } else {
             None
         };
+        self.send_work(run, busy, grant).map(drop)
+    }
+
+    /// Hands an interrupted sub-agent that runs again in the pane this engine took over the
+    /// task its run holds, with the note, typed as one turn into the session it never left,
+    /// once its worker is free and its account not paused; the session is already running,
+    /// so the run is resumed once the turn goes out. A task no longer waiting gives the run
+    /// up. Any other agent that runs again keeps the run waiting until it stops.
+    /// Takes the paused accounts and the run. Returns any SQLite or ledger failure.
+    fn resume_in_pane(
+        &mut self,
+        paused: &BTreeSet<CredentialRef>,
+        run: &Interrupted,
+    ) -> Result<(), EngineError> {
+        let worker = &self.workers[&run.agent];
+        if run.kind != AgentRole::Sub
+            || worker.managed
+            || worker.stopping
+            || worker.busy.is_some()
+            || paused.contains(&worker.connection)
+        {
+            return Ok(());
+        }
+        let Work::Waiting(busy @ Busy::Task(_)) = self.work(run)? else {
+            return self.give_up(run, RunState::Interrupted, NOTHING_WAITING);
+        };
+        self.workers
+            .get_mut(&run.agent)
+            .expect("a running agent has a worker")
+            .busy = Some(busy);
+        if !self.send_work(run, busy, None)? {
+            self.workers
+                .get_mut(&run.agent)
+                .expect("a running agent has a worker")
+                .busy = None;
+            return Ok(());
+        }
+        recovery::mark(
+            &self.connection,
+            run.id,
+            RunState::Interrupted,
+            RunState::Resumed,
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Types a run's note with the task or message its agent's worker holds into that
+    /// agent as one turn, then marks the item handed to it and the agent working. Takes the
+    /// run, the item and the turn's account grant, if any. Returns whether the turn went
+    /// out, or any SQLite failure.
+    fn send_work(
+        &mut self,
+        run: &Interrupted,
+        busy: Busy,
+        grant: Option<Box<Grant>>,
+    ) -> Result<bool, EngineError> {
+        let item = match busy {
+            Busy::Task(task) => self.connection.query_row(
+                "SELECT prompt FROM team_tasks WHERE id=?1",
+                [task],
+                |row| row.get::<_, String>(0),
+            ),
+            Busy::Message(message) => self.connection.query_row(
+                "SELECT text FROM team_messages WHERE id=?1",
+                [message],
+                |row| row.get::<_, String>(0),
+            ),
+        }
+        .map_err(error)?;
         let worker = self
             .workers
             .get_mut(&run.agent)
-            .expect("the restarted agent has a worker");
+            .expect("the agent handed its work has a worker");
         assert_eq!(worker.busy, Some(busy));
-        if worker.orders.send(Order::Turn(note(run), grant)).is_err() {
-            return Ok(());
+        if worker
+            .orders
+            .send(Order::Turn(note(run, Some(&item)), grant))
+            .is_err()
+        {
+            return Ok(false);
         }
         match busy {
             Busy::Task(task) => {
@@ -341,7 +434,7 @@ impl TeamRuntime {
                         params![task, run.agent, now_ms()],
                     )
                     .map_err(error)?;
-                self.mark_agent(run.agent, AgentStatus::Working, Some(task))
+                self.mark_agent(run.agent, AgentStatus::Working, Some(task))?;
             }
             Busy::Message(message) => {
                 self.connection
@@ -350,9 +443,10 @@ impl TeamRuntime {
                         [message],
                     )
                     .map_err(error)?;
-                self.mark_agent(run.agent, AgentStatus::Working, None)
+                self.mark_agent(run.agent, AgentStatus::Working, None)?;
             }
         }
+        Ok(true)
     }
 
     /// Follows one worker report for recovery before the runtime applies it: an agent that
@@ -468,24 +562,79 @@ impl TeamRuntime {
         let _ = worker.orders.send(Order::Stop);
     }
 
+    /// Gives up a run that can never resume, or whose work is gone: records it failed with
+    /// its reason, then lets go of its task or message and settles that item's delivery as
+    /// an engine start settles one no run holds, so the item never waits behind the run and
+    /// is never typed twice. Takes the run, the state it is in and the plain reason.
+    /// Returns any SQLite or ledger failure.
+    fn give_up(
+        &mut self,
+        run: &Interrupted,
+        from: RunState,
+        reason: &str,
+    ) -> Result<(), EngineError> {
+        self.failed(run, from, reason, None)
+    }
+
     /// Records a run's resume failed with its reason and tells the project once, so the
-    /// owner can retry it. Takes the run, the state it is in and the plain reason.
-    /// Returns any SQLite failure.
+    /// owner can retry it; a run the owner already retried gives up instead, as
+    /// [`Self::give_up`] does, so its task or message waits behind no more retries.
+    /// Takes the run, the state it is in and the plain reason. Returns any SQLite failure.
     fn fail(&mut self, run: &Interrupted, from: RunState, reason: &str) -> Result<(), EngineError> {
-        if recovery::mark(
+        let retried = recovery::retried(&self.connection, run.id)?;
+        self.failed(run, from, reason, (!retried).then_some(RETRY_ONCE))
+    }
+
+    /// Records a run's resume failed for a reason that passes with time, such as no
+    /// account free to run it during a pool-wide limit, and tells the project once; the run
+    /// keeps its task or message through every retry, so a later retry can still resume it.
+    /// Takes the run, the state it is in and the plain reason. Returns any SQLite failure.
+    fn fail_for_now(
+        &mut self,
+        run: &Interrupted,
+        from: RunState,
+        reason: &str,
+    ) -> Result<(), EngineError> {
+        self.failed(run, from, reason, Some(RETRY_LATER))
+    }
+
+    /// Records a run's resume failed with its reason and tells the project once, with what
+    /// becomes of its task or message, then, when it gives up and it was in the expected
+    /// state, lets go of that item and settles its delivery. Takes the run, its state, the
+    /// plain reason and, for a run that keeps its item, the sentence that says how long.
+    /// Returns any SQLite or ledger failure.
+    fn failed(
+        &mut self,
+        run: &Interrupted,
+        from: RunState,
+        reason: &str,
+        kept: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if !recovery::mark(
             &self.connection,
             run.id,
             from,
             RunState::Failed,
             Some(reason),
         )? {
-            self.note(
-                &run.project,
-                &full_stop(format!(
-                    "An agent cut short when CrazyAgent stopped could not resume: {reason}"
-                )),
-            )?;
+            return Ok(());
         }
-        Ok(())
+        let then = kept.unwrap_or(LET_GO);
+        self.note(
+            &run.project,
+            &full_stop(format!(
+                "An agent cut short when CrazyAgent stopped could not resume: {reason}. {then}"
+            )),
+        )?;
+        if kept.is_some() {
+            return Ok(());
+        }
+        let (held, busy) = match (run.last_turn.task, run.last_turn.message) {
+            (Some(task), _) => (HeldItem::Task(task), Busy::Task(task)),
+            (None, Some(message)) => (HeldItem::Message(message), Busy::Message(message)),
+            (None, None) => return Ok(()),
+        };
+        recovery::release(&self.connection, held)?;
+        super::delivery::settle_released(&self.connection, busy)
     }
 }

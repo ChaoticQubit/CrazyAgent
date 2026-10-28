@@ -230,6 +230,101 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
     );
 }
 
+/// The step an engine input runs before it types runs only once the master is free and held
+/// for that input, never while a turn is open or the owner types, so a delivery the step
+/// records is never left open for an input that waits. A step that answers false leaves the
+/// input waiting as `Busy`, one that fails fails it; either way nothing is typed and the
+/// master is free for the next input.
+#[test]
+fn engine_input_runs_its_step_only_right_before_it_types() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&AgentId::team(MASTER).unwrap(), &command)
+        .unwrap();
+    let input = |text: &str, now: i64, answer: Result<bool, EngineError>| {
+        let ran = std::cell::Cell::new(false);
+        let result = master_input_at_when(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            text,
+            now,
+            || {
+                ran.set(true);
+                answer
+            },
+        );
+        (result, ran.get())
+    };
+    let input_ms = || -> Option<i64> {
+        fixture
+            .connection
+            .query_row(
+                "SELECT input_ms FROM team_live_masters WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::NoMaster), false)
+    );
+    fixture.live(Some(MASTER));
+    fixture.set("turn_open=1");
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::Busy), false)
+    );
+    fixture.set("turn_open=0");
+    owner_typed(&fixture.connection, MASTER, b"x", NOW - 5_000).unwrap();
+    assert_eq!(
+        input("first", NOW, Ok(true)),
+        (Err(InputRefused::OwnerTyping), false)
+    );
+
+    let later = NOW + DRAFT_ABANDONED_MS;
+    assert_eq!(
+        input("first", later, Ok(false)),
+        (Err(InputRefused::Busy), true)
+    );
+    assert_eq!(input_ms(), None, "a step that waits frees the master");
+    assert_eq!(
+        input(
+            "first",
+            later,
+            Err(EngineError("ledger_unavailable".into()))
+        ),
+        (Err(InputRefused::Failed("ledger_unavailable".into())), true)
+    );
+    assert_eq!(input_ms(), None, "a failed step frees the master");
+    assert_eq!(input("first", later, Ok(true)), (Ok(()), true));
+    assert_eq!(input_ms(), Some(later));
+    let seen = typed_until(&typed, b"first\x1b[201~\r");
+    assert_eq!(
+        seen.windows(5).filter(|window| *window == b"first").count(),
+        1,
+        "only the input whose step agreed was typed: {seen:?}"
+    );
+}
+
 #[test]
 fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothing() {
     assert_eq!(keys(b"abc"), (false, true));

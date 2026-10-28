@@ -395,6 +395,22 @@ pub fn master_input(
     master_input_at(connection, host, typing, project, text, now_ms())
 }
 
+/// [`master_input`] with a step that runs once the master was found free and held for this
+/// input, right before anything is typed, so a step that records the input runs only for an
+/// input that is typed now. Takes the same inputs and the step, which answers false to leave
+/// the input waiting as `Busy`, or fails it as `Failed`; either way the hold is cleared and
+/// nothing is typed. Returns Ok once typed, or why it was not typed.
+pub(crate) fn master_input_when(
+    connection: &Connection,
+    host: &dyn Host,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    text: &str,
+    before: impl FnOnce() -> Result<bool, EngineError>,
+) -> Result<(), InputRefused> {
+    master_input_at_when(connection, host, typing, project, text, now_ms(), before)
+}
+
 /// [`master_input`] at a given time. Takes the same inputs and the time in milliseconds.
 pub(crate) fn master_input_at(
     connection: &Connection,
@@ -403,6 +419,20 @@ pub(crate) fn master_input_at(
     project: &ProjectId,
     text: &str,
     now: i64,
+) -> Result<(), InputRefused> {
+    master_input_at_when(connection, host, typing, project, text, now, || Ok(true))
+}
+
+/// [`master_input_when`] at a given time. Takes the same inputs, the time in milliseconds
+/// and the step. Returns Ok once typed, or why it was not typed.
+fn master_input_at_when(
+    connection: &Connection,
+    host: &dyn Host,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    text: &str,
+    now: i64,
+    before: impl FnOnce() -> Result<bool, EngineError>,
 ) -> Result<(), InputRefused> {
     let text = text.trim();
     let plain = !text
@@ -455,6 +485,23 @@ pub(crate) fn master_input_at(
     )
     .map_err(failed)?;
     tx.commit().map_err(failed)?;
+    let release = || {
+        let _ = connection.execute(
+            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
+            params![project.as_str(), now],
+        );
+    };
+    match before() {
+        Ok(true) => {}
+        Ok(false) => {
+            release();
+            return Err(InputRefused::Busy);
+        }
+        Err(problem) => {
+            release();
+            return Err(InputRefused::Failed(problem.0));
+        }
+    }
     let typed = paste(text)
         .iter()
         .try_for_each(|part| host.input(&pane, part.as_bytes()))
@@ -463,10 +510,7 @@ pub(crate) fn master_input_at(
             host.input(&pane, b"\r")
         });
     if let Err(problem) = typed {
-        let _ = connection.execute(
-            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
-            params![project.as_str(), now],
-        );
+        release();
         return Err(InputRefused::Failed(problem.0));
     }
     Ok(())
