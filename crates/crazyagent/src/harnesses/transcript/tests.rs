@@ -3,6 +3,9 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 const SHORT_LINES_READ_TIME: Duration = Duration::from_secs(10);
+const IDLE_POLLS: usize = 1000;
+const IDLE_POLLS_TIME: Duration = Duration::from_secs(2);
+const PARKED_LINE_WAIT: Duration = Duration::from_secs(60);
 
 struct Case {
     root: tempfile::TempDir,
@@ -600,4 +603,36 @@ fn a_read_of_a_million_short_lines_drains_them_in_one_pass() {
         .expect("a read of short lines stalls the engine thread");
     assert_eq!(events.unwrap(), vec![TranscriptEvent::TurnStarted]);
     assert!(took < SHORT_LINES_READ_TIME, "{took:?}");
+}
+
+/// A long line the harness has not finished is scanned once: a poll that finds no new
+/// bytes does not rescan it, so a thousand idle polls of a 15 MiB partial line cost the
+/// engine thread almost nothing, and the line still ends where the next newline arrives.
+#[test]
+fn a_parked_partial_line_is_not_rescanned_by_polls_without_new_bytes() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    let parked = LINE_BYTES_MAX - READ_BYTES_MAX;
+    append(&file, &"x".repeat(parked));
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while reader.bytes() < parked as u64 {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..IDLE_POLLS {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let _ = sent.send((reader, started.elapsed()));
+    });
+    let (mut reader, took) = read
+        .recv_timeout(PARKED_LINE_WAIT)
+        .expect("idle polls rescan the parked line");
+    assert!(
+        took < IDLE_POLLS_TIME,
+        "{IDLE_POLLS} idle polls took {took:?}"
+    );
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &format!("\n{prompt}\n"));
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
 }

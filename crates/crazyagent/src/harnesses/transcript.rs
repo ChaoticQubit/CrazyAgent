@@ -42,6 +42,7 @@ pub struct TranscriptReader {
     found: Option<(String, PathBuf)>,
     start: u64,
     pending: Vec<u8>,
+    scanned: usize,
     in_turn: bool,
     consumed: u64,
 }
@@ -89,6 +90,7 @@ impl TranscriptReader {
             found: None,
             start: 0,
             pending: Vec::new(),
+            scanned: 0,
             in_turn: false,
             consumed: 0,
         }
@@ -154,9 +156,10 @@ impl TranscriptReader {
     }
 
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
-    /// walking its lines by offset and draining the used ones once, so many short lines cost
-    /// one pass. Output: the facts in order, none while the record does not exist yet, or a
-    /// plain code when a line passes `LINE_BYTES_MAX` or the record cannot be read.
+    /// scanning on from where the last read stopped and draining the used lines once, so many
+    /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
+    /// in order, none while the record does not exist yet, or a plain code when a line passes
+    /// `LINE_BYTES_MAX` or the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -183,9 +186,18 @@ impl TranscriptReader {
         self.consumed += count as u64;
         let mut events = Vec::new();
         let mut used = 0;
-        while let Some(length) = self.pending[used..].iter().position(|byte| *byte == b'\n') {
-            let line = &self.pending[used..=used + length];
-            used += length + 1;
+        let mut scanned = self.scanned;
+        while events.len() < EVENTS_PER_READ_MAX {
+            let Some(length) = self.pending[scanned..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+            else {
+                scanned = self.pending.len();
+                break;
+            };
+            let line = &self.pending[used..=scanned + length];
+            used = scanned + length + 1;
+            scanned = used;
             let Ok(value) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
@@ -199,15 +211,14 @@ impl TranscriptReader {
                     events.push(fact);
                 }
             }
-            if events.len() >= EVENTS_PER_READ_MAX {
-                break;
-            }
         }
         self.pending.drain(..used);
+        self.scanned = scanned - used;
         if self.pending.len() > LINE_BYTES_MAX {
             return Err(failure("launch_transcript_line_too_long"));
         }
-        assert!(events.len() >= EVENTS_PER_READ_MAX || !self.pending.contains(&b'\n'));
+        assert!(self.scanned <= self.pending.len());
+        assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
     }
 
