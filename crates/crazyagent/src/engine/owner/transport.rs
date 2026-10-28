@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(all(test, unix))]
+mod barrier_tests;
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
 #[cfg(all(test, unix))]
@@ -66,9 +68,15 @@ mod native_auth_dispatch_lifetime_tests;
 #[cfg(all(test, unix))]
 mod native_auth_restart_tests;
 #[cfg(all(test, unix))]
+mod owner_deadline_tests;
+#[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
+#[cfg(all(test, unix))]
+mod setup_tests;
+#[cfg(all(test, unix))]
+mod usage_tests;
 
 const SOCKET: &str = "owner.sock";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
@@ -2113,6 +2121,9 @@ async fn serve_admitted(
                     .await
                     .map(|()| None);
             }
+            Protocol::Plugins if plugins::imports(body) => {
+                return Ok(Some(Deferred::SkillImport(a)));
+            }
             Protocol::Plugins => {
                 return plugins::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2121,20 +2132,8 @@ async fn serve_admitted(
             Protocol::Agents => return Ok(Some(Deferred::Agents(a))),
             Protocol::Changes => return Ok(Some(Deferred::Changes(a))),
             Protocol::IdeExtensions => return Ok(Some(Deferred::IdeExtensions(a))),
-            Protocol::Cleanup => {
-                let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("cleanup_outcome_unknown"))?
-                    .map(|()| None);
-            }
-            Protocol::Usage => {
-                let served = usage::serve(stream, engine, authority, auth, &a, body);
-                return tokio::time::timeout(usage::USAGE_TIMEOUT, served)
-                    .await
-                    .map_err(|_| failure("usage_outcome_unknown"))?
-                    .map(|()| None);
-            }
+            Protocol::Cleanup => return Ok(Some(Deferred::Cleanup(a))),
+            Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::NativeAuth => {
@@ -2310,6 +2309,18 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Cleanup(a) => {
+            let served = cleanup::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+        }
+        Deferred::SkillImport(a) => {
+            let served = plugins::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+        }
+        Deferred::Usage(a) => {
+            let served = usage::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2357,9 +2368,12 @@ struct Tasks {
 /// agent's process group or its host to end it, Changes requests, which run git on the
 /// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
 /// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
-/// which wait for an IDE server to start, and Questions requests, which wait for the
-/// database write lock and rewrite a project's questions page. Each carries the admission,
-/// and the projects home its validated request; the others read the request frame.
+/// which wait for an IDE server to start, Questions requests, which wait for the database
+/// write lock and rewrite a project's questions page, Cleanup requests, which size and
+/// remove finished agents' worktrees and folders, skill import scans and imports, which
+/// copy skill folders, and Usage requests, which read and write the usage store. Each
+/// carries the admission, and the projects home its validated request; the others read
+/// the request frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2371,6 +2385,9 @@ enum Deferred {
     Ide(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Cleanup(Admission),
+    SkillImport(Admission),
+    Usage(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2434,7 +2451,21 @@ async fn write_owner_reply(
     mutation: bool,
 ) -> Result<(), EngineError> {
     let frame = owner_reply_frame(result, id, mutation)?;
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
+}
+
+/// The longest a reply written under the owner barrier waits for its client to read it.
+const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
+
+/// Writes one reply frame for a writer holding the owner barrier, giving up after
+/// `REPLY_WRITE_TIME` so a client that stops reading never holds the barrier for others;
+/// the connection is then dropped. Inputs: the connection and the frame.
+/// Output: done once written, or `owner_reply_stalled` and the write error.
+async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), EngineError> {
+    tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(frame))
+        .await
+        .map_err(|_| failure("owner_reply_stalled"))?
+        .map_err(io_error)
 }
 
 /// Encodes one owner reply. An error becomes Rejected with its code when the engine
@@ -2638,29 +2669,7 @@ fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
 
 #[cfg(unix)]
 fn dispatch_config(path: &Path) -> Result<(), EngineError> {
-    let mut pending = vec![path.join(".git")];
-    let mut visited = 0;
-    while let Some(entry) = pending.pop() {
-        visited += 1;
-        if visited > 8192 {
-            return Err(failure("dispatch_git_metadata_capacity"));
-        }
-        let metadata = std::fs::symlink_metadata(&entry).map_err(io_error)?;
-        if metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.mode() & 0o022 != 0
-            || (!metadata.is_dir() && (!metadata.is_file() || metadata.nlink() != 1))
-        {
-            return Err(failure("dispatch_git_metadata_untrusted"));
-        }
-        if metadata.is_dir() {
-            for child in std::fs::read_dir(&entry).map_err(io_error)? {
-                pending.push(child.map_err(io_error)?.path());
-                if pending.len() > 8192 {
-                    return Err(failure("dispatch_git_metadata_capacity"));
-                }
-            }
-        }
-    }
+    crate::worktrees::validate_metadata(path)?;
     let bytes = dispatch_file(&path.join(".git/config"), 65536)?;
     let text = std::str::from_utf8(&bytes).map_err(io_error)?;
     let mut section = String::new();
@@ -2747,6 +2756,7 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
         return Err(failure("dispatch_git_metadata_escape"));
     }
     dispatch_directory(&metadata, &seal.metadata)?;
+    crate::worktrees::validate_admin(repository, &metadata)?;
     if dispatch_file(&metadata.join("commondir"), 32)? != b"../..\n"
         || dispatch_file(&metadata.join("gitdir"), 4096)?
             != format!("{}/.git\n", seal.path).as_bytes()
@@ -3198,6 +3208,34 @@ mod tests {
     use crate::model_gateway::{Health, Observation, ObservationKind, Quota};
     use std::future::Future;
     use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn the_terminal_host_follows_the_tmux_program_setup_installs_or_removes() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
+        let first = engine.terminal(root.path()).unwrap();
+        assert!(Arc::ptr_eq(&first, &engine.terminal(root.path()).unwrap()));
+        let bin = root.path().join("setup/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("tmux"), "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(bin.join("tmux"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let installed = engine.terminal(root.path()).unwrap();
+        assert!(!Arc::ptr_eq(&first, &installed));
+        assert!(Arc::ptr_eq(
+            &installed,
+            &engine.terminal(root.path()).unwrap()
+        ));
+        std::fs::remove_file(bin.join("tmux")).unwrap();
+        let removed = engine.terminal(root.path()).unwrap();
+        assert!(!Arc::ptr_eq(&installed, &removed));
+        assert!(Arc::ptr_eq(
+            &removed,
+            &engine.terminal(root.path()).unwrap()
+        ));
+        engine.close().await.unwrap();
+    }
 
     const GATEWAY_ACTOR_CATALOG: &str = r#"
 allowed_destinations = ["sandbox-profile"]

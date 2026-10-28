@@ -279,7 +279,15 @@ impl TeamRuntime {
             }
         };
         self.resuming = Some((run.agent, resume));
-        let revived = self.revive(stored, run.agent, run.kind, &run.harness, tools, &account);
+        let revived = self.revive(
+            stored,
+            run.agent,
+            run.kind,
+            &run.harness,
+            tools,
+            &account,
+            None,
+        );
         self.resuming = None;
         if let Err(reason) = revived? {
             return self.fail(
@@ -391,9 +399,10 @@ impl TeamRuntime {
     }
 
     /// Types a run's note with the task or message its agent's worker holds into that
-    /// agent as one turn, then marks the item handed to it and the agent working. Takes the
-    /// run, the item and the turn's account grant, if any. Returns whether the turn went
-    /// out, or any SQLite failure.
+    /// agent as one turn, bounded by the project's task and session limits as every turn is,
+    /// then marks the item handed to it and the agent working. Takes the run, the item and
+    /// the turn's account grant, if any. Returns whether the turn went out, or any SQLite
+    /// failure or stored time limit the engine refuses.
     fn send_work(
         &mut self,
         run: &Interrupted,
@@ -413,6 +422,10 @@ impl TeamRuntime {
             ),
         }
         .map_err(error)?;
+        let bound = super::turn_bound(
+            crate::team::time_limits(&self.connection, &run.project)?,
+            self.workers[&run.agent].ran(),
+        );
         let worker = self
             .workers
             .get_mut(&run.agent)
@@ -420,11 +433,16 @@ impl TeamRuntime {
         assert_eq!(worker.busy, Some(busy));
         if worker
             .orders
-            .send(Order::Turn(note(run, Some(&item)), grant))
+            .send(Order::Turn(
+                note(run, Some(&item)),
+                grant,
+                bound.map(|(limit, _)| limit),
+            ))
             .is_err()
         {
             return Ok(false);
         }
+        worker.bound = bound.map(|(_, by)| by);
         match busy {
             Busy::Task(task) => {
                 self.connection

@@ -1,7 +1,7 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    AgentInstructions, OwnerClient, PROCESS_CODES, ProcessText, SavedText,
+    AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessText, SavedText,
 };
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
@@ -55,7 +55,8 @@ impl NativeBridge {
     /// Saves the owner's instructions whole, run without the bridge lock, when no other save
     /// landed since they were read. Inputs: none for the app-wide text, or the project id;
     /// the text; the version read; and only for "Keep mine" after a stale reply, the older
-    /// version the owner opened. Output: the saved version, or the stale reply with the
+    /// version the owner opened. Output: the saved version with, for app or project text,
+    /// what agents now get beside what a Claude master takes, or the stale reply with the
     /// newer text.
     pub fn save_process_text(
         &self,
@@ -108,6 +109,41 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .agent_instructions(project, agent)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's agent instruction settings, run without the bridge lock.
+    /// Input: the project id. Output: the settings, the defaults when never changed.
+    pub fn instruction_settings(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .instruction_settings(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Stores one project's agent instruction settings whole, run without the bridge lock.
+    /// Inputs: the project id and the settings. Output: the settings as stored.
+    pub fn save_instruction_settings(
+        &self,
+        project_id: String,
+        settings: InstructionSettings,
+    ) -> Result<Unlocked<InstructionSettings>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .save_instruction_settings(project, settings)
                 .await
                 .map_err(process_error)
         }))

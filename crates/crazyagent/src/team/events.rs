@@ -273,19 +273,22 @@ pub struct AgentLine {
     pub waiting: Option<String>,
 }
 
-/// What the master's status tool shows: the project's live sub-agents, the newest events
-/// and whether auto-wake is paused at its cap.
+/// What the master's status tool shows: the project's live sub-agents, the finished ones it
+/// can wake, the newest events and whether auto-wake is paused at its cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsStatus {
     pub project_id: ProjectId,
     pub agents: Vec<AgentLine>,
+    #[serde(default)]
+    pub finished: Vec<String>,
     pub events: Vec<TeamEvent>,
     pub paused: bool,
 }
 
 impl EventsStatus {
     /// Writes the status as plain lines for the master's tool reply. Takes the status.
-    /// Returns one line per agent, then the newest events, oldest first.
+    /// Returns one line per running agent, the finished agents it can wake, newest first,
+    /// then the newest events, oldest first.
     pub fn text(&self) -> String {
         let mut text = String::new();
         if self.agents.is_empty() {
@@ -300,9 +303,19 @@ impl EventsStatus {
                 text.push_str(&format!(", task {task}: {prompt}"));
             }
             if let Some(question) = &agent.waiting {
-                text.push_str(&format!(", waiting on: {}", plain_brackets(question)));
+                text.push_str(&format!(", waiting on: {}", agent_line(question)));
             }
             text.push('\n');
+        }
+        if !self.finished.is_empty() {
+            text.push_str(&format!(
+                "Finished sub-agents you can wake with {}(agent, text), newest first:\n",
+                super::tool::WAKE_TOOL
+            ));
+            for line in &self.finished {
+                text.push_str(line);
+                text.push('\n');
+            }
         }
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
@@ -585,7 +598,9 @@ fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
     Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)
 }
 
-fn one_line(text: &str, max: usize) -> String {
+/// Joins text onto one line of plain words without control characters, bounded to `max`
+/// bytes. Takes the text and the bound. Returns the line.
+pub(super) fn one_line(text: &str, max: usize) -> String {
     let joined = text
         .split_whitespace()
         .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
@@ -1270,6 +1285,79 @@ fn event_row(connection: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Resu
     })
 }
 
+/// The most finished sub-agents a master is told it can wake.
+pub(crate) const FINISHED_LISTED_MAX: usize = 20;
+const FINISHED_TASK_BYTES_MAX: usize = 120;
+
+/// Lists a project's finished sub-agents a live master can wake, newest first and at most
+/// `FINISHED_LISTED_MAX`: each stopped or failed sub-agent whose worktree is still recorded,
+/// with its name and Sub-agent number, harness, last task on one line and when it finished.
+/// Takes the database, the project and now. Returns the lines, or none when no such agent
+/// exists.
+pub(crate) fn finished_agents(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<Vec<String>, EngineError> {
+    let rows: Vec<(i64, String, Option<i64>, Option<String>)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id,a.harness,a.stopped_ms,
+                        (SELECT t.prompt FROM team_tasks t WHERE t.agent=a.id ORDER BY COALESCE(t.started_ms,t.created_ms) DESC, t.id DESC LIMIT 1)
+                 FROM team_agents a
+                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
+                   AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
+            )
+            .map_err(error)?;
+        statement
+            .query_map(
+                params![project.as_str(), FINISHED_LISTED_MAX as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    assert!(rows.len() <= FINISHED_LISTED_MAX);
+    rows.into_iter()
+        .map(
+            |(id, harness, stopped, task)| -> Result<String, EngineError> {
+                let task = task
+                    .map(|task| one_line(&task, FINISHED_TASK_BYTES_MAX))
+                    .filter(|task| !task.is_empty())
+                    .unwrap_or_else(|| "no task yet".to_owned());
+                let when =
+                    stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
+                let label = label(connection, id)?;
+                let number = AgentRole::Sub.agent_label(id);
+                let named = if label == number {
+                    label
+                } else {
+                    format!("{label}, {number}")
+                };
+                Ok(format!(
+                    "- {named} ({}): {task}; {when}",
+                    super::names::harness_name(&harness)
+                ))
+            },
+        )
+        .collect()
+}
+
+/// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
+/// ago", "finished 3 h ago" or "finished 2 days ago". Takes the stop time and now in epoch
+/// milliseconds. Returns the phrase.
+fn finished_ago(at: i64, now: i64) -> String {
+    let minutes = now.saturating_sub(at).max(0) / 60_000;
+    match minutes {
+        0 => "finished just now".to_owned(),
+        1..60 => format!("finished {minutes} min ago"),
+        60..1440 => format!("finished {} h ago", minutes / 60),
+        _ => format!("finished {} days ago", minutes / 1440),
+    }
+}
+
 const EVENT_COLUMNS: &str = "id,agent,task,kind,text,state,created_ms,delivered_ms";
 
 /// Reads a project's newest events, oldest first. Takes the connection, the project and the
@@ -1294,7 +1382,8 @@ pub fn events(
 }
 
 /// Reads what the master's status tool shows for a project: its live sub-agents with their
-/// task and any question they wait on, the newest events and the auto-wake pause.
+/// task and any question they wait on, the finished sub-agents it can wake as they are now,
+/// the newest events and the auto-wake pause.
 /// Takes the connection and the project. Returns the bounded status.
 pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStatus, EngineError> {
     let waiting = waiting(connection, project)?;
@@ -1346,12 +1435,13 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     Ok(EventsStatus {
         project_id: project.clone(),
         agents,
+        finished: finished_agents(connection, project, super::now_ms())?,
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
 }
 
-/// Writes one event as the master reads it: the agent's text keeps no square brackets, so
+/// Writes one event as the master reads it: the agent's text goes through `agent_line`, so
 /// a tag such as `[owner]` inside it can never pass for a speaker. Takes the event.
 /// Returns the line.
 fn line(event: &TeamEvent) -> String {
@@ -1362,7 +1452,7 @@ fn line(event: &TeamEvent) -> String {
         "[team] {} {}: {}{task}",
         event.label,
         event.kind.verb(),
-        plain_brackets(&event.text)
+        agent_line(&event.text)
     )
 }
 
@@ -1374,6 +1464,49 @@ const CLOSE_BRACKETS: [char; 16] = [
     ']', '\u{FF3D}', '\u{27E7}', '\u{3011}', '\u{3015}', '\u{3017}', '\u{3019}', '\u{301B}',
     '\u{2046}', '\u{2773}', '\u{298C}', '\u{298E}', '\u{2990}', '\u{27ED}', '\u{FE5E}', '\u{FE48}',
 ];
+
+const QUOTE: &str = "> ";
+
+/// Writes text a sub-agent wrote as the master reads it on lines of its own: brackets made
+/// plain, and every line opened with `> `, so no line of it can start as the owner, the
+/// engine or any other speaker however it is written. A line that already opens with `> `
+/// is kept, so quoting twice changes nothing. Task results and problems and the master's
+/// history reach the master through it. Takes the text. Returns it.
+pub(super) fn agent_text(text: &str) -> String {
+    let plain = plain_brackets(text);
+    let mut quoted = String::with_capacity(plain.len() + QUOTE.len());
+    for line in plain.split_inclusive(line_break) {
+        if !line.starts_with(QUOTE) {
+            quoted.push_str(QUOTE);
+        }
+        quoted.push_str(line);
+    }
+    assert!(
+        quoted
+            .split_inclusive(line_break)
+            .all(|line| line.starts_with(QUOTE))
+    );
+    quoted
+}
+
+/// Writes text a sub-agent wrote as part of one engine line, such as an event or the
+/// question an agent waits on: brackets made plain and every line break made a space, so it
+/// never starts a line of its own. Takes the text. Returns one line.
+fn agent_line(text: &str) -> String {
+    let line: String = plain_brackets(text)
+        .chars()
+        .map(|c| if line_break(c) { ' ' } else { c })
+        .collect();
+    assert!(!line.contains(line_break));
+    line
+}
+
+fn line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
 
 /// Turns square brackets and the brackets that look like them, fullwidth, white, lenticular
 /// and tortoise shell ones among them, into parentheses, so agent text can never show a
@@ -1718,8 +1851,8 @@ fn cleared_levels(
 }
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
-/// Takes the connection. Returns the view with the unseen count for the badge and the
-/// unseen count of each project for the sidebar.
+/// Takes the connection. Returns the view fitted to one owner reply by `fit_app`, with the
+/// unseen count for the badge and the unseen count of each project for the sidebar.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -1732,7 +1865,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
             |row| row.get(0),
         )
         .map_err(error)?;
-    Ok(AppEvents {
+    fit_app(AppEvents {
         rule,
         rule_version: rule_version(connection, &RuleTarget::App)?,
         effective: rule.unwrap_or_default(),
@@ -1760,6 +1893,39 @@ pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64,
         return Ok(0);
     }
     Ok(versioned::current(connection, &rule_item(target))?.version)
+}
+
+/// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
+/// the texts are cut to one shared cap, halved until the view fits, then the oldest go. The
+/// unseen counts stay whole. Takes the view. Returns it, or `team_events_bounds` when even
+/// an empty list does not fit.
+fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
+    let fits = |view: &AppEvents| -> Result<bool, EngineError> {
+        Ok(super::encoded_len(view)? <= super::STATUS_REPLY_BYTES_MAX)
+    };
+    while !fits(&view)? {
+        if !super::drop_older(&mut view.notifications, true, |item| item.seen_ms.is_some()) {
+            break;
+        }
+    }
+    if fits(&view)? {
+        return Ok(view);
+    }
+    let whole = view.notifications.clone();
+    for cap in super::STATUS_TEXT_CAPS {
+        for (item, kept) in view.notifications.iter_mut().zip(&whole) {
+            item.text = super::cut_text(&kept.text, cap);
+        }
+        if fits(&view)? {
+            return Ok(view);
+        }
+    }
+    while super::drop_older(&mut view.notifications, true, |_| true) {
+        if fits(&view)? {
+            return Ok(view);
+        }
+    }
+    Err(error("team_events_bounds"))
 }
 
 /// Sets or clears the wake rule at one level when the owner's screen showed its current

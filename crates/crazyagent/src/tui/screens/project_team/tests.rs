@@ -72,6 +72,9 @@ fn agent(
         stopped_ms: None,
         persona: None,
         handle: None,
+        finished: false,
+        wakeable: false,
+        wake_note: None,
     }
 }
 
@@ -126,6 +129,12 @@ fn team() -> TeamStatus {
     TeamStatus {
         project_id: project(),
         keep_warm: false,
+        turn_limit_secs: None,
+        session_limit_secs: None,
+        idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
+        show_finished: false,
+        live_switch: None,
         paused: false,
         live_master: None,
         live_problem: None,
@@ -168,6 +177,7 @@ fn team() -> TeamStatus {
         messages: Vec::new(),
         plan: Vec::new(),
         events: Default::default(),
+        partial: false,
     }
 }
 
@@ -1348,4 +1358,192 @@ fn an_agent_level_the_owner_cleared_sends_the_version_its_reset_left() {
         "the cleared level's version, not 0, so the engine takes the change"
     );
     assert_eq!(switch(4, reset), 0, "a level never set is at version 0");
+}
+
+#[test]
+fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('t'))), TeamReply::Handled);
+    let mut view = loaded();
+    assert!(
+        find(&frame(&view, 120, 24), "Team").contains("Task  Off  Session  Off  Idle stop  Off")
+    );
+    let reply = view.key(press(KeyCode::Char('t')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: Some(1800),
+            session_secs: None,
+            idle_secs: None
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Each task may now run up to 30 min, each agent session as long as it needs."
+        ))
+    );
+    let mut limited = team();
+    limited.turn_limit_secs = Some(28_800);
+    limited.session_limit_secs = Some(28_800);
+    let query = view.next_query(NOW + 10).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(limited))));
+    assert!(find(&frame(&view, 120, 24), "Team").contains("Task  8 h  Session  8 h"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('l'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: Some(28_800),
+            session_secs: None,
+            idle_secs: None
+        }),
+        "past 8 h the session limit goes Off; an Off session holds any task limit"
+    );
+    let mut view = TeamView::new(project());
+    let mut limited = team();
+    limited.turn_limit_secs = Some(28_800);
+    limited.session_limit_secs = Some(28_800);
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(limited))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('t'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: Some(28_800),
+            idle_secs: None
+        }),
+        "a task limit turned Off leaves the session limit"
+    );
+    let mut view = loaded();
+    assert_eq!(
+        view.key(press(KeyCode::Char('l'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: Some(1800),
+            idle_secs: None
+        }),
+        "a session limit needs no task limit"
+    );
+    let mut idle = team();
+    idle.idle_stop_secs = Some(crate::team::IDLE_STOP_DEFAULT_SECS);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(idle))));
+    assert!(find(&frame(&view, 120, 24), "Team").contains("Idle stop  10 min"));
+    let reply = view.key(press(KeyCode::Char('i')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: Some(3600)
+        }),
+        "the idle stop steps from 10 min to 1 h and leaves the task and session limits"
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "An idle sub-agent now stops after 1 h. An idle master stops 15 min after its work is done."
+        ))
+    );
+    let mut idle = team();
+    idle.idle_stop_secs = Some(3600);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(idle))));
+    assert_eq!(
+        view.key(press(KeyCode::Char('i'))),
+        TeamReply::Change(TeamAction::TimeLimits {
+            project_id: project(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None
+        }),
+        "past 1 h the idle stop goes Off"
+    );
+}
+
+#[test]
+fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('h'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Carry over"));
+    let reply = view.key(press(KeyCode::Char('h')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchMode::Fresh,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "When the master harness changes, the new harness starts fresh."
+        ))
+    );
+    let mut fresh = team();
+    fresh.on_harness_switch = crate::team::SwitchMode::Fresh;
+    let query = view.next_query(NOW + 10).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(fresh))));
+    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Start fresh"));
+    assert_eq!(
+        view.key(press(KeyCode::Char('h'))),
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: project(),
+            mode: crate::team::SwitchMode::Carry,
+        })
+    );
+}
+
+/// A team view the engine shortened to fit one reply says older history is hidden.
+#[test]
+fn a_shortened_team_view_says_older_history_is_hidden() {
+    let view = loaded();
+    assert!(!find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
+    let mut partial = team();
+    partial.partial = true;
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
+    assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
 }

@@ -6,6 +6,7 @@ const node_child_process_1 = require("node:child_process");
 const node_net_1 = require("node:net");
 const engine_js_1 = require("./engine.js");
 const git_js_1 = require("./git.js");
+const scm_model_js_1 = require("./scm-model.js");
 const ANSWER_GRACE_MS = 5_000;
 const SETTING_BYTES_MAX = 4096;
 const REBASES = new Set(["true", "yes", "on", "1", "interactive", "i"]);
@@ -116,7 +117,7 @@ function ask(env, args, folder, stdout, stderr) {
             if (reply === undefined)
                 return;
             if (reply.kind !== "ok") {
-                finish(128, `fatal: CrazyAgent did not run this git command (${reply.code})\n`);
+                finish(128, `fatal: ${(0, scm_model_js_1.unconfirmed)(reply.code) ?? `CrazyAgent did not run this git command (${reply.code})`}\n`);
                 return;
             }
             const outcome = (0, git_js_1.gitOutcome)(reply.data);

@@ -293,6 +293,17 @@ test("a refusal or a lost engine ends git with a fatal line and code 128", { tim
     assert.equal(refused.stdout, "");
     assert.equal(refused.stderr, "fatal: CrazyAgent did not run this git command (ide_git_transport_refused)\n");
 
+    const pushing = once(server, "connection");
+    const unknown = forward(["push", "origin", "main"], project, env);
+    const [slow] = await pushing;
+    await received(slow);
+    slow.end(encodeFrame({ kind: "rejected", code: "ide_git_outcome_unknown" }));
+    const unconfirmed = await unknown;
+    assert.equal(unconfirmed.code, 128);
+    assert.equal(unconfirmed.stderr,
+      "fatal: CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.\n",
+      "a push the engine could not confirm never reads as one that did not run");
+
     const closing = once(server, "connection");
     const lost = forward(["fetch", "origin"], project, env);
     const [dropped] = await closing;

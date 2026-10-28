@@ -148,3 +148,61 @@ fn launching_for_an_unknown_project_is_refused() {
         Some("plugin_project_unknown".into())
     );
 }
+
+#[test]
+fn a_stored_skill_description_or_source_with_hidden_characters_is_shown_escaped() {
+    let record = SkillRecord {
+        id: "s1".into(),
+        name: "fmt".into(),
+        description: "Formats changed files.\u{e0041}\u{e0042}".into(),
+        scope: Scope::Global,
+        enabled: true,
+        source: "/Users/o/skills/fmt\u{202e}".into(),
+        folder: "global/s1".into(),
+    };
+    let store = tempfile::tempdir().unwrap();
+    let skill_md = store.path().join(&record.folder).join("SKILL.md");
+    std::fs::create_dir_all(skill_md.parent().unwrap()).unwrap();
+    std::fs::write(
+        &skill_md,
+        format!("---\nname: fmt\ndescription: {}\n---\n", record.description),
+    )
+    .unwrap();
+    let connection = Connection::open_in_memory().unwrap();
+    let view = skill_view(&connection, &record, store.path(), None).unwrap();
+    assert_eq!(
+        view.description,
+        "Formats changed files.\\u{e0041}\\u{e0042}"
+    );
+    assert_eq!(view.line, view.description);
+    assert_eq!(view.source, "/Users/o/skills/fmt\\u202e");
+    for text in [&view.description, &view.line, &view.source] {
+        assert!(!crate::memory::hidden_text(text), "{text}");
+    }
+    assert_eq!(view.refused.as_deref(), Some("skill_description_hidden"));
+    assert!(view.enabled, "the owner's switch is shown as it is");
+    assert_eq!(
+        view.version, 0,
+        "a skill the owner never changed is at version 0"
+    );
+
+    std::fs::write(
+        &skill_md,
+        "---\nname: fmt\ndescription: Formats changed files.\n---\n",
+    )
+    .unwrap();
+    assert_eq!(
+        skill_view(&connection, &record, store.path(), None)
+            .unwrap()
+            .refused,
+        None
+    );
+    std::fs::remove_file(&skill_md).unwrap();
+    assert_eq!(
+        skill_view(&connection, &record, store.path(), None)
+            .unwrap()
+            .refused
+            .as_deref(),
+        Some("skill_unreadable")
+    );
+}

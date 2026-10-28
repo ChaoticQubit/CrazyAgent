@@ -1213,6 +1213,7 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
+        "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
@@ -1659,6 +1660,10 @@ mod tests {
                 MasterReason::ApprovalRequired,
             ),
             ("codex_host_cancelled", MasterReason::Cancelled),
+            (
+                "master_instructions_too_large",
+                MasterReason::InstructionsTooLarge,
+            ),
         ] {
             assert_eq!(
                 reason_for_error(&EngineError(code.into())),

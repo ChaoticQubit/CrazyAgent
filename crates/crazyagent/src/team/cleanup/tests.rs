@@ -246,6 +246,15 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         crate::landing::AcceptOutcome::Landed { .. }
     ));
     case.agent(3, "master", "stopped");
+    for id in [1, 3] {
+        case.db
+            .execute(
+                "INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
+                 VALUES (?1,?2,'codex','connection-1','conversation-1','/tmp/record.jsonl')",
+                params![id, case.project.as_str()],
+            )
+            .unwrap();
+    }
     let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
     assert_eq!(
         listed.iter().map(|agent| agent.id).collect::<Vec<_>>(),
@@ -274,6 +283,19 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
         .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
         .unwrap();
     assert_eq!(rows, 3);
+    let conversations: Vec<i64> = case
+        .db
+        .prepare("SELECT agent FROM team_agent_conversations ORDER BY agent")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        conversations,
+        [3],
+        "a removed agent's kept conversation goes with it, a kept agent keeps its own"
+    );
     assert!(case.retiring().is_empty());
     assert_eq!(
         git_in(&case.home, &case.repo, &["status", "--porcelain"]),
@@ -470,4 +492,94 @@ fn read_only_folders_are_removed_without_following_a_link_out() {
         std::fs::read(outside.join("keep.txt")).unwrap(),
         b"the owner's\n"
     );
+}
+
+/// A master stored under a harness alias ("claude") is the same harness as one stored under
+/// its catalog entry ("claude-code"): only the newest of the two stays for the runtime to
+/// start again, as the runtime's own lookup picks it, and the older one is listed and removed.
+#[test]
+fn an_older_master_under_a_harness_alias_is_listed_and_removed() {
+    let case = Case::new();
+    case.agent(1, "master", "stopped");
+    case.agent(3, "master", "failed");
+    case.db
+        .execute("UPDATE team_agents SET harness='claude' WHERE id=1", [])
+        .unwrap();
+    assert_eq!(case.listed(), [1]);
+    assert_eq!(case.remove(&[3]), refused("cleanup_agent_running"));
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.known(1) && case.kept(3));
+}
+
+#[test]
+fn an_agent_git_cannot_read_keeps_its_own_code_and_leaves_the_others_removable() {
+    let case = Case::new();
+    for id in [1, 2, 3] {
+        case.agent(id, "sub", "stopped");
+    }
+    write(&case.git_dir(2).join("index.lock"), b"");
+    std::fs::File::options()
+        .write(true)
+        .open(case.worktree(2).join("README"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+        .unwrap();
+    assert_eq!(
+        case.listed(),
+        [3, 1],
+        "the agent git stops on is left out, the others stay listed"
+    );
+    assert_eq!(case.remove(&[1, 2]), refused("cleanup_worktree_unreadable"));
+    assert!(case.kept(1) && case.kept(2));
+    assert!(case.retiring().is_empty());
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(claim(&case.db, &case.project, &[2], NOW).unwrap().is_ok());
+    assert_eq!(case.listed(), [3]);
+    assert!(
+        case.known(2),
+        "a claimed agent git stops on gets its record back"
+    );
+    assert!(case.retiring().is_empty());
+    std::fs::remove_file(case.git_dir(2).join("index.lock")).unwrap();
+    assert_eq!(case.listed(), [3, 2]);
+    assert_eq!(case.remove(&[2, 3]), removed(&[2, 3]));
+    assert!(case.listed().is_empty());
+}
+
+#[test]
+fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    for id in [1, 2] {
+        case.agent(id, "sub", "stopped");
+    }
+    let outside = case.home.join("outside");
+    write(&outside.join("keep.txt"), b"the owner's\n");
+    let cache = case.worktree(1).join("target/cache/module");
+    write(&cache.join("lib.go"), b"package lib\n");
+    std::os::unix::fs::symlink(&outside, case.worktree(1).join("target/cache/link")).unwrap();
+    std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o555)).unwrap();
+    assert_eq!(case.listed(), [2, 1]);
+    assert_eq!(case.remove(&[1, 2]), removed(&[1, 2]));
+    let listing = git_in(&case.home, &case.repo, &["worktree", "list", "--porcelain"]);
+    for id in [1, 2] {
+        assert!(!case.worktree(id).exists() && !case.git_dir(id).exists());
+        assert!(!listing.contains(&format!("agent-{id}")));
+        assert!(!case.folder(id).exists() && !case.known(id));
+    }
+    let bases: i64 = case
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_bases WHERE worktree=?1",
+            [case.worktree(1).to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bases, 0);
+    assert_eq!(
+        std::fs::read(outside.join("keep.txt")).unwrap(),
+        b"the owner's\n"
+    );
+    assert!(case.retiring().is_empty());
+    assert!(case.listed().is_empty());
 }

@@ -15,6 +15,7 @@ fn claude_driver() -> Driver {
         model: None,
         tools: false,
         sandbox_profile: None,
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -211,6 +212,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
             model: None,
             tools: true,
             sandbox_profile: Some(profile),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
         },
@@ -464,6 +466,7 @@ fn codex_driver_in_a_turn() -> Driver {
         model: None,
         tools: false,
         sandbox_profile: None,
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -580,6 +583,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         model: None,
         tools: true,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: Some(super::GitIdentity::new(name, email).unwrap()),
         limits: LaunchLimits::default(),
     };

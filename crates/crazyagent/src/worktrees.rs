@@ -18,6 +18,12 @@ use std::process::{Command as Process, Stdio};
 use std::time::{Duration, Instant};
 
 const OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
+const METADATA_ENTRIES_MAX: usize = 8192;
+const OBJECT_ENTRIES_MAX: usize = 262_144;
+const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
+const SHOWN_ENTRY_BYTES_MAX: usize = 160;
+const SHARED_WORKTREE_FILES: &[&str] = &["HEAD", "commondir", "gitdir", "locked"];
+const HEAD_BYTES_MAX: usize = 512;
 #[cfg(unix)]
 pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
@@ -205,11 +211,14 @@ fn bounded_read(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
     Err(error("worktree_filesystem_unavailable"))
 }
 
+/// Reads a small file an agent may have replaced: opened without following a link and
+/// without waiting on a FIFO or device, kept only when it is a regular file, at most
+/// `limit` bytes. Inputs: the path and the limit. Output: the bytes, or the refusal.
 #[cfg(unix)]
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
         .map_err(error)?;
     if !file.metadata().map_err(error)?.is_file() {
@@ -333,26 +342,13 @@ fn collect_git_output(
     Ok(bytes)
 }
 
-fn validate_metadata(repository: &Path) -> Result<(), EngineError> {
+/// Checks a repository's .git for entries the engine's Git could be led through, then
+/// refuses shared, partial and grafted repositories. Each lease's own admin folder is
+/// checked with its lease by [`validate_admin`]. Input: the repository. Output: nothing,
+/// or a code naming the first offending entry, the capacity reached or the refused file.
+pub(crate) fn validate_metadata(repository: &Path) -> Result<(), EngineError> {
     let metadata = repository.join(".git");
-    let mut pending = vec![metadata.clone()];
-    let mut visited = 0;
-    while let Some(path) = pending.pop() {
-        visited += 1;
-        if visited > 8192 {
-            return Err(error("git_metadata_capacity"));
-        }
-        let entry = std::fs::symlink_metadata(&path).map_err(error)?;
-        identity(&path, entry.is_dir())?;
-        if entry.is_dir() {
-            for entry in std::fs::read_dir(&path).map_err(error)? {
-                pending.push(entry.map_err(error)?.path());
-                if pending.len() > 8192 {
-                    return Err(error("git_metadata_capacity"));
-                }
-            }
-        }
-    }
+    walk_metadata(&metadata, &metadata)?;
     for name in [
         "commondir",
         "objects/info/alternates",
@@ -365,9 +361,201 @@ fn validate_metadata(repository: &Path) -> Result<(), EngineError> {
             return Err(error("unsupported_shared_or_partial_git_metadata"));
         }
     }
-    assert!(visited > 0);
-    assert!(visited <= 8192);
     Ok(())
+}
+
+/// Checks one lease's own admin folder in .git/worktrees with the rules of the rest of
+/// .git, so an entry planted there marks only that lease. Inputs: the repository and the
+/// admin folder. Output: nothing, or a code naming the offending entry or the capacity.
+pub(crate) fn validate_admin(repository: &Path, admin: &Path) -> Result<(), EngineError> {
+    let metadata = repository.join(".git");
+    if admin.parent() != Some(metadata.join("worktrees").as_path()) {
+        return Err(error("worktree_metadata_escape"));
+    }
+    walk_metadata(&metadata, admin)
+}
+
+/// Walks `start` inside the .git folder `metadata`. Every folder and file must pass
+/// [`identity`]. In the object store, which confined agents write, only `info`, `pack`,
+/// the fan-out folders and the object files Git reads are held to that, and of another
+/// worktree's admin folder only the files every Git command reads. Inputs: the .git
+/// folder and where to start. Output: nothing, or the refusal or capacity code.
+fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
+    let objects = metadata.join("objects");
+    let worktrees = metadata.join("worktrees");
+    let mut pending = vec![start.to_path_buf()];
+    let mut visited = 0;
+    let mut stored = 0;
+    while let Some(path) = pending.pop() {
+        visited += 1;
+        if visited > METADATA_ENTRIES_MAX {
+            return Err(error("git_metadata_capacity"));
+        }
+        if !trusted(metadata, &path)?.is_dir() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&path).map_err(error)? {
+            let child = entry.map_err(error)?.path();
+            let name = child.file_name().unwrap_or_default();
+            if path == worktrees {
+                visited += 1;
+                if visited > METADATA_ENTRIES_MAX {
+                    return Err(error("git_metadata_capacity"));
+                }
+                shared_worktree_files(metadata, &child)?;
+            } else if path == objects && name.len() == 2 && hex(name) {
+                stored += fan_out(metadata, &child, OBJECT_ENTRIES_MAX - stored)?;
+            } else if path == objects
+                && !name.eq_ignore_ascii_case("info")
+                && !name.eq_ignore_ascii_case("pack")
+            {
+                stored += 1;
+                if stored > OBJECT_ENTRIES_MAX {
+                    return Err(error("git_object_store_capacity"));
+                }
+            } else {
+                pending.push(child);
+                if pending.len() > METADATA_ENTRIES_MAX {
+                    return Err(error("git_metadata_capacity"));
+                }
+            }
+        }
+    }
+    assert!(visited > 0);
+    assert!(visited <= METADATA_ENTRIES_MAX);
+    assert!(stored <= OBJECT_ENTRIES_MAX);
+    Ok(())
+}
+
+/// Reads one .git entry without following a link and requires [`identity`] of it. Inputs:
+/// the .git folder and the entry. Output: its metadata, or `untrusted_git_entry:` with
+/// the entry's path inside .git.
+fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineError> {
+    let entry = std::fs::symlink_metadata(path).map_err(error)?;
+    identity(path, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+    Ok(entry)
+}
+
+/// Checks one fan-out folder of the object store and every object file in it, since Git
+/// reads an object through any link put in its place. Names that are not hex digits, such
+/// as a temporary object left by a killed Git, are never read as objects and are left
+/// alone. Inputs: the .git folder, the fan-out folder and how many entries may still be
+/// read. Output: the entries read, or the refusal or `git_object_store_capacity` code.
+fn fan_out(metadata: &Path, folder: &Path, room: usize) -> Result<usize, EngineError> {
+    if room == 0 {
+        return Err(error("git_object_store_capacity"));
+    }
+    if !trusted(metadata, folder)?.is_dir() {
+        return Err(untrusted(metadata, folder));
+    }
+    let mut read = 1;
+    for entry in std::fs::read_dir(folder).map_err(error)? {
+        let path = entry.map_err(error)?.path();
+        read += 1;
+        if read > room {
+            return Err(error("git_object_store_capacity"));
+        }
+        if path.file_name().is_some_and(hex) && !trusted(metadata, &path)?.is_file() {
+            return Err(untrusted(metadata, &path));
+        }
+    }
+    assert!(read <= room);
+    Ok(read)
+}
+
+/// Checks the files of another worktree's admin folder that Git reads for every worktree,
+/// as `git worktree add` does: each must be a plain file when present, so no read follows
+/// a link or waits on a pipe, and HEAD must pass [`plain_head`], so Git resolves no ref of
+/// that folder. The rest of that folder is checked with its own lease.
+/// Inputs: the .git folder and the admin folder. Output: nothing, or the refusal code.
+fn shared_worktree_files(metadata: &Path, admin: &Path) -> Result<(), EngineError> {
+    let folder = std::fs::symlink_metadata(admin).map_err(error)?;
+    if folder.file_type().is_symlink() {
+        return Err(untrusted(metadata, admin));
+    }
+    if !folder.is_dir() {
+        return Ok(());
+    }
+    for name in SHARED_WORKTREE_FILES {
+        let path = admin.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(failed) if failed.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(entry) if entry.is_file() && (*name != "HEAD" || plain_head(&path)) => {}
+            _ => return Err(untrusted(metadata, &path)),
+        }
+    }
+    Ok(())
+}
+
+/// Whether a worktree's HEAD names only what Git resolves outside that worktree's own
+/// folder: a detached object id, or a branch in `refs/heads/`, whose ref the walk of the
+/// shared refs checks. Per-worktree refs such as `refs/worktree/` or `refs/bisect/` and
+/// pseudo refs are refused. It is read with [`bounded_read`], so a FIFO swapped in is
+/// never waited on. Input: the HEAD file. Output: the answer.
+fn plain_head(path: &Path) -> bool {
+    let Ok(bytes) = bounded_read(path, HEAD_BYTES_MAX) else {
+        return false;
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return false;
+    };
+    let line = text.strip_suffix('\n').unwrap_or(text);
+    match line.strip_prefix("ref: refs/heads/") {
+        Some(branch) => branch_name(branch),
+        None => {
+            matches!(line.len(), 40 | 64)
+                && line
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        }
+    }
+}
+
+/// Whether text is a branch name Git accepts after `refs/heads/`, by the rules of
+/// `git check-ref-format`: no control character, space or any of `~^:?*[\`, no `..` or
+/// `@{`, not `@`, no empty component or one starting with `.` or ending in `.lock`, and no
+/// trailing `.`. Input: the name. Output: the answer.
+fn branch_name(name: &str) -> bool {
+    name != "@"
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name
+            .bytes()
+            .any(|byte| byte < 0x20 || byte == 0x7f || b" ~^:?*[\\".contains(&byte))
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
+/// Whether a file name is made only of hex digits, in either case, since a folder that
+/// ignores case resolves Git's lowercase name to it. Input: the name. Output: the answer.
+fn hex(name: &std::ffi::OsStr) -> bool {
+    !name.is_empty() && name.as_encoded_bytes().iter().all(u8::is_ascii_hexdigit)
+}
+
+/// Builds the refusal that names an offending .git entry for the owner, shown as its path
+/// inside .git with anything outside letters, digits, `.`, `_`, `-` and `/` replaced and
+/// the length capped, since an agent chooses the name. Inputs: the .git folder and the
+/// entry. Output: the `untrusted_git_entry:` error.
+fn untrusted(metadata: &Path, path: &Path) -> EngineError {
+    let inside = path
+        .strip_prefix(metadata)
+        .unwrap_or(path)
+        .to_string_lossy();
+    let shown = inside
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/') {
+                c
+            } else {
+                '?'
+            }
+        })
+        .take(SHOWN_ENTRY_BYTES_MAX)
+        .collect::<String>();
+    assert!(shown.len() <= SHOWN_ENTRY_BYTES_MAX);
+    error(format!("{UNTRUSTED_GIT_ENTRY}{shown}"))
 }
 
 const CONFIG_REFUSED: &str = "repository_config_refused:";
@@ -1388,6 +1576,7 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     let metadata = worktree_metadata(record)?;
     record.metadata = Some(identity(&metadata, true)?);
     lock_remotes(repository, target)?;
+    ensure_submodule_stores(repository, &metadata)?;
     let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
     let lease = |args: &[&str]| {
         let mut full = vec![
@@ -1419,6 +1608,25 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     assert!(left_out.len() <= LINKS_LEFT_OUT_MAX);
     assert!(record.directory.is_some());
+    Ok(())
+}
+
+/// Makes the two submodule-store folders a sandbox profile denies writes to, the common
+/// `.git/modules` and this lease's admin `modules`, through `sandbox::ensure_store`, so every
+/// platform guards a real folder. A store already there is kept when it is a plain folder;
+/// a file or link there is refused, never trusted. Inputs: the repository and the lease
+/// admin git dir. Output: success, or `submodule_store_invalid` or the filesystem refusal.
+#[cfg(unix)]
+fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), EngineError> {
+    for store in [
+        repository.join(".git").join("modules"),
+        admin.join("modules"),
+    ] {
+        crate::sandbox::ensure_store(&store).map_err(|problem| match problem.kind() {
+            std::io::ErrorKind::InvalidData => error("submodule_store_invalid"),
+            _ => error(problem),
+        })?;
+    }
     Ok(())
 }
 
@@ -1756,15 +1964,16 @@ fn linked_metadata(repository: &Path, worktree: &Path) -> Result<PathBuf, Engine
 }
 
 /// Finds and checks the Git metadata folder of an engine lease worktree: it must sit in
-/// the repository's .git/worktrees, link back to the lease, and hold no config.worktree,
-/// which Git reads for that worktree when extensions.worktreeConfig is on, other than the
-/// engine's [`REMOTE_LOCK`]. Input: the lease record. Output: the metadata folder, or the
-/// refusal code.
+/// the repository's .git/worktrees, pass [`validate_admin`], link back to the lease, and
+/// hold no config.worktree, which Git reads for that worktree when
+/// extensions.worktreeConfig is on, other than the engine's [`REMOTE_LOCK`]. Input: the
+/// lease record. Output: the metadata folder, or the refusal code.
 fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
     let path = linked_metadata(
         Path::new(&record.lease.repository),
         Path::new(&record.lease.path),
     )?;
+    validate_admin(Path::new(&record.lease.repository), &path)?;
     if bounded_read(&path.join("commondir"), 32)? != b"../..\n"
         || bounded_read(&path.join("gitdir"), 4096)?
             != format!("{}/.git\n", record.lease.path).as_bytes()
@@ -2113,7 +2322,7 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     if registration.get(index + 1).copied() != Some(format!("HEAD {oid}").as_bytes()) {
         return Err(error("worktree_revision_mismatch"));
     }
-    let head = bounded_read(&metadata.join("HEAD"), 512)?;
+    let head = bounded_read(&metadata.join("HEAD"), HEAD_BYTES_MAX)?;
     if head != format!("ref: refs/heads/{}\n", record.lease.branch).as_bytes() {
         return Err(error("worktree_head_mismatch"));
     }
@@ -2435,6 +2644,56 @@ mod tests {
             git(&repository, args).unwrap();
         }
         repository
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn submodule_stores_are_created_private_and_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        ensure_submodule_stores(&repository, &admin).unwrap();
+        for store in [repository.join(".git/modules"), admin.join("modules")] {
+            let metadata = std::fs::metadata(&store).unwrap();
+            assert!(metadata.is_dir(), "{} is not a folder", store.display());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+        ensure_submodule_stores(&repository, &admin).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_submodule_store_that_is_a_file_or_a_link_is_refused_not_trusted() {
+        let temporary = tempfile::tempdir().unwrap();
+        let repository = temporary.path().join("repository");
+        let admin = temporary.path().join("admin");
+        let elsewhere = temporary.path().join("elsewhere");
+        std::fs::create_dir_all(repository.join(".git")).unwrap();
+        std::fs::create_dir(&admin).unwrap();
+        std::fs::create_dir(&elsewhere).unwrap();
+        let common = repository.join(".git").join("modules");
+        std::fs::write(&common, b"planted").unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert_eq!(std::fs::read(&common).unwrap(), b"planted");
+        std::fs::remove_file(&common).unwrap();
+        let private = admin.join("modules");
+        std::os::unix::fs::symlink(&elsewhere, &private).unwrap();
+        assert_eq!(
+            ensure_submodule_stores(&repository, &admin).unwrap_err().0,
+            "submodule_store_invalid"
+        );
+        assert!(
+            std::fs::symlink_metadata(&private)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]

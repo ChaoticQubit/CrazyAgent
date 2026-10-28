@@ -2,11 +2,11 @@ use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 use crate::terminal::{
-    AgentId, CHUNK_BYTES_MAX, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame,
-    TerminalRequest, TerminalStream,
+    AgentId, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame, TerminalRequest,
+    TerminalStream,
 };
 #[cfg(unix)]
-use crate::terminal::{HostError, type_prompt};
+use crate::terminal::{CHUNK_BYTES_MAX, HostError, type_prompt};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
@@ -15,6 +15,10 @@ const GRANT_CHECK: Duration = Duration::from_secs(5);
 const WRITE_TIME: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const REQUESTS_QUEUED: usize = 16;
+#[cfg(unix)]
+const VIEWER_GONE: &str = "terminal_viewer_gone";
+#[cfg(unix)]
+const GRANT_ENDED: &str = "owner_grant_stale_or_revoked";
 
 /// An owner's live view of one agent terminal: its size at attach, then output and controls.
 /// `output` gives the screen and then live output in order; `control` types, resizes and detaches.
@@ -161,7 +165,8 @@ impl OwnerClient {
 }
 
 impl OwnerRuntimeHandle {
-    /// Returns the engine's terminal host on its private tmux server, opening it on first use.
+    /// Returns the engine's terminal host on its private tmux server, opening it on first use
+    /// and again whenever the tmux program found changes; see [`Engine::terminal`].
     /// Engine launchers start every interactive agent through it; viewers attach over the
     /// owner socket. While tmux is missing every call fails with `terminal_unavailable`.
     pub fn terminal(&self) -> Result<Arc<dyn Host>, EngineError> {
@@ -170,16 +175,23 @@ impl OwnerRuntimeHandle {
 }
 
 impl Engine {
+    /// Gives the terminal host on the tmux program found now. The host is kept while that
+    /// program stays the one found and opened anew when it changes, such as when setup
+    /// installs its own copy over an unsupported one or an upgrade removes the old one.
+    /// Takes the engine root. Returns the host, or `terminal_unavailable`.
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        if let Some((true, host)) = slot.as_ref() {
+        let found = crate::terminal::tmux::installed(root);
+        if let Some((program, host)) = slot.as_ref()
+            && *program == found
+        {
             return Ok(host.clone());
         }
-        let (ready, host) = crate::terminal::platform(root);
-        *slot = Some((ready, host.clone()));
+        let host = crate::terminal::tmux_host(root, found.clone());
+        *slot = Some((found, host.clone()));
         Ok(host)
     }
 }
@@ -201,6 +213,15 @@ async fn granted(
 ) -> Result<Admission, EngineError> {
     let _barrier = engine.owner_egress.write().await;
     authority.authenticate(packet)
+}
+
+/// Checks before each typed key, prompt or resize that the viewer's grant still stands.
+/// It reads the authority directly, without the owner barrier, so typing never waits on
+/// other owner work and a revocation published a moment ago already refuses the next key.
+/// Inputs: the authority, the viewer's packet and its admission. Output: whether it holds.
+#[cfg(unix)]
+fn still_granted(authority: &Authority, packet: &[u8; 37], admission: &Admission) -> bool {
+    authority.authenticate(packet).ok().as_ref() == Some(admission)
 }
 
 async fn write(
@@ -241,6 +262,10 @@ async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<b
         .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
 }
 
+/// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
+/// owner grant, reads the `Attach` request and attaches to the agent terminal. Takes the
+/// connection, its packet, the engine and the authority. Writes nothing, so a refusal can
+/// still be sent whole. Returns the admission, the attached viewer and its host.
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
@@ -260,29 +285,47 @@ async fn open(
     let viewer = tokio::task::spawn_blocking(move || attaching.attach(&agent_id))
         .await
         .map_err(|_| failure("terminal_unavailable"))??;
-    write(
-        stream,
-        &TerminalFrame::Attached {
-            agent_id: viewer.agent.clone(),
-            cols: viewer.cols,
-            rows: viewer.rows,
-        },
-    )
-    .await?;
+    Ok((admission, viewer, host))
+}
+
+/// Starts an attached view: the `Attached` frame, then the pane's history and screen, each
+/// frame bounded by `WRITE_TIME` instead of the attach deadline and the grant checked again
+/// every `GRANT_CHECK`. Takes the writer, the viewer, the engine, authority, packet and
+/// admission. Returns why the view ends early: `VIEWER_GONE` after a failed write, when the
+/// stream may hold part of a frame, or `GRANT_ENDED`.
+#[cfg(unix)]
+async fn replay(
+    writer: &mut (impl AsyncWrite + Unpin),
+    viewer: &TerminalStream,
+    engine: &Engine,
+    authority: &Authority,
+    packet: &[u8; 37],
+    admission: &Admission,
+) -> Result<(), &'static str> {
+    let attached = TerminalFrame::Attached {
+        agent_id: viewer.agent.clone(),
+        cols: viewer.cols,
+        rows: viewer.rows,
+    };
+    write(writer, &attached).await.map_err(|_| VIEWER_GONE)?;
+    let mut checked = Instant::now();
     for chunk in viewer
         .history
         .chunks(CHUNK_BYTES_MAX)
         .chain(viewer.screen.chunks(CHUNK_BYTES_MAX))
     {
-        write(
-            stream,
-            &TerminalFrame::Output {
-                bytes: chunk.to_vec(),
-            },
-        )
-        .await?;
+        if checked.elapsed() >= GRANT_CHECK {
+            if granted(engine, authority, packet).await.ok().as_ref() != Some(admission) {
+                return Err(GRANT_ENDED);
+            }
+            checked = Instant::now();
+        }
+        let output = TerminalFrame::Output {
+            bytes: chunk.to_vec(),
+        };
+        write(writer, &output).await.map_err(|_| VIEWER_GONE)?;
     }
-    Ok((admission, viewer, host))
+    Ok(())
 }
 
 /// Records a prompt the owner sent to a team sub-agent for the master's next turn.
@@ -360,60 +403,67 @@ async fn watch(
             }
         }
     });
+    let replayed = replay(&mut writer, &viewer, engine, authority, packet, &admission).await;
     let mut check = tokio::time::interval(GRANT_CHECK);
-    let reason = loop {
-        tokio::select! {
-            chunk = viewer.next() => match chunk {
-                Some(bytes) => {
-                    if write(&mut writer, &TerminalFrame::Output { bytes }).await.is_err() {
-                        break "terminal_viewer_gone";
+    let reason = match replayed {
+        Err(reason) => reason,
+        Ok(()) => loop {
+            tokio::select! {
+                chunk = viewer.next() => match chunk {
+                    Some(bytes) => {
+                        if write(&mut writer, &TerminalFrame::Output { bytes }).await.is_err() {
+                            break VIEWER_GONE;
+                        }
                     }
-                }
-                None => break "terminal_ended",
-            },
-            request = asked.recv() => match request {
-                None | Some(TerminalRequest::Detach) => break "terminal_detached",
-                Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
-                Some(TerminalRequest::Prompt { text }) => {
-                    let typed = prompt(&host, &agent, text.clone()).await;
-                    if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
-                        break "terminal_ended";
+                    None => break "terminal_ended",
+                },
+                request = asked.recv() => match request {
+                    None | Some(TerminalRequest::Detach) => break "terminal_detached",
+                    Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
+                    Some(_) if !still_granted(authority, packet, &admission) => {
+                        break GRANT_ENDED;
                     }
-                    if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
-                        heard(database.clone(), member, text).await;
+                    Some(TerminalRequest::Prompt { text }) => {
+                        let typed = prompt(&host, &agent, text.clone()).await;
+                        if typed.as_ref().is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                            break "terminal_ended";
+                        }
+                        if let (Ok(true), Some(member), Some(database)) = (typed, member, &database) {
+                            heard(database.clone(), member, text).await;
+                        }
                     }
-                }
-                Some(request) => {
-                    if let (TerminalRequest::Input { bytes }, Some(member)) = (&request, member)
-                        && let Some(agents) = engine.agents_if_open()
-                    {
-                        agents.typing().record(member, bytes, crate::team::now_ms());
+                    Some(request) => {
+                        if let (TerminalRequest::Input { bytes }, Some(member)) = (&request, member)
+                            && let Some(agents) = engine.agents_if_open()
+                        {
+                            agents.typing().record(member, bytes, crate::team::now_ms());
+                        }
+                        if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
+                            break "terminal_ended";
+                        }
                     }
-                    if act(&host, &agent, request).await.is_err_and(|error| error.0 == "terminal_agent_unknown") {
-                        break "terminal_ended";
+                },
+                _ = check.tick() => {
+                    if granted(engine, authority, packet).await.ok().as_ref() != Some(&admission) {
+                        break GRANT_ENDED;
                     }
-                }
-            },
-            _ = check.tick() => {
-                if granted(engine, authority, packet).await.ok().as_ref() != Some(&admission) {
-                    break "owner_grant_stale_or_revoked";
                 }
             }
-        }
+        },
     };
     listener.abort();
-    let _ = write(
-        &mut writer,
-        &TerminalFrame::Closed {
+    if reason != VIEWER_GONE {
+        let closed = TerminalFrame::Closed {
             reason: reason.into(),
-        },
-    )
-    .await;
+        };
+        let _ = write(&mut writer, &closed).await;
+    }
     let _ = writer.shutdown().await;
 }
 
-/// Serves one owner terminal connection: checks the owner, attaches, then streams until the
-/// viewer detaches, the terminal ends or the owner's grant changes.
+/// Serves one owner terminal connection: checks the owner and attaches within the attach
+/// deadline, then replays and streams under per-write limits until the viewer detaches, the
+/// terminal ends or the owner's grant changes. Only a failed handshake gets `Rejected`.
 /// Takes the connection, its `CAT1` packet, the engine, the authority and the attach deadline.
 pub(super) async fn serve(
     mut stream: UnixStream,

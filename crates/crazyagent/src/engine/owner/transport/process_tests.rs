@@ -105,16 +105,30 @@ fn the_app_and_a_project_text_are_saved_and_read_through_the_protocol() {
     let project = with_project(&root, &folder);
 
     assert_eq!(read(&root, None).unwrap(), shown("", 0));
-    assert_eq!(
-        save(&root, None, "App rule.\n", 0).unwrap(),
-        SavedText::Saved { version: 1 }
+    let saved = save(&root, None, "App rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
     assert_eq!(read(&root, None).unwrap(), shown("App rule.\n", 1));
 
     assert_eq!(read(&root, Some(project.clone())).unwrap(), shown("", 0));
-    assert_eq!(
-        save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap(),
-        SavedText::Saved { version: 1 }
+    let saved = save(&root, Some(project.clone()), "Project rule.\n", 0).unwrap();
+    assert!(
+        matches!(
+            saved,
+            SavedText::Saved {
+                version: 1,
+                size: Some(_)
+            }
+        ),
+        "{saved:?}"
     );
     assert_eq!(
         fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
@@ -203,7 +217,8 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
         "review your own diff",
         "No comments in code, except a short docstring",
         "Never use an em dash",
-        "Never add a Co-Authored-By trailer",
+        "never commit, and never write inside `.git`",
+        "CrazyAgent turns them into a change set",
         "Never put a secret",
         "asks the master",
         "escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions",
@@ -296,9 +311,16 @@ fn stale_process_text_save_is_refused() {
     for scope in [None, Some(project.clone())] {
         let opened = read(&root, scope.clone()).unwrap();
         assert_eq!(opened, shown("", 0));
-        assert_eq!(
-            save(&root, scope.clone(), "Desktop rule.\n", opened.version).unwrap(),
-            SavedText::Saved { version: 1 }
+        let saved = save(&root, scope.clone(), "Desktop rule.\n", opened.version).unwrap();
+        assert!(
+            matches!(
+                saved,
+                SavedText::Saved {
+                    version: 1,
+                    size: Some(_)
+                }
+            ),
+            "{saved:?}"
         );
         assert_eq!(
             save(&root, scope.clone(), "TUI rule.\n", opened.version).unwrap(),
@@ -325,10 +347,16 @@ fn stale_process_text_save_is_refused() {
                 "Keep mine is only for a version newer than the one opened"
             );
         }
-        assert_eq!(
-            keep(&root, scope.clone(), "TUI rule.\n", 1, Some(0)).unwrap(),
-            SavedText::Saved { version: 2 },
-            "Keep mine writes over the version the conflict showed"
+        let kept = keep(&root, scope.clone(), "TUI rule.\n", 1, Some(0)).unwrap();
+        assert!(
+            matches!(
+                kept,
+                SavedText::Saved {
+                    version: 2,
+                    size: Some(_)
+                }
+            ),
+            "Keep mine writes over the version the conflict showed: {kept:?}"
         );
         assert_eq!(read(&root, scope.clone()).unwrap(), shown("TUI rule.\n", 2));
         let records = kept_over(&root, scope.as_ref());
@@ -375,7 +403,7 @@ fn stale_process_text_save_is_refused() {
         runs.into_iter().map(|run| run.join().unwrap()).collect()
     });
     let won: Vec<usize> = (0..racers)
-        .filter(|index| results[*index] == SavedText::Saved { version: 3 })
+        .filter(|index| matches!(results[*index], SavedText::Saved { version: 3, .. }))
         .collect();
     assert_eq!(won.len(), 1, "two saves never both win: {results:?}");
     let winner = format!("Racer {}.\n", won[0]);
@@ -453,7 +481,10 @@ fn stale_agent_instructions_save_is_refused() {
     let parser = "Only touch the parser.\n";
     assert_eq!(
         agent_save(&root, &project, agent, parser, 0, None).unwrap(),
-        SavedText::Saved { version: 1 }
+        SavedText::Saved {
+            version: 1,
+            size: None
+        }
     );
     assert_eq!(
         agent_save(&root, &project, agent, "Write the docs.\n", 0, None).unwrap(),
@@ -476,7 +507,10 @@ fn stale_agent_instructions_save_is_refused() {
     );
     assert_eq!(
         agent_save(&root, &project, agent, "Write the docs.\n", 1, Some(0)).unwrap(),
-        SavedText::Saved { version: 2 },
+        SavedText::Saved {
+            version: 2,
+            size: None
+        },
         "Keep mine writes over the version the conflict showed"
     );
     let item = versioned::agent_instructions_item(&project, agent);
@@ -574,6 +608,45 @@ fn stale_agent_instructions_save_is_refused() {
     );
 }
 
+#[test]
+fn saves_at_once_each_read_back_the_settings_they_stored() {
+    use crate::instruction_files::Choice;
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+        .into_iter()
+        .flat_map(|files| {
+            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        })
+        .collect();
+    assert_eq!(options.len(), 6);
+    let start = std::sync::Barrier::new(options.len());
+    std::thread::scope(|scope| {
+        let saves: Vec<_> = options
+            .iter()
+            .map(|&settings| {
+                let (root, project, start) = (&root, &project, &start);
+                scope.spawn(move || {
+                    start.wait();
+                    for _ in 0..100 {
+                        assert_eq!(
+                            instruction_settings(root, project, Some(settings)),
+                            Ok(settings)
+                        );
+                    }
+                })
+            })
+            .collect();
+        for save in saves {
+            save.join()
+                .expect("every save reads back what it stored, whatever saves beside it");
+        }
+    });
+    assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
+}
+
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();
@@ -627,6 +700,10 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: false,
             text: String::new(),
             skills: Vec::new(),
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
@@ -634,9 +711,16 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
+        files: crate::instruction_files::Choice::Project,
+        owner_home: None,
+    };
+    let text = |text: &str| crate::agent_home::Given {
+        text: text.into(),
+        files: Vec::new(),
+        section_bytes: 0,
     };
     let sub_home = launched_home(&root, sub);
-    prepare(&sub_home, Harness::Codex, &given, "# Sub rules\n").unwrap();
+    prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
     record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
@@ -646,11 +730,52 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
             launched: true,
             text: "# Sub rules\n".into(),
             skills: vec!["tdd".into(), "code-review".into()],
+            sessions: 0,
+            loaded: Vec::new(),
+            skills_used: Vec::new(),
+            files: Vec::new(),
         }
     );
 
+    let rollout = sub_home.join("sessions/2026/10/27/rollout-2026-10-27T18-00-00-0199.jsonl");
+    fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let said = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            said(&format!(
+                "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\nOWNER-SECRET-78\n</INSTRUCTIONS>",
+                folder.display()
+            )),
+            said("<skill>\n<name>tdd</name>\n<path>/skills/tdd/SKILL.md</path>\n</skill>")
+        ),
+    )
+    .unwrap();
+    let reported = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(reported.sessions, 1);
+    assert_eq!(
+        reported.loaded,
+        vec![crate::agent_home::LoadedFile {
+            name: "AGENTS.md".into(),
+            path: folder.display().to_string(),
+        }]
+    );
+    assert_eq!(reported.skills_used, vec!["tdd".to_owned()]);
+    assert!(!format!("{reported:?}").contains("OWNER-SECRET-78"));
+
     let master_home = launched_home(&root, master);
-    prepare(&master_home, Harness::Claude, &given, "# Master rules\n").unwrap();
+    prepare(
+        &master_home,
+        Harness::Claude,
+        &given,
+        &text("# Master rules\n"),
+    )
+    .unwrap();
     let shown = agent_instructions(&root, &project, None).unwrap();
     assert_eq!(
         shown.agent, master,
@@ -688,6 +813,68 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         "agent_instructions_unsafe",
         "a link the agent planted in its home is never followed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare};
+    use crate::instruction_files::{Choice, Record, State};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "claude-code");
+    let home = launched_home(&root, sub);
+    let files = vec![
+        Record {
+            name: "CLAUDE.md".into(),
+            bytes: 120,
+            state: State::Given,
+        },
+        Record {
+            name: "AGENTS.md".into(),
+            bytes: 40_000,
+            state: State::TooLarge,
+        },
+    ];
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: files.clone(),
+        section_bytes: 0,
+    };
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        files: Choice::Project,
+        owner_home: None,
+    };
+    prepare(&home, Harness::Claude, &launch, &given).unwrap();
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .files,
+        files
+    );
+
+    let forged = "given\t5\tCLAUDE.local.md\n";
+    let mut planted = vec![home.join("crazyagent-instruction-files")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "CLAUDE.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
 }
 
 #[test]

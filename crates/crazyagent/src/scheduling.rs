@@ -166,6 +166,60 @@ impl Schedule {
             .find(|entry| &entry.connection == connection)
             .map_or_else(AccountPlan::default, |entry| entry.plan)
     }
+
+    /// Applies one change as the engine stores it, so a view can build the next change on
+    /// the last one before the schedule is read back: a strategy of none or a default plan
+    /// removes the row, each list stays sorted by id and the version moves past the one the
+    /// change names. Takes the change.
+    pub fn update(&mut self, change: &ScheduleChange) {
+        self.version += 1;
+        match change {
+            ScheduleChange::AppStrategy { strategy } => self.strategy = *strategy,
+            ScheduleChange::PoolStrategy { pool, strategy } => {
+                set_scoped(&mut self.pools, pool, *strategy);
+            }
+            ScheduleChange::ProjectStrategy { project, strategy } => {
+                set_scoped(&mut self.projects, project, *strategy);
+            }
+            ScheduleChange::Account { connection, plan } => {
+                self.accounts
+                    .retain(|entry| &entry.connection != connection);
+                if *plan != AccountPlan::default() {
+                    let at = self
+                        .accounts
+                        .partition_point(|entry| entry.connection.as_str() < connection.as_str());
+                    self.accounts.insert(
+                        at,
+                        AccountEntry {
+                            connection: connection.clone(),
+                            plan: *plan,
+                        },
+                    );
+                }
+                assert_eq!(self.plan(connection), *plan);
+            }
+        }
+    }
+}
+
+/// Stores or removes one pool or project strategy in a list sorted by id.
+/// Takes the list, the id and the strategy, none to remove it.
+fn set_scoped(list: &mut Vec<ScopedStrategy>, id: &CredentialRef, strategy: Option<Strategy>) {
+    list.retain(|entry| &entry.id != id);
+    if let Some(strategy) = strategy {
+        let at = list.partition_point(|entry| entry.id.as_str() < id.as_str());
+        list.insert(
+            at,
+            ScopedStrategy {
+                id: id.clone(),
+                strategy,
+            },
+        );
+    }
+    assert_eq!(
+        list.iter().filter(|entry| &entry.id == id).count(),
+        usize::from(strategy.is_some())
+    );
 }
 
 /// One owner change to the scheduling choices. A pool or project strategy of none and a
@@ -824,4 +878,4 @@ impl Choice {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

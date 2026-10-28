@@ -6,6 +6,8 @@ use crate::project_setup::{
 };
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 
+const MEMORY_PAGES_MAX: usize = 20;
+
 impl OwnerController {
     /// Reads the New Project choices and the smart team defaults for a pool and toggles.
     /// Takes the chosen pool, if any, and the chosen research toggles.
@@ -80,6 +82,23 @@ impl OwnerController {
             OwnerData::ProjectReadPaths { paths, version, .. } => {
                 Ok(crate::project_setup::ReadPaths { paths, version })
             }
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
+    /// its availability here, and the toolchains its agents may read. Takes the project id.
+    /// Returns the policy view, or the engine's refusal for an unknown project.
+    pub async fn project_agent_policy(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<crate::sandbox::policy::PolicyView, EngineError> {
+        match self
+            .read(OwnerRead::ProjectAgentPolicy { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectAgentPolicy { policy, .. } => Ok(policy),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -282,6 +301,23 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Replaces a project's agent policy: access level and toolchain choices. Takes the
+    /// project id, the policy and the client generation. Returns the actual owner response;
+    /// a level this computer cannot run is a plain rejection.
+    pub async fn set_project_agent_policy(
+        &mut self,
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::AgentPolicy,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_agent_policy(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectAgentPolicy { project_id, policy },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
     /// Stops one research job; a running agent's process group is stopped by its runner.
     /// Takes the project id, the job id and the client generation.
     /// Returns the actual owner response; a finished job is a plain rejection.
@@ -374,6 +410,31 @@ impl OwnerController {
             OwnerData::IdeAsks { asks } => Ok(asks),
             _ => Err(EngineError("controller_read_response".into())),
         }
+    }
+
+    /// Lists every memory of a project, research saved for approval included, in id order,
+    /// batch after batch up to `MEMORY_PAGES_MAX` batches, for counts and lists that must not
+    /// stop at one engine batch of at most 8. Takes the project id. Returns the current entry
+    /// versions, or `controller_read_response` when a batch does not continue after the last.
+    pub async fn all_project_memories(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<KnowledgeEntry>, EngineError> {
+        let mut entries: Vec<KnowledgeEntry> = Vec::new();
+        for _ in 0..MEMORY_PAGES_MAX {
+            let after = entries.last().map(|entry| entry.id.clone());
+            let batch = self
+                .project_memories(project_id.clone(), after.clone())
+                .await?;
+            let Some(last) = batch.last() else {
+                break;
+            };
+            if after.is_some_and(|after| last.id.as_str() <= after.as_str()) {
+                return Err(EngineError("controller_read_response".into()));
+            }
+            entries.extend(batch);
+        }
+        Ok(entries)
     }
 
     /// Approves, edits, rejects or removes one memory; Keep is the one-click approval.

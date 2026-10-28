@@ -18,6 +18,7 @@ test("every plain bridge command is routed with its own arguments and native one
   const catalog = planned.get("desktop_harness_catalog").route;
   assert.deepEqual(catalog.args.map((arg) => arg.name), ["check"]);
   assert.match(catalog.body, /^read\(state\)\s*\.await\?\s*\.harness_catalog\(check\.unwrap_or\(false\)\)\s*\.await$/, "plain reads share the bridge as the app's do");
+  assert.match(planned.get("desktop_project_read_paths").route.body, /^read\(state\)\s*\.await\?\s*\.project_read_paths\(&id\)\s*\.await$/, "the read-folders read never takes the bridge alone");
   for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions"]) {
     assert.ok(planned.get(native).skip, `${native} needs the native app`);
   }

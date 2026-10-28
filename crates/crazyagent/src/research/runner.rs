@@ -12,6 +12,7 @@ use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::project_setup::ResearchKind;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
@@ -276,6 +277,7 @@ pub struct ResearchRunner {
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
     terminal: Option<Arc<dyn Host>>,
     agents: Option<Arc<Agents>>,
+    settings: Option<(PathBuf, PathBuf)>,
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -374,7 +376,16 @@ impl ResearchRunner {
             custody: Mutex::new(custody),
             terminal: None,
             agents: None,
+            settings: None,
         })
+    }
+
+    /// Reads the owner's model settings from these two files at each tools-on launch, so
+    /// the agent's sandbox keeps the ports of the configured local model endpoints free of
+    /// its listeners. Takes the global and project settings files. Returns the runner.
+    pub fn with_settings(mut self, global: &Path, project: &Path) -> Self {
+        self.settings = Some((global.to_path_buf(), project.to_path_buf()));
+        self
     }
 
     /// Runs every research agent in its harness's interactive app in a pane of `host` named
@@ -787,10 +798,24 @@ impl ResearchRunner {
         } else {
             SandboxNetwork::Only(vec![model_remote(account)?])
         };
+        let policy = jobs
+            .agent_policy(&project)
+            .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
+        if let Some(reason) = policy.access.unavailable() {
+            return Err(RunError::Invalid(reason.into()));
+        }
+        let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?;
+        let kept = match (&self.settings, job.tools) {
+            (Some((global, local)), true) => crate::config::resolve_config(global, local)
+                .ok()
+                .and_then(|config| config.settings.model_access)
+                .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access)),
+            _ => Vec::new(),
+        };
+        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }
@@ -798,7 +823,7 @@ impl ResearchRunner {
             .read_paths(&project)
             .map_err(|_| RunError::Invalid("project read-only folders unreadable".into()))?;
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::detect(&root, &homes))?
+            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
         for folder in read_folders(executable, &context, job.tools)? {
@@ -828,7 +853,8 @@ impl ResearchRunner {
                 account: binding,
                 model,
                 tools: job.tools,
-                sandbox_profile: Some(profile.clone()),
+                sandbox_profile: (!unconfined).then(|| profile.clone()),
+                unconfined,
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
@@ -871,7 +897,11 @@ impl ResearchRunner {
             }
         };
         launch.current_dir(&worktree);
-        let mut command = sandbox.wrap(&profile, &launch)?;
+        let mut command = if unconfined {
+            sandbox.wrap_unconfined(&launch)?
+        } else {
+            sandbox.wrap(&profile, &launch)?
+        };
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

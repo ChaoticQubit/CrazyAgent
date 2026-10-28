@@ -14,6 +14,7 @@ fn reply(query: ProcessQuery, result: Result<&str, &str>) -> Arrival {
             }),
             ProcessQuery::Save { version, .. } => ProcessReply::Saved(SavedText::Saved {
                 version: version + 1,
+                size: None,
             }),
             _ => ProcessReply::Text(text.to_owned()),
         })
@@ -25,6 +26,23 @@ fn answered(query: ProcessQuery, result: Result<ProcessReply, String>) -> Arriva
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query,
         result,
+    }))))
+}
+
+fn saved(query: ProcessQuery, bytes: u32) -> Arrival {
+    let ProcessQuery::Save { version, .. } = &query else {
+        panic!("only a save is saved: {query:?}");
+    };
+    let version = version + 1;
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query,
+        result: Ok(ProcessReply::Saved(SavedText::Saved {
+            version,
+            size: Some(crate::engine::owner::ProcessSaved {
+                bytes,
+                claude_bytes_max: 28_159,
+            }),
+        })),
     }))))
 }
 
@@ -44,10 +62,24 @@ fn opened(scope: Scope, saved: &str) -> Shell {
         Scope::Project { id, .. } => Some(id.clone()),
     };
     let mut shell = Shell::with(ctx(80, 24), Box::new(ProcessPage::new(scope)));
-    let read = ProcessQuery::Read { project };
+    let read = ProcessQuery::Read {
+        project: project.clone(),
+    };
     assert_eq!(requests(&mut shell), vec![read.clone()]);
     shell.arrive(reply(read, Ok(saved)));
+    if let Some(project) = project {
+        let query = ProcessQuery::Settings { project };
+        assert_eq!(requests(&mut shell), vec![query.clone()]);
+        shell.arrive(settings(query, Ok(InstructionSettings::default())));
+    }
     shell
+}
+
+fn settings(query: ProcessQuery, result: Result<InstructionSettings, &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
+        query,
+        result: result.map(ProcessReply::Settings).map_err(str::to_owned),
+    }))))
 }
 
 fn screen(shell: &mut Shell) -> String {
@@ -122,6 +154,36 @@ fn the_editor_shows_control_and_escape_characters_as_marks_and_follows_the_curso
 }
 
 #[test]
+fn end_on_a_pasted_100k_character_line_scrolls_at_once_and_keeps_wide_characters_whole() {
+    let mut editor = Editor::new("");
+    editor.key(&Key::Paste("x".repeat(100_000)));
+    editor.key(&Key::Home);
+    let (_, cursor) = editor.view(80, 10);
+    assert_eq!(cursor, (0, 0));
+    let started = std::time::Instant::now();
+    editor.key(&Key::End);
+    let (lines, cursor) = editor.view(80, 10);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "End on a long line took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(cursor, (79, 0));
+    assert_eq!(editor.left, 100_000 - 79);
+    assert_eq!(lines[0], "x".repeat(79));
+
+    let mut wide = Editor::new(&"\u{4e2d}".repeat(50));
+    wide.key(&Key::End);
+    let (lines, (column, _)) = wide.view(21, 1);
+    assert_eq!(
+        column, 20,
+        "ten wide characters fill the cells before the cursor"
+    );
+    assert_eq!(wide.left, 40);
+    assert_eq!(lines[0], "\u{4e2d}".repeat(10));
+}
+
+#[test]
 fn the_app_page_reads_the_saved_text_and_saves_only_on_ctrl_s() {
     let mut shell = opened(Scope::App, "Use tdd.\n");
     let shown = screen(&mut shell);
@@ -155,8 +217,158 @@ fn the_app_page_reads_the_saved_text_and_saves_only_on_ctrl_s() {
     assert_eq!(requests(&mut shell), vec![save.clone()]);
     shell.key(Key::Ctrl('s'));
     assert_eq!(requests(&mut shell), vec![], "one request at a time");
-    shell.arrive(reply(save, Ok("")));
+    shell.arrive(saved(save, 24));
     assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_save_a_claude_master_may_refuse_warns_with_the_limit() {
+    let mut shell = opened(Scope::App, "Use tdd.\n");
+    typed(&mut shell, "Ask the master. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Ask the master. Use tdd.\n".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(saved(save, 40_000));
+    let shown = screen(&mut shell);
+    assert!(
+        !shown.contains("Not saved yet"),
+        "the text is saved: {shown}"
+    );
+    assert!(
+        shown.contains("Instructions saved. Shorten: a Claude master takes 27.5 KB, not 39.1 KB."),
+        "the save names what a Claude master takes and what agents get: {shown}"
+    );
+    assert!(!shown.contains("Agents started from now on"), "{shown}");
+
+    typed(&mut shell, "Short. ");
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Ask the master. Short. Use tdd.\n".into(),
+        version: READ_VERSION + 1,
+        opened: None,
+    };
+    assert_eq!(requests(&mut shell), vec![save.clone()]);
+    shell.arrive(saved(save, 28_159));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Instructions saved. Agents started from now on get them."),
+        "exactly the limit is no warning: {shown}"
+    );
+    assert!(!shown.contains("Shorten"), "{shown}");
+}
+
+#[test]
+fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
+    let mut shell = opened(Scope::App, "Use tdd.");
+    shell.key(Key::End);
+    typed(&mut shell, " Always.");
+    let mut filled = 0;
+    while filled < 64 && {
+        shell.ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+            },
+        })
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+
+    shell.key(Key::Ctrl('s'));
+    assert_eq!(
+        shell.ctx.message().map(|message| message.lead.as_str()),
+        Some("Too many requests are waiting.")
+    );
+    assert!(!shell.busy(), "a refused save is not waiting on the engine");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Saving..."), "{shown}");
+    assert!(shown.contains("Not saved yet"), "{shown}");
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "the refused save never queued"
+    );
+
+    shell.key(Key::Ctrl('s'));
+    let save = ProcessQuery::Save {
+        project: None,
+        text: "Use tdd. Always.".into(),
+        version: READ_VERSION,
+        opened: None,
+    };
+    assert_eq!(
+        requests(&mut shell),
+        vec![save.clone()],
+        "once the queue drains the same Ctrl-S saves"
+    );
+    assert!(shell.busy());
+    shell.arrive(saved(save, 16));
+    assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever() {
+    let mut ctx = ctx(80, 24);
+    let mut filled = 0;
+    while filled < 64 && {
+        ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+            },
+        })
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    let mut shell = Shell::with(ctx, Box::new(ProcessPage::new(Scope::App)));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "the refused read never queued"
+    );
+    assert!(!shell.busy(), "a refused read is not waiting on the engine");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Loading the instructions"), "{shown}");
+    assert!(shown.contains("Press r to try again."), "{shown}");
+
+    shell.key(Key::Char('r'));
+    let read = ProcessQuery::Read { project: None };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("Back.")));
+    assert!(screen(&mut shell).contains("│ █ack."));
+}
+
+#[test]
+fn a_many_line_paste_into_a_long_text_inserts_in_one_pass() {
+    let mut editor = Editor::new(&"\n".repeat(99_999));
+    assert_eq!(editor.lines.len(), 100_000);
+    let started = std::time::Instant::now();
+    editor.key(&Key::Paste("x\n".repeat(50_000)));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a 50,000-line paste took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(editor.lines.len(), 150_000);
+    assert_eq!((editor.row, editor.column), (50_000, 0));
+    assert!(editor.lines[..50_000].iter().all(|line| line == "x"));
+    assert!(editor.lines[50_000..].iter().all(String::is_empty));
+    assert_eq!(
+        editor.text(),
+        format!("{}{}", "x\n".repeat(50_000), "\n".repeat(99_999))
+    );
+
+    let mut middle = Editor::new("ab\ncd");
+    middle.key(&Key::Right);
+    middle.key(&Key::Paste("1\r\n2\r3".into()));
+    assert_eq!(middle.text(), "a1\n2\n3b\ncd");
+    assert_eq!((middle.row, middle.column), (2, 1));
 }
 
 #[test]
@@ -382,6 +594,123 @@ fn stale_save_shows_the_conflict_choices() {
 }
 
 #[test]
+fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = opened(scope, "");
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Agent instruction files: Project files"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: On"),
+        "{shown}"
+    );
+    assert!(shown.contains("Ctrl-F changes"), "{shown}");
+    assert!(shown.contains("committed in your checkout"), "{shown}");
+    let mut stored = InstructionSettings::default();
+    for (files, words) in [
+        (Choice::ProjectAndUser, "Project and user files"),
+        (Choice::None, "Agent instruction files: None"),
+        (Choice::Project, "Agent instruction files: Project files"),
+    ] {
+        shell.key(Key::Ctrl('f'));
+        stored.files = files;
+        let save = ProcessQuery::SaveSettings {
+            project: project.clone(),
+            settings: stored,
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        shell.key(Key::Ctrl('f'));
+        assert_eq!(requests(&mut shell), vec![], "one request at a time");
+        shell.arrive(settings(save, Ok(stored)));
+        let shown = screen(&mut shell);
+        assert!(shown.contains(words), "{shown}");
+        assert!(shown.contains("Agent settings saved."), "{shown}");
+    }
+    for transcripts in [false, true] {
+        shell.key(Key::Ctrl('t'));
+        stored.transcripts = transcripts;
+        let save = ProcessQuery::SaveSettings {
+            project: project.clone(),
+            settings: stored,
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        shell.arrive(settings(save, Ok(stored)));
+        let words = if transcripts { ": On" } else { ": Off" };
+        assert!(
+            screen(&mut shell)
+                .contains(&format!("Keep transcripts for headless Claude runs{words}"))
+        );
+    }
+    shell.key(Key::Ctrl('t'));
+    let refused = ProcessQuery::SaveSettings {
+        project: project.clone(),
+        settings: InstructionSettings {
+            files: Choice::Project,
+            transcripts: false,
+        },
+    };
+    assert_eq!(requests(&mut shell), vec![refused.clone()]);
+    shell.arrive(settings(refused, Err("instruction_settings_unavailable")));
+    let shown = screen(&mut shell);
+    assert!(
+        shown.contains("Keep transcripts for headless Claude runs: On"),
+        "{shown}"
+    );
+    assert!(shown.contains("couldn't be read"), "{shown}");
+}
+
+#[test]
+fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_defaults() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = Shell::with(
+        ctx(80, 24),
+        Box::new(ProcessPage::new(Scope::Project {
+            id: project.clone(),
+            name: "Harbor Notes".into(),
+        })),
+    );
+    let read = ProcessQuery::Read {
+        project: Some(project.clone()),
+    };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("")));
+    let query = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    shell.arrive(settings(query, Err("instruction_settings_invalid")));
+    let shown = screen(&mut shell);
+    assert!(shown.contains("value CrazyAgent doesn't know"), "{shown}");
+    shell.key(Key::Ctrl('f'));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::SaveSettings {
+            project,
+            settings: InstructionSettings {
+                files: Choice::ProjectAndUser,
+                transcripts: true,
+            },
+        }]
+    );
+}
+
+#[test]
+fn the_app_page_has_no_agent_settings() {
+    let mut shell = opened(Scope::App, "");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Agent instruction files"), "{shown}");
+    shell.key(Key::Ctrl('f'));
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(requests(&mut shell), vec![]);
+}
+
+#[test]
 fn a_text_over_64_kb_says_why_and_is_never_sent() {
     let mut shell = opened(Scope::App, "");
     shell.key(Key::Paste("a".repeat(TEXT_BYTES_MAX + 1)));
@@ -423,6 +752,7 @@ fn skill(id: &str, name: &str, line: &str) -> crate::plugins::SkillView {
         source: String::new(),
         folder: String::new(),
         version: 0,
+        refused: None,
     }
 }
 

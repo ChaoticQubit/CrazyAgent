@@ -54,6 +54,7 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
         version: 2,
+        refused: None,
     }
 }
 
@@ -300,6 +301,7 @@ fn approval_shows_the_whole_command_first() {
     assert_eq!(view.confirm, None);
 
     view.key(press(KeyCode::Enter));
+    frame(&view, 80, 24);
     let change = sent(view.key(press(KeyCode::Char('y'))));
     let PluginChange::Approve { id, spec } = change else {
         panic!("an approval expected");
@@ -316,6 +318,176 @@ fn approval_shows_the_whole_command_first() {
             "postgres can't start. The command exited at once."
         ))
     );
+}
+
+#[test]
+fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_last_line() {
+    use crate::tui::screens::project::ProjectScreen;
+    use crate::tui::screens::project_view::project_screen;
+
+    let long = format!("{LONG_RUNS}{}", " --table notes_archive_2026".repeat(14));
+    let read = |runs: &str| {
+        let (skills, mut servers) = lists();
+        servers[1].runs = runs.to_owned();
+        SettingsEvent::ProjectPlugins(project(), Ok((skills, servers)))
+    };
+    let mut screen = ProjectScreen::new(project(), "Tidepool".into(), None);
+    screen.open(Tab::Settings);
+    screen.plugins.next_job().unwrap();
+    screen.plugins.apply(&read(&long));
+    for _ in 0..5 {
+        screen.plugins.key(press(KeyCode::Down));
+    }
+    assert!(matches!(
+        screen.plugins.key(press(KeyCode::Enter)),
+        PluginsReply::Handled
+    ));
+    assert!(
+        matches!(
+            screen.plugins.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ),
+        "nothing has shown the command yet"
+    );
+    assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+
+    let look = Look::plain();
+    let expected = exact_lines(&long, 74);
+    assert!(
+        expected.len() > 4,
+        "the command needs more rows than 80x24 leaves"
+    );
+    let mut read_lines = vec![false; expected.len()];
+    let mut reached_end = false;
+    for _ in 0..expected.len() + 2 {
+        let drawn = project_screen(&mut screen, 80, 24, &look);
+        let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+        assert!(rows.len() <= 24 && rows.iter().all(|row| row.chars().count() <= 80));
+        assert!(rows.iter().any(|row| row.contains("Project settings")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Instructions for this project's agents"))
+        );
+        assert!(drawn.help.contains(&("y", "Approve")));
+        let question = rows
+            .iter()
+            .position(|row| row.contains("Approve postgres?"))
+            .unwrap_or_else(|| panic!("the question shows:\n{}", rows.join("\n")));
+        assert!(rows[question].contains("y Approve"));
+        assert!(rows[question + 1].contains("It runs:"));
+        let marker = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Lines "))
+            .unwrap_or_else(|| panic!("a line marker shows:\n{}", rows.join("\n")));
+        let numbers: Vec<usize> = rows[marker]
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap())
+            .collect();
+        let [first, last, total] = numbers[..] else {
+            panic!("the marker names its lines: {}", rows[marker]);
+        };
+        assert_eq!(total, expected.len());
+        assert_eq!(marker - (question + 2), last + 1 - first);
+        for (offset, row) in rows[question + 2..marker].iter().enumerate() {
+            let line = &expected[first - 1 + offset];
+            assert_eq!(&row[..4 + line.len()], format!("    {line}"));
+            assert!(row[4 + line.len()..].trim().is_empty());
+            read_lines[first - 1 + offset] = true;
+        }
+        if last == total {
+            assert!(rows[marker].contains("the end"));
+            reached_end = true;
+            break;
+        }
+        assert!(rows[marker].contains("y waits for the end"));
+        assert!(
+            matches!(
+                screen.plugins.key(press(KeyCode::Char('y'))),
+                PluginsReply::Handled
+            ),
+            "y waits until the last line has shown"
+        );
+        assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+        assert!(!screen.plugins.busy());
+        screen.plugins.key(press(KeyCode::Down));
+    }
+    assert!(reached_end, "Down reaches the last line");
+    assert!(read_lines.iter().all(|line| *line), "every line showed");
+
+    let changed = format!("{long} --write");
+    screen.plugins.apply(&read(&changed));
+    assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+    assert!(
+        matches!(
+            screen.plugins.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ),
+        "a changed command is read again"
+    );
+    let rows: Vec<String> = project_screen(&mut screen, 80, 24, &look)
+        .rows
+        .iter()
+        .map(Row::text)
+        .collect();
+    assert!(
+        rows.iter().any(|row| row.contains("Lines 1-")),
+        "a changed command starts at its first line:\n{}",
+        rows.join("\n")
+    );
+    assert!(matches!(
+        screen.plugins.key(press(KeyCode::Char('y'))),
+        PluginsReply::Handled
+    ));
+    for _ in 0..expected.len() + 2 {
+        screen.plugins.key(press(KeyCode::Down));
+        project_screen(&mut screen, 80, 24, &look);
+    }
+    screen.plugins.key(press(KeyCode::Up));
+    project_screen(&mut screen, 80, 24, &look);
+    let PluginChange::Approve { id, .. } = sent(screen.plugins.key(press(KeyCode::Char('y'))))
+    else {
+        panic!("an approval expected");
+    };
+    assert_eq!(
+        id, "pl0xpostgres",
+        "reading back up keeps the approval open"
+    );
+}
+
+#[test]
+fn a_window_too_short_for_any_command_line_never_approves() {
+    let look = Look::plain();
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    for room in 0..4 {
+        let (rows, _) = view.rows(76, room, &look);
+        assert!(rows.len() <= room, "{} rows in {room}", rows.len());
+        assert!(matches!(
+            view.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ));
+    }
+    let (rows, _) = view.rows(76, 4, &look);
+    assert!(
+        rows.iter()
+            .any(|row| row.text().contains("Make the window taller")),
+        "{:?}",
+        rows.iter().map(Row::text).collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        view.key(press(KeyCode::Char('y'))),
+        PluginsReply::Handled
+    ));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.rows(76, 5, &look);
+    assert!(matches!(
+        sent(view.key(press(KeyCode::Char('y')))),
+        PluginChange::Approve { .. }
+    ));
 }
 
 #[test]

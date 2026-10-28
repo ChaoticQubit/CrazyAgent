@@ -107,7 +107,7 @@ test("Earlier conversation opens the old engine-driven conversation read-only in
   assert.equal(seen.back.conversation, false);
 });
 
-test("the live master header offers Stop live master and says the master starts when the tab opens", async () => {
+test("the live master console head offers Stop live master, says the master starts when the tab opens and shows it live", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountView("running")');
     const running = await evaluate("Fixture.shown()");
@@ -116,7 +116,8 @@ test("the live master header offers Stop live master and says the master starts 
   });
   assert.ok(seen.running.buttons.includes("Stop live master"), seen.running.buttons.join(", "));
   assert.ok(!seen.running.buttons.includes("Start live master"), seen.running.buttons.join(", "));
-  assert.match(seen.running.text, /Live master starts when you open this tab\./);
+  assert.equal(seen.running.titles["Stop live master"], "Live master starts when you open this tab.");
+  assert.equal(seen.running.state, "Live");
   assert.equal(seen.stopped, true);
   assert.deepEqual(seen.switched, [false]);
 });
@@ -228,7 +229,22 @@ test("a closed terminal panel detaches only the view its own attach opened", () 
   assert.match(panel, /if \(serial !== null\) void detachTerminal\(name, serial\);/);
 });
 
-test("the terminal hands Shift+Enter to the key override before xterm reads it", () => {
+test("a refused live master stop names its project, so a toast on another page says whose master still runs", () => {
+  const refused = { kind: "refused", code: "team_live_master_busy", copy: "The engine refused." };
+  assert.equal(live.stopFailedNote("plant-shop", refused), "Couldn't stop the live master of plant-shop. The engine refused.");
+  assert.equal(live.stopFailedNote("plant-shop", { kind: "not_ready" }), "Couldn't stop the live master of plant-shop. It isn't in this build.");
+  assert.equal(live.stopFailedNote("", refused), "Couldn't stop the live master of this project. The engine refused.");
+  assert.ok(!live.stopFailedNote("shop\u202eevil", refused).includes("\u202e"), "the name is shown through displayText");
+});
+
+test("a live master area left before the switch reply changes nothing on the next page", () => {
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  assert.match(source, /const turned = await setLiveMaster\(id, next\);[\s\S]*?if \(failed && !next\) data\.notify\(stopFailedNote\(data\.name, failed\)\);\s*if \(!mounted\.current\) return;\s*if \(failed\) \{/);
+  assert.match(source, /mounted\.current = true;\s*return \(\) => \{ mounted\.current = false; \};/);
+  assert.doesNotMatch(source, /data\.notify\(`Couldn't stop the live master\./, "no toast without the project's name");
+});
+
+test("the terminal hands Shift+Enter to the key override, after only the copy key, before xterm reads it", () => {
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*const override = keyOverride\(event\);/);
+  assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*if \(copyKey\(event, terminal\.hasSelection\(\), mac\)\) \{(?:(?!keyOverride)[\s\S])*?return false;\s*\}\s*const override = keyOverride\(event\);/);
 });

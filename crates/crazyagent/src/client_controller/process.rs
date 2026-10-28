@@ -22,7 +22,8 @@ impl OwnerController {
     /// Saves the owner's instructions whole when no other save landed since they were read.
     /// Inputs: none for the app-wide text, or the project; the text; the version read; and,
     /// only for "Keep mine" after a stale reply, the older version the owner opened.
-    /// Output: the saved version, the stale reply with the newer text, or a refusal such as
+    /// Output: the saved version with what agents now receive beside what a Claude master is
+    /// sure to take, the stale reply with the newer text, or a refusal such as
     /// `process_text_too_large`.
     pub async fn save_process_text(
         &self,
@@ -72,6 +73,27 @@ impl OwnerController {
     /// Reads the CrazyAgent default process for a preview.
     pub async fn default_process(&self) -> Result<String, EngineError> {
         self.process_client()?.default_process().await
+    }
+
+    /// Reads one project's agent instruction settings. Input: the project.
+    /// Output: the settings, the defaults when the owner never changed them.
+    pub async fn instruction_settings(
+        &self,
+        project: ProjectId,
+    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        self.process_client()?.instruction_settings(project).await
+    }
+
+    /// Stores one project's agent instruction settings whole. Inputs: the project and the
+    /// settings. Output: the settings as stored.
+    pub async fn save_instruction_settings(
+        &self,
+        project: ProjectId,
+        settings: crate::engine::owner::InstructionSettings,
+    ) -> Result<crate::engine::owner::InstructionSettings, EngineError> {
+        self.process_client()?
+            .save_instruction_settings(project, settings)
+            .await
     }
 
     /// Reads what one team agent received at its last launch. Inputs: the project and the

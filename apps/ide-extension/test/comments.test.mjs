@@ -50,14 +50,12 @@ test("a comment on the agent side of a diff, the recorded head's text, goes to t
 
 test("every IDE write the engine could not confirm in time reads as a check-first sentence, never a plain retry", () => {
   const bridge = readFileSync(new URL("../../../crates/crazyagent/src/ide/bridge.rs", import.meta.url), "utf8");
-  const codes = [...new Set(bridge.match(/"ide_[a-z_]+_outcome_unknown"/g).map((quoted) => quoted.slice(1, -1)))];
-  assert.deepEqual(codes.sort(), [
-    "ide_agent_message_outcome_unknown",
-    "ide_comment_outcome_unknown",
-    "ide_extension_decide_outcome_unknown",
-    "ide_memory_decide_outcome_unknown",
-    "ide_owner_edit_outcome_unknown",
-  ]);
+  const codes = [...new Set(bridge.match(/"ide_[a-z_]+_outcome_unknown"/g).map((quoted) => quoted.slice(1, -1)))].sort();
+  const source = readFileSync(new URL("../src/scm-model.ts", import.meta.url), "utf8");
+  const table = source.match(/const UNCONFIRMED: Record<string, string> = \{\n([\s\S]*?)\n\};/)?.[1] ?? "";
+  const sentences = [...table.matchAll(/^ {2}([a-z_]+): "/gm)].map((match) => match[1]).sort();
+  assert.ok(codes.includes("ide_git_outcome_unknown") && codes.length >= 6, codes.join(" "));
+  assert.deepEqual(sentences, codes, "every outcome-unknown code the bridge answers has one sentence, and no sentence names a code it never answers");
   for (const code of codes) {
     const sentence = model.unconfirmed(code);
     assert.match(sentence, /^CrazyAgent couldn't confirm /, code);

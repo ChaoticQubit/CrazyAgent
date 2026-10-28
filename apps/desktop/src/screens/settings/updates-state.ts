@@ -48,7 +48,11 @@ export function updateMessage(code: string): string {
   return COPY[code] ?? withCode("Something went wrong with the update. Try again.", code);
 }
 
-const blocking = (state: UpdatePhase) => state.kind === "installing" || state.kind === "installed";
+/** Tells whether an install is running or done and waiting for the app restart; checks,
+ * channel switches and Restart engine wait until it ends. Input: the phase. */
+export function blocking(state: UpdatePhase): boolean {
+  return state.kind === "installing" || state.kind === "installed";
+}
 
 /** Applies one update event. Checks and channel switches never interrupt an install, and an
  * install starts only from a found release. Inputs: the phase and the event. Output: the next

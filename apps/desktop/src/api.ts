@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, PendingIntent } from "./engine-client";
+import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -121,6 +121,9 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
+  agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
+  agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -293,6 +296,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
   memory_add: "adding a memory",
@@ -866,14 +870,33 @@ export function suggestionsFrom(project: { id: string; name: string }, items: Me
     .map((item) => ({ project_id: project.id, project_name: project.name, id: item.id, version: item.version, text: item.text }));
 }
 
-/** Reads unreviewed research memories across projects (first page of each, up to 50
+export const MEMORY_PAGES_MAX = 20;
+
+/** Reads a project's memories, research saved for approval included, batch after batch up to
+ * MEMORY_PAGES_MAX batches, for every screen that lists or counts them; one engine batch holds
+ * at most 8 entries of any status. Input: the project id. Output: the memories in id order and
+ * whether more remain unread. */
+export async function loadAllProjectMemories(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
+  const items: MemoryItem[] = [];
+  let after: string | null = null;
+  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
+    const batch: Result<MemoryItem[]> = await call<MemoryItem[]>("desktop_project_memories", { id, after });
+    if (batch.kind !== "ok") return batch;
+    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
+    items.push(...batch.value);
+    after = batch.value[batch.value.length - 1].id;
+  }
+  return { kind: "ok", value: { items, more: true } };
+}
+
+/** Reads unreviewed research memories across projects (every memory batch of each, up to 50
  * projects). Input: the projects. Output: the suggestions. */
 export async function memorySuggestions(projects: { id: string; name: string }[]): Promise<Result<Suggestion[]>> {
   const found: Suggestion[] = [];
   for (const project of projects.slice(0, SUGGESTION_PROJECTS_MAX)) {
-    const items = await call<MemoryItem[]>("desktop_project_memories", { id: project.id, after: null });
-    if (items.kind !== "ok") return items;
-    found.push(...suggestionsFrom(project, items.value));
+    const memories = await loadAllProjectMemories(project.id);
+    if (memories.kind !== "ok") return memories;
+    found.push(...suggestionsFrom(project, memories.value.items));
   }
   return { kind: "ok", value: found };
 }
@@ -982,6 +1005,26 @@ export function detachTerminal(agent: string, serial: number): Promise<Result<vo
  * and the switch. Output: the engine receipt, not ready, or a plain error. */
 export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_keep_warm", { id, on, generation: nextGeneration() });
+}
+
+/** Sets how long one task turn and one agent session of the team may run, and how long a
+ * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
+ * seconds. Output: the engine receipt, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+}
+
+/** Sets what the live master does with the conversation when the master harness changes.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
+ * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running

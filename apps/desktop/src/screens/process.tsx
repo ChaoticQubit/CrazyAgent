@@ -1,11 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadProcess, processMessage, processTextError, saveProcess,
-  skillSegments, textBytes, type SavedText, type SkillEntry,
+  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadInstructionSettings,
+  loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments, textBytes,
+  type InstructionSettings, type SavedText, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
-import { Button, Dialog, LoadError, NotReady, Notice, Panel, Skeleton, TextArea } from "../ui";
+import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, Switch, TextArea } from "../ui";
+import { navigate } from "../ui/router";
 import { ConflictView, keepMine, type Conflict } from "./conflict";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
@@ -20,13 +22,22 @@ export interface ProcessPreview {
 }
 
 /** Shows instructions text with each catalog skill name as a tag: hovering shows its one-line
- * description and clicking opens that skill in Settings. Inputs: the text and the catalog. */
-export function TaggedText({ text, skills }: { text: string; skills: readonly SkillEntry[] }) {
+ * description and clicking opens that skill in Settings, or hands it to `onOpen` when the
+ * page decides first. Inputs: the text, the catalog and the optional opener. */
+export function TaggedText({ text, skills, onOpen }: { text: string; skills: readonly SkillEntry[]; onOpen?: (skill: SkillEntry) => void }) {
   return <div className="process-text">
     {skillSegments(text, skills).map((segment, index) => segment.kind === "text"
       ? <span key={index}>{segment.text}</span>
-      : <SkillTag key={index} name={segment.name} skills={[segment]} />)}
+      : <SkillTag key={index} name={segment.name} skills={[segment]} onOpen={onOpen} />)}
   </div>;
+}
+
+/** The draft to show once the saved text is read again: the new text while the owner left
+ * the last read text untouched, else the owner's unsaved draft, so no reply or save made
+ * elsewhere replaces typing. Inputs: the draft, the text last read (null before the first
+ * read) and the text just read. Output: the draft. */
+export function keptDraft(draft: string, loaded: string | null, saved: string): string {
+  return loaded === null || draft === loaded ? saved : draft;
 }
 
 /** Writes a byte count the way the Process pages show sizes. Input: bytes. Output: the words. */
@@ -44,9 +55,10 @@ export function conflictOf(stale: Extract<SavedText, { kind: "stale" }>): Confli
  * app level the two seeds, each opening a preview first. After a stale save it shows the
  * conflict, whose Reload and Keep mine are then the only ways on. Inputs: where it applies,
  * the saved text, the draft, the skill catalog, the last failure, what is running, the
- * preview, the conflict and the actions. Nothing reads the owner's files or saves without
- * the matching click. */
-export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine }: {
+ * preview, the conflict, the skill the owner asked to open over unsaved text and the
+ * actions. The editor is read-only while saving. Nothing reads the owner's files or saves
+ * without the matching click. */
+export function ProcessView({ scope, saved, draft, skills, failure, busy, preview, conflict, leaving = null, onDraft, onSave, onImport, onDefault, onUsePreview, onClosePreview, onRetry, onReload, onKeepMine, onOpenSkill, onLeave, onStay }: {
   scope: ProcessScope;
   saved: Loaded<string>;
   draft: string;
@@ -55,6 +67,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   busy: "save" | "import" | "default" | null;
   preview: ProcessPreview | null;
   conflict: Conflict<string> | null;
+  leaving?: SkillEntry | null;
   onDraft: (text: string) => void;
   onSave: () => void;
   onImport: () => void;
@@ -64,6 +77,9 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   onRetry: () => void;
   onReload: () => void;
   onKeepMine: () => void;
+  onOpenSkill?: (skill: SkillEntry) => void;
+  onLeave?: () => void;
+  onStay?: () => void;
 }) {
   const intro = scope.kind === "app"
     ? "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these."
@@ -86,7 +102,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
     {seeds}
     <Panel title="Instructions">
       <form className="stack-small" onSubmit={(event) => { event.preventDefault(); if (!invalid && changed && !conflict) onSave(); }}>
-        <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid}
+        <TextArea id={`process-${scope.kind}`} label="Instructions for agents" value={draft} onValue={onDraft} rows={16} error={invalid} readOnly={busy === "save"}
           helper={`${byteSize(textBytes(draft))} of ${byteSize(PROCESS_TEXT_BYTES_MAX)}${changed ? ". Not saved yet." : ""}`} />
         <span className="row">
           <Button type="submit" variant="primary" icon="check" pending={busy === "save"} pendingLabel="Saving..."
@@ -95,7 +111,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
         </span>
       </form>
     </Panel>
-    {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} /></Panel>}
+    {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></Panel>}
     <Dialog open={preview !== null} wide title={preview?.source === "import" ? "Your global instructions" : "CrazyAgent default process"}
       onClose={onClosePreview}
       footer={<>
@@ -105,9 +121,66 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       <p className="secondary">{preview?.source === "import"
         ? "Read from ~/.claude/CLAUDE.md. It replaces the editor's text; nothing is saved until you click Save."
         : "It replaces the editor's text; nothing is saved until you click Save."}</p>
-      {preview && <TaggedText text={preview.text} skills={skills} />}
+      {preview && <TaggedText text={preview.text} skills={skills} onOpen={onOpenSkill} />}
     </Dialog>
+    <ConfirmDialog open={leaving !== null} title={`Open ${leaving?.name ?? "the skill"} without saving?`} confirmLabel="Open skill"
+      cancelLabel="Keep editing" onConfirm={() => onLeave?.()} onCancel={() => onStay?.()}>
+      Your instructions changes will be lost.
+    </ConfirmDialog>
   </div>;
+}
+
+/** A project's agent settings as a pure view: which instruction files its agents get and
+ * whether headless Claude runs keep their transcript, each saved on its own change. Settings
+ * that could not be read say why and show the defaults, so a change replaces them.
+ * Inputs: the read, whether a save runs, the last save failure and the save action. */
+export function AgentSettingsView({ settings, busy, failure, onSave }: {
+  settings: Loaded<InstructionSettings>;
+  busy: boolean;
+  failure: string;
+  onSave: (settings: InstructionSettings) => void;
+}) {
+  if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
+  if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
+  const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
+  const choice = INSTRUCTION_CHOICES.find((option) => option.value === current.files) ?? INSTRUCTION_CHOICES[0];
+  const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
+  return <Panel title="Agent settings">
+    <div className="stack-small">
+      {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
+      {failure && <Notice tone="danger" alert>{failure}</Notice>}
+      <span>Agent instruction files</span>
+      <Segmented label="Agent instruction files" value={current.files}
+        options={INSTRUCTION_CHOICES.map(({ value, label }) => ({ value, label }))}
+        onValue={(files) => save({ ...current, files })} />
+      <p className="secondary">{choice.note}</p>
+      <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" checked={current.transcripts}
+        disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
+      <p className="secondary">{current.transcripts
+        ? "Headless Claude runs keep their transcript in the agent's own home."
+        : "Headless Claude runs keep no transcript."}</p>
+    </div>
+  </Panel>;
+}
+
+/** A project's agent settings: reads them from the engine and saves each change at once.
+ * Input: the project id. */
+export function AgentSettings({ projectId }: { projectId: string }) {
+  const session = useAppSession();
+  const [settings, reload] = useLoad(() => loadInstructionSettings(projectId), [projectId]);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const store = async (next: InstructionSettings) => {
+    setFailure("");
+    setBusy(true);
+    const result = session.noteResult(await saveInstructionSettings(projectId, next));
+    setBusy(false);
+    if (result.kind === "ok") {
+      session.showToast("Agent settings saved. Agents started from now on follow them.");
+      reload();
+    } else setFailure(processMessage(result));
+  };
+  return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
 }
 
 /** The skill catalog the tags name, from the engine's skill list. Input: the read, whose
@@ -118,10 +191,11 @@ export function catalogOf(skills: Loaded<{ id: string; name: string; description
 }
 
 /** The Process page for one scope: reads the saved text and the skill catalog from the
- * engine, keeps the owner's draft, and saves only on Save. A stale save shows the conflict
- * and keeps the draft, which no later read replaces until the owner picks Reload or Keep
- * mine. The seeds read the owner's global file or the default text only on their click,
- * into a preview. Input: where it applies. */
+ * engine, keeps the owner's draft, which no later read replaces while it holds unsaved
+ * edits, and saves only on Save. A stale save shows the conflict and keeps the draft until
+ * the owner picks Reload or Keep mine. A skill link over unsaved text asks first. The seeds
+ * read the owner's global file or the default text only on their click, into a preview. A
+ * project's page also shows its agent settings. Input: where it applies. */
 export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const session = useAppSession();
   const projectId = scope.kind === "project" ? scope.id : null;
@@ -133,8 +207,21 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const [busy, setBusy] = useState<"save" | "import" | "default" | null>(null);
   const [preview, setPreview] = useState<ProcessPreview | null>(null);
   const [conflict, setConflict] = useState<Conflict<string> | null>(null);
+  const [leaving, setLeaving] = useState<SkillEntry | null>(null);
+  const lastRead = useRef<string | null>(null);
   const savedText = saved.kind === "ok" ? saved.value : null;
-  useEffect(() => { if (savedText !== null && conflict === null) setDraft(savedText); }, [savedText]);
+  useEffect(() => {
+    if (savedText === null) return;
+    const before = lastRead.current;
+    lastRead.current = savedText;
+    if (conflict === null) setDraft((current) => keptDraft(current, before, savedText));
+  }, [savedText]);
+  const open = (skill: SkillEntry) => navigate({ name: "settings", tab: "plugins", skill: skill.id });
+  const openSkill = (skill: SkillEntry) => {
+    setPreview(null);
+    if (savedText !== null && draft !== savedText) setLeaving(skill);
+    else open(skill);
+  };
 
   const fail = (result: Result<unknown>) => { if (result.kind !== "ok") setFailure(processMessage(result)); };
   const seed = async (source: "import" | "default") => {
@@ -156,7 +243,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     else if (result.value.kind === "stale") setConflict(conflictOf(result.value));
     else {
       setConflict(null);
-      session.showToast("Instructions saved. Agents started from now on get them.");
+      session.showToast(savedMessage(result.value.size));
       reload();
     }
   };
@@ -166,10 +253,16 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     setFailure("");
     reload();
   };
-  return <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
+  const editor = <ProcessView scope={scope} saved={saved} draft={draft} skills={catalogOf(skills)} failure={failure} busy={busy} preview={preview} conflict={conflict}
     onDraft={setDraft} onSave={() => void save(null)} onImport={() => void seed("import")} onDefault={() => void seed("default")}
     onUsePreview={() => { if (preview) setDraft(preview.text); setPreview(null); }} onClosePreview={() => setPreview(null)} onRetry={reload}
-    onReload={reloadConflict} onKeepMine={() => void save(conflict)} />;
+    onReload={reloadConflict} onKeepMine={() => void save(conflict)}
+    leaving={leaving} onOpenSkill={openSkill} onLeave={() => { if (leaving) open(leaving); setLeaving(null); }} onStay={() => setLeaving(null)} />;
+  if (scope.kind === "app") return editor;
+  return <div className="stack">
+    <AgentSettings projectId={scope.id} />
+    {editor}
+  </div>;
 }
 
 /** Settings, Process: the app-wide instructions every agent gets. */

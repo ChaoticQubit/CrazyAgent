@@ -767,9 +767,18 @@ impl CodexProtocol {
                 return Err(ProtocolError::Capacity);
             }
             frames += 1;
-            let Ok(envelope) = serde_json::from_slice::<Envelope>(&self.buffer) else {
-                self.refused = Some(frame_name(&self.buffer));
-                return Err(ProtocolError::InvalidMessage);
+            let parsed = match super::claude::parse_line(&self.buffer) {
+                Ok(value) => serde_json::from_value::<Envelope>(value)
+                    .map_err(|_| ProtocolError::InvalidMessage),
+                Err(super::claude::ProtocolError::Capacity) => Err(ProtocolError::Capacity),
+                Err(_) => Err(ProtocolError::InvalidMessage),
+            };
+            let envelope = match parsed {
+                Ok(envelope) => envelope,
+                Err(problem) => {
+                    self.refused = Some(frame_name(&self.buffer));
+                    return Err(problem);
+                }
             };
             let observed = self.message(envelope);
             if observed.is_err() {
@@ -1523,9 +1532,9 @@ fn identifier(value: &Value) -> Result<String, ProtocolError> {
 /// Names one frame by its method (`response` without one), JSON-RPC id and the thread,
 /// parent thread and turn ids its params carry; an absent value shows as `-` and one that is
 /// not a short plain identifier as `?`. Input: the frame bytes. Output: the name, or
-/// `unreadable` for bytes that are not JSON.
+/// `unreadable` for bytes that are not JSON or hold more values than one line may.
 fn frame_name(frame: &[u8]) -> String {
-    let Ok(value) = serde_json::from_slice::<Value>(frame) else {
+    let Ok(value) = super::claude::parse_line(frame) else {
         return "unreadable".to_owned();
     };
     let plain = |value: &Value| {
@@ -1619,6 +1628,21 @@ fn valid_path(path: &Path) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line holding more JSON values than one stream line may is refused as capacity
+    /// before it is built, as the Claude adapter refuses it, though it fits the line length.
+    #[test]
+    fn a_line_of_more_values_than_the_bound_is_refused_before_it_is_built() {
+        let mut protocol = CodexProtocol::new();
+        let values = vec!["0"; super::super::claude::NODES_MAX + 1].join(",");
+        let line = format!("{{\"method\":\"item/agentMessage/delta\",\"params\":[{values}]}}\n");
+        assert!(line.len() <= LINE_BYTES_MAX);
+        assert_eq!(
+            protocol.receive(line.as_bytes()),
+            Err(ProtocolError::Capacity)
+        );
+        assert_eq!(protocol.refused(), Some("unreadable"));
+    }
 
     #[test]
     #[should_panic(expected = "assertion failed: self.next_id > 0")]

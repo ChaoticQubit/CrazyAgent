@@ -14,6 +14,7 @@ import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
+import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
 
 const ARGS_MAX = 32;
@@ -134,6 +135,12 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
+/** Says that agents do not get a stored skill the engine refuses now, and why.
+ * Input: the refusal code. Output: the sentence. */
+export function skillUnused(code: string): string {
+  return `Agents don't get this skill. ${plainError(code)}`;
+}
+
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
 export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen, onToggle, onRemove, onRetry }: {
@@ -166,7 +173,8 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
         return <div className="item-row" key={skill.id}>
           <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
             onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
-            <span className="mono muted small">{homePath(skill.source)}</span></div>
+            <span className="mono muted small">{homePath(skill.source)}</span>
+            {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span className="secondary">{skillUnused(skill.refused)}</span></span>}</div>
           <span className="row">
             <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
             <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -179,14 +187,28 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
   </div>;
 }
 
-/** Drops the frontmatter block at the top of a SKILL.md, which the detail view shows as the
- * skill's name and description instead. Input: the file text. Output: the Markdown body. */
+/** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
+ * skill's name and description, plus any other header line agents read. Input: the file text.
+ * Output: the Markdown body. */
 export function skillBody(text: string): string {
   const source = text.replace(/^\uFEFF/, "");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   return end < 0 ? source : lines.slice(end + 1).join("\n").replace(/^(\s*\n)+/, "");
+}
+
+/** The SKILL.md header lines agents read that the detail view does not already show as the
+ * skill's name and description: every non-blank line of a closed frontmatter block other
+ * than the plain `name:` and `description:` lines. Inputs: the file text and the skill.
+ * Output: the lines in file order, none when the file has no closed header. */
+export function skillHeaderExtra(text: string, skill: { name: string; description: string }): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split("\n").map((line) => line.replace(/\r$/, ""));
+  if (lines[0]?.trimEnd() !== "---") return [];
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (end < 0) return [];
+  return lines.slice(1, end)
+    .filter((line) => line.trim() !== "" && line !== `name: ${skill.name}` && line !== `description: ${skill.description}`);
 }
 
 /** A file size as the detail view lists it. Input: bytes. Output: such as "812 B" or "4.2 KB". */
@@ -212,8 +234,12 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
   if (detail.kind === "error") return <LoadError message={detail.message} onRetry={onRetry} />;
   const { skill, text, files, files_more } = detail.value;
   const on = pluginSwitch(skill, projectId);
+  const extra = skillHeaderExtra(text, skill);
   return <div className="stack">
     <p className="secondary">{skill.description}</p>
+    {skill.refused && <Notice tone="danger">{skillUnused(skill.refused)} Remove it in Settings, Plugins and skills.</Notice>}
+    {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
+      <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
       <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -307,7 +333,7 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
   const { found, more } = list.value;
   return <div className="stack-small">
     <p className="secondary">From ~/.claude/skills and ~/.codex/skills. Ticked skills are copied into CrazyAgent and turned on for every project. Dotfiles and files that look like keys or passwords are left out, and your folders don't change.</p>
-    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{importSentence(outcome)}</Notice>)}
+    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{displayText(importSentence(outcome))}</Notice>)}
     {found.length === 0 ? <EmptyState icon="folder-input" title="No skills found in those folders" compact /> : <Panel padded={false}><div className="rows">
       {found.map((item) => {
         const word = importWord(item.state);
@@ -315,8 +341,8 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
           : item.state.kind === "differs" ? "Importing replaces the added copy and keeps its project switches." : "";
         return <div className="item-row" key={item.folder}>
           <Checkbox checked={ticked.has(item.folder)} disabled={!importable(item.state)} onChecked={(on) => onTick(item, on)}
-            label={<span className="stack-small"><span className="title">{item.name}</span>{item.line && <span className="secondary">{item.line}</span>}
-              <span className="mono muted small">{IMPORT_FROM[item.from]}: {homePath(item.folder)}</span>{why && <span className="secondary">{why}</span>}</span>} />
+            label={<span className="stack-small"><span className="title">{displayText(item.name)}</span>{item.line && <span className="secondary">{displayText(item.line)}</span>}
+              <span className="mono muted small">{IMPORT_FROM[item.from]}: {displayText(homePath(item.folder))}</span>{why && <span className="secondary">{why}</span>}</span>} />
           {word && <StatusBadge word={word} tone={item.state.kind === "unusable" ? "danger" : item.state.kind === "differs" ? "warn" : "neutral"} />}
         </div>;
       })}
@@ -475,16 +501,35 @@ export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
 }
 
 interface SecretRow {
+  id: number;
   name: string;
   value: RefObject<HTMLInputElement | null>;
 }
 
-function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
+/** Reads each secret row's name with the value in that row's own masked field.
+ * Input: the rows. Output: name and value pairs in row order. */
+export function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
   return rows.map((row) => ({ name: row.name, value: row.value.current?.value ?? "" }));
 }
 
 function clearSecrets(rows: SecretRow[]): void {
   for (const row of rows) if (row.value.current) row.value.current.value = "";
+}
+
+/** The secret rows of Add MCP server: a name and a masked value each, keyed by an id that never
+ * changes, so removing one row never moves a typed value onto another row's name. Add secret
+ * stops at the secrets limit. Inputs: the rows and their change handler. */
+export function SecretRows({ rows, onRows }: { rows: SecretRow[]; onRows: (rows: SecretRow[]) => void }) {
+  return <>
+    {rows.map((row) => <div className="row" key={row.id}>
+      <TextField id={`server-secret-name-${row.id}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
+        onValue={(value) => onRows(rows.map((other) => other.id === row.id ? { ...other, name: value } : other))} />
+      <SecretField id={`server-secret-value-${row.id}`} label="Value" inputRef={row.value} />
+      <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; onRows(rows.filter((other) => other.id !== row.id)); }} />
+    </div>)}
+    {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus"
+      onClick={() => onRows([...rows, { id: Math.max(0, ...rows.map((other) => other.id)) + 1, name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+  </>;
 }
 
 /** The Add MCP server dialog: name, a command on this Mac or a URL, and secrets by name.
@@ -541,13 +586,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
       <div className="stack-small">
         <span className="title">Secrets</span>
         <p className="secondary">{form.kind === "stdio" ? "Each secret is given to the command as an environment value." : "Each secret is sent to the URL as a header."} CrazyAgent's engine keeps them privately; you won't see them again.</p>
-        {rows.map((row, index) => <div className="row" key={index}>
-          <TextField id={`server-secret-name-${index}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
-            onValue={(value) => setRows(rows.map((other, at) => at === index ? { ...other, name: value } : other))} />
-          <SecretField id={`server-secret-value-${index}`} label="Value" inputRef={row.value} />
-          <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; setRows(rows.filter((_, at) => at !== index)); }} />
-        </div>)}
-        {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus" onClick={() => setRows([...rows, { name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+        <SecretRows rows={rows} onRows={setRows} />
         {errors.secrets && <span className="field-error" role="alert">{errors.secrets}</span>}
       </div>
       {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}

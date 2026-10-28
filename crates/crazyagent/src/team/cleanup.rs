@@ -139,10 +139,9 @@ fn place(
 }
 
 /// Says why a team agent's own row keeps it: not this project's, still running, the master
-/// the runtime starts again in this worktree (for its harness, the newest ended master
-/// that still has a worktree record, as `start_master` picks it), or with an unfinished
-/// task pinned to it. Inputs: the store, the project and the agent. Output: None when it
-/// ended and nothing waits for it.
+/// the runtime starts again in this worktree (picked by `runtime::last_master`, so aliases
+/// of its harness count), or with an unfinished task pinned to it. Inputs: the store, the
+/// project and the agent. Output: None when it ended and nothing waits for it.
 fn agent_blocker(
     db: &Connection,
     project: &ProjectId,
@@ -163,16 +162,7 @@ fn agent_blocker(
         return Ok(Some("cleanup_agent_running"));
     }
     if role == "master" {
-        let revived: Option<i64> = db
-            .query_row(
-                "SELECT a.id FROM team_agents a JOIN team_worktrees w ON w.agent=a.id AND w.project=a.project
-                 WHERE a.project=?1 AND a.role='master' AND a.harness=?2 AND a.status IN ('stopped','failed')
-                 ORDER BY a.id DESC LIMIT 1",
-                params![project.as_str(), harness],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(unavailable)?;
+        let revived = super::runtime::last_master(db, project, &harness).map_err(unavailable)?;
         if revived == Some(id) {
             return Ok(Some("cleanup_agent_running"));
         }
@@ -383,10 +373,11 @@ pub fn remove(
 }
 
 /// Checks every claimed worktree again, then per agent checks its row once more, removes
-/// its worktree, its agent folder and sandbox profile and last its waiting record, in
-/// claim order. Inputs: the store, the team state folder, the project, the claims, the
-/// time now and the list each removed agent joins. Output: None once all are removed, or
-/// the plain code of the first one kept.
+/// its worktree, deleting what git left when it removed its record only part way, then its
+/// agent folder and sandbox profile and last its waiting record, in claim order. Inputs:
+/// the store, the team state folder, the project, the claims, the time now and the list
+/// each removed agent joins. Output: None once all are removed, or the plain code of the
+/// first one kept.
 fn retire_claimed(
     db: &Connection,
     team: &Path,
@@ -413,19 +404,26 @@ fn retire_claimed(
             if let Some(code) = agent_blocker(db, project, target.id)? {
                 return Ok(Some(code));
             }
-            if let Err(code) = crate::landing::retire_worktree(
+            match crate::landing::retire_worktree(
                 db,
                 &place.repository,
                 &place.worktree,
                 &place.git_dir,
                 now,
             )? {
-                return Ok(Some(code));
+                Ok(()) => {}
+                Err("cleanup_worktree_leftover") if remove_tree(&place.worktree).is_ok() => {}
+                Err(code) => return Ok(Some(code)),
             }
         }
         if remove_agent_files(team, target.id).is_err() {
             return Ok(Some("cleanup_folder_failed"));
         }
+        db.execute(
+            "DELETE FROM team_agent_conversations WHERE agent=?1 AND project=?2",
+            params![target.id, project.as_str()],
+        )
+        .map_err(unavailable)?;
         db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
             params![target.id, project.as_str()],
@@ -517,18 +515,28 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
 /// read-only folders writable first, such as a module cache a toolchain left. Inputs: the
 /// team state folder and the agent. Output: Ok once both are gone.
 fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
-    let gone = |result: std::io::Result<()>| match result {
+    remove_tree(&agent_folder(team, id))?;
+    gone(std::fs::remove_file(profile(team, id)))
+}
+
+fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
+    match result {
         Err(problem) if problem.kind() != std::io::ErrorKind::NotFound => {
             Err(EngineError("cleanup_folder_failed".into()))
         }
         _ => Ok(()),
-    };
-    let folder = agent_folder(team, id);
-    if std::fs::remove_dir_all(&folder).is_err() {
-        writable(&folder);
-        gone(std::fs::remove_dir_all(&folder))?;
     }
-    gone(std::fs::remove_file(profile(team, id)))
+}
+
+/// Deletes a folder and everything in it without following a link, making its read-only
+/// folders writable first when a plain delete stops on one. Input: the folder. Output: Ok
+/// once nothing has its name.
+fn remove_tree(folder: &Path) -> Result<(), EngineError> {
+    if std::fs::remove_dir_all(folder).is_err() {
+        writable(folder);
+        gone(std::fs::remove_dir_all(folder))?;
+    }
+    Ok(())
 }
 
 /// Lets the owner delete inside every real folder under `folder`, visiting at most

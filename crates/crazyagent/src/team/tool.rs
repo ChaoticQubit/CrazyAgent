@@ -44,6 +44,7 @@ pub const MEMORIES_TOOL: &str = "memories";
 pub const REMEMBER_TOOL: &str = "remember";
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
+pub const WAKE_TOOL: &str = "wake";
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -92,11 +93,12 @@ const _: () = assert!(
 
 /// One team tool call a live master made, as its server writes it into the mailbox for the
 /// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
-/// sub-agent's terminal, `status` and `changes` read the team and its pending change sets,
-/// `escalate` raises an app notification for a decision only the owner makes, `memories`
-/// reads the project's memories with their versions, `remember` suggests one or changes
-/// a suggestion at the version it names, `ask` logs a question for the owner, and
-/// `record_answer` records the owner's chat message that answered one.
+/// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
+/// and `changes` read the team and its pending change sets, `escalate` raises an app
+/// notification for a decision only the owner makes, `memories` reads the project's
+/// memories with their versions, `remember` suggests one or changes a suggestion at the
+/// version it names, `ask` logs a question for the owner, and `record_answer` records the
+/// owner's chat message that answered one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -110,6 +112,10 @@ pub enum Call {
         text: String,
     },
     Answer {
+        agent: String,
+        text: String,
+    },
+    Wake {
         agent: String,
         text: String,
     },
@@ -300,6 +306,11 @@ fn live_tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"agent": agent, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
         },
         {
+            "name": WAKE_TOOL,
+            "description": "Wake a finished sub-agent by its name: it starts again under the same name in its own worktree, continuing its own conversation where its harness can, and gets your text as its next task.",
+            "inputSchema": {"type": "object", "properties": {"agent": {"type": "string", "description": "The finished sub-agent: its persona name, its @role handle or its number."}, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
+        },
+        {
             "name": STATUS_TOOL,
             "description": "Read the team: each sub-agent, its job and state, and the tasks waiting or running.",
             "inputSchema": none,
@@ -444,6 +455,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             .map(|(agent, text)| Call::Message { agent, text }),
         ANSWER_TOOL => typed(argument("agent"), argument("text"))
             .map(|(agent, text)| Call::Answer { agent, text }),
+        WAKE_TOOL => typed(argument("agent"), argument("text"))
+            .map(|(agent, text)| Call::Wake { agent, text }),
         STATUS_TOOL => Ok(Call::Status),
         CHANGES_TOOL => Ok(Call::Changes),
         ESCALATE_TOOL => match argument("text") {
@@ -572,6 +585,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         ),
         Call::Message { agent, text } => (MESSAGE_TOOL, json!({"agent": agent, "text": text})),
         Call::Answer { agent, text } => (ANSWER_TOOL, json!({"agent": agent, "text": text})),
+        Call::Wake { agent, text } => (WAKE_TOOL, json!({"agent": agent, "text": text})),
         Call::Status => (STATUS_TOOL, json!({})),
         Call::Changes => (CHANGES_TOOL, json!({})),
         Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
@@ -1261,10 +1275,11 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
 }
 
 /// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the record.
-/// Takes the drop file in the master's private temporary folder; a link or other non-file is never read.
+/// Takes the drop file in the master's private temporary folder; a link or other non-file is never
+/// read, nor a file reached through a link the master put in place of that folder.
 /// Returns at most eight valid proposals in call order, none when there is no record.
 pub fn take(drop: &Path) -> Vec<Delegation> {
-    let opened = open_recorded(drop);
+    let opened = open_taken(drop);
     clear(drop);
     let Ok(file) = opened else {
         return Vec::new();
@@ -1294,9 +1309,55 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
 }
 
 /// Removes a master's drop file so a new turn starts with no recorded proposal.
-/// Takes the drop file path; a link there is removed, never followed.
+/// Takes the drop file path; a link there is removed, never followed, and nothing is removed
+/// through a link the master put in place of its private temporary folder.
 /// Returns nothing; a missing file is already clear.
 pub fn clear(drop: &Path) {
+    remove_drop(drop);
+}
+
+/// Opens the master's private temporary folder that holds its drop file, for the engine,
+/// refusing a link at that folder or at the agent folder above it, which the master can
+/// replace. Takes the drop file path. Returns the folder handle and the file's name.
+#[cfg(unix)]
+fn drop_folder(drop: &Path) -> std::io::Result<(Mailbox, &str)> {
+    let refused = || std::io::Error::other("the drop file is not inside a folder");
+    let name = drop
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(refused)?;
+    let folder = drop.parent().ok_or_else(refused)?;
+    Ok((Mailbox::open_for_engine(folder)?, name))
+}
+
+/// Opens the drop file for the engine through its folder's handle, without following a link
+/// or blocking on a FIFO. Takes its path. Returns the open file or the I/O error.
+#[cfg(unix)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    let (folder, name) = drop_folder(drop)?;
+    folder.read(name)
+}
+
+/// Opens the drop file for the engine as the reparse point itself, never a link's target.
+/// Takes its path. Returns the open file or the I/O error.
+#[cfg(windows)]
+fn open_taken(drop: &Path) -> std::io::Result<File> {
+    open_recorded(drop)
+}
+
+/// Removes the drop file through its folder's handle; a link there is removed, never
+/// followed, and a folder of that name stays. Takes its path.
+#[cfg(unix)]
+fn remove_drop(drop: &Path) {
+    if let Ok((folder, name)) = drop_folder(drop) {
+        let _ = folder.remove(name);
+    }
+}
+
+/// Removes the drop file by its path unless a folder is there; a link is removed, never
+/// followed. Takes its path.
+#[cfg(windows)]
+fn remove_drop(drop: &Path) {
     if std::fs::symlink_metadata(drop).is_ok_and(|metadata| !metadata.is_dir()) {
         let _ = std::fs::remove_file(drop);
     }

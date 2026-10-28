@@ -122,9 +122,11 @@ impl Record {
     }
 
     /// The commit message an Accept proposes: the one made from the agent's own commits,
-    /// else the prompt line, else a line naming the agent. Output: the message.
+    /// else the prompt line, else a line naming the agent, with every character a reviewer
+    /// cannot see shown as an escape, so one stored before subjects were escaped is shown
+    /// and landed visibly too. Output: the message.
     pub(super) fn message(&self) -> String {
-        if !self.message.is_empty() {
+        let message = if !self.message.is_empty() {
             self.message.clone()
         } else if !self.prompt_line.is_empty() {
             self.prompt_line.clone()
@@ -133,7 +135,8 @@ impl Record {
                 "Changes from {}",
                 super::flow::subject(&self.agent.label, &[])
             )
-        }
+        };
+        crate::memory::visible_text(&message)
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -380,14 +383,19 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
 /// Reads one change set. Inputs: the store and the id. Output: the record, or
 /// `changes_not_found`.
 pub(super) fn load(db: &Connection, id: &ChangeSetId) -> Result<Record, EngineError> {
+    find(db, id)?.ok_or_else(|| failure("changes_not_found"))
+}
+
+/// Reads one change set when it exists. Inputs: the store and the id. Output: the
+/// record, or None when no change set has that id.
+pub(super) fn find(db: &Connection, id: &ChangeSetId) -> Result<Option<Record>, EngineError> {
     db.query_row(
         &format!("SELECT {COLUMNS} FROM landing_change_sets WHERE id=?1"),
         [id.as_str()],
         read,
     )
     .optional()
-    .map_err(storage)?
-    .ok_or_else(|| failure("changes_not_found"))
+    .map_err(storage)
 }
 
 /// Reads the open change set of one worktree. Inputs: the store and the worktree path.
