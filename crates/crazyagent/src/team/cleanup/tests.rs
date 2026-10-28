@@ -583,3 +583,35 @@ fn a_worktree_git_removes_only_part_way_is_finished_without_following_a_link_out
     assert!(case.retiring().is_empty());
     assert!(case.listed().is_empty());
 }
+
+/// CEIL-L1: an older-layout project's cleanup of agent 7 is cut off after its claim, so the
+/// record waits in `team_retiring` while the worktree and its `gitdir:` `.git` stay in
+/// `<project>/worktrees`. Once the project gains a `.crazyagent` folder, the IDE's git
+/// ceiling must still keep that older root, as it does for the live record.
+#[test]
+fn an_agent_whose_cleanup_stopped_after_its_claim_keeps_the_older_root_in_the_git_ceiling() {
+    let case = Case::new();
+    let engine = case.team.parent().unwrap().to_path_buf();
+    let state = case.repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    std::fs::remove_dir(&state).unwrap();
+    let older = || crate::ide::workspace::older_agents(&engine, &case.project, &case.repo);
+    assert!(!older().unwrap(), "no engine-made worktree yet");
+    case.agent(7, "sub", "stopped");
+    let worktree = case.repo.join("worktrees").join("agent-7");
+    assert!(worktree.join(".git").is_file());
+    std::fs::create_dir(&state).unwrap();
+    assert_eq!(crate::projects_home::state_folder(&case.repo), state);
+    assert!(older().unwrap(), "the live record in the older root counts");
+
+    assert!(claim(&case.db, &case.project, &[7], NOW).unwrap().is_ok());
+    assert_eq!(case.retiring(), [7]);
+    assert!(!case.known(7));
+    assert!(
+        worktree.join(".git").is_file(),
+        "the claim alone removes nothing"
+    );
+    assert!(
+        older().unwrap(),
+        "a record waiting in team_retiring keeps the older root in the ceiling"
+    );
+}
