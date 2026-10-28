@@ -18,6 +18,8 @@ const ATTACH_TIME: Duration = Duration::from_secs(10);
 const PROJECT: &str = "usage-shop";
 const FIRST_TOTAL: (u64, u64, u64) = (1_200, 200, 300);
 const SECOND_TOTAL: (u64, u64, u64) = (2_000, 500, 450);
+const PROBE_BEFORE: [(u64, u64, u64); 3] = [(100, 0, 10), (200, 0, 20), (300, 0, 30)];
+const PROBE_AFTER: [(u64, u64, u64); 3] = [(400, 0, 40), (500, 0, 50), (600, 0, 60)];
 const COUNTED_WHEN: &str = "the engine counts usage while its team runtime runs: a writable engine with Codex or Claude Code installed";
 
 fn now_ms() -> i64 {
@@ -124,6 +126,32 @@ async fn report_until(
     }
 }
 
+/// Appends each probe total to the probe agent's record and waits until the page counts it.
+/// Each count after the first proves the scan before it finished over every other record.
+/// Inputs: the owner client, the project, the probe record and row key, and the totals.
+/// Output: the report that counted the last total.
+async fn rescanned(
+    owner: &OwnerController,
+    project: &ProjectId,
+    (record, key): (&Path, &str),
+    totals: &[(u64, u64, u64)],
+) -> UsageReport {
+    let mut report = None;
+    for &total in totals {
+        append(record, &token_count(total));
+        report = Some(
+            report_until(
+                owner,
+                project,
+                "the next scan counts the probe record",
+                |report| row(report, key).is_some_and(|row| row.tokens == counted(total)),
+            )
+            .await,
+        );
+    }
+    report.unwrap()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_reports_none() {
     let mut engine = Engine::start("ca-av2-usage-");
@@ -142,11 +170,14 @@ async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_repor
     let codex = add_agent(&engine, "sub", "codex");
     let gemini = add_agent(&engine, "sub", "gemini-cli");
     let rcli = add_agent(&engine, "master", "rcli");
-    assert!(codex > 0 && gemini > codex && rcli > gemini);
+    let probe = add_agent(&engine, "sub", "codex");
+    assert!(codex > 0 && gemini > codex && rcli > gemini && probe > rcli);
     let rollout = codex_rollout(&engine, codex);
+    let probe_rollout = codex_rollout(&engine, probe);
     append(&rollout, &token_count(FIRST_TOTAL));
 
     let codex_key = format!("team-{codex}");
+    let probe_key = format!("team-{probe}");
     let gemini_key = format!("team-{gemini}");
     let gemini_name = crazyagent::harnesses::spec("gemini-cli").unwrap().name;
     let rcli_name = crazyagent::harnesses::spec("rcli").unwrap().name;
@@ -192,6 +223,18 @@ async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_repor
         "the TUI reads the same rows as the desktop"
     );
 
+    let rescan = rescanned(&desk, &project, (&probe_rollout, &probe_key), &PROBE_BEFORE).await;
+    assert_eq!(
+        row(&rescan, &codex_key).map(|row| row.tokens),
+        Some(counted(FIRST_TOTAL)),
+        "two later scans over the same Codex record add nothing to it"
+    );
+    assert_eq!(
+        rescan.total,
+        counted(FIRST_TOTAL).plus(counted(PROBE_BEFORE[2])),
+        "the total grows only by the probe record's new lines"
+    );
+
     drop(desk);
     drop(tui);
     engine.restart();
@@ -208,13 +251,25 @@ async fn the_usage_page_counts_codex_records_once_and_names_a_harness_that_repor
     .await;
     assert_eq!(
         after.total,
-        counted(SECOND_TOTAL),
-        "the restart never counts the first line again"
+        counted(SECOND_TOTAL).plus(counted(PROBE_BEFORE[2])),
+        "the restart never counts the first line or the probe lines again"
     );
     assert_eq!(
         row(&after, &gemini_key).and_then(|row| row.not_reported_by.as_deref()),
         Some(gemini_name),
         "the mark survives the restart"
+    );
+
+    let rescan = rescanned(&desk, &project, (&probe_rollout, &probe_key), &PROBE_AFTER).await;
+    assert_eq!(
+        row(&rescan, &codex_key).map(|row| row.tokens),
+        Some(counted(SECOND_TOTAL)),
+        "later scans after the restart add nothing to the Codex record either"
+    );
+    assert_eq!(
+        rescan.total,
+        counted(SECOND_TOTAL).plus(counted(PROBE_AFTER[2])),
+        "the probe record is counted once across the restart as well"
     );
     drop(desk);
     engine.stop();
