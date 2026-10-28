@@ -1447,6 +1447,10 @@ const CLOSE_BRACKETS: [char; 16] = [
 ];
 
 const QUOTE: &str = "> ";
+const BIDI_CONTROLS: [char; 12] = [
+    '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
 
 /// Writes text a sub-agent wrote as the master reads it on lines of its own: made plain by
 /// `plain_agent_text`, and every line opened with `> `, so no line of it can start as the
@@ -1497,7 +1501,7 @@ fn line_break(c: char) -> bool {
 /// dropped, so no text reorders what is shown around it. Takes the text. Returns it.
 pub(super) fn plain_agent_text(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .filter(|c| (!c.is_control() || matches!(c, '\n' | '\t')) && !BIDI_CONTROLS.contains(c))
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
                 '('
