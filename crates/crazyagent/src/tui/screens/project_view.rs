@@ -68,7 +68,8 @@ pub(in crate::tui) fn project_screen(
     let running = screen.counts().0;
     let items = tab_items(running, width, look);
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
-    let banner = screen.recovery.rows(content, look);
+    let composer = screen.tab == Tab::Conversation && screen.typing;
+    let banner = screen.recovery.rows(content, look, composer);
     let room = body_height.saturating_sub(2 + banner.len());
     for line in banner {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
