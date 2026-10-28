@@ -2,7 +2,8 @@ import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
 
-/** How often a shown IDE tab tells the engine the owner still uses it, in milliseconds. */
+/** How often a project page with its IDE loaded tells the engine the owner still uses it, in
+ * milliseconds. */
 export const HEARTBEAT_MS = 60_000;
 
 /** Where the engine's pinned IDE build stands. */
@@ -30,6 +31,8 @@ export type IdeStatus = { line: string; action: "download" | "retry" | null; rea
 const PLATFORMS: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
 const MEGABYTE = 1024 * 1024;
 const UNQUALIFIED = "The IDE is unavailable on this platform.";
+const EXTENSIONS_FAILED = "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.";
+const LINK_FAILED = "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.";
 
 const BUILD_FAILURES: Record<string, string> = {
   ide_build_hash_mismatch: "The IDE download didn't match its published checksum, so it was deleted and never run.",
@@ -47,6 +50,9 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_servers_full: "Too many project IDEs are open. Close another project, then try again.",
   ide_server_start_timeout: "The IDE took too long to start. Try again.",
   ide_server_start_failed: "The IDE couldn't start. Try again.",
+  ide_entropy_unavailable: "The IDE couldn't start. Try again.",
+  ide_capability_capacity: LINK_FAILED,
+  ide_capability_unavailable: LINK_FAILED,
   ide_server_exited: "The IDE stopped while it started. Try again.",
   ide_server_port_taken: "Another program took the IDE's port. Try again.",
   ide_port_unavailable: "No free port was found for the IDE. Try again.",
@@ -81,8 +87,10 @@ export function ideStatus(state: IdeTabState): IdeStatus {
   }
 }
 
-/** Says why the IDE didn't open. Input: the refusal code. Output: the plain sentence. */
+/** Says why the IDE didn't open; every refusal of the extension install before the server
+ * starts reads as one sentence. Input: the refusal code. Output: the plain sentence. */
 export function openFailure(code: string): string {
+  if (code === "ide_extensions_unavailable" || code.startsWith("ide_extension_")) return EXTENSIONS_FAILED;
   return OPEN_FAILURES[code] ?? failureCopy(code);
 }
 
@@ -93,6 +101,12 @@ export function bounds(box: { left: number; top: number; width: number; height: 
   const height = Math.round(box.height);
   if (width < 1 || height < 1) return null;
   return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height };
+}
+
+/** Whether the panel kept the box the IDE webview was last placed at. Inputs: the box now
+ * and the one last placed, null before the first. Output: true when nothing moved. */
+export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
+  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height;
 }
 
 /** Reads what the IDE tab shows; with `retry` the engine first starts the build download

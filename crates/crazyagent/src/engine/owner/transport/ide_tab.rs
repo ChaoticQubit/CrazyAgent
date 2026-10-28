@@ -10,10 +10,29 @@ const REQUEST_BYTES_MAX: usize = 512;
 pub(super) const IDE_TAB_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Every code an IDE tab request can answer an owner client with: this protocol's own, the
-/// IDE server register's and workspace writer's, and the owner connection's it travels on.
+/// IDE server register's, workspace writer's, settings lock's and sandbox's, the extension
+/// installs and the capability issue every open runs, and the owner connection's it
+/// travels on.
 pub const IDE_TAB_CODES: &[&str] = &[
+    "ide_agent_invalid",
     "ide_build_invalid",
     "ide_build_not_ready",
+    "ide_capability_capacity",
+    "ide_capability_unavailable",
+    "ide_entropy_unavailable",
+    "ide_extension_download_failed",
+    "ide_extension_hash_invalid",
+    "ide_extension_hash_mismatch",
+    "ide_extension_hash_missing",
+    "ide_extension_install_failed",
+    "ide_extension_invalid",
+    "ide_extension_list_invalid",
+    "ide_extension_metadata_invalid",
+    "ide_extension_not_found",
+    "ide_extension_source_refused",
+    "ide_extension_too_large",
+    "ide_extensions_unavailable",
+    "ide_folder_unavailable",
     "ide_folder_unsafe",
     "ide_path_unreadable",
     "ide_platform_unqualified",
@@ -21,6 +40,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_project_folder_invalid",
     "ide_project_invalid",
     "ide_project_unknown",
+    "ide_sandbox_invalid",
     "ide_server_check_failed",
     "ide_server_exited",
     "ide_server_not_loopback",
@@ -30,6 +50,8 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_server_stopped",
     "ide_servers_closed",
     "ide_servers_full",
+    "ide_settings_invalid",
+    "ide_settings_unwritable",
     "ide_state_unavailable",
     "ide_tab_outcome_unknown",
     "ide_tab_owner_unavailable",
@@ -86,6 +108,7 @@ enum Action {
     Retry,
     Open { project: ProjectId },
     Touch { project: ProjectId },
+    Stop { project: ProjectId },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -94,6 +117,7 @@ enum Reply {
     State { state: IdeTabState },
     Opened { server: IdeTabServer },
     Touched { running: bool },
+    Stopped { stopped: bool },
     Rejected { code: String },
 }
 
@@ -135,6 +159,15 @@ impl OwnerClient {
     pub async fn ide_tab_touch(&self, project: ProjectId) -> Result<bool, EngineError> {
         match self.ide_tab_exchange(Action::Touch { project }).await? {
             Reply::Touched { running } => Ok(running),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stops a project's IDE server once its project page closes, after any open still
+    /// starting it. Input: the project. Output: whether a server was running.
+    pub async fn ide_tab_stop(&self, project: ProjectId) -> Result<bool, EngineError> {
+        match self.ide_tab_exchange(Action::Stop { project }).await? {
+            Reply::Stopped { stopped } => Ok(stopped),
             _ => Err(unknown()),
         }
     }
@@ -253,6 +286,9 @@ async fn handle(
         Action::Touch { project } => Ok(Reply::Touched {
             running: touch(authority, &project),
         }),
+        Action::Stop { project } => Ok(Reply::Stopped {
+            stopped: stop(authority, &project).await,
+        }),
     }
 }
 
@@ -311,6 +347,16 @@ fn touch(authority: &Authority, project: &ProjectId) -> bool {
 
 #[cfg(not(unix))]
 fn touch(_authority: &Authority, _project: &ProjectId) -> bool {
+    false
+}
+
+#[cfg(unix)]
+async fn stop(authority: &Authority, project: &ProjectId) -> bool {
+    authority.ide_servers.stop(project).await
+}
+
+#[cfg(not(unix))]
+async fn stop(_authority: &Authority, _project: &ProjectId) -> bool {
     false
 }
 

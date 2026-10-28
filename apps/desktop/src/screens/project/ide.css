@@ -1,9 +1,28 @@
+.main:has(.ide-tab),
+.main:has(.ide-tab) > .page,
+.page > .pj-project:has(.ide-tab),
+.pj-project > .pj-tab-panel:has(.ide-tab) {
+  display: flex;
+  flex-direction: column;
+}
+
+.main:has(.ide-tab) > .page,
+.page > .pj-project:has(.ide-tab),
+.pj-project > .pj-tab-panel:has(.ide-tab) {
+  flex: 1 0 auto;
+  min-height: 0;
+}
+
+.main:has(.ide-tab) > .page {
+  padding-bottom: var(--space-4);
+}
+
 .ide-tab {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: var(--space-2);
   min-height: 0;
-  height: calc(100vh - 220px);
 }
 
 .ide-status {

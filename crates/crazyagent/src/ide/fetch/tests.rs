@@ -723,3 +723,28 @@ fn an_unqualified_platform_never_fetches_or_records_the_ide_build() {
     assert_eq!(state(&runtime), BuildState::Missing);
     assert!(!runtime.join(IDE_FOLDER).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_ide_folder_is_private_from_the_first_state_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    let tmp = tempfile::tempdir().unwrap();
+    let fresh = runtime(tmp.path());
+    write_state(&fresh, &BuildState::Verifying).unwrap();
+    assert_eq!(mode(&fresh.join("ide")), 0o700);
+    assert!(
+        crate::ide::bridge::private_folder(&fresh.join("ide")).is_ok(),
+        "the IDE open accepts the folder the fetch made"
+    );
+    let older = tmp.path().join("older");
+    std::fs::create_dir(&older).unwrap();
+    std::fs::create_dir(older.join("ide")).unwrap();
+    std::fs::set_permissions(older.join("ide"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_state(&older, &BuildState::Verifying).unwrap();
+    assert_eq!(
+        mode(&older.join("ide")),
+        0o700,
+        "a folder an earlier version left open is narrowed"
+    );
+}

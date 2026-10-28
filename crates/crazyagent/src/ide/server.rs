@@ -1,5 +1,5 @@
 use super::ports::{self, Ports};
-use super::{env, extensions, output, proxy, sandbox, settings, token};
+use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rustix::process::{Pid, Signal};
@@ -74,10 +74,13 @@ pub struct ServerInfo {
 }
 
 /// The engine's IDE servers: at most one per project, each in its own process group on
-/// 127.0.0.1 with its own token, stopped when idle, on [`Servers::stop_all`] and on drop.
+/// 127.0.0.1 with its own token and its built-in extension's capability, stopped when idle,
+/// on [`Servers::stop_all`] and on drop.
 pub struct Servers {
     folder: PathBuf,
     idle: Duration,
+    grants: Arc<bridge::Grants>,
+    socket: PathBuf,
     slots: Mutex<HashMap<ProjectId, Arc<Slot>>>,
     launches: AtomicU64,
     closed: AtomicBool,
@@ -91,6 +94,8 @@ struct Slot {
 
 struct Running {
     launch: u64,
+    project: ProjectId,
+    grants: Arc<bridge::Grants>,
     child: Child,
     group: Pid,
     info: ServerInfo,
@@ -113,13 +118,24 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Servers {
     /// The IDE servers of one engine, none running yet. Inputs: the engine's data folder,
-    /// whose [`super::FOLDER`] folder holds their state, and how long a server may go
-    /// untouched, [`IDLE_LIMIT`] outside tests. Output: the register.
-    pub fn new(data: &Path, idle: Duration) -> Self {
+    /// whose [`super::FOLDER`] folder holds their state, how long a server may go untouched,
+    /// [`IDLE_LIMIT`] outside tests, the owner server's IDE capability grants and its owner
+    /// socket, `<data>/<root>/owner.sock`, the one the IDE sandbox lets a server reach.
+    /// Output: the register.
+    pub(crate) fn new(
+        data: &Path,
+        idle: Duration,
+        grants: Arc<bridge::Grants>,
+        socket: PathBuf,
+    ) -> Self {
         assert!(!idle.is_zero());
+        assert_eq!(socket.parent().and_then(Path::parent), Some(data));
+        assert_eq!(socket.file_name(), Some(std::ffi::OsStr::new("owner.sock")));
         Self {
             folder: data.join(super::FOLDER),
             idle,
+            grants,
+            socket,
             slots: Mutex::default(),
             launches: AtomicU64::new(0),
             closed: AtomicBool::new(false),
@@ -171,9 +187,11 @@ impl Servers {
     }
 
     /// Opens a project's IDE server, starting it from `build` unless it already runs: the
-    /// recorded ports while free, a new token, the allowlisted environment, its own process
-    /// group, its output redacted into [`LOG`], its extensions brought to the owner's
-    /// approvals ([`extensions::on_server_start`]) and the engine proxy in front of it. Returns
+    /// recorded ports while free, a new token, the allowlisted environment with the owner
+    /// socket, its own process group, its output redacted into [`LOG`], the built-in extension
+    /// installed with a new capability for this launch ([`Servers::spawn`]), its extensions
+    /// brought to the owner's approvals ([`extensions::on_server_start`]) and the engine proxy
+    /// in front of it. Returns
     /// once the server listens on 127.0.0.1 and no other process holds its port. The server
     /// runs under its Seatbelt profile from [`sandbox::profile`]; where no sandbox is
     /// qualified it never starts. The idle watch starts with the launch, so a launch whose
@@ -235,11 +253,10 @@ impl Servers {
         };
         let started = match output::start(&folder.join(LOG), &token)
             .map_err(|_| failure("ide_state_unavailable"))
-            .and_then(|output| command(&build, &folder, root, &info, output))
+            .and_then(|output| command(&build, &folder, root, &info, &self.socket, output))
         {
             Ok(mut command) => match self.prepare_extensions(&build, &folder).await {
-                Ok(()) => crate::spawn_gate::spawn(&mut command)
-                    .map_err(|_| failure("ide_server_start_failed")),
+                Ok(()) => self.spawn(project, &slot, &info, &mut command),
                 Err(error) => Err(error),
             },
             Err(error) => Err(error),
@@ -263,6 +280,8 @@ impl Servers {
         ));
         *locked(&slot.state) = Some(Running {
             launch,
+            project: project.clone(),
+            grants: Arc::clone(&self.grants),
             child,
             group,
             info: info.clone(),
@@ -273,7 +292,7 @@ impl Servers {
             proxy,
         });
         tokio::spawn(watch(Arc::downgrade(&slot), launch, self.idle));
-        if let Err(error) = ready(&slot, launch, server_port, group).await {
+        if let Err(error) = ready(&slot, launch, server_port, group, &self.closed).await {
             stop_launch(&slot, launch).await;
             return Err(error);
         }
@@ -375,7 +394,8 @@ impl Servers {
     }
 
     /// Brings a project's server extensions to the owner's approvals before it starts, after
-    /// [`command`] wrote the pin list into its Remote settings: every approved extension
+    /// [`command`] wrote the pin list into its Remote settings: the built-in extension
+    /// installed and listed ([`bridge::install_extension`]), every approved extension
     /// installed from its verified VSIX and every other one but the built-in removed
     /// ([`extensions::on_server_start`]), off the async runtime. A failure stops the start.
     /// Inputs: the build root and the project's IDE folder. Output: Ok, or a plain refusal.
@@ -392,6 +412,7 @@ impl Servers {
             folder.join(SERVER_DATA),
         );
         tokio::task::spawn_blocking(move || {
+            bridge::install_extension(&extensions)?;
             extensions::on_server_start(
                 &data,
                 &extensions::Registry::open_vsx(),
@@ -403,6 +424,37 @@ impl Servers {
         })
         .await
         .map_err(|_| failure("ide_extension_install_failed"))?
+    }
+
+    /// Starts a launch's server: refuses once [`Servers::stop_all`] began (a stop that begins
+    /// after this check is caught by [`ready`]), issues the project's capability for the
+    /// built-in extension at the launch's capability path, replacing any earlier one, then
+    /// spawns; a spawn that fails revokes it again. Inputs: the project, its slot with no
+    /// launch, the launch's info and its command. Output: the leader, or a plain refusal.
+    fn spawn(
+        &self,
+        project: &ProjectId,
+        slot: &Slot,
+        info: &ServerInfo,
+        command: &mut Command,
+    ) -> Result<Child, EngineError> {
+        {
+            let state = locked(&slot.state);
+            assert!(state.is_none());
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(failure("ide_servers_closed"));
+            }
+        }
+        let data = self
+            .folder
+            .parent()
+            .ok_or_else(|| failure("ide_state_unavailable"))?;
+        let capability = self.grants.issue(data, project)?;
+        assert_eq!(capability, info.capability_path);
+        crate::spawn_gate::spawn(command).map_err(|_| {
+            let _ = self.grants.revoke(project);
+            failure("ide_server_start_failed")
+        })
     }
 
     fn prepare(&self, project: &ProjectId) -> Result<PathBuf, EngineError> {
@@ -429,6 +481,7 @@ impl Drop for Servers {
                 continue;
             };
             running.proxy.abort();
+            let _ = running.grants.revoke(&running.project);
             if matches!(running.child.try_wait(), Ok(None)) || group_present(running.group) {
                 let _ = rustix::process::kill_process_group(running.group, Signal::KILL);
             }
@@ -460,10 +513,20 @@ async fn reuse(slot: &Slot) -> Option<ServerInfo> {
     None
 }
 
-/// Waits until a launch listens on its port, the launch ends or [`START_LIMIT`] passes.
-async fn ready(slot: &Slot, launch: u64, port: u16, group: Pid) -> Result<(), EngineError> {
+/// Waits until a launch listens on its port, the launch ends, [`Servers::stop_all`] began
+/// (`closed`) or [`START_LIMIT`] passes.
+async fn ready(
+    slot: &Slot,
+    launch: u64,
+    port: u16,
+    group: Pid,
+    closed: &AtomicBool,
+) -> Result<(), EngineError> {
     let deadline = Instant::now() + START_LIMIT;
     loop {
+        if closed.load(Ordering::SeqCst) {
+            return Err(failure("ide_servers_closed"));
+        }
         {
             let mut state = locked(&slot.state);
             let Some(running) = state.as_mut().filter(|running| running.launch == launch) else {
@@ -533,9 +596,11 @@ async fn stop_launch(slot: &Slot, launch: u64) {
     }
 }
 
-/// Ends a launch: the proxy, the process group, its token and group record.
+/// Ends a launch: the proxy, its built-in extension's capability, the process group, its
+/// token and group record.
 async fn finish(mut running: Running) {
     running.proxy.abort();
+    let _ = running.grants.revoke(&running.project);
     let _ = (&mut running.proxy).await;
     end_group(&mut running.child, running.group).await;
     let _ = token::remove(&running.folder);
@@ -597,14 +662,16 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// file (never the token), its own server data folder, the user data folder inside it whose
 /// Remote settings folder is locked, the locked-keys file readable, the extensions folder
 /// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
-/// grace; a cleared environment holding only [`env::server_env`] with TMPDIR at its short
-/// temp folder, stdout and stderr into the redacting `output` pipe, and its own process
-/// group.
+/// grace; a cleared environment holding only [`env::server_env`], with the owner `socket`
+/// the built-in extension connects to and TMPDIR at its short temp folder, its server data
+/// folder as the working directory (the profile lets it read no folder above), stdout and
+/// stderr into the redacting `output` pipe, and its own process group.
 fn command(
     build: &Path,
     folder: &Path,
     root: &Path,
     info: &ServerInfo,
+    socket: &Path,
     output: PipeWriter,
 ) -> Result<Command, EngineError> {
     let errors = output
@@ -655,11 +722,12 @@ fn command(
         .arg("--disable-workspace-trust")
         .arg("--reconnection-grace-time")
         .arg(RECONNECTION_GRACE.as_secs().to_string())
-        .current_dir(folder)
+        .current_dir(&home)
         .env_clear()
         .envs(env::server_env(
             std::env::vars_os(),
             &info.capability_path,
+            socket,
             &written.locked,
         ))
         .env("TMPDIR", &tmp)
@@ -803,4 +871,4 @@ pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests;
+pub(crate) mod tests;

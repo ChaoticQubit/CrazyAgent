@@ -10,7 +10,7 @@ const GONE_WAIT: Duration = Duration::from_secs(15);
 /// The pinned VSCodium reh-web build that IDE-1 extracted into the project-local cache, in
 /// the `.local-state/ide-cache` of the nearest checkout above this crate. A machine without
 /// it fails these tests: the IDE server is unqualified there.
-fn cached_build() -> PathBuf {
+pub(crate) fn cached_build() -> PathBuf {
     let build = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .map(|folder| folder.join(".local-state").join("ide-cache").join(BUILD))
@@ -28,6 +28,17 @@ fn scratch() -> tempfile::TempDir {
     folder
 }
 
+/// A register on `data` as the owner server makes one: its own grants and the owner socket
+/// path the sandbox lets a server reach. Inputs: the data folder and the idle limit.
+fn servers_in(data: &Path, idle: Duration) -> Servers {
+    Servers::new(
+        data,
+        idle,
+        Arc::default(),
+        data.join("engine").join("owner.sock"),
+    )
+}
+
 fn project(name: &str) -> ProjectId {
     ProjectId::new(name).unwrap()
 }
@@ -36,11 +47,21 @@ fn mode(path: &Path) -> u32 {
     fs::symlink_metadata(path).unwrap().mode() & 0o777
 }
 
+/// The process group the running launch recorded in a project's IDE folder. Input: the
+/// folder. Output: the group's id; panics when none is recorded.
+pub(crate) fn recorded_launch(folder: &Path) -> i32 {
+    recorded_group(&folder.join(GROUP))
+        .expect("a running launch records its process group")
+        .0
+        .as_raw_nonzero()
+        .get()
+}
+
 fn present(group: i32) -> bool {
     group_present(Pid::from_raw(group).unwrap())
 }
 
-async fn gone(group: i32) {
+pub(crate) async fn gone(group: i32) {
     let deadline = Instant::now() + GONE_WAIT;
     while present(group) {
         assert!(
@@ -118,7 +139,7 @@ fn group_listeners(group: i32) -> Vec<String> {
 async fn ide_server_listens_only_on_loopback() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("loopback");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
@@ -164,7 +185,7 @@ async fn ide_server_listens_only_on_loopback() {
 async fn request_without_the_token_is_refused() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("refused");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
@@ -240,7 +261,7 @@ async fn request_without_the_token_is_refused() {
 async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlist() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("token");
     let build = cached_build();
     let first = servers
@@ -330,6 +351,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("AWS_SECRET_ACCESS_KEY", "fixture-cloud-key"),
         ("CRAZYAGENT_POOL_ACCOUNT", "fixture-pool-account"),
         ("CRAZYAGENT_IDE_CAPABILITY_FILE", "/private/tmp/forged"),
+        ("CRAZYAGENT_IDE_SOCKET", "/private/tmp/forged.sock"),
         ("CRAZYAGENT_IDE_LOCKED_FILE", "/private/tmp/forged-locks"),
         ("CODEX_HOME", "/private/tmp/codex"),
         ("GIT_ASKPASS", "/private/tmp/askpass"),
@@ -345,8 +367,10 @@ fn server_env_holds_only_allowlisted_names() {
         .iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)));
     let capability = Path::new("/private/tmp/ide/project/capability");
+    let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
-    let built = env::server_env(source, capability, locked);
+    let built = env::server_env(source, capability, socket, locked);
+    assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
         .env_clear()
@@ -367,6 +391,7 @@ fn server_env_holds_only_allowlisted_names() {
         env::CAPABILITY_VARIABLE,
         "/private/tmp/ide/project/capability",
     ));
+    expected.push((env::SOCKET_VARIABLE, "/private/tmp/data/engine/owner.sock"));
     expected.push((
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
@@ -378,6 +403,7 @@ fn server_env_holds_only_allowlisted_names() {
     assert!(seen.iter().all(|(name, _)| {
         env::allowed(std::ffi::OsStr::new(name))
             || *name == env::CAPABILITY_VARIABLE
+            || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
             || crate::ide::git::CONFIG_ENV
                 .iter()
@@ -396,7 +422,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let data = scratch();
     let build = cached_build();
     let project = project("ports");
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let first = servers
         .open(&project, checkout.path(), &build)
         .await
@@ -423,7 +449,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     drop(servers);
 
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
-    let restarted = Servers::new(data.path(), IDLE_LIMIT);
+    let restarted = servers_in(data.path(), IDLE_LIMIT);
     let moved = restarted
         .open(&project, checkout.path(), &build)
         .await
@@ -453,7 +479,7 @@ async fn idle_server_stops_after_the_idle_limit() {
     let checkout = scratch();
     let data = scratch();
     let idle = Duration::from_secs(3);
-    let servers = Servers::new(data.path(), idle);
+    let servers = servers_in(data.path(), idle);
     let project = project("idle");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
@@ -625,7 +651,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .enable_all()
             .build()
             .unwrap();
-        let crashed = Servers::new(&left, IDLE_LIMIT);
+        let crashed = servers_in(&left, IDLE_LIMIT);
         let info = runtime
             .block_on(crashed.open(&name, &opened, &path))
             .unwrap();
@@ -642,7 +668,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
     .unwrap();
     assert!(present(old_group));
     assert!(present(other_group));
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     servers.sweep_left().await;
     let other_leader = Pid::from_raw(other_group).unwrap();
     assert!(
@@ -680,7 +706,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
 async fn the_server_log_never_holds_the_token() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("log");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
@@ -726,7 +752,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let checkout = scratch();
     let data = scratch();
     let build = cached_build();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("page");
     let info = servers
         .open(&project, checkout.path(), &build)
@@ -841,7 +867,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
 async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("socket");
     let info = servers
         .open(&project, checkout.path(), &cached_build())
@@ -887,7 +913,7 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
 fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let checkout = scratch();
     let data = scratch();
-    let servers = Servers::new(data.path(), IDLE_LIMIT);
+    let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("command");
     let folder = servers.prepare(&project).unwrap();
     let build = cached_build();
@@ -901,7 +927,8 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         workspace: folder.join(WORKSPACE),
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
-    let command = command(&build, &folder, checkout.path(), &info, writer).unwrap();
+    let socket = data.path().join("engine").join("owner.sock");
+    let command = command(&build, &folder, checkout.path(), &info, &socket, writer).unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
     let profile = folder.join(sandbox::PROFILE);
     let expected: Vec<OsString> = [
@@ -934,7 +961,11 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         args.iter()
             .all(|arg| !arg.to_string_lossy().contains(&token))
     );
-    assert_eq!(command.get_current_dir(), Some(folder.as_path()));
+    assert_eq!(
+        command.get_current_dir(),
+        Some(folder.join(SERVER_DATA).as_path()),
+        "the server starts in a folder its profile lets it read, so getcwd works under Seatbelt"
+    );
     let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
     for (name, value) in crate::ide::git::CONFIG_ENV {
         assert!(
@@ -945,6 +976,14 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
             "{name}"
         );
     }
+    assert!(envs.contains(&(
+        std::ffi::OsStr::new(env::SOCKET_VARIABLE),
+        Some(socket.as_os_str())
+    )));
+    assert!(envs.contains(&(
+        std::ffi::OsStr::new(env::CAPABILITY_VARIABLE),
+        Some(info.capability_path.as_os_str())
+    )));
     assert!(
         envs.iter()
             .all(|(_, value)| value.is_none_or(|value| !value.to_string_lossy().contains(&token)))
@@ -987,6 +1026,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     assert!(!text.contains(&folder.join("user-data").display().to_string()));
     for file in [
         &token_path,
+        &info.capability_path,
         &info.workspace,
         &folder.join(settings::LOCKED_FILE),
     ] {
@@ -996,4 +1036,106 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
             file.display()
         );
     }
+}
+
+/// The handshake the built-in extension sends with the token in its capability file.
+fn capability_packet(path: &Path) -> [u8; 37] {
+    let text = fs::read_to_string(path).unwrap();
+    assert_eq!(text.len(), 64);
+    let mut packet = [0; 37];
+    packet[..4].copy_from_slice(bridge::MAGIC);
+    for (index, byte) in packet[5..].iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).unwrap();
+    }
+    packet
+}
+
+#[tokio::test]
+async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
+    let checkout = scratch();
+    let data = scratch();
+    let grants: Arc<bridge::Grants> = Arc::default();
+    let socket = data.path().join("engine").join("owner.sock");
+    let servers = Servers::new(data.path(), IDLE_LIMIT, Arc::clone(&grants), socket);
+    let project = project("built-in");
+    let info = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
+    let installed = extensions.join(bridge::EXTENSION);
+    for (name, bytes) in bridge::EXTENSION_FILES {
+        assert_eq!(fs::read(installed.join(name)).unwrap(), bytes, "{name}");
+    }
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_slice(&fs::read(extensions.join("extensions.json")).unwrap()).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .filter(|entry| entry["identifier"]["id"] == extensions::BUILT_IN
+                && entry["relativeLocation"] == bridge::EXTENSION)
+            .count(),
+        1,
+        "the server's profile lists the built-in, or the server deletes it at start: {listed:?}"
+    );
+    assert_eq!(
+        info.capability_path,
+        servers.project_folder(&project).unwrap().join(CAPABILITY)
+    );
+    assert_eq!(mode(&info.capability_path), 0o600);
+    let packet = capability_packet(&info.capability_path);
+    assert_eq!(
+        grants.admit(&packet).unwrap_err().0,
+        "ide_session_required",
+        "the launch's capability file holds a live grant for the extension to take"
+    );
+    let group = servers.group(&project).unwrap();
+    assert!(servers.stop(&project).await);
+    gone(group).await;
+    assert!(!info.capability_path.exists());
+    assert_eq!(
+        grants.admit(&packet).unwrap_err().0,
+        "ide_capability_refused",
+        "a stopped server's capability is revoked"
+    );
+    let again = servers
+        .open(&project, checkout.path(), &cached_build())
+        .await
+        .unwrap();
+    let renewed = capability_packet(&again.capability_path);
+    assert_ne!(renewed, packet, "each launch gets a new capability");
+    assert_eq!(
+        grants.admit(&renewed).unwrap_err().0,
+        "ide_session_required"
+    );
+    assert_eq!(
+        grants.admit(&packet).unwrap_err().0,
+        "ide_capability_refused"
+    );
+    servers.stop_all().await;
+    assert!(!again.capability_path.exists());
+    assert_eq!(
+        grants.admit(&renewed).unwrap_err().0,
+        "ide_capability_refused"
+    );
+}
+
+#[tokio::test]
+async fn a_start_stops_waiting_once_stop_all_began() {
+    let slot = Slot::default();
+    let group = Pid::from_raw(std::process::id() as i32).unwrap();
+    assert_eq!(
+        ready(&slot, 0, 1, group, &AtomicBool::new(true))
+            .await
+            .unwrap_err()
+            .0,
+        "ide_servers_closed"
+    );
+    assert_eq!(
+        ready(&slot, 0, 1, group, &AtomicBool::new(false))
+            .await
+            .unwrap_err()
+            .0,
+        "ide_server_stopped"
+    );
 }

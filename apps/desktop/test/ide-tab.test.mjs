@@ -50,6 +50,12 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   }
   assert.equal(client.openFailure("ide_platform_unqualified"), "The IDE is unavailable on this platform.");
   assert.equal(client.openFailure("ide_build_not_ready"), "The IDE isn't ready yet. Wait for the download to finish.");
+  for (const code of ["ide_extension_install_failed", "ide_extension_list_invalid", "ide_extension_hash_mismatch", "ide_extensions_unavailable"]) {
+    assert.equal(client.openFailure(code), "The IDE's extensions couldn't be installed, so the IDE didn't start. Try again.", code);
+  }
+  for (const code of ["ide_capability_capacity", "ide_capability_unavailable"]) {
+    assert.equal(client.openFailure(code), "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.", code);
+  }
 });
 
 test("the tab is absent when ide_tab is off and last when it is on", () => {
@@ -96,7 +102,7 @@ test("the IDE webview runs the input guard, locks navigation and opens other lin
 test("the IDE tab follows its panel, hides with the tab, closes with the project and beats every minute", () => {
   const source = read("src/screens/project/ide.tsx");
   assert.equal(client.HEARTBEAT_MS, 60_000);
-  assert.match(source, /new ResizeObserver\(/);
+  assert.match(source, /window\.requestAnimationFrame\(follow\)/);
   assert.match(source, /hideIde\(/);
   assert.match(source, /touchIde\(/);
   const index = read("src/screens/project/index.tsx");
@@ -145,4 +151,68 @@ test("the TUI focus poll reaches the engine only while a project's IDE webview i
   assert.match(focus, /if !views\.any_loaded\(\) \{\s*return Ok\(None\);\s*\}/, "with no IDE loaded no reveal can mark a focus");
   assert.ok(focus.indexOf("views.any_loaded()") < focus.indexOf("ide_focus()"), "the engine is not asked, and its bridge lock not taken, before the check");
   assert.ok(focus.indexOf("main_window(&window)?") < focus.indexOf("views.any_loaded()"), "only the main window may ask");
+});
+
+const command = (lib, name) => {
+  const start = lib.indexOf(`async fn ${name}(`);
+  assert.ok(start >= 0, `${name} exists`);
+  return lib.slice(start, lib.indexOf("#[tauri::command]", start));
+};
+
+test("the IDE webview follows its panel through any layout shift or scroll, and the tab fills the space left", () => {
+  const box = { x: 0, y: 120, width: 900, height: 600 };
+  assert.equal(client.sameBounds(box, { ...box }), true);
+  assert.equal(client.sameBounds(box, null), false, "the first measure always places");
+  for (const moved of [{ ...box, y: 168 }, { ...box, x: 1 }, { ...box, width: 899 }, { ...box, height: 640 }]) {
+    assert.equal(client.sameBounds(box, moved), false, JSON.stringify(moved));
+  }
+  const tab = read("src/screens/project/ide.tsx");
+  assert.match(tab, /window\.requestAnimationFrame\(follow\)/, "the panel's box is compared every frame while shown, so a banner or a scroll that moves it without a resize moves the IDE too");
+  assert.match(tab, /window\.cancelAnimationFrame\(frame\)/, "hiding the tab stops following");
+  assert.match(tab, /if \(!box \|\| sameBounds\(box, last\)\) return;/, "the window hears only a box that changed");
+  assert.match(tab, /const place = \(\) => \{\s*if \(!shown\) return;\s*const box = bounds\(element\.getBoundingClientRect\(\)\);/, "nothing is measured before the IDE shows");
+  assert.match(tab, /if \(!live \|\| !shown\) \{\s*frame = 0;\s*return;\s*\}/, "the loop runs only while the IDE is shown");
+  assert.match(tab, /if \(frame === 0\) follow\(\);/, "the loop starts once the IDE shows, never twice");
+  const css = read("src/screens/project/ide.css");
+  assert.doesNotMatch(css, /100vh/, "the tab is not sized from a guessed header height");
+  assert.match(css, /\.main:has\(\.ide-tab\)/, "the page lays out as a column while the IDE tab is shown");
+  assert.match(css, /\.ide-tab \{[^}]*flex: 1;/, "the tab takes the space left under the header, banner and tabs");
+});
+
+test("closing a project page stops its IDE server, ordered with any open of the same project", () => {
+  const lib = read("src-tauri/src/lib.rs");
+  const close = command(lib, "desktop_ide_close");
+  assert.ok(close.indexOf("views.closing(&project)") >= 0 && close.indexOf("views.closing(&project)") < close.indexOf("ide::close("), "the close is noted before the webview closes and before any await");
+  assert.match(close, /views\s*\.stop_closed\(&project, closing,/);
+  assert.match(close, /ide_stop\(project\.clone\(\)\)/, "the engine stops the server");
+  const open = command(lib, "desktop_ide_open");
+  assert.match(open, /let \(ticket, turn\) = views\.begin\(&project\);/, "an open takes its ticket and its turn under one lock");
+  assert.doesNotMatch(open, /views\.turn\(/, "no second lock where a close could remove the order between them");
+  assert.ok(open.indexOf("turn.lock().await") < open.indexOf("ide_open(project"), "the engine opens only in the project's turn");
+  const bridge = read("src-tauri/src/bridge/ide.rs");
+  assert.match(bridge, /client\.ide_tab_stop\(project\)/);
+  const engine = read("../../crates/crazyagent/src/engine/owner/transport/ide_tab.rs");
+  assert.match(engine, /Action::Stop \{ project \} => Ok\(Reply::Stopped \{/);
+  assert.match(engine, /authority\.ide_servers\.stop\(project\)\.await/);
+});
+
+test("a loaded IDE hears the heartbeat on every tab of its project page, and only a loaded one reaches the engine", () => {
+  const index = read("src/screens/project/index.tsx");
+  assert.match(index, /window\.setInterval\(\(\) => void touchIde\(projectId\), HEARTBEAT_MS\)/, "the page beats while open, not only while the IDE is shown");
+  assert.match(index, /if \(ide\?\.tab !== "on"\) return;/, "no beat with the IDE tab off");
+  const touch = command(read("src-tauri/src/lib.rs"), "desktop_ide_touch");
+  assert.match(touch, /if !views\.loaded\(&project\) \{\s*return Ok\(false\);\s*\}/);
+  assert.ok(touch.indexOf("views.loaded(&project)") < touch.indexOf("ide_touch(project)"), "a project with no IDE loaded never asks the engine");
+});
+
+test("the IDE ask polls run only with the IDE tab on, and reach the engine only while an IDE is loaded", () => {
+  const index = read("src/screens/project/index.tsx");
+  assert.match(index, /\{ide\?\.tab === "on" && <IdeConfirm data=\{data\} \/>\}/);
+  assert.match(index, /\{ide\?\.tab === "on" && <IdeExtensionConfirm data=\{data\} \/>\}/);
+  const lib = read("src-tauri/src/lib.rs");
+  for (const [name, engine] of [["desktop_ide_asks", "ide_asks(&id)"], ["desktop_ide_extension_asks", "ide_extension_asks(project_id)"]]) {
+    const body = command(lib, name);
+    assert.match(body, /if !views\.any_loaded\(\) \{\s*return Ok\(Vec::new\(\)\);\s*\}/, name);
+    assert.ok(body.indexOf("views.any_loaded()") < body.indexOf(engine), `${name}: no engine read before the check`);
+  }
 });

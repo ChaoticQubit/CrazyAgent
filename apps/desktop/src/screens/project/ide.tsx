@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideView, openFailure, openIde, placeIde, touchIde } from "../../api-ide";
-import type { IdeTabState } from "../../api-ide";
+import { HEARTBEAT_MS, bounds, hideIde, ideStatus, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
+import type { IdeBounds, IdeTabState } from "../../api-ide";
 import { useOverlayShown } from "../../ui";
 import "./ide.css";
 
@@ -60,9 +60,22 @@ export function IdeTab({ projectId }: { projectId: string }) {
     if (!ready || !element || covered) return;
     let live = true;
     let shown = false;
+    let last: IdeBounds | null = null;
+    let frame = 0;
     const place = () => {
+      if (!shown) return;
       const box = bounds(element.getBoundingClientRect());
-      if (box && shown) void placeIde(projectId, box);
+      if (!box || sameBounds(box, last)) return;
+      last = box;
+      void placeIde(projectId, box);
+    };
+    const follow = () => {
+      if (!live || !shown) {
+        frame = 0;
+        return;
+      }
+      place();
+      frame = window.requestAnimationFrame(follow);
     };
     const open = async () => {
       const box = bounds(element.getBoundingClientRect());
@@ -78,13 +91,11 @@ export function IdeTab({ projectId }: { projectId: string }) {
         return;
       }
       shown = true;
+      last = null;
       setProblem(null);
-      place();
+      if (frame === 0) follow();
     };
     void open();
-    const observer = new ResizeObserver(place);
-    observer.observe(element);
-    window.addEventListener("resize", place);
     const beat = window.setInterval(() => {
       void touchIde(projectId).then((result) => {
         if (live && result.kind === "ok" && !result.value) void open();
@@ -92,8 +103,7 @@ export function IdeTab({ projectId }: { projectId: string }) {
     }, HEARTBEAT_MS);
     return () => {
       live = false;
-      observer.disconnect();
-      window.removeEventListener("resize", place);
+      window.cancelAnimationFrame(frame);
       window.clearInterval(beat);
       void hideIde(projectId);
     };

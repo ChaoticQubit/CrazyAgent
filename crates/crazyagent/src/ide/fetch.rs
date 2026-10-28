@@ -113,9 +113,25 @@ fn read_state(runtime: &Path) -> Option<BuildState> {
     serde_json::from_str(&text).ok()
 }
 
-fn write_state(runtime: &Path, state: &BuildState) -> Result<(), EngineError> {
+/// Makes the engine's IDE folder, which every agent sandbox denies and the IDE open refuses
+/// unless private, a 0700 folder of this user, narrowing one an earlier version left open.
+/// Input: the engine root. Output: the folder, or `ide_build_storage`.
+#[cfg(unix)]
+fn ide_folder(runtime: &Path) -> Result<PathBuf, EngineError> {
+    let folder = runtime.join(IDE_FOLDER);
+    super::token::private_folder(&folder).map_err(storage)?;
+    Ok(folder)
+}
+
+#[cfg(not(unix))]
+fn ide_folder(runtime: &Path) -> Result<PathBuf, EngineError> {
     let folder = runtime.join(IDE_FOLDER);
     std::fs::create_dir_all(&folder).map_err(storage)?;
+    Ok(folder)
+}
+
+fn write_state(runtime: &Path, state: &BuildState) -> Result<(), EngineError> {
+    let folder = ide_folder(runtime)?;
     let text = serde_json::to_vec(state).map_err(storage)?;
     let staged = folder.join(format!(".{STATE_FILE}.{}", std::process::id()));
     std::fs::write(&staged, text).map_err(storage)?;
@@ -259,7 +275,7 @@ fn installed(build: &Build) -> String {
 }
 
 fn install(runtime: &Path, build: &Build) -> Result<PathBuf, EngineError> {
-    let ide = runtime.join(IDE_FOLDER);
+    let ide = ide_folder(runtime)?;
     let (downloads, builds) = (ide.join("downloads"), ide.join("builds"));
     std::fs::create_dir_all(&downloads).map_err(storage)?;
     std::fs::create_dir_all(&builds).map_err(storage)?;

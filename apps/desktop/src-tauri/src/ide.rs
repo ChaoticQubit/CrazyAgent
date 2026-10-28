@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::webview::{NewWindowResponse, WebviewBuilder};
@@ -174,6 +174,21 @@ struct Held {
     launches: u64,
     opening: HashMap<String, u64>,
     asks: u64,
+    engine: HashMap<String, Order>,
+}
+
+/// One project's place in the queue of engine opens and stops: the turn each holds while the
+/// engine runs it, and the ticket of the project's newest open.
+struct Order {
+    turn: Arc<tokio::sync::Mutex<()>>,
+    begun: u64,
+}
+
+/// A project page's close waiting to stop its IDE server: the project's turn and the last
+/// ticket handed out when the page closed.
+pub struct Closing {
+    turn: Arc<tokio::sync::Mutex<()>>,
+    epoch: u64,
 }
 
 impl Held {
@@ -212,13 +227,75 @@ impl IdeViews {
     }
 
     /// Starts one open of a project's IDE before the engine is asked, so a hide or close
-    /// that comes first stops it from showing. Input: the project. Output: its ticket.
-    pub fn begin(&self, project: &ProjectId) -> u64 {
+    /// that comes first stops it from showing. Input: the project. Output: its ticket and
+    /// the turn it holds while the engine opens the project's server, so a stop from a page
+    /// close runs wholly before or wholly after it.
+    pub fn begin(&self, project: &ProjectId) -> (u64, Arc<tokio::sync::Mutex<()>>) {
         let mut held = self.lock();
         held.asks += 1;
         let ticket = held.asks;
         held.opening.insert(project.as_str().to_owned(), ticket);
-        ticket
+        let order = held
+            .engine
+            .entry(project.as_str().to_owned())
+            .or_insert_with(|| Order {
+                turn: Arc::default(),
+                begun: ticket,
+            });
+        order.begun = ticket;
+        (ticket, Arc::clone(&order.turn))
+    }
+
+    /// Whether this project's IDE webview is loaded, shown or hidden. Input: the project.
+    /// Output: true while it is loaded.
+    pub fn loaded(&self, project: &ProjectId) -> bool {
+        self.lock().loaded.contains_key(project.as_str())
+    }
+
+    /// Notes a project page's close, before any await, when an open asked the engine for
+    /// that project's server since the last close. Input: the project. Output: the close
+    /// to stop the server with, or none when no open asked for one.
+    pub fn closing(&self, project: &ProjectId) -> Option<Closing> {
+        let held = self.lock();
+        let order = held.engine.get(project.as_str())?;
+        Some(Closing {
+            turn: Arc::clone(&order.turn),
+            epoch: held.asks,
+        })
+    }
+
+    /// Runs a closed page's server stop in the project's turn, unless an open of that
+    /// project began after the close and wants the server, then forgets the project's order
+    /// once nothing else holds it. Inputs: the project, its close and the stop. Output: the
+    /// stop's answer, or false when it was skipped.
+    pub async fn stop_closed<F, S>(
+        &self,
+        project: &ProjectId,
+        closing: Closing,
+        stop: S,
+    ) -> Result<bool, BridgeError>
+    where
+        S: FnOnce() -> F,
+        F: std::future::Future<Output = Result<bool, BridgeError>>,
+    {
+        let turn = closing.turn.lock().await;
+        let reopened = self
+            .lock()
+            .engine
+            .get(project.as_str())
+            .is_some_and(|order| order.begun > closing.epoch);
+        let stopped = if reopened { Ok(false) } else { stop().await };
+        drop(turn);
+        let mut held = self.lock();
+        let idle = held.engine.get(project.as_str()).is_some_and(|order| {
+            Arc::ptr_eq(&order.turn, &closing.turn)
+                && order.begun <= closing.epoch
+                && Arc::strong_count(&order.turn) == 2
+        });
+        if idle {
+            held.engine.remove(project.as_str());
+        }
+        stopped
     }
 }
 
@@ -581,8 +658,8 @@ mod tests {
         let views = IdeViews::default();
         let alpha = ProjectId::new("alpha").unwrap();
         let beta = ProjectId::new("beta").unwrap();
-        let first = views.begin(&alpha);
-        let second = views.begin(&alpha);
+        let (first, _) = views.begin(&alpha);
+        let (second, _) = views.begin(&alpha);
         assert!(second > first);
         assert!(
             !views.lock().admit(&alpha, first),
@@ -590,18 +667,134 @@ mod tests {
         );
         assert!(views.lock().admit(&alpha, second));
         assert!(!views.lock().admit(&alpha, second), "a ticket shows once");
-        let hidden = views.begin(&alpha);
+        let (hidden, _) = views.begin(&alpha);
         views.lock().cancel(&alpha);
         assert!(
             !views.lock().admit(&alpha, hidden),
             "hide or close before the engine answered"
         );
-        let other = views.begin(&beta);
+        let (other, _) = views.begin(&beta);
         views.lock().cancel(&alpha);
         assert!(
             views.lock().admit(&beta, other),
             "cancelling one project leaves the other"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_page_stops_its_server_in_turn_unless_a_newer_open_wants_it() {
+        use crate::bridge::NativeBridge;
+        use crazyagent::engine::bootstrap::EngineService;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let root = tempfile::Builder::new()
+            .prefix("ca-dide-stop-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("g"),
+            &root.path().join("p"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut bridge = NativeBridge::new(Some(root.path().join("e.sock")));
+        bridge.connect().await.unwrap();
+        let bridge = Arc::new(bridge);
+        let views = Arc::new(IdeViews::default());
+        let alpha = ProjectId::new("alpha").unwrap();
+        assert!(
+            views.closing(&alpha).is_none(),
+            "a page that never asked for a server stops nothing"
+        );
+
+        let (_, open) = views.begin(&alpha);
+        let opening = open.lock().await;
+        let closing = views.closing(&alpha).unwrap();
+        let asked = Arc::new(AtomicBool::new(false));
+        let stop = tokio::spawn({
+            let (views, bridge, asked, alpha) = (
+                Arc::clone(&views),
+                Arc::clone(&bridge),
+                Arc::clone(&asked),
+                alpha.clone(),
+            );
+            async move {
+                views
+                    .stop_closed(&alpha, closing, || async {
+                        asked.store(true, Ordering::SeqCst);
+                        let call = bridge.ide_stop(alpha.clone())?;
+                        call.await
+                    })
+                    .await
+                    .map_err(|error| error.code)
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!stop.is_finished(), "the stop waits while the open runs");
+        assert!(
+            !asked.load(Ordering::SeqCst),
+            "the engine is not asked to stop before the open ends"
+        );
+        drop(opening);
+        drop(open);
+        assert_eq!(
+            stop.await.unwrap(),
+            Ok(false),
+            "then the engine is asked, and with no server running it stopped none"
+        );
+        assert!(asked.load(Ordering::SeqCst));
+        assert!(
+            views.closing(&alpha).is_none(),
+            "a stopped project is forgotten"
+        );
+
+        views.begin(&alpha);
+        let closing = views.closing(&alpha).unwrap();
+        views.begin(&alpha);
+        let asked = AtomicBool::new(false);
+        assert_eq!(
+            views
+                .stop_closed(&alpha, closing, || async {
+                    asked.store(true, Ordering::SeqCst);
+                    let call = bridge.ide_stop(alpha.clone())?;
+                    call.await
+                })
+                .await
+                .map_err(|error| error.code),
+            Ok(false),
+            "an open that began after the close keeps its server"
+        );
+        assert!(
+            !asked.load(Ordering::SeqCst),
+            "and the engine is never asked to stop it"
+        );
+        assert!(
+            views.closing(&alpha).is_some(),
+            "the newer open's order stays"
+        );
+
+        let closing = views.closing(&alpha).unwrap();
+        let detached = NativeBridge::new(Some(root.path().join("e.sock")));
+        assert_eq!(
+            views
+                .stop_closed(&alpha, closing, || async {
+                    let call = detached.ide_stop(alpha.clone())?;
+                    call.await
+                })
+                .await
+                .map_err(|error| error.code),
+            Err("not_connected"),
+            "a refused stop reaches the caller"
+        );
+        assert!(views.closing(&alpha).is_none());
+        service.shutdown().await.unwrap();
     }
 
     #[test]
