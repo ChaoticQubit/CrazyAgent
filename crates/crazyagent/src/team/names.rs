@@ -454,6 +454,44 @@ pub fn resolve(
     by("handle")
 }
 
+/// Finds the finished sub-agent of a project that a name addresses, for a wake (DEC-102):
+/// a persona in any case first, then an `@handle` or bare handle, among the project's
+/// sub-agents that stopped or failed, the most recently stopped one when several carried it.
+/// Takes the connection, project and the name text. Returns the team agent id, or None.
+pub fn resolve_finished(
+    connection: &Connection,
+    project: &ProjectId,
+    text: &str,
+) -> Result<Option<i64>, EngineError> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > NAME_CHARS_MAX {
+        return Ok(None);
+    }
+    let (marked, bare) = match text.strip_prefix('@') {
+        Some(bare) => (true, bare.to_ascii_lowercase()),
+        None => (false, text.to_ascii_lowercase()),
+    };
+    let by = |column: &str| {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT a.id FROM team_names n JOIN team_agents a ON a.id=n.agent
+                     WHERE n.project=?1 AND a.project=?1 AND a.role='sub'
+                       AND a.status IN ('stopped','failed') AND n.{column}=?2 COLLATE NOCASE
+                     ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT 1"
+                ),
+                params![project.as_str(), bare],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(error)
+    };
+    if !marked && let Some(found) = by("persona")? {
+        return Ok(Some(found));
+    }
+    by("handle")
+}
+
 #[cfg(all(test, unix))]
 #[path = "names/tests.rs"]
 mod tests;

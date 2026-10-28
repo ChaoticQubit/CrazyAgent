@@ -1167,7 +1167,7 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
     let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
     for text in [
         framing(&setup, true, &["codex", "claude-code"]),
-        live_framing(&setup, true, &["codex", "claude-code"]),
+        live_framing(&setup, true, &["codex", "claude-code"], &[]),
     ] {
         assert!(text.contains(listed), "{text}");
     }
@@ -1944,22 +1944,7 @@ done
 "#;
 
 fn live_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
-    let bin = fixture.base.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let codex = bin.join("codex");
-    std::fs::write(&codex, script).unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let access = fixture.access.clone();
-    TeamRuntime::open(
-        &fixture.base.join("engine.db"),
-        &fixture.base.join("team"),
-        BTreeMap::from([("codex", codex)]),
-        Box::new(move || Some(access.clone())),
-        TeamLimits::default(),
-    )
-    .unwrap()
-    .with_terminal(host.clone())
-    .unwrap()
+    limited_runtime(fixture, host, script, TeamLimits::default())
 }
 
 fn masters(connection: &Connection) -> Vec<i64> {
@@ -2909,6 +2894,42 @@ fn task_of(fixture: &Fixture, prompt: &str) -> (String, Option<String>) {
         .unwrap()
 }
 
+const WAKE_IDLE: Duration = Duration::from_secs(2);
+
+fn subs(fixture: &Fixture) -> Vec<i64> {
+    fixture
+        .connection
+        .prepare("SELECT id FROM team_agents WHERE project=?1 AND role='sub' ORDER BY id")
+        .unwrap()
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn agent_conversation(fixture: &Fixture, agent: i64) -> Option<(String, PathBuf)> {
+    fixture
+        .connection
+        .query_row(
+            "SELECT conversation,record FROM team_agent_conversations WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))),
+        )
+        .optional()
+        .unwrap()
+}
+
+fn agent_worktree(fixture: &Fixture, agent: i64) -> String {
+    fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 /// With the owner's task limit stored at 1 s, a sub-agent turn that keeps running is stopped
 /// and its task names the limit and where to change it.
 #[cfg(target_os = "macos")]
@@ -3141,4 +3162,472 @@ fn an_idle_sub_agent_is_stopped_by_the_idle_setting_and_never_while_it_is_off() 
         f.agent_status(id).0 == AgentStatus::Stopped
     });
     team.shutdown().unwrap();
+}
+
+fn typed(fixture: &Fixture, agent: i64) -> String {
+    std::fs::read_to_string(
+        fixture
+            .base
+            .join("team/agents")
+            .join(format!("agent-{agent}"))
+            .join("home/typed"),
+    )
+    .unwrap_or_default()
+}
+
+fn delegate_page(fixture: &Fixture) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("codex".into()),
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+}
+
+/// Plants one live master `wake` call in a mailbox and answers it the way the runtime's
+/// tick does. Takes the fixture, the mailbox, a call number and the call's agent and text.
+/// Returns the reply text and whether it is an error.
+fn wake_call(
+    fixture: &Fixture,
+    mailbox: &Path,
+    call: u32,
+    agent: &str,
+    text: &str,
+) -> (String, bool) {
+    let id = format!("{call:032x}");
+    std::fs::write(
+        mailbox.join(format!("{id}.call")),
+        serde_json::to_vec(&serde_json::json!({"tool": "wake", "agent": agent, "text": text}))
+            .unwrap(),
+    )
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let answering = super::super::master::Answering {
+        access: &fixture.access,
+        stored: &fixture.setup,
+        landing: &fixture.base,
+        events: None,
+        host: None,
+    };
+    assert_eq!(
+        super::super::master::serve_calls(&mut connection, &answering, mailbox).unwrap(),
+        1
+    );
+    let reply: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+            .unwrap();
+    (
+        reply["text"].as_str().unwrap().to_owned(),
+        reply["error"].as_bool().unwrap(),
+    )
+}
+
+/// The master wakes a finished sub-agent by its name (DEC-102): it starts again under the
+/// same id, name and worktree, continuing its own Codex conversation through `resume <id>`
+/// with the master's text as its next task. A running or unknown name gets a plain refusal.
+/// Once its conversation record is gone, the next wake starts a fresh conversation that
+/// carries the agent's last result as a handoff.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        RESUMING_CODEX,
+        TeamLimits {
+            idle_stop: WAKE_IDLE,
+            ..TeamLimits::default()
+        },
+    );
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes, keeps its conversation and stops",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Stopped
+                    && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (conversation, record) = agent_conversation(&fixture, member).unwrap();
+    assert!(
+        crate::harnesses::interactive::resumable(&conversation),
+        "{conversation}"
+    );
+    let worktree = agent_worktree(&fixture, member);
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    assert_eq!(
+        wake_call(&fixture, &mailbox, 1, "Zzyzx", "Hello"),
+        (
+            "Not woken: no finished sub-agent of this project is called Zzyzx. Call status() for their names.".to_owned(),
+            true
+        )
+    );
+    let label = super::super::events::label(&fixture.connection, member).unwrap();
+    assert_eq!(
+        wake_call(&fixture, &mailbox, 2, &persona, "Add a footer to page.md."),
+        (
+            format!(
+                "Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+            ),
+            false
+        )
+    );
+    fixture.until(
+        &mut team,
+        "the woken sub-agent continues its conversation with the new task",
+        |f| launches(f, member).len() == 2 && typed(f, member).contains("Add a footer to page.md."),
+    );
+    let label = super::super::events::label(&fixture.connection, member).unwrap();
+    assert_eq!(
+        wake_call(&fixture, &mailbox, 3, &persona, "Again"),
+        (
+            format!("Not woken: {label} is running. Reach it with message()."),
+            true
+        )
+    );
+    assert!(
+        launches(&fixture, member)[1].ends_with(&format!(" resume {conversation}")),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert!(!typed(&fixture, member).contains("Your last result then"));
+    assert_eq!(
+        subs(&fixture),
+        vec![member],
+        "no other sub-agent was started"
+    );
+    assert_eq!(agent_worktree(&fixture, member), worktree);
+    assert_eq!(
+        names::name(&fixture.connection, member)
+            .unwrap()
+            .unwrap()
+            .persona,
+        persona
+    );
+
+    fixture.until(
+        &mut team,
+        "the woken sub-agent finishes and stops again",
+        |f| f.agent_status(member).0 == AgentStatus::Stopped,
+    );
+    std::fs::remove_file(&record).unwrap();
+    assert_eq!(
+        wake_call(
+            &fixture,
+            &mailbox,
+            4,
+            &format!("Sub-agent {member}"),
+            "Check page.md."
+        )
+        .1,
+        false
+    );
+    fixture.until(
+        &mut team,
+        "the sub-agent without its conversation starts a fresh one",
+        |f| launches(f, member).len() == 3 && typed(f, member).contains("Check page.md."),
+    );
+    assert!(
+        !launches(&fixture, member)[2].contains("resume"),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert!(
+        typed(&fixture, member).contains("Your last result then: Done."),
+        "{}",
+        typed(&fixture, member)
+    );
+    fixture.until(&mut team, "the fresh conversation is kept", |f| {
+        agent_conversation(f, member).is_some_and(|(kept, _)| kept != conversation)
+    });
+    assert_eq!(subs(&fixture), vec![member]);
+    assert_eq!(agent_worktree(&fixture, member), worktree);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// The owner's restart of a finished sub-agent in the agent register wakes the same agent
+/// through the same function as the master's wake: same id, worktree and register entry,
+/// continuing its own conversation.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owner_restart_of_a_finished_sub_agent_wakes_the_same_agent() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        RESUMING_CODEX,
+        TeamLimits {
+            idle_stop: WAKE_IDLE,
+            ..TeamLimits::default()
+        },
+    )
+    .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes, keeps its conversation and stops",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Stopped
+                    && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (conversation, _) = agent_conversation(&fixture, member).unwrap();
+    let worktree = agent_worktree(&fixture, member);
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    agents.restart(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the restarted sub-agent starts again", |f| {
+        launches(f, member).len() == 2
+    });
+    assert!(
+        launches(&fixture, member)[1].ends_with(&format!(" resume {conversation}")),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert_eq!(
+        subs(&fixture),
+        vec![member],
+        "no other sub-agent was started"
+    );
+    assert_eq!(agent_worktree(&fixture, member), worktree);
+    let again = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(again.len(), 1, "the register entry was reused: {again:?}");
+    assert_eq!(again[0].id, listed[0].id);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A woken sub-agent continues only a conversation kept on the same harness and account,
+/// with an id its harness resumes by and its record still a plain file, and only where
+/// agents run in terminal panes. A Claude Code agent's kept conversation is the one its
+/// `--resume` gets, as the adapter test of the resumed command line shows.
+#[test]
+fn a_woken_sub_agent_continues_only_a_conversation_its_harness_and_account_can_resume() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let account = reference(ENDPOINT);
+    let agent = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Stopped);
+    let record = fixture.base.join("conversation.jsonl");
+    std::fs::write(&record, "").unwrap();
+    let resume = Resume {
+        id: "0f0e0d0c-0000-4000-8000-000000000001".into(),
+        record: record.clone(),
+    };
+    keep_agent_conversation(
+        &fixture.connection,
+        agent,
+        &project,
+        "claude-code",
+        &account,
+        &resume,
+    )
+    .unwrap();
+    assert_eq!(
+        fixture
+            .runtime()
+            .kept_conversation(agent, "claude-code", &account)
+            .unwrap(),
+        None,
+        "a headless agent never resumes"
+    );
+    let team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    assert_eq!(
+        team.kept_conversation(agent, "claude-code", &account)
+            .unwrap(),
+        Some(resume.clone())
+    );
+    assert_eq!(
+        team.kept_conversation(agent, "claude-code", &reference("other-account"))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        team.kept_conversation(agent, "codex", &account).unwrap(),
+        None
+    );
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    assert_eq!(
+        team.kept_conversation(agent, "claude-code", &account)
+            .unwrap(),
+        None
+    );
+    std::fs::remove_dir(&record).unwrap();
+    std::fs::write(&record, "").unwrap();
+    keep_agent_conversation(
+        &fixture.connection,
+        agent,
+        &project,
+        "claude-code",
+        &account,
+        &Resume {
+            id: "not-a-uuid".into(),
+            record: record.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        team.kept_conversation(agent, "claude-code", &account)
+            .unwrap(),
+        None
+    );
+    drop(team);
+    host.close(&[]).unwrap();
+}
+
+/// A live master with team tools is told the newest twenty finished sub-agents it can
+/// wake, each with its name, harness, last task on one line and when it finished; running
+/// agents, agents whose worktree is gone and masters are left out.
+#[test]
+fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let now = 100 * 24 * 60 * 60 * 1000;
+    let finished = |harness: &str, status: AgentStatus, ago: i64, worktree: bool| {
+        let id = fixture.agent(AgentRole::Sub, harness, status);
+        names::assign_persona(&fixture.connection, &project, id).unwrap();
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET stopped_ms=?2 WHERE id=?1",
+                params![id, now - ago],
+            )
+            .unwrap();
+        if worktree {
+            fixture
+                .connection
+                .execute(
+                    "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+                    params![id, PROJECT, format!("worktrees/agent-{id}")],
+                )
+                .unwrap();
+        }
+        id
+    };
+    let task = |agent: i64, prompt: &str, created: i64| {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,started_ms) VALUES (?1,'master','codex',0,?2,'done',?3,?4,?4)",
+                params![PROJECT, prompt, agent, created],
+            )
+            .unwrap();
+    };
+    let fresh = finished("codex", AgentStatus::Stopped, 30_000, true);
+    task(fresh, "Old task", 1);
+    task(fresh, "Write page.md\n  with a header", 2);
+    let failed = finished("claude-code", AgentStatus::Failed, 4 * 60_000, true);
+    let hours = finished("codex", AgentStatus::Stopped, 3 * 60 * 60_000, true);
+    task(hours, &"long ".repeat(100), 3);
+    let days = finished("codex", AgentStatus::Stopped, 2 * 24 * 60 * 60_000, true);
+    finished("codex", AgentStatus::Idle, 1_000, true);
+    finished("codex", AgentStatus::Stopped, 1_000, false);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET stopped_ms=?1 WHERE id=?2",
+            params![
+                now,
+                fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped)
+            ],
+        )
+        .unwrap();
+    let older: Vec<i64> = (0..20)
+        .map(|n| {
+            finished(
+                "codex",
+                AgentStatus::Stopped,
+                10 * 24 * 60 * 60_000 + n,
+                true,
+            )
+        })
+        .collect();
+
+    let lines = finished_agents(&fixture.connection, &project, now).unwrap();
+    assert_eq!(lines.len(), FINISHED_LISTED_MAX);
+    let label = |id: i64| super::super::events::label(&fixture.connection, id).unwrap();
+    let codex = names::harness_name("codex");
+    assert_eq!(
+        lines[0],
+        format!(
+            "- {} ({codex}): Write page.md with a header; finished just now",
+            label(fresh)
+        )
+    );
+    assert_eq!(
+        lines[1],
+        format!(
+            "- {} ({}): no task yet; finished 4 min ago",
+            label(failed),
+            names::harness_name("claude-code")
+        )
+    );
+    assert!(
+        lines[2].starts_with(&format!("- {} ({codex}): long long", label(hours))),
+        "{}",
+        lines[2]
+    );
+    assert!(lines[2].ends_with("; finished 3 h ago"), "{}", lines[2]);
+    assert!(lines[2].len() < 200, "{}", lines[2]);
+    assert_eq!(
+        lines[3],
+        format!(
+            "- {} ({codex}): no task yet; finished 2 days ago",
+            label(days)
+        )
+    );
+    assert_eq!(
+        lines[4..],
+        older[..16]
+            .iter()
+            .map(|id| format!(
+                "- {} ({codex}): no task yet; finished 10 days ago",
+                label(*id)
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let listed = format!(
+        "Finished sub-agents you can wake with wake(agent, text), newest first, as this session starts:\n{}\n",
+        lines.join("\n")
+    );
+    let framed = live_framing(&fixture.setup, true, &[], &lines);
+    assert!(framed.contains(&listed), "{framed}");
+    assert!(
+        framed.contains("wake(agent, text) wakes a finished sub-agent"),
+        "{framed}"
+    );
+    assert!(!live_framing(&fixture.setup, true, &[], &[]).contains("Finished sub-agents"));
+    assert!(!live_framing(&fixture.setup, false, &[], &lines).contains("Finished sub-agents"));
 }

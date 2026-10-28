@@ -1,4 +1,4 @@
-use super::{AgentSession, KeyFile, TerminalSession, host_failure};
+use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
@@ -252,6 +252,16 @@ impl AgentSession {
         match self {
             Self::Piped(_) => None,
             Self::Terminal(session) => session.record().cloned(),
+        }
+    }
+
+    /// Names the harness conversation a pane agent records, once its record exists, so a
+    /// later start can continue it. Takes the session. Returns none for a headless agent on
+    /// pipes or before the record exists.
+    pub fn conversation(&self) -> Option<Resume> {
+        match self {
+            Self::Piped(_) => None,
+            Self::Terminal(session) => session.conversation(),
         }
     }
 

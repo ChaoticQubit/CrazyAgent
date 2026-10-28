@@ -554,7 +554,9 @@ fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
     Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)
 }
 
-fn one_line(text: &str, max: usize) -> String {
+/// Joins text onto one line of plain words without control characters, bounded to `max`
+/// bytes. Takes the text and the bound. Returns the line.
+pub(super) fn one_line(text: &str, max: usize) -> String {
     let joined = text
         .split_whitespace()
         .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
