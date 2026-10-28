@@ -1974,3 +1974,81 @@ fn the_recovery_banner_on_the_conversation_tab_says_tab_first_while_the_composer
         "out of the composer the key works as shown:\n{out}"
     );
 }
+
+#[test]
+fn at_eighty_columns_with_a_failed_run_and_a_notice_every_banner_key_is_drawn_whole() {
+    use crate::engine::owner::{BannerNotice, BannerRun, NoticeShown, RecoveryBanner, RunShown};
+    use crate::tui::client::recovery::{RecoveryEvent, RecoveryQuery, RecoveryReply};
+    let notes = ProjectId::new("notes-cli").unwrap();
+    let mut ctx = ctx(80, 24);
+    ctx.link = crate::tui::ctx::Link::Ready;
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let mut read = Vec::new();
+    while let Some(request) = shell.ctx.next_request() {
+        if let Request::Recovery(query) = request {
+            read.push(*query);
+        }
+    }
+    assert_eq!(read, [RecoveryQuery::Read { project: notes }]);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Recovery(Box::new(
+        RecoveryEvent {
+            query: read[0].clone(),
+            result: Ok(RecoveryReply::Banner(RecoveryBanner {
+                runs: vec![BannerRun {
+                    agent: 3,
+                    label: "Sub-agent 3".into(),
+                    role: crate::team::AgentRole::Sub,
+                    harness: "Codex".into(),
+                    at_ms: 1_800_000_000_000,
+                    turn: 3,
+                    asked: Some("Plan the page".into()),
+                    state: RunShown::Failed,
+                    reason: Some("The account is unavailable.".into()),
+                    paused: false,
+                }],
+                notices: vec![BannerNotice {
+                    action_kind: crate::ledger::ActionKind::AgentSpawn,
+                    id: 7,
+                    agent: Some(2),
+                    label: Some("Ada".into()),
+                    change_set: None,
+                    shown: NoticeShown::Unknown,
+                    started_ms: 1_800_000_000_000,
+                }],
+                more: 0,
+            })),
+        },
+    )))));
+
+    for (state, out) in [
+        ("typing", render(&mut shell, 80, 24)),
+        ("after Tab", {
+            shell.key(Key::Tab);
+            render(&mut shell, 80, 24)
+        }),
+    ] {
+        for key in [
+            "Ctrl-R Retry Sub-agent 3",
+            "Ctrl-D Dismiss Ada's start",
+            "Ctrl-N Next item",
+        ] {
+            assert!(
+                out.lines().any(|line| line.contains(key)),
+                "{state}: {key:?} is drawn whole on one line:\n{out}"
+            );
+        }
+        assert!(
+            !out.lines()
+                .any(|line| line.contains("Ctrl-") && line.contains('\u{2026}')),
+            "{state}: no key line is cut:\n{out}"
+        );
+    }
+}
