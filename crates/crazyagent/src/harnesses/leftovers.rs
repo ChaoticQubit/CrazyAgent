@@ -22,6 +22,23 @@ const NAMED_MAX: usize = 8;
 const PROGRAM_CHARS_MAX: usize = 32;
 #[cfg(unix)]
 const TABLE_ROWS_MAX: usize = 65_536;
+/// How long one read of the process table may take before `ps` is killed, so a stalled
+/// exec never delays the kill of a stopping agent.
+#[cfg(unix)]
+const TABLE_TIME: Duration = Duration::from_secs(1);
+#[cfg(unix)]
+const TABLE_BYTES_MAX: u64 = 4 * 1024 * 1024;
+#[cfg(unix)]
+const TABLE_POLL: Duration = Duration::from_millis(5);
+/// The command that lists every process with what the lineage needs of it.
+#[cfg(unix)]
+const PS_TABLE: &[&str] = &[
+    "/bin/ps",
+    "-A",
+    "-ww",
+    "-o",
+    "pid=,ppid=,uid=,stat=,lstart=,comm=",
+];
 
 /// Why a stop could not report every process of an agent ended.
 #[derive(Debug)]
@@ -55,11 +72,12 @@ struct Process {
 /// The processes of a Full access agent the engine can still find: its leader, every
 /// process in the leader's session, and every process whose parent is one of them. A
 /// process that left both before it was seen, such as a daemon whose parent already
-/// exited, is not found.
+/// exited, is not found. `table` is the command that lists the processes.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     leader: i32,
     known: Vec<Process>,
+    table: &'static [&'static str],
 }
 
 /// The processes a Full access agent left running after its stop, which no Seatbelt
@@ -127,6 +145,13 @@ impl Lineage {
     /// [`Unstopped::Uncertain`] when the processes cannot be read.
     #[cfg(unix)]
     pub(crate) fn of(leader: u32) -> Result<Self, Unstopped> {
+        Self::reading(leader, PS_TABLE)
+    }
+
+    /// Finds a lineage as [`Self::of`] does with the processes listed by `table`.
+    /// Inputs: the leader and the listing command. Output: as for [`Self::of`].
+    #[cfg(unix)]
+    fn reading(leader: u32, table: &'static [&'static str]) -> Result<Self, Unstopped> {
         let leader = i32::try_from(leader)
             .ok()
             .filter(|leader| *leader > 1)
@@ -134,6 +159,7 @@ impl Lineage {
         let mut lineage = Self {
             leader,
             known: Vec::new(),
+            table,
         };
         lineage.refresh()?;
         Ok(lineage)
@@ -176,7 +202,7 @@ impl Lineage {
     /// when `ps` cannot be read.
     #[cfg(unix)]
     fn refresh(&mut self) -> Result<(), Unstopped> {
-        let table = table()?;
+        let table = table(self.table)?;
         let mut kept: Vec<Process> = table
             .iter()
             .filter(|(process, _)| self.known.iter().any(|known| same(known, process)))
@@ -222,30 +248,75 @@ fn same(known: &Process, now: &Process) -> bool {
     known.pid == now.pid && known.started == now.started
 }
 
-/// Reads this user's running processes, other than the engine, with `ps`; a zombie has
-/// ended and is left out. Output: each process with its parent's id, or uncertain when
-/// `ps` fails or its listing is out of bounds.
+/// Reads this user's running processes, other than the engine, with the listing command;
+/// a zombie has ended and is left out. Input: the command, [`PS_TABLE`] outside tests.
+/// Output: each process with its parent's id, or uncertain when the listing fails or is out
+/// of bounds.
 #[cfg(unix)]
-fn table() -> Result<Vec<(Process, i32)>, Unstopped> {
+fn table(argv: &[&str]) -> Result<Vec<(Process, i32)>, Unstopped> {
+    let output = read_bounded(argv)?;
+    let listing = String::from_utf8_lossy(&output);
+    let user = rustix::process::getuid().as_raw();
+    let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
+    parse(&listing, user, own)
+}
+
+/// Runs a listing command with a cleared environment and reads its output, at most
+/// `TABLE_BYTES_MAX` bytes within `TABLE_TIME`, and kills it past either bound, so a stalled
+/// or flooding listing never holds up a stop. Input: the program and its arguments.
+/// Output: the output of a run that exited 0 within both bounds, or uncertain.
+#[cfg(unix)]
+fn read_bounded(argv: &[&str]) -> Result<Vec<u8>, Unstopped> {
+    use std::io::Read;
     use std::process::{Command, Stdio};
-    let output = crate::spawn_gate::output(
-        Command::new("/bin/ps")
+    let (program, arguments) = argv.split_first().ok_or(Unstopped::Uncertain)?;
+    let deadline = Instant::now() + TABLE_TIME;
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(program)
+            .args(arguments)
             .env_clear()
             .env("LC_ALL", "C")
             .env("TZ", "UTC0")
-            .args(["-A", "-ww", "-o", "pid=,ppid=,uid=,stat=,lstart=,comm="])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),
     )
     .map_err(|_| Unstopped::Uncertain)?;
-    if !output.status.success() {
-        return Err(Unstopped::Uncertain);
+    let read = child.stdout.take().and_then(|stdout| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("lineage-table".into())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                let read = stdout.take(TABLE_BYTES_MAX + 1).read_to_end(&mut bytes);
+                let _ = sender.send(read.map(|_| bytes));
+            })
+            .ok()?;
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok()?
+            .ok()
+            .filter(|bytes| {
+                u64::try_from(bytes.len()).is_ok_and(|length| length <= TABLE_BYTES_MAX)
+            })
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if read.is_some() && Instant::now() < deadline => {
+                std::thread::sleep(TABLE_POLL);
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    match (read, status) {
+        (Some(bytes), Some(status)) if status.success() => Ok(bytes),
+        _ => Err(Unstopped::Uncertain),
     }
-    let listing = String::from_utf8_lossy(&output.stdout);
-    let user = rustix::process::getuid().as_raw();
-    let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
-    parse(&listing, user, own)
 }
 
 /// Picks from a `ps -o pid=,ppid=,uid=,stat=,lstart=,comm=` listing the processes of `user`
@@ -344,7 +415,12 @@ mod tests {
                 program: "sleep".into(),
             })
             .collect();
-        let report = Leftovers(Lineage { leader: 2, known }).plain();
+        let report = Leftovers(Lineage {
+            leader: 2,
+            known,
+            table: PS_TABLE,
+        })
+        .plain();
         assert!(
             report.contains("still running: 2 sleep, 3 sleep,"),
             "{report}"
@@ -441,11 +517,33 @@ mod tests {
     }
 
     #[test]
+    fn a_table_read_that_stalls_or_floods_ends_within_its_bound() {
+        let stalled: &'static [&'static str] = &["/bin/sleep", "5"];
+        let flooding: &'static [&'static str] =
+            &["/bin/dd", "if=/dev/zero", "bs=1048576", "count=8"];
+        for table in [stalled, flooding] {
+            let started = Instant::now();
+            let read = Lineage::reading(std::process::id(), table);
+            let took = started.elapsed();
+            assert!(
+                matches!(read, Err(Unstopped::Uncertain)),
+                "{table:?} was read as a process table after {took:?}: {read:?}"
+            );
+            assert!(
+                took < Duration::from_secs(3),
+                "{table:?} held the read for {took:?}"
+            );
+        }
+        assert!(Lineage::of(std::process::id()).is_ok());
+    }
+
+    #[test]
     #[should_panic]
     fn an_empty_report_trips_its_invariant() {
         let _ = Leftovers(Lineage {
             leader: 2,
             known: Vec::new(),
+            table: PS_TABLE,
         })
         .plain();
     }
