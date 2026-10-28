@@ -293,6 +293,7 @@ struct Worker {
     session: Option<String>,
     seed: Option<String>,
     handoff: Option<String>,
+    told_finished: BTreeSet<i64>,
 }
 
 /// Reads the live model access on every tick; none means no pool is configured.
@@ -1602,13 +1603,18 @@ impl TeamRuntime {
         };
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
+        let finished = super::events::finished_agents(&self.connection, project, now_ms())?;
+        let told: BTreeSet<i64> = finished.iter().map(|(agent, _)| *agent).collect();
+        let lines: Vec<String> = finished.into_iter().map(|(_, line)| line).collect();
+        if !fresh && !told.is_subset(&self.workers[&id].told_finished) {
+            prompt.push_str(&wake_text(&lines));
+        }
         if fresh {
-            let finished = super::events::finished_agents(&self.connection, project, now_ms())?;
             prompt.push_str(&framing(
                 stored,
                 team_tool,
                 &super::available_harnesses(access, project),
-                &finished,
+                &lines,
             ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
@@ -1628,6 +1634,7 @@ impl TeamRuntime {
         if worker.orders.send(Order::Turn(prompt, grant)).is_err() {
             return Ok(());
         }
+        worker.told_finished = told;
         worker.busy = Some(Busy::Message(message));
         self.connection
             .execute(
@@ -1881,8 +1888,11 @@ impl TeamRuntime {
         } else {
             None
         };
-        let finished =
-            super::events::finished_agents(&self.connection, &stored.project_id, now_ms())?;
+        let finished: Vec<String> =
+            super::events::finished_agents(&self.connection, &stored.project_id, now_ms())?
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect();
         let mut framing = live_framing(
             stored,
             self.workers[&id].team_tool,
@@ -2772,6 +2782,7 @@ impl TeamRuntime {
                 session: None,
                 seed: None,
                 handoff: None,
+                told_finished: BTreeSet::new(),
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -3830,15 +3841,7 @@ fn framing(
 ) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
-    let wake = if finished.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "To wake a finished sub-agent in its own worktree with your text as its next task, write on its own line exactly like this:\n{} <its name or Sub-agent number>: <the text>\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
-            super::WAKE_MARKER,
-            finished.join("\n")
-        )
-    };
+    let wake = wake_text(finished);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -3851,6 +3854,20 @@ fn framing(
     format!(
         "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results.\n\nProject brief:\n{}\n\n",
         stored.name, team, brief
+    )
+}
+
+/// Tells a master that is not live how to wake a finished sub-agent with a `WAKE` line and
+/// which ones it can wake (WK-R5). Input: the finished sub-agents' lines, newest first.
+/// Output: the text, or nothing when no sub-agent finished.
+fn wake_text(finished: &[String]) -> String {
+    if finished.is_empty() {
+        return String::new();
+    }
+    format!(
+        "To wake a finished sub-agent in its own worktree with your text as its next task, write on its own line exactly like this:\n{} <its name or Sub-agent number>: <the text>\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
+        super::WAKE_MARKER,
+        finished.join("\n")
     )
 }
 
