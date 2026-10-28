@@ -2239,6 +2239,15 @@ async fn desktop_cancel_native_auth(
 }
 
 #[tauri::command]
+async fn desktop_clear_native_auth(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<bool, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.clear_native_auth().await
+}
+
+#[tauri::command]
 async fn desktop_submit_claude_auth_code(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2456,6 +2465,7 @@ pub fn run() {
             desktop_start_native_auth,
             desktop_read_native_auth,
             desktop_cancel_native_auth,
+            desktop_clear_native_auth,
             desktop_logout_native_auth,
             desktop_submit_claude_auth_code,
             desktop_owner_profile,

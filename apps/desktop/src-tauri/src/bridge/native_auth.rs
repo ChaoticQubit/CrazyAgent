@@ -10,6 +10,8 @@ use serde::Serialize;
 
 mod claude;
 mod presentation;
+#[cfg(all(test, unix))]
+mod tests;
 
 #[derive(Serialize)]
 pub struct NativeAuthView {
@@ -139,18 +141,105 @@ impl NativeBridge {
         self.finish_auth(ticket, result)
     }
 
-    pub(super) fn allow_new_auth(&self) -> Result<(), BridgeError> {
+    /// Ends a sign-in whose outcome the bridge could not confirm, once the engine answers for
+    /// it. The engine re-reads the operation with the scope it started with and, while it
+    /// still runs, is asked to cancel it. Output: true when no stuck sign-in remains, false
+    /// while the engine still runs it; an unconfirmed answer keeps it and returns that error.
+    pub async fn clear_native_auth(&mut self) -> Result<bool, BridgeError> {
+        let Some(operation) = self.native_auth.as_ref().filter(|value| value.unresolved) else {
+            return Ok(true);
+        };
+        let scope = operation.original.scope().clone();
+        let operation_id = operation.original.id().clone();
+        let request = NativeAuthQuery {
+            request_id: self.auth_request_id()?,
+            scope: scope.clone(),
+            operation_id: operation_id.clone(),
+        };
+        let read = self.controller()?.read_native_auth(request).await;
+        if !self.settle_auth(read)? {
+            let request = NativeAuthCancel {
+                request_id: self.auth_request_id()?,
+                scope,
+                operation_id,
+            };
+            let cancel = self.controller()?.cancel_native_auth(request).await;
+            if !self.settle_auth(cancel)? {
+                assert!(self.stuck_auth().is_some());
+                return Ok(false);
+            }
+        }
+        assert!(self.native_auth.is_none());
+        Ok(true)
+    }
+
+    /// Names the connection of the sign-in whose outcome is still unconfirmed, if any.
+    pub(super) fn stuck_auth(&self) -> Option<&ModelConnection> {
+        self.native_auth
+            .as_ref()
+            .filter(|value| value.unresolved)
+            .map(|value| &value.connection)
+    }
+
+    /// Refuses any owner change while an account profile change awaits its outcome.
+    pub(super) fn allow_change(&self) -> Result<(), BridgeError> {
         if self.profile_pending() {
             return Err(failure("account_profile_recovery_required"));
         }
-        if self
-            .native_auth
-            .as_ref()
-            .is_some_and(|value| value.unresolved)
-        {
+        Ok(())
+    }
+
+    /// Refuses a change to the account of a stuck sign-in. Input: tells whether the change
+    /// touches a given connection's account. Output: the refusal, if any.
+    pub(super) fn allow_account_change(
+        &self,
+        touches: impl FnOnce(&ModelConnection) -> bool,
+    ) -> Result<(), BridgeError> {
+        self.allow_change()?;
+        if self.stuck_auth().is_some_and(touches) {
             return Err(failure("native_auth_recovery_required"));
         }
         Ok(())
+    }
+
+    /// Refuses a new sign-in or logout while another one is stuck, since the bridge keeps
+    /// one sign-in record and needs it to settle the stuck one.
+    pub(super) fn allow_new_auth(&self) -> Result<(), BridgeError> {
+        self.allow_change()?;
+        if self.stuck_auth().is_some() {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        Ok(())
+    }
+
+    /// Applies one engine answer about the stuck sign-in. Output: true when the answer ends
+    /// it, false while the engine still runs it; an unconfirmed answer keeps it as an error.
+    fn settle_auth(
+        &mut self,
+        result: Result<NativeAuthReply, EngineError>,
+    ) -> Result<bool, BridgeError> {
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(error) => {
+                let error = auth_error(error);
+                if crazyagent::engine::owner::ends_operation(error.code) {
+                    self.native_auth = None;
+                    return Ok(true);
+                }
+                return Err(self.auth_failure(error));
+            }
+        };
+        if let Err(error) = self.validate_auth_reply(&reply) {
+            return Err(self.auth_failure(error));
+        }
+        if reply.fact.phase.unfinished() {
+            let operation = self.native_auth.as_mut().expect("validated auth operation");
+            operation.generation = Some(reply.fact.generation);
+            assert!(operation.unresolved);
+            return Ok(false);
+        }
+        self.native_auth = None;
+        Ok(true)
     }
 
     fn retain_auth(&mut self, original: Original, connection: ModelConnection) {

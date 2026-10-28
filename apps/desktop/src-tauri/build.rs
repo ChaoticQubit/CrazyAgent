@@ -91,6 +91,7 @@ fn main() {
         "desktop_start_native_auth",
         "desktop_read_native_auth",
         "desktop_cancel_native_auth",
+        "desktop_clear_native_auth",
         "desktop_logout_native_auth",
         "desktop_submit_claude_auth_code",
         "desktop_model_access_page",

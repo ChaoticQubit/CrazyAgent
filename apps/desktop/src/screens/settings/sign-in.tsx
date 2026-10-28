@@ -42,13 +42,15 @@ export function signInFailure(code: string, provider: SubscriptionProvider): { t
   return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
-const STUCK = new Set(["native_auth_operation_missing", "native_profile_source_conflict", "native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);
+const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
 
 /** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
  * sentence, or undefined when the sign-in had already stopped. */
 export function cancelError(code: string): string | undefined {
   if (code === "native_auth_not_active") return undefined;
-  if (STUCK.has(code)) return "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.";
+  if (GONE.has(code)) return "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.";
+  if (STUCK.has(code)) return "CrazyAgent can't stop this sign-in from here. Use Clear stuck sign-in at the top of the window.";
   return plainError(code);
 }
 

@@ -81,7 +81,7 @@ const COPY: Record<string, string> = {
   native_auth_host_unavailable: "Sign-in isn't available on this Mac right now. Check that the harness is installed.",
   native_auth_cannot_display_safely: "The sign-in page sent something CrazyAgent can't show safely. Try again.",
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
-  native_auth_recovery_required: "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.",
+  native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -204,6 +204,7 @@ async function change(command: string, args: InvokeArgs): Promise<Result<void>> 
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 /** Connects this window to the engine. Output: whether it is connected and whether an earlier
@@ -515,6 +516,22 @@ export function profileSettledLine(check: ProfileCheck): string | null {
   if (check === "configured") return "The account is set up for agents.";
   if (check === "not_recorded") return "The account set-up for agents never reached the engine. Save the pool again to set it up.";
   return null;
+}
+
+/** The banner line while a sign-in's outcome is unconfirmed. */
+export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
+
+/** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
+ * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
+ * while the engine is still stopping it, or a plain error. */
+export function clearStuckSignIn(): Promise<Result<boolean>> {
+  return call<boolean>("desktop_clear_native_auth");
+}
+
+/** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
+export function stuckClearedLine(result: Result<boolean>): string {
+  if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
+  return result.kind === "error" ? result.message : plainError("unknown");
 }
 
 export interface PoolMember {
