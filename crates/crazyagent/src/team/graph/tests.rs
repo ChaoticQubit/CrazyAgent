@@ -65,6 +65,7 @@ fn status() -> TeamStatus {
         turn_limit_secs: None,
         session_limit_secs: None,
         idle_stop_secs: None,
+        on_harness_switch: crate::team::SwitchMode::Carry,
         paused: false,
         live_master: None,
         live_problem: None,

@@ -35,6 +35,7 @@
     "allow-desktop-team-cancel",
     "allow-desktop-team-keep-warm",
     "allow-desktop-team-time-limits",
+    "allow-desktop-team-on-harness-switch",
     "allow-desktop-team-live-master",
     "allow-desktop-team-pause",
     "allow-desktop-team-hand-off",

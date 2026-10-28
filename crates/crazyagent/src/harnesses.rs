@@ -382,6 +382,17 @@ pub fn spec(id: &str) -> Option<&'static HarnessSpec> {
     specs().iter().find(|spec| spec.id == id)
 }
 
+/// Tells whether two harness names, as a team plan, agent row or connection stores them,
+/// name the same harness: one catalog entry by its id or an alias ("claude" and
+/// "claude-code"), or the same text for names the catalog does not know.
+/// Inputs: the two names. Output: the answer.
+pub fn same(one: &str, other: &str) -> bool {
+    match (spec(one), spec(other)) {
+        (Some(one), Some(other)) => one.id == other.id,
+        _ => one == other,
+    }
+}
+
 const CONNECTION_NAMES: [(&str, &str); 1] = [("claude", "claude-code")];
 
 const NO_ADAPTER: &str = "installed, but CrazyAgent cannot start it yet";

@@ -30,6 +30,7 @@ fn main() {
         "desktop_team_cancel",
         "desktop_team_keep_warm",
         "desktop_team_time_limits",
+        "desktop_team_on_harness_switch",
         "desktop_team_live_master",
         "desktop_team_pause",
         "desktop_team_hand_off",

@@ -224,8 +224,11 @@ export function agentTotalText(team: TeamPlan): string {
   return team.sub_harnesses.length ? `This team has ${count} ${noun}.` : `This team has up to ${count} ${noun}.`;
 }
 
-function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | undefined {
-  return harnesses?.find((harness) => harness.id === id);
+/** Finds a harness's catalog entry by its id or by one of its aliases, such as "claude" for
+ * Claude Code, so a plan that stored an alias reads as that one harness.
+ * Inputs: the catalog or null and the stored name. Output: the entry, or undefined. */
+export function entry(harnesses: HarnessEntry[] | null, id: string): HarnessEntry | undefined {
+  return harnesses?.find((harness) => harness.id === id || harness.aliases.includes(id));
 }
 
 const choosable = (harness: HarnessEntry | undefined) => harness !== undefined && harness.status.kind !== "not_installed";

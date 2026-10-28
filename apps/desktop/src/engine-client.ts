@@ -747,12 +747,17 @@ export interface TeamMessage {
   created_ms: number;
 }
 
+/** What the live master does with the conversation when the master harness changes: carry it
+ * over to the new harness, or start the new harness fresh. */
+export type SwitchMode = "carry" | "fresh";
+
 export interface TeamStatus {
   project_id: string;
   keep_warm: boolean;
   turn_limit_secs?: number | null;
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
+  on_harness_switch?: SwitchMode;
   paused: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
@@ -865,6 +870,10 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
  * limits in seconds or null for no limit, and a generation. Output: the engine receipt. */
 export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation });
+}
+
+export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
 }
 
 /** Turns the project's live master on or off. Inputs: the project id, the switch and a

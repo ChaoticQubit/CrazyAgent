@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setTeamTimeLimits } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setOnHarnessSwitch, setTeamTimeLimits } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { IntentReceipt, TeamStatus } from "../../engine-client";
+import type { IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -61,6 +61,18 @@ export function taskInput(text: string): { kind: "ok"; prompt: string } | { kind
   return { kind: "ok", prompt };
 }
 
+/** The choices of the On harness switch setting, Carry over first as the default. */
+export const SWITCH_OPTIONS: SelectOption[] = [
+  { value: "carry", label: "Carry conversation over" },
+  { value: "fresh", label: "Start fresh" },
+];
+
+/** The On harness switch mode a team status holds, Carry over when an older engine sends none.
+ * Input: the status. Output: the mode. */
+export function switchMode(status: Pick<TeamStatus, "on_harness_switch">): SwitchMode {
+  return status.on_harness_switch ?? "carry";
+}
+
 /** What a team change's result means for the owner. Inputs: the call result, what it did and
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
 export function changeNote(result: Result<IntentReceipt>, missing: string): string {
@@ -72,8 +84,9 @@ export function changeNote(result: Result<IntentReceipt>, missing: string): stri
 }
 
 /** Team controls on the Agents tab: keep the plan's minimum sub-agents ready, set how long a
- * task and an agent session may run, and hand one task straight to a sub-agent when the
- * master should not plan it. Inputs: the project id, the
+ * task and an agent session may run, choose what a master harness switch does with the
+ * conversation, and hand one task straight to a sub-agent when the master should not plan
+ * it. Inputs: the project id, the
  * latest team status, a harness name lookup and a reload. Output: the controls. */
 export function TeamControls({ projectId, status, harness, reload }: {
   projectId: string;
@@ -83,6 +96,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
 }) {
   const [warm, setWarm] = useState<boolean | null>(null);
   const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
+  const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -117,6 +131,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseSwitch(mode: SwitchMode) {
+    setOnSwitch(mode);
+    setBusy(true);
+    const message = changeNote(await setOnHarnessSwitch(projectId, mode), "the On harness switch setting");
+    setBusy(false);
+    setOnSwitch(null);
+    setNote(message);
+    reload();
+  }
+
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
@@ -143,6 +167,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
         onValue={(value) => void limit("idle", value)}
         helper="Off keeps an idle sub-agent running until the team stops. The master is never stopped while its work is still going." />
     </div>
+    <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

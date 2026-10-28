@@ -8,8 +8,8 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, DelegationPath, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
-    TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, DelegationPath, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource,
+    TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -368,6 +368,7 @@ impl TeamView {
             KeyCode::Char('t') => self.time_limit(Limit::Task),
             KeyCode::Char('l') => self.time_limit(Limit::Session),
             KeyCode::Char('i') => self.time_limit(Limit::Idle),
+            KeyCode::Char('h') => self.harness_switch(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -893,6 +894,40 @@ impl TeamView {
         })
     }
 
+    /// Flips the On harness switch setting between Carry over and Start fresh.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn harness_switch(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.on_harness_switch {
+            SwitchMode::Carry => SwitchMode::Fresh,
+            SwitchMode::Fresh => SwitchMode::Carry,
+        };
+        self.changing = Some(
+            match mode {
+                SwitchMode::Carry => {
+                    "When the master harness changes, the new harness gets the earlier conversation."
+                }
+                SwitchMode::Fresh => {
+                    "When the master harness changes, the new harness starts fresh."
+                }
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::OnHarnessSwitch {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -1103,7 +1138,9 @@ impl TeamView {
             .push("  Session  ", look.muted)
             .push(limit_label(status.session_limit_secs), look.fg)
             .push("  Idle stop  ", look.muted)
-            .push(limit_label(status.idle_stop_secs), look.fg);
+            .push(limit_label(status.idle_stop_secs), look.fg)
+            .push("  On harness switch  ", look.muted)
+            .push(switch_words(status.on_harness_switch), look.fg);
         spread(content, left, right)
     }
 
@@ -1292,6 +1329,7 @@ impl TeamView {
             ("t", "Task limit"),
             ("l", "Session limit"),
             ("i", "Idle stop"),
+            ("h", "On harness switch"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1514,6 +1552,15 @@ fn tools_word(on: bool) -> &'static str {
         "On, inside the project folder"
     } else {
         "Off"
+    }
+}
+
+/// The short words for the On harness switch setting on the team summary row.
+/// Takes the mode. Returns its choice name.
+fn switch_words(mode: SwitchMode) -> &'static str {
+    match mode {
+        SwitchMode::Carry => "Carry over",
+        SwitchMode::Fresh => "Start fresh",
     }
 }
 

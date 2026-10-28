@@ -90,3 +90,15 @@ test("a changed limit keeps the session limit not below the task limit", () => {
   assert.deepEqual(controls.limitPair(3600, 7200, "turn", null), { turn: null, session: null });
   assert.deepEqual(controls.limitPair(3600, 7200, "session", null), { turn: 3600, session: null });
 });
+
+test("the On master harness switch setting offers Carry over first and shows the engine's choice", () => {
+  assert.deepEqual(controls.SWITCH_OPTIONS.map((option) => option.value), ["carry", "fresh"]);
+  assert.deepEqual(controls.SWITCH_OPTIONS.map((option) => option.label), ["Carry conversation over", "Start fresh"]);
+  assert.equal(controls.switchMode(status()), "carry");
+  assert.equal(controls.switchMode(status({ on_harness_switch: "fresh" })), "fresh");
+  const carry = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
+  assert.match(carry, /<label for="tg-switch-chores">On master harness switch<\/label>/);
+  assert.match(carry, /<option value="carry" selected="">Carry conversation over<\/option><option value="fresh">Start fresh<\/option>/);
+  const fresh = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ on_harness_switch: "fresh" }), reload() {} }));
+  assert.match(fresh, /<option value="carry">Carry conversation over<\/option><option value="fresh" selected="">Start fresh<\/option>/);
+});
