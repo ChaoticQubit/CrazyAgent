@@ -289,6 +289,175 @@ fn refused<T: std::fmt::Debug>(result: Result<T, EngineError>) -> String {
     result.unwrap_err().0
 }
 
+/// The bare-repository layouts an agent can leave in a worktree (SM-R1): the folder git
+/// makes with `init --bare`, the same names in mixed case, `HEAD` beside a `commondir`, and
+/// executable files standing in for `objects` and `refs`. Output: each layout's folder and
+/// its files with their text and whether each is executable.
+fn bare_layouts() -> Vec<(&'static str, Vec<(&'static str, &'static str, bool)>)> {
+    let head = "ref: refs/heads/main\n";
+    vec![
+        (
+            "notes",
+            vec![
+                ("HEAD", head, false),
+                ("config", "[core]\n\tbare = true\n", false),
+                ("objects/info/packs", "\n", false),
+                ("refs/heads/main", "\n", false),
+            ],
+        ),
+        (
+            "docs/Mixed",
+            vec![
+                ("Head", head, false),
+                ("OBJECTS/x", "x\n", false),
+                ("Refs/y", "y\n", false),
+            ],
+        ),
+        (
+            "linked",
+            vec![("HEAD", head, false), ("commondir", "../..\n", false)],
+        ),
+        (
+            "tools",
+            vec![
+                ("HEAD", head, false),
+                ("objects", "#!/bin/sh\n", true),
+                ("refs", "#!/bin/sh\n", true),
+            ],
+        ),
+    ]
+}
+
+/// Writes one layout into a folder. Inputs: the folder and the layout's files.
+fn plant_layout(folder: &Path, files: &[(&str, &str, bool)]) {
+    for (name, text, executable) in files {
+        let path = folder.join(name);
+        write(&path, text);
+        if *executable {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_bare_repository_layout_an_agent_leaves_is_refused_when_its_turn_is_committed() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    for (folder, files) in bare_layouts() {
+        let case = Case::new();
+        let layout = case.workspace.worktree.join(folder);
+        plant_layout(&layout, &files);
+        if folder == "notes" {
+            assert_eq!(
+                git_in(&case.home, &layout, &["rev-parse", "--git-dir"]).trim(),
+                ".",
+                "the owner's own git takes the layout as a repository"
+            );
+        }
+        assert_eq!(
+            refused(record_turn_end(&case.db, &case.workspace, &turn)),
+            "changes_bare_repository",
+            "{folder}"
+        );
+    }
+
+    let case = Case::own_branch();
+    let (_, files) = &bare_layouts()[0];
+    plant_layout(&case.workspace.worktree.join("notes"), files);
+    case.agent_commit("Notes");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_bare_repository",
+        "an Own branch agent's commit"
+    );
+
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    write(
+        &worktree.join("src/objects/model.rs"),
+        "pub struct Model;\n",
+    );
+    write(&worktree.join("src/refs/link.rs"), "pub struct Link;\n");
+    write(&worktree.join("docs/HEAD"), "A file named HEAD.\n");
+    write(&worktree.join("head/index.html"), "<p>head</p>\n");
+    assert!(
+        record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .is_some(),
+        "folders named objects and refs without a HEAD file land"
+    );
+}
+
+/// Adds a second agent's linked worktree to a case's repository, from the owner's
+/// current branch tip, as the engine adds one for a sibling sub-agent. Input: the case.
+/// Output: the second agent's workspace.
+fn second_agent(case: &Case) -> Workspace {
+    let worktree = case.repo.parent().unwrap().join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    }
+}
+
+#[test]
+fn accepting_two_change_sets_that_each_hold_half_a_bare_layout_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let store: Vec<(&str, &str, bool)> = vec![
+        ("objects/info/packs", "\n", false),
+        ("refs/heads/main", "\n", false),
+    ];
+    let head: Vec<(&str, &str, bool)> = vec![
+        ("HEAD", "ref: refs/heads/main\n", false),
+        ("config", "[core]\n\tbare = true\n", false),
+    ];
+    for (first, second) in [(&store, &head), (&head, &store)] {
+        let case = Case::new();
+        let sibling = second_agent(&case);
+        plant_layout(&case.workspace.worktree.join("notes"), first);
+        plant_layout(&sibling.worktree.join("notes"), second);
+        let one = record_turn_end(&case.db, &case.workspace, &turn)
+            .unwrap()
+            .expect("half a layout lands as a change set");
+        let two = record_turn_end(&case.db, &sibling, &turn)
+            .unwrap()
+            .expect("the other half lands as a change set");
+        assert!(matches!(
+            case.accept(&one).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+        let tip = case.tip();
+        assert_eq!(
+            refused(case.accept(&two)),
+            "changes_bare_repository",
+            "the merge would complete the layout in the owner's project"
+        );
+        assert_eq!(case.tip(), tip, "the branch did not move");
+        let landed = case.repo.join("notes").join(second[0].0);
+        assert!(!landed.exists(), "{}", landed.display());
+    }
+}
+
 #[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();

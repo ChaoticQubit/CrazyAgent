@@ -271,9 +271,9 @@ fn edited(text: &str) -> Result<String, EngineError> {
 
 /// Lands a change set as one squash commit on the owner's checked-out branch: refuses
 /// an unusable checkout or a configured filter or merge driver, merges with
-/// merge-tree, makes the commit with the owner's identity, records the intent, writes
-/// the index and files with a two-tree read-tree and moves the branch by compare and
-/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
+/// merge-tree, refuses a merge that completes a bare-repository layout (SR1-1), makes
+/// the commit with the owner's identity, records the intent, writes the index and files
+/// with a two-tree read-tree and moves the branch by compare and swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
 /// owner's edited message and where a test stops it. Output: the landed commit and branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
@@ -315,6 +315,7 @@ pub(super) fn accept(
     if uses_configured_commands(&owner, &paths, &[&tree])? {
         return Err(failure("changes_git_unsupported"));
     }
+    flow::check_layout(&owner, &record.base, &record.head, &tree)?;
     check_clean(&owner, &repository, &tip, &tree)?;
     if tree == owner.tree_of(&tip)? {
         finish(db, &mut record, &tip)?;

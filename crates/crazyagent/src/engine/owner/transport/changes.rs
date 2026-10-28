@@ -15,6 +15,7 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const CHANGES_CODES: &[&str] = &[
     "changes_agent_busy",
     "changes_agent_has_pending",
+    "changes_bare_repository",
     "changes_branch_moved",
     "changes_conflict",
     "changes_detached_head",

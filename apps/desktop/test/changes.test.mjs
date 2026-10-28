@@ -101,6 +101,7 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
+  assert.equal(client.changesRefusal({ code: "changes_bare_repository" }), "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.");
   assert.equal(client.changesRefusal({ code: "changes_message_invalid" }), "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
   assert.equal(client.changesRefusal({ code: "changes_master_tools_off" }), "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.");

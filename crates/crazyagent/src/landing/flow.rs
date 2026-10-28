@@ -14,6 +14,8 @@ use std::sync::{Condvar, Mutex, PoisonError};
 pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invalid");
 const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
+const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
+const LAYOUT_FOLDERS_MAX: usize = 64;
 const NAME_BYTES_MAX: usize = 128;
 const SUBJECT_CHARS_MAX: usize = 72;
 const PROPOSED_BYTES_MAX: usize = 1024;
@@ -761,9 +763,11 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
 /// Refuses a change set past the bounds `check_bounds` applies to a worktree, whatever
 /// put the change in git: too many changed paths, a path too deep, too long or not
 /// UTF-8, too many bytes in the changed files, a file added since `fresh` that the
-/// owner's ignore rules exclude, which `add -A` never takes, or a gitlink (mode 160000)
+/// owner's ignore rules exclude, which `add -A` never takes, a gitlink (mode 160000)
 /// that `add -A` recorded from an embedded repository, which no lease tree starts with
-/// and the owner's own git would enter unsandboxed (SM1-R backstop to the sandbox deny).
+/// and the owner's own git would enter unsandboxed (SM1-R backstop to the sandbox deny),
+/// or a folder the change makes into a layout git would open as a bare repository
+/// (`repository_layout`, SM-R1).
 /// Inputs: the repository, the owner's checkout, the trees the set spans, the tree its
 /// newest part starts from and the bounds. Output: Ok within the bounds.
 fn check_change(
@@ -788,6 +792,7 @@ fn check_change(
     }
     let mut fields = output.stdout.split(|byte| *byte == 0);
     let (mut blobs, mut added) = (Vec::new(), Vec::new());
+    let mut folders: BTreeSet<String> = BTreeSet::new();
     let mut paths: usize = 0;
     while let Some(header) = fields.next().filter(|header| !header.is_empty()) {
         let path = fields.next().ok_or_else(|| failure("changes_git_failed"))?;
@@ -817,8 +822,14 @@ fn check_change(
         if status == "A" {
             added.push(path);
         }
+        if status != "D" {
+            layout_folders(&mut folders, path);
+        }
     }
     assert!(paths <= bounds.files && blobs.len() <= paths && added.len() <= paths);
+    if repository_layout(repo, to, &folders)? {
+        return Err(failure("changes_bare_repository"));
+    }
     if blob_bytes(repo, &blobs)? > bounds.bytes {
         return Err(failure("changes_too_large"));
     }
@@ -840,6 +851,116 @@ fn check_change(
         return Err(failure("changes_ignored_files"));
     }
     Ok(())
+}
+
+/// Adds the folders above each component of a path named like a part of a git folder
+/// (`LAYOUT_NAMES`, any case): the folders `repository_layout` lists.
+/// Inputs: the set and one added or changed path.
+fn layout_folders(folders: &mut BTreeSet<String>, path: &str) {
+    let names: Vec<&str> = path.split('/').collect();
+    for (at, name) in names.iter().enumerate() {
+        if LAYOUT_NAMES.contains(&name.to_ascii_lowercase().as_str()) {
+            folders.insert(names[..at].join("/"));
+        }
+    }
+}
+
+/// Refuses a merged tree in which a change completes a bare-repository layout (SR1-1):
+/// Accept's merge can join a change set's half of a layout with the other half another
+/// change set already landed. A layout the merge makes holds a name the change added or
+/// changed, so the change's own kept paths name every folder to list.
+/// Inputs: the repository, the change's start and end commits and the merged tree.
+/// Output: Ok, else `changes_bare_repository` or the listing failure.
+pub(super) fn check_layout(
+    repo: &Repo,
+    from: &str,
+    to: &str,
+    tree: &str,
+) -> Result<(), EngineError> {
+    let output = repo.exec(
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=d",
+            from,
+            to,
+        ],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    let mut folders = BTreeSet::new();
+    for path in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+    {
+        let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
+        layout_folders(&mut folders, path);
+    }
+    if repository_layout(repo, tree, &folders)? {
+        return Err(failure("changes_bare_repository"));
+    }
+    Ok(())
+}
+
+/// Tells whether a tree holds a folder git would open as a bare repository (SM-R1): a
+/// `HEAD` file or link beside a `commondir`, or beside both `objects` and `refs`, each
+/// name in any case, `objects` and `refs` of any type since git takes an executable file
+/// for either folder. The owner's own git run in that folder would read its config.
+/// Inputs: the repository, the tree and the folders a change put such a name in.
+/// Output: the answer, `changes_too_large` past `LAYOUT_FOLDERS_MAX` folders, else
+/// `changes_git_failed` when git cannot list one.
+fn repository_layout(
+    repo: &Repo,
+    tree: &str,
+    folders: &BTreeSet<String>,
+) -> Result<bool, EngineError> {
+    if folders.len() > LAYOUT_FOLDERS_MAX {
+        return Err(failure("changes_too_large"));
+    }
+    for folder in folders {
+        let spec = if folder.is_empty() {
+            tree.to_owned()
+        } else {
+            format!("{tree}:{folder}")
+        };
+        let output = repo.exec(&["ls-tree", "-z", &spec], None, &[], LISTING_BYTES_MAX)?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let mut entries: Vec<(String, bool)> = Vec::new();
+        for entry in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let tab = entry
+                .iter()
+                .position(|byte| *byte == b'\t')
+                .ok_or_else(|| failure("changes_git_failed"))?;
+            let file = !entry[..tab].starts_with(b"040000 ");
+            entries.push((
+                String::from_utf8_lossy(&entry[tab + 1..]).to_ascii_lowercase(),
+                file,
+            ));
+        }
+        let has = |name: &str| entries.iter().any(|(entry, _)| entry == name);
+        let head = entries.iter().any(|(entry, file)| entry == "head" && *file);
+        if head && (has("commondir") || (has("objects") && has("refs"))) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Sums the sizes of blobs as git stores them. Inputs: the repository and the blob ids.

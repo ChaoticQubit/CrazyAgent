@@ -72,6 +72,7 @@ const REFUSALS: Record<string, string> = {
   changes_owner_identity_missing: "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.",
   changes_owner_unavailable: "Your project folder couldn't be read. Check that it is still there, then try again.",
   changes_too_large: "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.",
+  changes_bare_repository: "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.",
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
   changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
   changes_master_closed: "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
