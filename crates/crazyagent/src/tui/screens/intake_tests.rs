@@ -5,7 +5,7 @@ use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
-use crate::github::{GitHubMethod, GitHubStatus};
+use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{MappingFacts, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
@@ -1329,6 +1329,71 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     assert!(matches!(*job, IntakeJob::GitHubToken(_)));
     assert_eq!(job.query(), IntakeQuery::GitHubStatus);
     assert!(shell.ctx.next_request().is_none());
+}
+
+#[test]
+fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clones_it() {
+    let mut ctx = ctx(100, 24);
+    let screen = open(&Place::CloneRepo, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    assert!(shell.ctx.next_request().is_some());
+    shell.arrive(intake(
+        IntakeQuery::GitHubStatus,
+        Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: true,
+            login: Some("octo-cat".into()),
+            method: GitHubMethod::Token,
+            waiting: false,
+            problem: None,
+        })),
+    ));
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("a signed-in clone page lists the repositories");
+    };
+    assert_eq!(job.query(), IntakeQuery::GitHubRepos { page: 1 });
+    let repo = |full_name: &str, refused: Option<&str>| GitHubRepo {
+        full_name: full_name.into(),
+        private: false,
+        default_branch: "main".into(),
+        size_kb: 4,
+        refused: refused.map(Into::into),
+    };
+    shell.arrive(intake(
+        IntakeQuery::GitHubRepos { page: 1 },
+        Ok(IntakeView::Repos(GitHubRepoPage {
+            repos: vec![
+                repo("octo-cat/.github", Some("github_repo_name_unsupported")),
+                repo("octo-cat/notes", None),
+            ],
+            next: None,
+        })),
+    ));
+    let rows = render(&mut shell, 100, 24);
+    assert!(shows(&rows, "octo-cat/.github"), "{rows:#?}");
+    assert!(shows(&rows, "Can't clone this name"), "{rows:#?}");
+    assert!(shows(&rows, "octo-cat/notes"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert!(shell.ctx.next_request().is_none());
+    let rows = render(&mut shell, 100, 24);
+    assert!(
+        shows(
+            &rows,
+            "can't clone a repository whose name starts with a dot"
+        ),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "github_repo_name_unsupported"), "{rows:#?}");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("the other repository still clones");
+    };
+    assert_eq!(
+        job.query(),
+        IntakeQuery::CloneRepo {
+            full_name: "octo-cat/notes".into()
+        }
+    );
 }
 
 /// Starts an engine whose GitHub settings file sets an empty client id, so the engine
