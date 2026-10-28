@@ -262,8 +262,40 @@ fn a_save_the_full_queue_refuses_leaves_the_page_ready_to_save_again() {
         "once the queue drains the same Ctrl-S saves"
     );
     assert!(shell.busy());
-    shell.arrive(reply(save, Ok("")));
+    shell.arrive(saved(save, 16));
     assert!(!screen(&mut shell).contains("Not saved yet"));
+}
+
+#[test]
+fn a_first_read_the_full_queue_refuses_offers_a_retry_instead_of_loading_forever() {
+    let mut ctx = ctx(80, 24);
+    let mut filled = 0;
+    while filled < 64 && {
+        ctx.try_request(Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+            },
+        })
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+    let mut shell = Shell::with(ctx, Box::new(ProcessPage::new(Scope::App)));
+    assert_eq!(
+        requests(&mut shell),
+        vec![],
+        "the refused read never queued"
+    );
+    assert!(!shell.busy(), "a refused read is not waiting on the engine");
+    let shown = screen(&mut shell);
+    assert!(!shown.contains("Loading the instructions"), "{shown}");
+    assert!(shown.contains("Press r to try again."), "{shown}");
+
+    shell.key(Key::Char('r'));
+    let read = ProcessQuery::Read { project: None };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("Back.")));
+    assert!(screen(&mut shell).contains("│ █ack."));
 }
 
 #[test]

@@ -26,6 +26,7 @@ const PAGE_STEP: usize = 10;
 const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
 const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
+const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -414,12 +415,17 @@ impl ProcessPage {
         }
     }
 
+    /// Sends one request unless another is running. A read the full queue refuses leaves
+    /// the page failed with a retry, never loading for a reply that cannot come.
+    /// Inputs: the query and the context. Output: none.
     fn send(&mut self, query: ProcessQuery, ctx: &mut Ctx) {
         if self.pending.is_some() {
             return;
         }
         if ctx.try_request(Request::Process(Box::new(query.clone()))) {
             self.pending = Some(query);
+        } else if matches!(query, ProcessQuery::Read { .. }) {
+            self.state = State::Failed(READ_REFUSED.into());
         }
     }
 
