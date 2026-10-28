@@ -594,3 +594,89 @@ fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
         [(last.as_str(), 1000 - listed, Some("OpenCode"))]
     );
 }
+
+#[test]
+fn trimmed_flagged_keys_are_counted_together_and_an_unattributed_agent_mark_stays_out() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let counted = ROWS_MAX as u64 + 3;
+    for index in 1..=counted {
+        crate::usage::capture::count_reported(
+            &db,
+            &who(
+                "p-1",
+                None,
+                "claude-1",
+                &format!("team-{index}"),
+                RunKind::Agent,
+            ),
+            Tokens {
+                input: 1000 - index,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            &format!("s-{index}"),
+            MIDNIGHT + HOUR,
+        )
+        .unwrap();
+    }
+    let first = format!("team-{}", ROWS_MAX + 1);
+    let second = format!("team-{}", ROWS_MAX + 2);
+    let marks = [
+        (first.as_str(), "opencode", MIDNIGHT + HOUR + 5),
+        (first.as_str(), "gemini-cli", MIDNIGHT + 4 * HOUR),
+        (second.as_str(), "opencode", MIDNIGHT + 3 * HOUR),
+        ("team-99", "opencode", MIDNIGHT + 2 * HOUR),
+    ];
+    for (agent, harness, at) in marks {
+        mark_unreported(&db, &readerless("p-1", agent, harness, RunKind::Agent), at).unwrap();
+    }
+    db.execute(
+        "INSERT INTO usage_unreported(hour_ms,kind,project,agent,harness,last_ms)
+         VALUES (?1,'agent','p-1','','opencode',?2)",
+        params![MIDNIGHT + 5 * HOUR, MIDNIGHT + 5 * HOUR + 1],
+    )
+    .unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert!(
+        !all.agents.iter().any(|row| row.key.is_empty()),
+        "the agents list leaves the unattributed key out, marked or not"
+    );
+    assert_eq!(all.agents.len(), ROWS_MAX + 3);
+    assert_eq!(
+        flagged(&all.agents[ROWS_MAX..]),
+        [
+            (
+                first.as_str(),
+                1000 - (ROWS_MAX as u64 + 1),
+                Some("Gemini CLI")
+            ),
+            (
+                second.as_str(),
+                1000 - (ROWS_MAX as u64 + 2),
+                Some("OpenCode")
+            ),
+            ("team-99", 0, Some("OpenCode")),
+        ],
+        "each trimmed key read in the one grouped count keeps its own tokens, once, under its newest harness"
+    );
+    let row = &all.agents[ROWS_MAX];
+    assert_eq!((row.runs, row.last_ms), (1, MIDNIGHT + 4 * HOUR));
+    assert!(
+        !all.agents
+            .iter()
+            .any(|row| row.key == format!("team-{counted}")),
+        "a trimmed key without a mark stays trimmed"
+    );
+    assert_eq!(
+        flagged(&all.projects),
+        [(
+            "p-1",
+            (1..=counted).map(|index| 1000 - index).sum::<u64>(),
+            Some("OpenCode")
+        )],
+        "the project column keeps its unattributed rule and its place"
+    );
+}
