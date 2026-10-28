@@ -5,6 +5,7 @@ use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
 };
 use crazyagent::harnesses::terminal_session::TerminalSession;
+use crazyagent::research::runner::{ResearchLimits, ResearchRunner};
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host};
 use rustix::process::{
@@ -236,6 +237,7 @@ struct StandIn {
     host: Arc<dyn Host>,
     agent: AgentId,
     home: PathBuf,
+    root: PathBuf,
     _server: Server,
     _root: tempfile::TempDir,
 }
@@ -289,6 +291,7 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         host,
         agent,
         home,
+        root: root_path,
         _server: server,
         _root: root,
     }
@@ -402,4 +405,42 @@ fn stopping_a_pane_session_ends_what_its_tools_started_in_their_own_sessions() {
         "a process the pane agent started in its own session outlived the stop"
     );
     assert_eq!(stopped, Ok(None));
+}
+
+/// PR-2 (rv-code pre-review of RV-DS-75): a research pane an earlier engine left running,
+/// whose harness keeps a background process that ignores hangup, has that process ended when
+/// the next engine's research runner sweeps the pane, not only its window. The profile
+/// leaves signals unconfined, so the pane's keeper cannot empty the sandbox and only the
+/// sweep's own group kill ends the process.
+#[test]
+fn a_research_pane_an_earlier_engine_left_is_swept_with_what_it_started() {
+    let pane = stand_in(SERVER_STAND_IN, "research-left-1", ALLOW_ALL);
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+    let server = background(&pane.home, group);
+    pane.session.leave();
+    let engine = pane.root.join("engine");
+    private(&engine);
+    let state = engine.join("research");
+    private(&state);
+    let runner = ResearchRunner::new(
+        &engine.join("engine.db"),
+        &state,
+        Path::new("/usr/bin/true"),
+        ResearchLimits::default(),
+    )
+    .unwrap()
+    .with_terminal(pane.host.clone())
+    .unwrap();
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
+    let ended = within(Duration::from_secs(10), || {
+        test_kill_process(server).is_err()
+    });
+    if !ended {
+        let _ = kill_process(server, Signal::KILL);
+    }
+    drop(runner);
+    assert!(
+        ended,
+        "a research pane an earlier engine left kept its background process after the sweep"
+    );
 }

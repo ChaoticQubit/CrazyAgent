@@ -137,6 +137,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         Ok(())
     }
 
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.inner.pane_pid(agent)
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         self.inner.alive()
     }

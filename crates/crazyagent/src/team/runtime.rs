@@ -15,7 +15,9 @@ use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost}
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
 };
-use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
+use crate::harnesses::terminal_session::{
+    AgentSession, PaneRecord, Resume, TerminalSession, end_left_pane,
+};
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
@@ -463,8 +465,8 @@ impl TeamRuntime {
                 None => Some("the engine has no record of it".to_owned()),
             };
             if let Some(reason) = refusal {
-                match host.kill(&agent) {
-                    Ok(()) => {}
+                match end_left_pane(host.as_ref(), &agent, "team") {
+                    Ok(_) => {}
                     Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                     Err(problem) => return Err(problem.into()),
                 }
@@ -674,8 +676,8 @@ impl TeamRuntime {
             if self.workers.contains_key(&id) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => self.closed_note(id, "its agent had stopped")?,
+            match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(_) => self.closed_note(id, "its agent had stopped")?,
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(problem.into()),
             }
@@ -3873,12 +3875,12 @@ fn live_adopted(
     let grant = match next_turn(orders, cancel, None) {
         Next::Turn(_, Some(grant)) => grant,
         Next::Turn(_, None) => {
-            let _ = host.kill(&agent);
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
             return Some("The live master was taken over without its signed-in account".into());
         }
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
-                let _ = host.kill(&agent);
+                let _ = end_left_pane(host.as_ref(), &agent, "team");
             }
             return None;
         }
@@ -3888,7 +3890,7 @@ fn live_adopted(
         match profile.hand_to_agent(&managed.home, limits.run_time, &managed.executable) {
             Ok(credential) => credential,
             Err(problem) => {
-                let _ = host.kill(&agent);
+                let _ = end_left_pane(host.as_ref(), &agent, "team");
                 return Some(with_code(
                     "The signed-in account could not reach the agent",
                     Some(&problem.0),
@@ -3914,7 +3916,14 @@ fn live_adopted(
             ))
         }
         Err(problem) => {
-            let _ = host.kill(&agent);
+            if matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(false)) {
+                credential.retain();
+                std::mem::forget(profile);
+                return Some(with_code(
+                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                    Some("harness_cleanup_uncertain"),
+                ));
+            }
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),

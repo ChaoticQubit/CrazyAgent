@@ -558,6 +558,38 @@ impl Drop for TerminalSession {
     }
 }
 
+/// Ends an agent pane no session holds, as one an earlier engine left, and every process its
+/// harness started: on macOS its keeper first empties the run's sandbox, then the window ends
+/// and every process left in the pane's process group is killed, found by the first process
+/// the host names while the pane runs. A cleanup not confirmed is reported on stderr.
+/// Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
+/// every process was confirmed gone, or the host's failure, such as
+/// `terminal_agent_unknown` for a pane already gone.
+pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bool, HostError> {
+    let pid = host.pane_pid(agent)?;
+    #[cfg(target_os = "macos")]
+    let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
+    #[cfg(not(target_os = "macos"))]
+    let kept = true;
+    match host.kill(agent) {
+        Ok(()) => {}
+        Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+        Err(problem) => return Err(problem),
+    }
+    #[cfg(unix)]
+    let ended = pid.is_some_and(|pid| {
+        super::launch::kill_group(pid);
+        super::launch::await_group_exit(pid)
+    });
+    #[cfg(not(unix))]
+    let ended = pid.is_none();
+    let confirmed = kept && ended;
+    if !confirmed {
+        eprintln!("{owner}_pane_cleanup_uncertain agent={}", agent.as_str());
+    }
+    Ok(confirmed)
+}
+
 /// Asks a pane's first process to stop with terminate and waits up to `KEEPER_WAIT` for the
 /// pane to end. A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in
 /// the sandbox and ends only once the warden confirmed that or found signals not confined,

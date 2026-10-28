@@ -10,7 +10,7 @@ use crate::harnesses::launch::{
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
-use crate::harnesses::terminal_session::TerminalSession;
+use crate::harnesses::terminal_session::{TerminalSession, end_left_pane};
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
@@ -387,7 +387,8 @@ impl ResearchRunner {
 
     /// Runs every research agent in its harness's interactive app in a pane of `host` named
     /// `research-<run>`, where the owner can watch it work. Panes an earlier engine left end
-    /// here, since that engine's jobs go back to the queue. Takes the host.
+    /// here with every process their harness started, since that engine's jobs go back to
+    /// the queue; a cleanup not confirmed is reported on stderr. Takes the host.
     /// Returns the runner, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
         let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
@@ -395,8 +396,8 @@ impl ResearchRunner {
             if !agent.as_str().starts_with(PANE_PREFIX) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => {}
+            match end_left_pane(host.as_ref(), &agent, "research") {
+                Ok(_) => {}
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(host_error(problem)),
             }

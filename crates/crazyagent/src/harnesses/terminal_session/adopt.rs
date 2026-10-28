@@ -184,7 +184,7 @@ impl TerminalSession {
                 });
             }
             if !settled {
-                let _ = host.kill(&agent);
+                let _ = super::end_left_pane(host.as_ref(), &agent, "adopt");
                 return Err(failure("launch_adopt_unsettled"));
             }
             replay(&mut reader, &limits)?;

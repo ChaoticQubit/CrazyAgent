@@ -968,6 +968,20 @@ impl Host for Tmux {
             .map(drop)
     }
 
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        let lines = self.live_control()?.run(&format!(
+            "display-message -p -t {} '#{{pane_pid}}'",
+            target(agent)
+        ))?;
+        lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .and_then(|text| text.trim().parse::<u32>().ok())
+            .filter(|pid| *pid > 1)
+            .map(Some)
+            .ok_or_else(|| failure("terminal_command_failed"))
+    }
+
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
         if self.executable.is_none() {
             return Err(failure("terminal_unavailable"));
