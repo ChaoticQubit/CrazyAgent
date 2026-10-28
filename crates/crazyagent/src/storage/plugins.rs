@@ -1,29 +1,51 @@
 use super::*;
 use crate::plugins::{
-    EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
-    LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
-    SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
-    SkillView, TOOL_NAME_BYTES_MAX, TOOL_NAMES_BYTES_MAX, TOOLS_MAX, skill_folder,
+    EffectiveHook, EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill,
+    HOOKS_PER_SCOPE_MAX, HookView, LaunchPlugins, LaunchSecret, LaunchServer,
+    SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX, SKILLS_PER_SCOPE_MAX, Scope, SecretValue,
+    SecretView, ServerSpec, ServerStatus, ServerView, SkillView, TOOL_NAME_BYTES_MAX,
+    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, hook_folder, skill_folder,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
-#[cfg(any(unix, test))]
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS plugin_items (
+macro_rules! items_columns {
+    () => {
+        "(
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
-    kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+    kind TEXT NOT NULL CHECK(kind IN ('skill','server','hook')),
     scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
     UNIQUE(kind, scope, name)
-);
+)"
+    };
+}
+
+#[cfg(any(unix, test))]
+const SCHEMA: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS plugin_items ",
+    items_columns!(),
+    ";
 CREATE TABLE IF NOT EXISTS plugin_switches (
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
     item TEXT NOT NULL CHECK(length(item) BETWEEN 1 AND 64),
     PRIMARY KEY(project, item)
-);";
+);"
+);
+/// Rebuilds an item table from before hooks with the current check, keeping every row, for
+/// the upgrade step that lets it hold hooks.
+pub(super) const WIDEN_ITEMS: &str = concat!(
+    "CREATE TABLE plugin_items_next ",
+    items_columns!(),
+    ";
+INSERT INTO plugin_items_next(id,kind,scope,name,body) SELECT id,kind,scope,name,body FROM plugin_items;
+DROP TABLE plugin_items;
+ALTER TABLE plugin_items_next RENAME TO plugin_items;"
+);
+pub(crate) const HOOKS: &str = "hooks";
 const PAGE_BYTES_MAX: usize = 48 * 1024;
 pub(crate) const STORE: &str = "plugins";
 pub(crate) const SECRETS: &str = "secrets";
@@ -43,6 +65,19 @@ pub(crate) enum Command {
     },
     RemoveSkill {
         id: String,
+    },
+    AddHooks {
+        scope: Scope,
+        source: String,
+        follows: Option<String>,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
+    },
+    Hooks {
+        project: Option<ProjectId>,
+        offset: u16,
     },
     AddServer {
         scope: Scope,
@@ -127,6 +162,9 @@ pub(crate) enum ResultValue {
     Check(Box<ServerSpec>, Vec<EffectiveSecret>),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
+    HooksAdded(Vec<HookView>, PathBuf),
+    Hooks(Vec<HookView>, Option<u16>),
+    Hook(Box<HookView>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,6 +175,26 @@ struct SkillRecord {
     description: String,
     scope: Scope,
     enabled: bool,
+    source: String,
+    folder: String,
+}
+
+/// One stored hook: its plugin, event, matcher, command and timeout as the plugin defined
+/// them, the store-relative folder copy its command runs from, where it applies, whether it
+/// is on, the skill or MCP server id it follows and the folder it was added from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookRecord {
+    id: String,
+    name: String,
+    plugin: String,
+    event: String,
+    matcher: Option<String>,
+    command: String,
+    timeout: Option<u32>,
+    scope: Scope,
+    enabled: bool,
+    follows: Option<String>,
     source: String,
     folder: String,
 }
@@ -163,7 +221,7 @@ struct ServerRecord {
     checks: u64,
 }
 
-/// Creates the skill and MCP server tables when the engine database opens.
+/// Creates the skill, MCP server and hook tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
@@ -490,6 +548,63 @@ pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<
     }
 }
 
+/// Deletes one stored hook folder the trash names, all its hooks being gone. Inputs: the
+/// engine root and the folder's id. Output: Ok when it is gone, or a plain refusal.
+pub(crate) fn remove_hook_folder(root: &Path, id: &str) -> Result<(), EngineError> {
+    if !valid_folder_id(id) {
+        return Err(error("plugin_hook_folder_invalid"));
+    }
+    match std::fs::remove_dir_all(root.join(STORE).join(HOOKS).join(id)) {
+        Ok(()) => Ok(()),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("plugin_hook_folder_not_removed")),
+    }
+}
+
+fn valid_folder_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Names the store folder id of a hook's folder copy, the last part of its store path.
+fn folder_id(record: &HookRecord) -> Option<&str> {
+    Path::new(&record.folder)
+        .file_name()?
+        .to_str()
+        .filter(|id| valid_folder_id(id))
+}
+
+/// Tells whether any stored hook follows one skill or MCP server. Inputs: the transaction
+/// and the item id. Output: true when one does.
+pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, EngineError> {
+    Ok(all::<HookRecord>(tx, "hook")?
+        .iter()
+        .any(|hook| hook.follows.as_deref() == Some(item)))
+}
+
+/// Deletes every hook that follows one skill or MCP server, with the item, and notes each
+/// hook folder copy for the trash to delete once nothing refers to it. Inputs: the
+/// transaction and the item id. Output: any SQLite failure.
+fn remove_following(tx: &Transaction<'_>, item: &str) -> Result<(), EngineError> {
+    let hooks: Vec<HookRecord> = all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.follows.as_deref() == Some(item))
+        .collect();
+    for hook in &hooks {
+        tx.execute("DELETE FROM plugin_items WHERE id=?1", [&hook.id])
+            .map_err(error)?;
+        tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&hook.id])
+            .map_err(error)?;
+        if let Some(id) = folder_id(hook) {
+            super::trash::put(tx, super::trash::HOOK_FOLDER, id)?;
+        }
+    }
+    Ok(())
+}
+
 /// Deletes every listed MCP server secret file, going on past one that fails so an
 /// earlier failure leaves none of the others behind. Inputs: the engine root and the
 /// references. Output: Ok when every file is gone, else the first failure.
@@ -528,6 +643,14 @@ pub(crate) fn remove_project(tx: &Transaction<'_>, project: &ProjectId) -> Resul
             |row| row.get(0),
         )
         .map_err(error)?;
+    for hook in all::<HookRecord>(tx, "hook")?
+        .iter()
+        .filter(|hook| hook.scope == scope)
+    {
+        if let Some(id) = folder_id(hook) {
+            super::trash::put(tx, super::trash::HOOK_FOLDER, id)?;
+        }
+    }
     tx.execute(
         "DELETE FROM plugin_switches WHERE project=?1",
         [project.as_str()],
@@ -688,6 +811,172 @@ fn skill_view(record: &SkillRecord, root: &Path, on_here: Option<bool>) -> Skill
         folder: folder.display().to_string(),
         refused,
     }
+}
+
+fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>) -> HookView {
+    HookView {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        plugin: record.plugin.clone(),
+        event: record.event.clone(),
+        matcher: record.matcher.clone(),
+        command: crate::memory::visible_text(&record.command),
+        scope: record.scope.clone(),
+        scope_label: record.scope.label().into(),
+        enabled: record.enabled,
+        on_here,
+        follows,
+        source: crate::memory::visible_text(&record.source),
+    }
+}
+
+/// Names the skill or MCP server a hook follows, as the hook list shows it.
+fn follows_name(tx: &Transaction<'_>, record: &HookRecord) -> Result<Option<String>, EngineError> {
+    let Some(item) = &record.follows else {
+        return Ok(None);
+    };
+    tx.query_row("SELECT name FROM plugin_items WHERE id=?1", [item], |row| {
+        row.get(0)
+    })
+    .optional()
+    .map_err(error)
+}
+
+/// Reads a plugin folder's command hooks and stores each one, turned on, with one bounded
+/// copy of the files they run from in the plugin store; a hook with `follows` runs only
+/// while that skill or MCP server is on. Hooks are named `<plugin>/<event>/<n>`. Inputs:
+/// the transaction, engine root, scope, the absolute plugin folder and the item to follow.
+/// Output: the stored hooks and their folder copy, or a plain refusal with nothing stored.
+fn add_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    scope: Scope,
+    source: String,
+    follows: Option<String>,
+) -> Result<(Vec<HookRecord>, PathBuf), EngineError> {
+    require_scope(tx, &scope)?;
+    if let Some(item) = &follows {
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM plugin_items WHERE id=?1", [item], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?;
+        if !matches!(kind.as_deref(), Some("skill" | "server")) {
+            return Err(error("plugin_not_found"));
+        }
+    }
+    let folder = std::fs::canonicalize(&source).map_err(|_| error("skill_folder_not_found"))?;
+    let found = hook_folder::read(&folder).map_err(error)?;
+    let key = scope_key(&scope);
+    if count(tx, "hook", &key)? + found.hooks.len() > HOOKS_PER_SCOPE_MAX {
+        return Err(error("hook_limit"));
+    }
+    let names: Vec<String> = (0..found.hooks.len())
+        .map(|index| {
+            let hook = &found.hooks[index];
+            let same = found.hooks[..index]
+                .iter()
+                .filter(|other| other.event == hook.event)
+                .count();
+            format!("{}/{}/{}", found.plugin, hook.event, same + 1)
+        })
+        .collect();
+    for name in &names {
+        assert!(name.len() <= 64);
+        if name_taken(tx, "hook", &key, name)? {
+            return Err(error("hooks_already_added"));
+        }
+    }
+    let id = new_id("hooks")?;
+    let parent = store_folder(root, &[HOOKS])?;
+    let copy = parent.join(&id);
+    hook_folder::copy(&folder, &copy, &found.hooks).map_err(error)?;
+    let relative = copy
+        .strip_prefix(root)
+        .map_err(|_| error("plugin_store_unavailable"))?
+        .display()
+        .to_string();
+    let mut records = Vec::with_capacity(found.hooks.len());
+    let stored = (|| {
+        for (hook, name) in found.hooks.iter().zip(names) {
+            let record = HookRecord {
+                id: new_id("hook")?,
+                name,
+                plugin: found.plugin.clone(),
+                event: hook.event.clone(),
+                matcher: hook.matcher.clone(),
+                command: hook.command.clone(),
+                timeout: hook.timeout,
+                scope: scope.clone(),
+                enabled: true,
+                follows: follows.clone(),
+                source: source.clone(),
+                folder: relative.clone(),
+            };
+            save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
+            records.push(record);
+        }
+        Ok(())
+    })();
+    if let Err(problem) = stored {
+        remove_folder(&copy);
+        return Err(problem);
+    }
+    assert_eq!(records.len(), found.hooks.len());
+    Ok((records, copy))
+}
+
+/// Lists the hooks agents launched for a project run: each hook that is on, from global
+/// settings unless the project switched it off or from the project itself, whose followed
+/// skill or MCP server is on there too, with its stored folder copy. Inputs: the open
+/// transaction, the engine root and the project. Output: the hooks, ordered by event,
+/// plugin and name.
+pub(crate) fn effective_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &ProjectId,
+) -> Result<Vec<EffectiveHook>, EngineError> {
+    let off = switched_off(tx, project)?;
+    let usable = |scope: &Scope, id: &str| match scope {
+        Scope::Global => !off.iter().any(|item| item == id),
+        Scope::Project { project_id } => project_id == project,
+    };
+    let mut on: Vec<String> = all::<SkillRecord>(tx, "skill")?
+        .into_iter()
+        .filter(|skill| skill.enabled && usable(&skill.scope, &skill.id))
+        .map(|skill| skill.id)
+        .collect();
+    on.extend(
+        all::<ServerRecord>(tx, "server")?
+            .into_iter()
+            .filter(|server| {
+                status(server) == ServerStatus::Approved && usable(&server.scope, &server.id)
+            })
+            .map(|server| server.id),
+    );
+    let mut hooks: Vec<(String, EffectiveHook)> = all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.enabled && usable(&hook.scope, &hook.id))
+        .filter(|hook| hook.follows.as_ref().is_none_or(|item| on.contains(item)))
+        .filter(|hook| folder_id(hook).is_some())
+        .map(|hook| {
+            (
+                hook.name,
+                EffectiveHook {
+                    plugin: hook.plugin,
+                    event: hook.event,
+                    matcher: hook.matcher,
+                    command: hook.command,
+                    timeout: hook.timeout,
+                    folder: root.join(hook.folder),
+                },
+            )
+        })
+        .collect();
+    hooks.sort_by(|a, b| (&a.1.event, &a.1.plugin, &a.0).cmp(&(&b.1.event, &b.1.plugin, &b.0)));
+    assert!(hooks.len() <= 2 * HOOKS_PER_SCOPE_MAX);
+    Ok(hooks.into_iter().map(|(_, hook)| hook).collect())
 }
 
 fn status(record: &ServerRecord) -> ServerStatus {
@@ -1083,6 +1372,10 @@ pub(crate) fn execute(
             remove_folder(Path::new(&skill.view.folder));
             Err(problem)
         }
+        (ResultValue::HooksAdded(_, folder), Err(problem)) => {
+            remove_folder(folder);
+            Err(problem)
+        }
         (_, Err(problem)) => Err(problem),
         (ResultValue::SkillRemoved(folder), Ok(())) => {
             remove_folder(folder);
@@ -1142,7 +1435,43 @@ pub(super) fn run(
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
+            remove_following(tx, &id)?;
             ResultValue::SkillRemoved(root.join(&record.folder))
+        }
+        Command::AddHooks {
+            scope,
+            source,
+            follows,
+        } => {
+            let (records, copy) = add_hooks(tx, root, scope, source, follows)?;
+            let mut views = Vec::with_capacity(records.len());
+            for record in &records {
+                views.push(hook_view(record, follows_name(tx, record)?, None));
+            }
+            ResultValue::HooksAdded(views, copy)
+        }
+        Command::SetHook { id, enabled } => {
+            let mut record: HookRecord = load(tx, "hook", &id)?;
+            record.enabled = enabled;
+            save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
+            let follows = follows_name(tx, &record)?;
+            ResultValue::Hook(Box::new(hook_view(&record, follows, None)))
+        }
+        Command::Hooks { project, offset } => {
+            let off = match &project {
+                Some(project) => switched_off(tx, project)?,
+                None => Vec::new(),
+            };
+            let mut views = Vec::new();
+            for record in all::<HookRecord>(tx, "hook")?
+                .iter()
+                .filter(|record| visible(&record.scope, project.as_ref()))
+            {
+                let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
+                views.push(hook_view(record, follows_name(tx, record)?, here));
+            }
+            let (views, next) = page(views, offset)?;
+            ResultValue::Hooks(views, next)
         }
         Command::AddServer {
             scope,
@@ -1185,6 +1514,7 @@ pub(super) fn run(
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
+            remove_following(tx, &id)?;
             for secret in &record.secrets {
                 super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
             }

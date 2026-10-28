@@ -570,15 +570,25 @@ pub(super) fn codex_configuration(
 }
 
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
-/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]).
-/// Input: the key file of a keyed account. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>) -> String {
-    let Some(key_file) = key_file else {
+/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
+/// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
+/// owner turned on. Setting sources stay off, so no other hook loads. Inputs: the key file
+/// of a keyed account and whether the launch runs hooks. Output: the settings JSON.
+fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
+    if key_file.is_none() && !hooks {
         return CLAUDE_SETTINGS.to_owned();
-    };
+    }
     let mut settings: serde_json::Value =
         serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
-    settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    if let Some(key_file) = key_file {
+        settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if hooks {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
     settings.to_string()
 }
 
@@ -589,7 +599,7 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file);
+    let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()

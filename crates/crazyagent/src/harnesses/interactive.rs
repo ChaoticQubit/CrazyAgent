@@ -378,6 +378,12 @@ fn claude(
     if let Some(key_file) = key_file {
         settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
     }
+    if installed.is_some_and(Installed::runs_hooks) {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),
         "--setting-sources".to_owned(),

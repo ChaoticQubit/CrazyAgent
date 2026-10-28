@@ -289,6 +289,13 @@ export function errorMessage(error: unknown): string {
     plugin_store_unavailable: "CrazyAgent can't write its plugin folder.",
     plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
     plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    hooks_none_found: "This folder has no Claude Code hooks.",
+    hooks_invalid: "The hooks file in this folder is not valid hooks JSON.",
+    hooks_too_many: "This plugin has more than 64 hooks.",
+    hooks_too_large: "The files these hooks run are larger than 16 MB or 2048 files.",
+    hook_plugin_name_invalid: "The plugin name must be 1 to 32 letters, digits, ., - or _.",
+    hooks_already_added: "These hooks were already added here.",
+    hook_limit: "There are already 100 hooks here.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
     setup_busy: "Setup is already running.",
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
@@ -1502,6 +1509,23 @@ export interface SkillFile {
   bytes: number;
 }
 
+/** One hook as Settings lists it: its plugin, Claude Code event and matcher, command, where
+ * it applies, its On flags and the skill or MCP server it follows. */
+export interface HookView {
+  id: string;
+  name: string;
+  plugin: string;
+  event: string;
+  matcher: string | null;
+  command: string;
+  scope: PluginScope;
+  scope_label: string;
+  enabled: boolean;
+  on_here: boolean | null;
+  follows: string | null;
+  source: string;
+}
+
 export interface SkillDetail {
   skill: SkillView;
   text: string;
@@ -1571,6 +1595,21 @@ export function pluginServers(projectId?: string): Promise<McpServerView[]> {
 /** Adds a skill from a picked folder that holds SKILL.md; the engine keeps its own copy. */
 export function addSkill(scope: PluginScope, folder: string): Promise<SkillView> {
   return invoke<SkillView>("desktop_add_skill", { scope, folder });
+}
+
+/** Lists hooks for global settings (no project) or for one project's settings. */
+export function pluginHooks(projectId?: string): Promise<HookView[]> {
+  return invoke<HookView[]>("desktop_plugin_hooks", { projectId: projectId ?? null });
+}
+
+/** Adds the hooks a picked plugin folder defines; the engine keeps its own copy of their files. */
+export function addHooks(scope: PluginScope, folder: string): Promise<HookView[]> {
+  return invoke<HookView[]>("desktop_add_hooks", { scope, folder });
+}
+
+/** Turns a hook on or off where it was added. */
+export function setHookEnabled(id: string, enabled: boolean): Promise<HookView> {
+  return invoke<HookView>("desktop_set_hook_enabled", { id, enabled });
 }
 
 /** Turns a skill on or off where it was added. */

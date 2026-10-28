@@ -16,6 +16,7 @@ struct Prepared {
     source: String,
     skills: Vec<PathBuf>,
     server: Option<(String, ServerSpec)>,
+    plugin: Option<PathBuf>,
 }
 
 const RECHECK_AFTER: Duration = Duration::from_secs(30);
@@ -239,11 +240,13 @@ fn prepare(
 ) -> Result<Prepared, InstallError> {
     let folder = fetch::entry_folder(setup, entry, bundled)?;
     let source = source_key(&entry.source);
+    let plugin = fetch::plugin_folder(setup, entry);
     match entry.kind {
         PackKind::Skill => Ok(Prepared {
             source,
             skills: fetch::skill_folders(&folder)?,
             server: None,
+            plugin,
         }),
         PackKind::McpServer => {
             let resolve = |name: &str| installer.program(name);
@@ -256,6 +259,7 @@ fn prepare(
                 source,
                 skills: Vec::new(),
                 server: Some((fetch::server_name(entry)?, spec)),
+                plugin,
             })
         }
     }
@@ -285,17 +289,33 @@ async fn install_entry(
     })
     .await;
     let outcome = match prepared {
-        Ok(Ok(prepared)) => storage(
-            sender,
-            Command::Install {
-                id: id.clone(),
-                source: prepared.source,
-                skills: prepared.skills,
-                server: prepared.server,
-            },
-        )
-        .await
-        .map_err(|problem| problem.0),
+        Ok(Ok(prepared)) => {
+            let installed = storage(
+                sender,
+                Command::Install {
+                    id: id.clone(),
+                    source: prepared.source,
+                    skills: prepared.skills,
+                    server: prepared.server,
+                },
+            )
+            .await
+            .map_err(|problem| problem.0);
+            if installed.is_ok()
+                && let Some(plugin) = prepared.plugin
+                && let Err(problem) = storage(
+                    sender,
+                    Command::SeedHooks {
+                        id: id.clone(),
+                        plugin,
+                    },
+                )
+                .await
+            {
+                eprintln!("pack_hooks_not_added entry={id} cause={}", problem.0);
+            }
+            installed
+        }
         Ok(Err(code)) => Err(code.0.to_owned()),
         Err(_) => Err("setup_install_failed".to_owned()),
     };

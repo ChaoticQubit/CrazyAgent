@@ -2,7 +2,7 @@ use super::{BridgeError, NativeBridge, Unlocked, failure};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::AccountSecret;
-use crazyagent::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
 use crazyagent::protocol::ProjectId;
 
 fn plugin_failure(error: EngineError) -> BridgeError {
@@ -58,6 +58,47 @@ impl NativeBridge {
         let project = project(project_id)?;
         self.reader()?
             .plugin_servers(project)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Lists hooks for global settings or one project's settings.
+    /// Output: each hook's plugin, event, command, scope, On flags and the item it follows.
+    pub async fn plugin_hooks(
+        &self,
+        project_id: Option<String>,
+    ) -> Result<Vec<HookView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.reader()?
+            .plugin_hooks(project)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Adds the command hooks of an owner-picked plugin folder.
+    /// Inputs: scope and the absolute folder. Output: the added hooks.
+    pub async fn add_hooks(
+        &mut self,
+        scope: Scope,
+        folder: String,
+    ) -> Result<Vec<HookView>, BridgeError> {
+        self.plugins_ready()?;
+        self.controller()?
+            .add_hooks(scope, folder)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Turns a hook on or off where it was added. Output: the hook.
+    pub async fn set_hook_enabled(
+        &mut self,
+        id: String,
+        enabled: bool,
+    ) -> Result<HookView, BridgeError> {
+        self.plugins_ready()?;
+        self.controller()?
+            .set_hook_enabled(id, enabled)
             .await
             .map_err(plugin_failure)
     }

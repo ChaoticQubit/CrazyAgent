@@ -1,6 +1,6 @@
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerClient};
-use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
+use crate::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
 use crate::protocol::ProjectId;
 
 const PAGES_MAX: usize = 64;
@@ -32,6 +32,48 @@ impl OwnerController {
             }
         }
         Err(EngineError("plugins_page_invalid".into()))
+    }
+
+    /// Lists every hook for global settings (no project) or for one project's settings,
+    /// following the engine's pages. Output: hooks with scope, On flags and the item each
+    /// follows.
+    pub async fn plugin_hooks(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<Vec<HookView>, EngineError> {
+        let client = self.plugins_client()?;
+        let mut hooks = Vec::new();
+        let mut offset = 0;
+        for _ in 0..PAGES_MAX {
+            let page = client.plugin_hooks(project.clone(), offset).await?;
+            hooks.extend(page.hooks);
+            match page.next {
+                Some(next) if next > offset => offset = next,
+                Some(_) => return Err(EngineError("plugins_page_invalid".into())),
+                None => return Ok(hooks),
+            }
+        }
+        Err(EngineError("plugins_page_invalid".into()))
+    }
+
+    /// Adds the command hooks a plugin folder defines. Inputs: global or project scope and
+    /// the absolute folder path. Output: the added hooks, each turned on.
+    pub async fn add_hooks(
+        &self,
+        scope: Scope,
+        folder: String,
+    ) -> Result<Vec<HookView>, EngineError> {
+        Ok(self.plugins_client()?.add_hooks(scope, folder).await?.hooks)
+    }
+
+    /// Turns a hook on or off where it was added. Inputs: the hook id and the new state.
+    /// Output: the hook.
+    pub async fn set_hook_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<HookView, EngineError> {
+        self.plugins_client()?.set_hook_enabled(id, enabled).await
     }
 
     /// Reads one skill's whole detail for its detail view, following the engine's pages of

@@ -20,6 +20,8 @@ const PROJECTS_HOME_TITLE: &str = "Choose the folder that holds your projects.";
 #[cfg(target_os = "linux")]
 const MEMORY_FOLDER_TITLE: &str = "Choose a folder of markdown memory files to import.";
 #[cfg(target_os = "linux")]
+const PLUGIN_FOLDER_TITLE: &str = "Choose a plugin folder. Its hooks are added.";
+#[cfg(target_os = "linux")]
 const DOCUMENTS_TITLE: &str = "Choose documents to add";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
@@ -39,6 +41,10 @@ pub const PROJECTS_HOME_SCRIPT: &str =
 
 /// The macOS folder chooser for a folder of markdown memory files to import. Fixed text.
 pub const MEMORY_FOLDER_SCRIPT: &str = "POSIX path of (choose folder with prompt \"Choose a folder of markdown memory files to import.\")";
+
+/// The macOS folder chooser for a Claude Code plugin folder whose hooks are added. Fixed text.
+pub const PLUGIN_FOLDER_SCRIPT: &str =
+    "POSIX path of (choose folder with prompt \"Choose a plugin folder. Its hooks are added.\")";
 
 /// The macOS file chooser for project documents, one POSIX path per line. Fixed text.
 pub const DOCUMENTS_SCRIPT: &str = "set picked to choose file with prompt \"Choose documents to add\" with multiple selections allowed
@@ -61,12 +67,16 @@ pub const WINDOWS_PROJECTS_HOME_SCRIPT: &str = "[Console]::OutputEncoding = [Tex
 /// The Windows folder chooser for a folder of markdown memory files to import. Fixed text.
 pub const WINDOWS_MEMORY_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder of markdown memory files to import.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
 
+/// The Windows folder chooser for a plugin folder whose hooks are added. Fixed text.
+pub const WINDOWS_PLUGIN_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a plugin folder. Its hooks are added.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
 /// The Windows document chooser, a fixed PowerShell script that prints one chosen path per line.
 pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose documents to add'; $d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { foreach ($f in $d.FileNames) { [Console]::Out.Write($f + [char]10) } }";
 
 /// What a folder chooser is for: a skill folder, an existing project folder to add, the
-/// folder that holds the owner's projects, or a folder of memory files to import. The web view names one of these; each has its own
-/// fixed prompt, so no text from the web view reaches a chooser.
+/// folder that holds the owner's projects, a folder of memory files to import, or a plugin
+/// folder whose hooks are added. The web view names one of these; each has its own fixed
+/// prompt, so no text from the web view reaches a chooser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderPurpose {
@@ -74,11 +84,18 @@ pub enum FolderPurpose {
     Project,
     ProjectsHome,
     Memory,
+    Plugin,
 }
 
 impl FolderPurpose {
     /// Every purpose, in the order the choosers are listed.
-    pub const ALL: [Self; 4] = [Self::Skill, Self::Project, Self::ProjectsHome, Self::Memory];
+    pub const ALL: [Self; 5] = [
+        Self::Skill,
+        Self::Project,
+        Self::ProjectsHome,
+        Self::Memory,
+        Self::Plugin,
+    ];
 
     /// The fixed macOS script of this purpose's chooser; it also picks the Linux title and the
     /// Windows script. Input: the purpose. Output: one of the folder scripts.
@@ -88,6 +105,7 @@ impl FolderPurpose {
             Self::Project => PROJECT_FOLDER_SCRIPT,
             Self::ProjectsHome => PROJECTS_HOME_SCRIPT,
             Self::Memory => MEMORY_FOLDER_SCRIPT,
+            Self::Plugin => PLUGIN_FOLDER_SCRIPT,
         }
     }
 }
@@ -210,6 +228,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 Some(FolderPurpose::Project) => WINDOWS_PROJECT_FOLDER_SCRIPT,
                 Some(FolderPurpose::ProjectsHome) => WINDOWS_PROJECTS_HOME_SCRIPT,
                 Some(FolderPurpose::Memory) => WINDOWS_MEMORY_FOLDER_SCRIPT,
+                Some(FolderPurpose::Plugin) => WINDOWS_PLUGIN_FOLDER_SCRIPT,
                 None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);
@@ -229,6 +248,7 @@ fn linux_title(purpose: FolderPurpose) -> &'static str {
         FolderPurpose::Project => PROJECT_FOLDER_TITLE,
         FolderPurpose::ProjectsHome => PROJECTS_HOME_TITLE,
         FolderPurpose::Memory => MEMORY_FOLDER_TITLE,
+        FolderPurpose::Plugin => PLUGIN_FOLDER_TITLE,
     }
 }
 

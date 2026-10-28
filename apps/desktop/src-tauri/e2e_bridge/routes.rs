@@ -1500,6 +1500,47 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.plugin_servers(project_id).await }.await;
             routed(result)
         }
+        "desktop_plugin_hooks" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.plugin_hooks(project_id).await }.await;
+            routed(result)
+        }
+        "desktop_add_hooks" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                scope: Scope,
+                folder: String,
+            }
+            let Args { scope, folder } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.add_hooks(scope, folder).await }.await;
+            routed(result)
+        }
+        "desktop_set_hook_enabled" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                enabled: bool,
+            }
+            let Args { id, enabled } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.set_hook_enabled(id, enabled).await }.await;
+            routed(result)
+        }
         "desktop_add_skill" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

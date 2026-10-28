@@ -1,6 +1,6 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView, check};
+use crate::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, check};
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,18 @@ enum Action {
     },
     RemoveSkill {
         id: String,
+    },
+    Hooks {
+        project: Option<ProjectId>,
+        offset: u16,
+    },
+    AddHooks {
+        scope: Scope,
+        folder: String,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
     },
     AddServer {
         scope: Scope,
@@ -114,6 +126,14 @@ pub struct ServerPage {
     pub next: Option<u16>,
 }
 
+/// One page of hooks as Settings lists them, with the offset of the next page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookPage {
+    pub hooks: Vec<HookView>,
+    pub next: Option<u16>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
@@ -125,6 +145,12 @@ enum Reply {
     },
     Servers {
         page: ServerPage,
+    },
+    Hooks {
+        page: HookPage,
+    },
+    Hook {
+        hook: HookView,
     },
     Skill {
         skill: SkillView,
@@ -172,6 +198,7 @@ impl Action {
             | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
             | Self::RemoveSkill { id }
+            | Self::SetHook { id, .. }
             | Self::UpdateServer { id, .. }
             | Self::Approve { id, .. }
             | Self::SetServer { id, .. }
@@ -186,7 +213,9 @@ impl Action {
             return Err(failure("plugin_not_found"));
         }
         match self {
-            Self::AddSkill { folder, .. } | Self::ImportSkill { folder, .. }
+            Self::AddSkill { folder, .. }
+            | Self::ImportSkill { folder, .. }
+            | Self::AddHooks { folder, .. }
                 if !valid_folder(folder) =>
             {
                 Err(failure("skill_folder_not_found"))
@@ -222,11 +251,14 @@ impl Action {
             | Self::Servers { .. }
             | Self::Server { .. }
             | Self::ImportScan
+            | Self::Hooks { .. }
             | Self::Effective { .. } => false,
             Self::AddSkill { .. }
             | Self::ImportSkill { .. }
             | Self::SetSkill { .. }
             | Self::RemoveSkill { .. }
+            | Self::AddHooks { .. }
+            | Self::SetHook { .. }
             | Self::AddServer { .. }
             | Self::UpdateServer { .. }
             | Self::Approve { .. }
@@ -370,6 +402,50 @@ impl OwnerClient {
     /// Removes a skill and its stored folder copy. Input: the skill id.
     pub async fn remove_skill(&self, id: String) -> Result<(), EngineError> {
         self.done_reply(Action::RemoveSkill { id }).await
+    }
+
+    /// Reads one page of hooks, with the same inputs as `plugin_skills`. Output: each hook
+    /// with its plugin, event, matcher, command, scope, On flags and the item it follows.
+    pub async fn plugin_hooks(
+        &self,
+        project: Option<ProjectId>,
+        offset: u16,
+    ) -> Result<HookPage, EngineError> {
+        match self
+            .plugins_exchange(Action::Hooks { project, offset }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hooks { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Adds the command hooks a Claude Code plugin folder defines, turned on, copying the
+    /// files they run from into the engine's store; nothing in the folder runs. Inputs:
+    /// global or project scope and the absolute plugin folder. Output: the added hooks.
+    pub async fn add_hooks(&self, scope: Scope, folder: String) -> Result<HookPage, EngineError> {
+        match self
+            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hooks { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Turns a hook on or off where it was added. Inputs: hook id and the new state.
+    pub async fn set_hook_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<HookView, EngineError> {
+        match self
+            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hook { hook } => Ok(hook),
+            _ => Err(unknown()),
+        }
     }
 
     /// Adds an MCP server that waits for approval, with its secrets in the same request:
@@ -1079,6 +1155,40 @@ async fn handle(
         Action::Effective { project } => Reply::Effective {
             plugins: engine.project_plugins(&project).await?,
         },
+        Action::Hooks { project, offset } => {
+            let ResultValue::Hooks(hooks, next) =
+                actor(engine, Command::Hooks { project, offset }).await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hooks {
+                page: HookPage { hooks, next },
+            }
+        }
+        Action::AddHooks { scope, folder } => {
+            let ResultValue::HooksAdded(hooks, _) = actor(
+                engine,
+                Command::AddHooks {
+                    scope,
+                    source: folder,
+                    follows: None,
+                },
+            )
+            .await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hooks {
+                page: HookPage { hooks, next: None },
+            }
+        }
+        Action::SetHook { id, enabled } => {
+            let ResultValue::Hook(hook) = actor(engine, Command::SetHook { id, enabled }).await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hook { hook: *hook }
+        }
     })
 }
 
