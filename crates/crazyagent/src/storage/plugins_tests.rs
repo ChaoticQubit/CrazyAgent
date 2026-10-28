@@ -238,6 +238,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
             },
             name: "private".into(),
             spec: spec.clone(),
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {
@@ -493,6 +494,7 @@ fn creating_a_project_clears_plugins_orphaned_by_an_earlier_removal() {
             },
             name: "private".into(),
             spec: spec.clone(),
+            secrets: Vec::new(),
         },
     )
     .unwrap() else {

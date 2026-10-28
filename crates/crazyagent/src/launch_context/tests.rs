@@ -686,6 +686,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         },
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
+        transcripts: true,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -697,6 +698,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         sandbox_profile: Some(profile.clone()),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
+        unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
 
@@ -775,6 +777,7 @@ impl LeftPane {
             },
             instructions: "# Project context from CrazyAgent\n".into(),
             process: None,
+            transcripts: true,
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -786,6 +789,7 @@ impl LeftPane {
             sandbox_profile: Some(profile),
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
+            unconfined: false,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
