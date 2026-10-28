@@ -502,6 +502,21 @@ fn setup(dir: &Path, args: &[&str]) -> String {
 /// server data folder as home. Inputs: the profile, the shim, the home, the folder and the
 /// arguments. Output: whether git exited 0, with what it printed on standard error.
 fn ide_git(profile: &Path, shim: &Path, home: &Path, dir: &Path, args: &[&str]) -> (bool, String) {
+    let output = ide_git_output(profile, shim, home, dir, args);
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// [`ide_git`] with everything git printed. Inputs: as [`ide_git`]. Output: git's output.
+fn ide_git_output(
+    profile: &Path,
+    shim: &Path,
+    home: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> std::process::Output {
     let mut command = super::command(profile, shim);
     command
         .args(args)
@@ -522,11 +537,7 @@ fn ide_git(profile: &Path, shim: &Path, home: &Path, dir: &Path, args: &[&str]) 
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    crate::spawn_gate::output(&mut command).unwrap()
 }
 
 /// Writes an executable script that records that it ran by creating `marker`, then passes
@@ -789,5 +800,95 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             "{name}'s planted filter runs where git reaches it"
         );
     }
+    crate::sandbox::toolchains::remove_tmp(&home).unwrap();
+}
+
+/// IN1-R1 under the installed IDE profile: in an older-layout project, whose agents sit at
+/// `<project>/worktrees`, an agent folder's unreadable `.git` makes git in the Project
+/// section see the agent's files as untracked, so Stage All would commit them past Accept.
+/// Once the IDE start hides the agents root ([`crate::projects_home::exclude_agents`]),
+/// Stage All through the IDE's git stages the owner's files only.
+#[test]
+fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-ides-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = fs::canonicalize(scratch.path()).unwrap();
+    let data = base.join("data");
+    let mine = data.join(crate::ide::FOLDER).join("p1");
+    let build = data.join(crate::ide::FOLDER).join("builds").join("v1");
+    let root = base.join("older");
+    let home = mine.join("server");
+    for path in [&mine, &home, &build, &root, &root.join("worktrees")] {
+        folder(path);
+    }
+    setup(&root, &["init", "-q"]);
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    setup(&root, &["add", "a.txt"]);
+    setup(&root, &["commit", "-q", "-m", "base"]);
+    let agent = root.join("worktrees").join("agent-3");
+    setup(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-3",
+            agent.to_str().unwrap(),
+        ],
+    );
+    fs::write(agent.join("work.txt"), "agent\n").unwrap();
+    fs::write(root.join("notes.txt"), "owner\n").unwrap();
+    assert_eq!(
+        crate::projects_home::state_folder(&root),
+        root,
+        "an older-layout project"
+    );
+
+    let tmp = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let grants = Grants {
+        data: &data,
+        root: &root,
+        build: &build,
+        home: &home,
+        tmp: &tmp,
+        writable: &[],
+        read_only: &[],
+        readable: &[],
+        locked: &[],
+    };
+    let profile = install(&mine, &grants, PORT).unwrap();
+    crate::ide::settings::write(&mine, &home, &data, None).unwrap();
+    let shim = crate::ide::settings::machine_folder(&home).join(crate::ide::git::SHIM);
+
+    let before = ide_git_output(&profile, &shim, &home, &root, &["add", "-A", "--dry-run"]);
+    let listed = String::from_utf8_lossy(&before.stdout).into_owned();
+    assert!(
+        listed.contains("worktrees/agent-3/work.txt"),
+        "without the exclude, Stage All takes the agent's file: {listed}"
+    );
+
+    assert!(crate::projects_home::exclude_agents(&root).unwrap());
+    let (staged, said) = ide_git(&profile, &shim, &home, &root, &["add", "-A"]);
+    assert!(staged, "{said}");
+    assert_eq!(
+        setup(&root, &["diff", "--cached", "--name-only"]),
+        "notes.txt\n"
+    );
+    let (committed, said) = ide_git(
+        &profile,
+        &shim,
+        &home,
+        &root,
+        &["commit", "-q", "-m", "owner"],
+    );
+    assert!(committed, "{said}");
+    assert_eq!(
+        setup(&root, &["show", "--name-only", "--format=", "HEAD"]),
+        "notes.txt\n"
+    );
+    assert_eq!(setup(&agent, &["status", "--porcelain"]), "?? work.txt\n");
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }

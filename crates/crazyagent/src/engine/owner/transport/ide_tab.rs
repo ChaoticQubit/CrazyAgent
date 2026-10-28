@@ -307,6 +307,7 @@ async fn open(
             BuildState::Ready { root: build, .. } => {
                 let written = crate::ide::workspace::write(&root, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
+                crate::projects_home::exclude_agents(&folder)?;
                 let hooks = crate::ide::workspace::project_hooks(&root, &project)?;
                 Ok((build, written, folder, hooks))
             }
