@@ -311,7 +311,7 @@ async fn skills_are_copied_into_the_engine_listed_switched_per_project_and_remov
 /// No test checks a real third-party MCP server: none is installed or approved.
 #[tokio::test]
 async fn a_skill_description_with_hidden_characters_is_refused_and_never_reaches_agents() {
-    let mut case = Case::new().await;
+    let case = Case::new().await;
     let mut controller = case.controller().await;
     let project = create_project(&mut controller, "app").await;
     let root = case.root.path().to_path_buf();
