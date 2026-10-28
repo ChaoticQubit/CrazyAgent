@@ -426,6 +426,7 @@ mod launch {
             model: Some("qwen2.5:0.5b".into()),
             tools: false,
             sandbox_profile: Some(profile),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -454,7 +455,12 @@ mod launch {
         project: &ProjectId,
         round: &str,
     ) -> Launched {
-        let context = crate::launch_context::for_project(connection, project).unwrap();
+        let context = crate::launch_context::for_project(
+            connection,
+            project,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
         let claude = agent_home(case, &format!("claude-{round}"));
         let (command, installed) =
             command_with_context(&request(case, "claude-code", &claude), &context).unwrap();
@@ -628,7 +634,12 @@ mod launch {
                 },
             )
             .unwrap();
-            let context = crate::launch_context::for_project(&connection, &project).unwrap();
+            let context = crate::launch_context::for_project(
+                &connection,
+                &project,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
             let home = agent_home(&case, &format!("claude-transcripts-{transcripts}"));
             let (command, installed) =
                 command_with_context(&request(&case, "claude-code", &home), &context).unwrap();

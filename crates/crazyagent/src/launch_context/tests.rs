@@ -610,6 +610,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             plugins: LaunchPlugins::default(),
             instructions: render(&setup.project_id, Some(&setup), "", layout),
             process: None,
+            transcripts: true,
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
