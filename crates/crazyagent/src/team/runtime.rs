@@ -2,7 +2,7 @@ use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, TaskSource, TaskStatus, TeamAccount, TeamReach,
     admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness, names, now_ms,
-    parse_delegations, pick_account, tool,
+    parse_delegations, parse_wakes, pick_account, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -146,6 +146,7 @@ struct Plan {
     pane: Option<(Arc<dyn Host>, AgentId)>,
     live: bool,
     resume: Option<Resume>,
+    continues: bool,
 }
 
 impl Plan {
@@ -896,42 +897,38 @@ impl TeamRuntime {
 
     /// Applies the owner's stop and restart from the agent register to live agents and
     /// shows the register which agents are working. A stop cancels the agent's work; a
-    /// restart returns it to its queue for the fresh process.
+    /// restart returns it to its queue for the fresh process. What the stop stores, the live
+    /// switch turned off and the owner's stop of a sub-agent (AW-1), is written before the
+    /// agent is touched, so a failed write leaves the stop to the next tick.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
-        let mut stopped_live = Vec::new();
-        let mut stopped_subs = Vec::new();
         for (id, worker) in &mut self.workers {
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
             hosted.set_busy(worker.busy.is_some());
             let asked = hosted.requested();
-            if asked == Some(HostedRequest::Restart) && !worker.held {
+            let restart = asked == Some(HostedRequest::Restart) && !worker.held;
+            if !restart && (asked != Some(HostedRequest::Stop) || worker.stopping) {
+                continue;
+            }
+            if worker.live {
+                super::master::set_live(&self.connection, &worker.project, false)?;
+            }
+            if worker.role == AgentRole::Sub {
+                self.connection
+                    .execute(
+                        "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                        params![*id, worker.project.as_str(), now_ms()],
+                    )
+                    .map_err(error)?;
+            }
+            if restart {
                 worker.held = true;
                 worker.restarting = true;
-            } else if asked != Some(HostedRequest::Stop) || worker.stopping {
-                continue;
             }
             worker.stopping = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
-            if worker.live {
-                stopped_live.push(worker.project.clone());
-            }
-            if worker.role == AgentRole::Sub {
-                stopped_subs.push((*id, worker.project.clone()));
-            }
-        }
-        for project in stopped_live {
-            super::master::set_live(&self.connection, &project, false)?;
-        }
-        for (id, project) in stopped_subs {
-            self.connection
-                .execute(
-                    "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
-                    params![id, project.as_str(), now_ms()],
-                )
-                .map_err(error)?;
         }
         Ok(())
     }
@@ -1058,7 +1055,7 @@ impl TeamRuntime {
             Ok(account) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
-                        self.owner_woke(&project, id, resumed)?;
+                        self.owner_woke(&project, id, resumed, again.is_some())?;
                         Ok(id)
                     }
                     Err(reason) => Err(reason),
@@ -1078,14 +1075,15 @@ impl TeamRuntime {
 
     /// After the owner's Wake or restart starts a sub-agent again with no task (WK-R4): when
     /// its harness conversation could not continue, keeps its last result for its next task's
-    /// prompt, as a master's wake gives it at once, and tells the master the owner woke it.
-    /// Takes the project, the agent and whether its conversation continues. Returns any
-    /// SQLite failure.
+    /// prompt, as a master's wake gives it at once, and tells the master the owner woke or
+    /// restarted it. Takes the project, the agent, whether its conversation continues and
+    /// whether it was a restart. Returns any SQLite failure.
     fn owner_woke(
         &mut self,
         project: &ProjectId,
         id: i64,
         resumed: bool,
+        restarted: bool,
     ) -> Result<(), EngineError> {
         let handoff = if resumed {
             None
@@ -1101,7 +1099,11 @@ impl TeamRuntime {
             id,
             None,
             super::events::EventKind::Progress,
-            OWNER_WOKE,
+            if restarted {
+                OWNER_RESTARTED
+            } else {
+                OWNER_WOKE
+            },
             now_ms(),
         )?;
         Ok(())
@@ -1736,10 +1738,12 @@ impl TeamRuntime {
         let mut prompt = String::new();
         let team_tool = self.workers[&id].team_tool;
         if fresh {
+            let finished = super::events::finished_agents(&self.connection, project, now_ms())?;
             prompt.push_str(&framing(
                 stored,
                 team_tool,
                 &super::available_harnesses(access, project),
+                &finished,
             ));
             let history =
                 conversation_before(&self.connection, project, message, HISTORY_BYTES_MAX)?;
@@ -2316,25 +2320,31 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let queued: Vec<(i64, String, String, Option<i64>)> = {
+        let queued: Vec<(i64, String, String, Option<i64>, bool)> = {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT t.id,t.harness,t.prompt,p.agent FROM team_tasks t
+                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master' FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
                      WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
                 )
                 .map_err(error)?;
             statement
                 .query_map([project.as_str()], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
                 })
                 .map_err(error)?
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
-        for (task, harness, prompt, pin) in queued {
+        for (task, harness, prompt, pin, by_master) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -2367,7 +2377,9 @@ impl TeamRuntime {
                 (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
-                (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
+                (None, Some(pinned))
+                    if by_master && super::owner_stopped(&self.connection, pinned)? =>
+                {
                     self.fail_task(task, OWNER_STOPPED_TASK)?;
                     continue;
                 }
@@ -3269,6 +3281,7 @@ impl TeamRuntime {
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
             live,
             resume: None,
+            continues: role == AgentRole::Sub,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -4095,6 +4108,7 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)?;
+        let wakes = parse_wakes(text);
         if text.trim().is_empty() && proposed.is_empty() {
             let _ = append_message(
                 &tx,
@@ -4117,7 +4131,7 @@ impl TeamRuntime {
         }
         delegations.truncate(DELEGATIONS_PER_REPLY_MAX);
         let mut refused = Vec::new();
-        if !delegations.is_empty() && rounds >= DELEGATION_ROUNDS_MAX {
+        if (!delegations.is_empty() || !wakes.is_empty()) && rounds >= DELEGATION_ROUNDS_MAX {
             let _ = append_message(
                 &tx,
                 project,
@@ -4161,6 +4175,22 @@ impl TeamRuntime {
                 now,
             )?;
         }
+        let mut woken = Vec::with_capacity(wakes.len());
+        for wake in &wakes {
+            let (said, _) =
+                super::master::wake_in(&tx, &access, &stored, &wake.agent, &wake.text, false)?;
+            woken.push(format!("- {said}"));
+        }
+        if !woken.is_empty() {
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &format!("The master's wakes:\n{}", woken.join("\n")),
+                MessageState::Note,
+                now,
+            )?;
+        }
         tx.commit().map_err(error)
     }
 }
@@ -4190,13 +4220,29 @@ fn sub_agent_prompt(
     )
 }
 
-/// Builds the master's opening frame: its sub-agents, how to hand out work, how the
-/// team's work lands and the project brief. Input: the setup, whether the team tool is on and, for an
-/// empty plan, the harnesses with an eligible account now.
+/// Builds the master's opening frame: its sub-agents, how to hand out work, how the team's
+/// work lands, when any sub-agent finished how to wake one with a `WAKE` line and which ones
+/// it can wake (WK-R5), and the project brief. Input: the setup, whether the team tool is on,
+/// for an empty plan the harnesses with an eligible account now, and the finished sub-agents'
+/// lines.
 /// Output: the frame text, with the brief from `master_brief`.
-fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String {
+fn framing(
+    stored: &StoredSetup,
+    team_tool: bool,
+    available: &[&str],
+    finished: &[String],
+) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
+    let wake = if finished.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "To wake a finished sub-agent in its own worktree with your text as its next task, write on its own line exactly like this:\n{} <its name or Sub-agent number>: <the text>\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
+            super::WAKE_MARKER,
+            finished.join("\n")
+        )
+    };
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
@@ -4207,7 +4253,7 @@ fn framing(stored: &StoredSetup, team_tool: bool, available: &[&str]) -> String 
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
     };
     format!(
-        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}\nProject brief:\n{}\n\n",
+        "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}\nProject brief:\n{}\n\n",
         stored.name,
         team,
         crate::launch_context::MASTER_LANDING_RULES,
@@ -4744,9 +4790,10 @@ fn serve(
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
 /// stop its warden did not confirm keeps both for the engine's life and ends the agent.
-/// Each turn's harness continues the conversation the previous turn recorded, or the one
-/// the plan resumes for a woken agent, and a new conversation is reported so a later wake
-/// continues it; a refused resume is reported and ends the agent as a kept one does.
+/// A sub-agent's turn continues the conversation its previous turn recorded, or the one the
+/// plan resumes for a woken agent, and a new conversation is reported so a later wake
+/// continues it; a refused resume is reported and ends the agent as a kept one does. A
+/// master's turn starts a fresh conversation, since its feed briefs it again each turn.
 fn per_turn(
     plan: &Plan,
     home: &Path,
@@ -4826,7 +4873,7 @@ fn per_turn(
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, limit);
         if let Some(recorded) = session
             .conversation()
-            .filter(|c| resume.as_ref() != Some(c))
+            .filter(|c| plan.continues && resume.as_ref() != Some(c))
         {
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
@@ -4862,6 +4909,7 @@ fn per_turn(
 const PROCESS_CLOSED: &str = "The agent process closed";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;

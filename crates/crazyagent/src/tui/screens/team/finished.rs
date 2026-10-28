@@ -1,3 +1,4 @@
+use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::{TeamAction, TeamStatus};
@@ -80,6 +81,15 @@ fn words(code: &str) -> &'static str {
             "The engine connection is not ready yet."
         }
         other => crate::config::plain_problem(other).unwrap_or("The engine could not do this."),
+    }
+}
+
+/// The engine's refusal in a change reply, whether the connection failed or the engine
+/// rejected the change. Input: the reply. Output: the code, or None once it applied.
+fn refusal(result: &Result<SetupView, String>) -> Option<&str> {
+    match result {
+        Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => Some(code),
+        Ok(_) => None,
     }
 }
 
@@ -229,8 +239,8 @@ impl Finished {
                 result,
             ) if project_id == project => {
                 self.saving = false;
-                match result {
-                    Ok(_) => {
+                match refusal(result) {
+                    None => {
                         self.show = Some(*show);
                         let lead = if *show {
                             "Finished agents now stay in the team tree."
@@ -242,7 +252,7 @@ impl Finished {
                             project: project.clone(),
                         });
                     }
-                    Err(code) => ctx.say(Message::warning(
+                    Some(code) => ctx.say(Message::warning(
                         "Could not change where finished agents show.",
                         words(code),
                     )),
@@ -258,8 +268,8 @@ impl Finished {
                 let Some(label) = self.waking.take() else {
                     return;
                 };
-                match result {
-                    Ok(_) => {
+                match refusal(result) {
+                    None => {
                         ctx.say(Message::success(
                             &format!("Waking {label}."),
                             "It comes back in the team tree.",
@@ -269,7 +279,7 @@ impl Finished {
                         });
                         Self::read(project, ctx);
                     }
-                    Err(code) => ctx.say(Message::warning(
+                    Some(code) => ctx.say(Message::warning(
                         &format!("Could not wake {label}."),
                         words(code),
                     )),

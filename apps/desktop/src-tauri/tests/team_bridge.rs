@@ -274,8 +274,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
 fn sqlite(root: &Path, sql: &str) -> Result<String, Box<dyn Error>> {
     let result = crazyagent::spawn_gate::output(
         std::process::Command::new("/usr/bin/sqlite3")
+            .arg("-cmd")
+            .arg(".timeout 5000")
             .arg(root.join("engine.db"))
-            .arg(format!("PRAGMA busy_timeout=5000; {sql}"))
+            .arg(sql)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
@@ -289,7 +291,9 @@ fn sqlite(root: &Path, sql: &str) -> Result<String, Box<dyn Error>> {
 /// Presses Wake the way the Finished fold-out does (DEC-102, AVF-5): the bridge sends the team
 /// wake by agent id to the real engine, which records it for the team runtime and then shows
 /// the agent as waking; a running agent, one whose worktree is gone and an unknown one are
-/// refused with their plain codes. Team agents are stored as the runtime leaves them.
+/// refused with their plain codes. Team agents are stored as the runtime leaves them. This
+/// engine runs no team runtime (only the `crazyagent` binary starts one), so the recorded
+/// Wake stays pending and the waking checks do not depend on any tick.
 async fn wake(bridge: &mut NativeBridge, root: &Path, id: &str) -> Result<(), Box<dyn Error>> {
     for (agent, status, turns, worktree) in [
         (501, "stopped", 2, true),

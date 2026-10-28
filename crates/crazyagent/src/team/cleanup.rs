@@ -417,6 +417,11 @@ fn retire_claimed(
             return Ok(Some("cleanup_folder_failed"));
         }
         db.execute(
+            "DELETE FROM team_agent_conversations WHERE agent=?1 AND project=?2",
+            params![target.id, project.as_str()],
+        )
+        .map_err(unavailable)?;
+        db.execute(
             "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
             params![target.id, project.as_str()],
         )

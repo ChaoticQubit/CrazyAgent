@@ -36,6 +36,8 @@ pub const HANDLE_CHARS_MAX: usize = 32;
 pub const MASTER_HANDLE: &str = "master";
 const NAME_CHARS_MAX: usize = 64;
 const LIVE: &str = "a.status IN ('starting','idle','working')";
+const WAKING: &str = "EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+     WHERE p.agent=a.id AND t.status IN ('queued','needs_pool'))";
 const SUFFIXES_MAX: usize = PANES_PER_PROJECT_MAX + 2;
 
 const _: () = assert!(PERSONAS.len() > PANES_PER_PROJECT_MAX);
@@ -185,7 +187,8 @@ fn held(
     let mut statement = connection
         .prepare(&format!(
             "SELECT n.{column} FROM team_names n JOIN team_agents a ON a.id=n.agent
-             WHERE n.project=?1 AND a.project=?1 AND n.agent<>?2 AND n.{column} IS NOT NULL AND {LIVE}"
+             WHERE n.project=?1 AND a.project=?1 AND n.agent<>?2 AND n.{column} IS NOT NULL
+             AND ({LIVE} OR {WAKING})"
         ))
         .map_err(error)?;
     let found = statement
@@ -198,8 +201,8 @@ fn held(
     Ok(found)
 }
 
-/// Gives a sub-agent its persona: the one it already has while no other live agent of the
-/// project holds it, or else a free persona no agent of the project held before, or the
+/// Gives a sub-agent its persona: the one it already has while no other live or waking agent
+/// of the project holds it, or else a free persona no agent of the project held before, or the
 /// least used. Takes the connection, project and team agent id. Returns the persona, or an
 /// error when the agent is not a sub-agent of the project.
 pub fn assign_persona(
@@ -305,8 +308,10 @@ fn store_handle(
 /// live agent holds it, and its role handle, with the first free `-2`, `-3` suffix when a
 /// live agent took that handle while it was stopped, or no handle when every suffix is
 /// taken, so no two live agents ever share a name and a live agent's name never changes
-/// under its master. Takes the connection, project and team agent id. Returns the name, or
-/// an error when the agent is not a sub-agent of the project.
+/// under its master. A woken agent's names are settled when its wake is admitted and stay
+/// held while its pinned task waits (WKC-2), so it starts under the name the master was
+/// told. Takes the connection, project and team agent id. Returns the name, or an error
+/// when the agent is not a sub-agent of the project.
 pub fn reclaim(
     connection: &Connection,
     project: &ProjectId,
