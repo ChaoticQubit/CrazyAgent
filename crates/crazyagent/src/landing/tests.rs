@@ -519,6 +519,128 @@ fn a_link_an_agent_leaves_pointing_outside_the_project_or_into_the_agents_folder
     );
 }
 
+/// Makes links in a folder, each a path and its target. Inputs: the folder and the links.
+fn plant_links(folder: &Path, links: &[(&str, &str)]) {
+    for (link, target) in links {
+        let path = folder.join(link);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+    }
+}
+
+#[test]
+fn a_link_reaching_the_agents_folder_through_another_link_dots_or_a_folded_name_is_refused() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let rows: [(&str, &[(&str, &str)]); 4] = [
+        (
+            "a link through an ancestor link",
+            &[
+                ("p", ".crazyagent"),
+                ("q", "p/worktrees/agent-3/target/bare"),
+            ],
+        ),
+        (
+            "dots through a folder link",
+            &[("x/d", ".."), ("y", "x/d/../..")],
+        ),
+        (
+            "transit through a link the agent keeps",
+            &[(
+                "t",
+                ".crazyagent/worktrees/agent-3/lnk/../../../../target/bare",
+            )],
+        ),
+        (
+            "a name the volume folds to worktrees",
+            &[("k", ".crazyagent/wor\u{212A}trees/agent-3/target/bare")],
+        ),
+    ];
+    let outcomes: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, links)| {
+            let case = Case::new();
+            std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+            plant_links(&case.workspace.worktree, links);
+            let outcome = match record_turn_end(&case.db, &case.workspace, &turn) {
+                Err(error) => error.0,
+                Ok(landed) => format!("landed {landed:?}"),
+            };
+            (*name, outcome)
+        })
+        .collect();
+
+    let case = Case::new();
+    std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+    plant_links(
+        &case.workspace.worktree,
+        &[("docs/readme", "../README"), ("a/b/docs", "../../docs")],
+    );
+    let id = record_turn_end(&case.db, &case.workspace, &turn)
+        .unwrap()
+        .expect("plain in-tree links land as a change set");
+    assert!(
+        matches!(case.accept(&id).unwrap(), AcceptOutcome::Landed { .. }),
+        "plain in-tree links pass Accept"
+    );
+
+    let refusals: Vec<(&str, String)> = rows
+        .iter()
+        .map(|(name, _)| (*name, "changes_link_outside".to_owned()))
+        .collect();
+    assert_eq!(outcomes, refusals);
+}
+
+#[test]
+fn accepting_two_change_sets_that_each_hold_half_a_link_chain_refuses_the_second() {
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Link the notes".into(),
+    };
+    let ancestor: &[(&str, &str)] = &[("p", ".crazyagent")];
+    let through: &[(&str, &str)] = &[("q", "p/worktrees/agent-3/target/bare")];
+    let outcomes: Vec<String> = [(through, ancestor), (ancestor, through)]
+        .iter()
+        .map(|(first, second)| {
+            let case = Case::new();
+            std::fs::create_dir(case.repo.join(".crazyagent")).unwrap();
+            let sibling = second_agent(&case);
+            plant_links(&case.workspace.worktree, first);
+            plant_links(&sibling.worktree, second);
+            let one = record_turn_end(&case.db, &case.workspace, &turn)
+                .unwrap()
+                .expect("one link lands as a change set");
+            let two = record_turn_end(&case.db, &sibling, &turn)
+                .unwrap()
+                .expect("the other link lands as a change set");
+            assert!(matches!(
+                case.accept(&one).unwrap(),
+                AcceptOutcome::Landed { .. }
+            ));
+            let tip = case.tip();
+            let outcome = match case.accept(&two) {
+                Err(error) => error.0,
+                Ok(landed) => format!("landed {landed:?}"),
+            };
+            let landed = case.repo.join(second[0].0);
+            if landed.symlink_metadata().is_err() && case.tip() == tip {
+                outcome
+            } else {
+                format!("{outcome}, branch moved or {} written", landed.display())
+            }
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["changes_link_outside", "changes_link_outside"],
+        "the merge would chain q through p, in both orders"
+    );
+}
+
 #[test]
 fn a_turn_that_edits_the_worktree_becomes_one_pending_change_set_the_engine_committed() {
     let case = Case::new();
