@@ -1,6 +1,7 @@
 import { createConnection } from "node:net";
 import { encodeFrame, FrameReader, type Reply } from "./engine.js";
 import { GIT_REQUEST_MS, GIT_SOCKET_ENV, gitOutcome, type GitOutcome } from "./git.js";
+import { unconfirmed } from "./scm-model.js";
 
 const ANSWER_GRACE_MS = 5_000;
 
@@ -13,7 +14,8 @@ export interface Printer {
  * Hands one git network command to the CrazyAgent extension's relay and prints the
  * engine's answer as git itself would have: its output on the same streams and its exit
  * code. A refusal, a missing relay, an unreadable answer or no answer in time prints one
- * `fatal:` line and exits 128, as git does for a fatal error.
+ * `fatal:` line and exits 128, as git does for a fatal error; a command the engine could
+ * not confirm finished says it may have run.
  * Inputs: the environment naming the relay, git's arguments, the folder git runs in and
  * the two streams. Output: the exit code.
  */
@@ -57,7 +59,7 @@ export function forward(
       const [reply] = replies as Reply<GitOutcome>[];
       if (reply === undefined) return;
       if (reply.kind !== "ok") {
-        finish(128, `fatal: CrazyAgent did not run this git command (${reply.code})\n`);
+        finish(128, `fatal: ${unconfirmed(reply.code) ?? `CrazyAgent did not run this git command (${reply.code})`}\n`);
         return;
       }
       const outcome = gitOutcome(reply.data);

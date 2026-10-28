@@ -4,6 +4,7 @@ exports.forward = forward;
 const node_net_1 = require("node:net");
 const engine_js_1 = require("./engine.js");
 const git_js_1 = require("./git.js");
+const scm_model_js_1 = require("./scm-model.js");
 const ANSWER_GRACE_MS = 5_000;
 function forward(env, args, folder, stdout, stderr) {
     const socket = env[git_js_1.GIT_SOCKET_ENV];
@@ -40,7 +41,7 @@ function forward(env, args, folder, stdout, stderr) {
             if (reply === undefined)
                 return;
             if (reply.kind !== "ok") {
-                finish(128, `fatal: CrazyAgent did not run this git command (${reply.code})\n`);
+                finish(128, `fatal: ${(0, scm_model_js_1.unconfirmed)(reply.code) ?? `CrazyAgent did not run this git command (${reply.code})`}\n`);
                 return;
             }
             const outcome = (0, git_js_1.gitOutcome)(reply.data);
