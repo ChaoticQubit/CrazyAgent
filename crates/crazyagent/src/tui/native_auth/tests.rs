@@ -1480,7 +1480,7 @@ async fn remove_elsewhere(case: &Case, id: &str) {
             crate::engine::owner::OwnerMutation::ModelAccess {
                 expected_config_id: read.config_id,
                 expected_source_hash: source_hash,
-                edit: crate::config::ModelAccessEdit::RemoveConnection { id: reference(id) },
+                edit: crate::config::ModelAccessEdit::RemoveConnectedAccount { id: reference(id) },
             },
             1,
         )
