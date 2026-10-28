@@ -12,6 +12,7 @@ use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::cell::Cell;
 
 const LIST_POLL_MS: i64 = 5_000;
 const DIFF_HEADER: &str = "diff --git ";
@@ -52,6 +53,8 @@ struct Diff {
     top: usize,
     moved: bool,
     seen_all: bool,
+    skip: usize,
+    width: Cell<usize>,
 }
 
 impl Diff {
@@ -71,6 +74,8 @@ impl Diff {
             top: 0,
             moved,
             seen_all: false,
+            skip: 0,
+            width: Cell::new(0),
         }
     }
 
@@ -115,6 +120,72 @@ impl Diff {
         assert!(self.lines.len() <= DIFF_LINES_MAX);
         assert!(self.files.len() <= FILES_MAX);
         assert!(self.files_done || self.next.is_some());
+    }
+
+    /// Whether a diff header line starts a file that carries the instruction file mark; a
+    /// quoted header, which git writes for unusual names, counts when any file is marked.
+    /// Input: the header line. Output: true for a marked file.
+    fn marked_header(&self, header: &str) -> bool {
+        let instructions = instruction_headers(&self.files);
+        instructions.iter().any(|known| known == header)
+            || (header.starts_with(QUOTED_HEADER) && !instructions.is_empty())
+    }
+
+    /// How many view rows one diff line takes: its wrapped rows at the width last drawn when
+    /// it belongs to a marked instruction file, which is shown in full, else one, as other
+    /// lines are cut. Input: the line index. Output: the rows, at least one.
+    fn rows_of(&self, index: usize) -> usize {
+        let width = self.width.get();
+        let Some(line) = self.lines.get(index) else {
+            return 1;
+        };
+        let marked = self.lines[..=index]
+            .iter()
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(|header| self.marked_header(header));
+        if width == 0 || !marked {
+            return 1;
+        }
+        crate::tui::text::wrap(&printable(line.clone()), width)
+            .len()
+            .max(1)
+    }
+
+    /// Moves the view down by rows: through the rest of a marked line's wrapped rows before
+    /// the next line, so a marked line taller than the view can be read to its end.
+    /// Input: the rows.
+    fn down(&mut self, rows: usize) {
+        let last = self.lines.len().saturating_sub(1);
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip + 1 < self.rows_of(self.top) {
+                self.skip += 1;
+            } else if self.top < last {
+                self.top += 1;
+                self.skip = 0;
+            } else {
+                break;
+            }
+        }
+        assert!(self.top <= last && self.skip < self.rows_of(self.top));
+    }
+
+    /// Moves the view up by rows: through a marked line's wrapped rows, entering a line
+    /// above at its last row. Input: the rows.
+    fn up(&mut self, rows: usize) {
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip > 0 {
+                self.skip -= 1;
+            } else if self.top > 0 {
+                self.top -= 1;
+                self.skip = self.rows_of(self.top) - 1;
+            } else {
+                break;
+            }
+        }
+        assert!(self.skip < self.rows_of(self.top));
     }
 }
 
@@ -487,14 +558,11 @@ impl ProjectChanges {
         let Some(diff) = self.diff.as_mut() else {
             return false;
         };
-        let last = diff.lines.len().saturating_sub(1);
         match code {
-            KeyCode::Up => diff.top = diff.top.saturating_sub(1),
-            KeyCode::Down => diff.top = (diff.top + 1).min(last),
-            KeyCode::PageUp => diff.top = diff.top.saturating_sub(DIFF_PAGE_ROWS),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                diff.top = (diff.top + DIFF_PAGE_ROWS).min(last)
-            }
+            KeyCode::Up => diff.up(1),
+            KeyCode::Down => diff.down(1),
+            KeyCode::PageUp => diff.up(DIFF_PAGE_ROWS),
+            KeyCode::PageDown | KeyCode::Char(' ') => diff.down(DIFF_PAGE_ROWS),
             KeyCode::Esc => self.diff = None,
             _ => return false,
         }
@@ -701,30 +769,30 @@ impl ProjectChanges {
             return lines;
         }
         let text_rows = room.saturating_sub(lines.len()).max(1);
-        let instructions = instruction_headers(&diff.files);
-        let marked = |header: &String| {
-            instructions.contains(header)
-                || (header.starts_with(QUOTED_HEADER) && !instructions.is_empty())
-        };
+        diff.width.set(content.max(1));
         let mut inside = diff
             .lines
             .iter()
             .take(diff.top)
             .rev()
             .find(|line| line.starts_with(DIFF_HEADER))
-            .is_some_and(&marked);
+            .is_some_and(|header| diff.marked_header(header));
         let mut shown = 0;
-        for line in diff.lines.iter().skip(diff.top) {
+        for (index, line) in diff.lines.iter().enumerate().skip(diff.top) {
             if shown >= text_rows {
                 break;
             }
             if line.starts_with(DIFF_HEADER) {
-                inside = marked(line);
+                inside = diff.marked_header(line);
             }
             let style = diff_style(line, look);
             if inside {
                 let pieces = crate::tui::text::wrap(&printable(line.clone()), content.max(1));
-                for piece in pieces.into_iter().take(text_rows - shown) {
+                let skip = match index == diff.top {
+                    true => diff.skip.min(pieces.len().saturating_sub(1)),
+                    false => 0,
+                };
+                for piece in pieces.into_iter().skip(skip).take(text_rows - shown) {
                     lines.push(Row::of(piece, style).pad(content));
                     shown += 1;
                 }
