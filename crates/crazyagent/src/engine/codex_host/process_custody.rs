@@ -367,14 +367,14 @@ impl OwnedChild {
         self.abandoned = true;
     }
 
-    /// Stops waiting for the group of a reaped harness that still answers its probe
-    /// `CLOSE_TIME` after the first stop, as macOS answers for a group left with only an
-    /// unreaped process: the warden stops the sandbox, the pipes are given up and the
+    /// Stops waiting for a harness that is still unreaped, or for the group of a reaped one
+    /// that still answers its probe, `CLOSE_TIME` after the first stop: a harness stuck in the
+    /// kernel is never reaped, and macOS answers the probe for a group left with only an
+    /// unreaped process. The warden stops the sandbox, the pipes are given up and the
     /// completion reports an uncertain cleanup, so the profile lease is released.
     /// Takes nothing.
     fn give_up_group(&mut self) {
-        if self.status.is_none()
-            || self.group_absent
+        if self.group_absent
             || self.abandoned
             || !self
                 .stopped_at
@@ -398,8 +398,7 @@ impl OwnedChild {
     }
 
     fn complete(&self) -> bool {
-        self.status.is_some()
-            && (self.group_absent || self.abandoned)
+        (self.group_absent || self.abandoned)
             && self.stdout_eof
             && self.stderr_eof
             && !self.accounting_failed
@@ -424,7 +423,7 @@ impl OwnedChild {
 
     fn publish_completion(&mut self) {
         assert!(self.complete());
-        assert!(self.status.is_some());
+        assert!(self.status.is_some() || self.abandoned);
         if let Some(profile) = &self.profile
             && profile.revalidate_retained().is_err()
         {

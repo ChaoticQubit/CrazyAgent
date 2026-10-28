@@ -667,6 +667,34 @@ async fn a_claude_master_whose_group_keeps_an_unreaped_process_still_ends_and_re
     processes.assert_gone();
 }
 
+#[tokio::test]
+async fn a_claude_master_whose_harness_it_can_never_reap_still_ends_and_releases_the_lease() {
+    use crate::engine::master_host_fixture::{MasterFixture, reap_before_the_host};
+
+    for _ in 0..5 {
+        let mut fixture = MasterFixture::new("claude");
+        let mut claude = stand_in_master(
+            &mut fixture,
+            "#!/bin/sh\necho $$ > leader.pid\nexec /bin/sleep 30\n",
+        )
+        .await;
+        if !reap_before_the_host(&fixture.project) {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        while fixture.sign_in("claude-unreaped-next", 3).is_err() {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "the profile lease was never released"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(claude.cancel().await.is_err());
+        return;
+    }
+    panic!("the host reaped its harness first on every attempt");
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn cancelling_a_claude_master_stops_what_its_shells_detached() {
