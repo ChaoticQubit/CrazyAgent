@@ -430,7 +430,13 @@ impl ManagedAgent {
         let project = ProjectId::new(PROJECT).unwrap();
         let context = self
             .runtime
-            .context(&project, AGENT, AgentRole::Sub, true)
+            .context(
+                &project,
+                AGENT,
+                AgentRole::Sub,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
             .unwrap();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

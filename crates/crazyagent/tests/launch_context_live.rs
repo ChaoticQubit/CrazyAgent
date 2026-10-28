@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::agent_git::Layout;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
@@ -220,7 +221,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
-        let context = launch_context::for_project(&connection, &project).unwrap();
+        let context = launch_context::for_project(&connection, &project, Layout::Linked).unwrap();
         drop(connection);
         let (port, bodies) = capture();
         let home = private_directory(&base.join(format!("home-{harness}")));

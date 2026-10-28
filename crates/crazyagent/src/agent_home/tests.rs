@@ -502,12 +502,14 @@ fn a_fifo_swapped_in_for_the_instruction_file_never_blocks_the_read() {
 }
 
 #[test]
-fn the_default_process_never_tells_an_agent_to_branch_or_commit() {
-    assert!(!DEFAULT_PROCESS.contains("Commit with"));
+fn the_default_process_leaves_commits_to_the_landing_rules_of_each_access_level() {
+    for told in ["Commit with", "never commit", "Leave your edits as files"] {
+        assert!(!DEFAULT_PROCESS.contains(told), "{told}");
+    }
     for rule in [
-        "Never create, switch, rename, delete or push a branch, never commit, and never write inside `.git`",
-        "Leave your edits as files in your worktree.",
-        "the owner accepts it in the project's Changes view",
+        "Commit or leave your edits as the \"How your work lands\" section CrazyAgent gives you says; it follows the project's agent access.",
+        "Never create, switch, rename, delete or push a branch, and never write inside the project folder's `.git` or rewrite history.",
+        "The owner accepts your work in the project's Changes view.",
         "never retry it outside the sandbox",
     ] {
         assert!(DEFAULT_PROCESS.contains(rule), "{rule}");

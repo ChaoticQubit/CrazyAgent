@@ -1,5 +1,6 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::agent_git::Layout;
 use crazyagent::agent_home::{self, Harness};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
@@ -89,13 +90,13 @@ impl Case {
         .unwrap()
     }
 
-    fn context(&self, project: &ProjectId) -> Result<AgentContext, String> {
+    fn context(&self, project: &ProjectId, layout: Layout) -> Result<AgentContext, String> {
         let connection = rusqlite::Connection::open_with_flags(
             self.root.path().join("engine.db"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
-        launch_context::for_project(&connection, project).map_err(|problem| problem.0)
+        launch_context::for_project(&connection, project, layout).map_err(|problem| problem.0)
     }
 
     fn master(&self, project: &ProjectId, tools: bool) -> Result<(bool, String), String> {
@@ -419,7 +420,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
             .unwrap(),
     );
 
-    let context = case.context(&project).unwrap();
+    let context = case.context(&project, Layout::Linked).unwrap();
     let instructions = context.instructions().to_owned();
     assert!(instructions.len() <= launch_context::INSTRUCTIONS_BYTES_MAX);
     assert!(instructions.contains("Meal planner"));
@@ -694,7 +695,7 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     assert!(bare.get_args().any(|argument| argument == "mcp_servers={}"));
     assert!(!off_home.join("config.toml").exists());
 
-    let other_context = case.context(&other).unwrap();
+    let other_context = case.context(&other, Layout::Linked).unwrap();
     let other_home = private_directory(&agents.join("other-home"));
     let (_, other_files) =
         command_with_context(&request(&case, "codex", &other_home, true), &other_context).unwrap();
@@ -727,7 +728,8 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
     drop(other_files);
 
     assert_eq!(
-        case.context(&ProjectId::new("ghost").unwrap()).err(),
+        case.context(&ProjectId::new("ghost").unwrap(), Layout::Linked)
+            .err(),
         Some("plugin_project_unknown".into())
     );
     drop(owner);
@@ -769,7 +771,7 @@ async fn every_master_and_agent_launch_states_how_work_lands() {
         "the owner accepts it in the project's Changes view onto the branch checked out in the project folder",
     ];
     let master_rules = [
-        "Never ask a sub-agent to create a branch, commit or push",
+        "Never tell a sub-agent how to branch, commit or push",
         "never name a base branch in a task",
         "tell the owner to review and accept them in the project's Changes view",
     ];
@@ -783,41 +785,59 @@ async fn every_master_and_agent_launch_states_how_work_lands() {
         }
     }
 
-    let context = case.context(&project).unwrap();
     let agents = private_directory(&root.join("agents"));
-    let codex_home = private_directory(&agents.join("codex-home"));
-    let (_, codex_files) =
-        command_with_context(&request(&case, "codex", &codex_home, false), &context).unwrap();
-    let config: toml::Table = fs::read_to_string(codex_home.join("config.toml"))
-        .unwrap()
-        .parse()
-        .unwrap();
-    let developer = config["developer_instructions"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let claude_home = private_directory(&agents.join("claude-home"));
-    let (claude_command, claude_files) = command_with_context(
-        &request(&case, "claude-code", &claude_home, false),
-        &context,
-    )
-    .unwrap();
-    let prompt =
-        fs::read_to_string(argument_after(&claude_command, "--append-system-prompt-file").unwrap())
-            .unwrap();
-    for (harness, text) in [
-        ("codex", developer.as_str()),
-        ("claude-code", prompt.as_str()),
+    let own_branch_rules = [
+        "Commit your work on the branch checked out in your worktree with conventional commit messages before your task ends",
+        "never write inside the project folder's `.git`",
+        "the owner's Accept in the project's Changes view lands your commits",
+    ];
+    for (layout, told, never) in [
+        (Layout::Linked, &agent_rules[..], &own_branch_rules[..]),
+        (
+            Layout::Clone,
+            &own_branch_rules[..],
+            &[
+                "never commit, push or tag",
+                "Leave your edits as files in your worktree.",
+            ][..],
+        ),
     ] {
-        for rule in agent_rules {
-            assert!(text.contains(rule), "{harness} misses: {rule}");
+        let context = case.context(&project, layout).unwrap();
+        let codex_home = private_directory(&agents.join(format!("codex-home-{layout:?}")));
+        let (_, codex_files) =
+            command_with_context(&request(&case, "codex", &codex_home, false), &context).unwrap();
+        let config: toml::Table = fs::read_to_string(codex_home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let developer = config["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let claude_home = private_directory(&agents.join(format!("claude-home-{layout:?}")));
+        let (claude_command, claude_files) = command_with_context(
+            &request(&case, "claude-code", &claude_home, false),
+            &context,
+        )
+        .unwrap();
+        let prompt = fs::read_to_string(
+            argument_after(&claude_command, "--append-system-prompt-file").unwrap(),
+        )
+        .unwrap();
+        for (harness, text) in [
+            ("codex", developer.as_str()),
+            ("claude-code", prompt.as_str()),
+        ] {
+            for rule in told {
+                assert!(text.contains(rule), "{harness} {layout:?} misses: {rule}");
+            }
+            for rule in never.iter().chain(&master_rules) {
+                assert!(!text.contains(rule), "{harness} {layout:?} is told: {rule}");
+            }
         }
-        for rule in master_rules {
-            assert!(!text.contains(rule), "{harness} is a sub-agent: {rule}");
-        }
+        drop(codex_files);
+        drop(claude_files);
     }
-    drop(codex_files);
-    drop(claude_files);
     drop(owner);
     case.close().await;
 }
