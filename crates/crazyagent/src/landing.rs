@@ -337,7 +337,7 @@ fn committed_files(
         !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
     }));
     let git_failed = || git::failure("changes_git_failed");
-    let owner = git::Repo::open(&checkout.join(".git"), None)?;
+    let owner = git::Repo::open(checkout, &checkout.join(".git"), None)?;
     let Some(head) = owner.commit_of("HEAD")? else {
         return Ok(paths.iter().map(|_| Ok(None)).collect());
     };
@@ -615,10 +615,11 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
 
 /// Says why a finished agent's worktree cannot be removed now, as a plain code:
 /// `cleanup_changes_open`, `cleanup_changes_restorable`, `cleanup_worktree_invalid`,
-/// `cleanup_commits_unlanded`, `cleanup_worktree_dirty` or `cleanup_worktree_unreadable`
-/// when git cannot read this one worktree. Inputs: the store, the owner's
-/// checkout root, the worktree, its git folder and the time now. Output: None when it can
-/// be removed.
+/// `cleanup_commits_unlanded`, `cleanup_refs_unlanded`, `cleanup_worktree_dirty` or
+/// `cleanup_worktree_unreadable` when git cannot read this one worktree. An agent's own
+/// clone is judged through the engine's fetch of its branch and its ref names read as
+/// data, with no git run in it. Inputs: the store, the owner's checkout root, the
+/// worktree, its git folder and the time now. Output: None when it can be removed.
 pub fn retire_blocker(
     db: &Connection,
     repository: &Path,
@@ -635,11 +636,12 @@ pub fn retire_blocker(
     }
 }
 
-/// Removes a finished agent's worktree with the host git, never forcing, after checking
-/// `retire_blocker` again while no landing step can run on its repository. Inputs: the
-/// store, the owner's checkout root, the worktree, its git folder and the time now.
-/// Output: Ok once removed, `cleanup_worktree_leftover` when git deleted its record of the
-/// worktree but left files in it, or the plain code that kept it.
+/// Removes a finished agent's worktree with the host git, never forcing, or an agent's
+/// own clone as a folder with no git, after checking `retire_blocker` again while no
+/// landing step can run on its repository. Inputs: the store, the owner's checkout root,
+/// the worktree, its git folder and the time now. Output: Ok once removed,
+/// `cleanup_worktree_leftover` when git deleted its record of the worktree, or a clone's
+/// folder was deleted, only part way, or the plain code that kept it.
 pub fn retire_worktree(
     db: &Connection,
     repository: &Path,

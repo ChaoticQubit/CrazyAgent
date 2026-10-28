@@ -15,6 +15,11 @@ const TEMP_KINDS: [&str; 5] = ["pack", "idx", "rev", "mtimes", "bitmap"];
 const TEMP_SUFFIX_LEN: usize = 6;
 const REPACK_TEMP_EXTENSIONS: [&str; 6] = ["pack", "idx", "rev", "mtimes", "bitmap", "promisor"];
 const PID_DIGITS_MAX: usize = 10;
+const REF_ENTRIES_MAX: usize = 1024;
+const REF_DEPTH_MAX: usize = 16;
+const PACKED_REFS_BYTES_MAX: u64 = 65_536;
+const REFS_LISTED_MAX: usize = 16;
+const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 
 #[cfg(test)]
 thread_local! {
@@ -51,7 +56,7 @@ pub(super) fn add(repository: &Path, worktree: &Path) -> Result<(), EngineError>
     {
         return Err(invalid());
     }
-    let shared = Repo::open(&repository.join(".git"), None)?;
+    let shared = Repo::open(repository, &repository.join(".git"), None)?;
     let head = shared
         .commit_of("HEAD")?
         .ok_or_else(|| failure("changes_git_failed"))?;
@@ -132,6 +137,134 @@ pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+/// Lists the refs an agent's own clone holds besides its branch, read as data from its git
+/// folder with no git run and no link followed (CC-1): each file under `refs`, each name in
+/// `packed-refs`, `HEAD` unless it is the symbolic ref to the branch, and `reftable` or
+/// `worktrees` when either exists, since git keeps refs there too. The engine's clone makes
+/// no ref but its branch. Input: the worktree. Output: at most `REFS_LISTED_MAX` names,
+/// empty when the branch is the only ref, else `changes_workspace_invalid` for ref data that
+/// is not a plain file or folder or `changes_too_large` past the bounds, never a clean read.
+pub(super) fn other_refs(worktree: &Path) -> Result<Vec<String>, EngineError> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat, statat};
+    let branch = agent_git::branch(worktree).ok_or_else(invalid)?;
+    let own = format!("refs/heads/{branch}");
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let git = openat(&root, ".git", flags, Mode::empty()).map_err(|_| invalid())?;
+    let mut found = Vec::new();
+    let pointer = format!("ref: {own}\n");
+    if read_at(&git, "HEAD", HEAD_BYTES_MAX)?.as_deref() != Some(pointer.as_bytes()) {
+        listed(&mut found, "HEAD".to_owned());
+    }
+    for store in REF_STORES {
+        match statat(&git, store, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => listed(&mut found, store.to_owned()),
+            Err(rustix::io::Errno::NOENT) => {}
+            Err(_) => return Err(invalid()),
+        }
+    }
+    let packed = read_at(&git, "packed-refs", PACKED_REFS_BYTES_MAX)?.unwrap_or_default();
+    for line in packed.split(|byte| *byte == b'\n') {
+        if line.is_empty() || line.starts_with(b"#") || line.starts_with(b"^") {
+            continue;
+        }
+        let space = line
+            .iter()
+            .position(|byte| *byte == b' ')
+            .ok_or_else(invalid)?;
+        let name = &line[space + 1..];
+        if name != own.as_bytes() {
+            listed(&mut found, String::from_utf8_lossy(name).into_owned());
+        }
+    }
+    let refs = openat(&git, "refs", flags, Mode::empty()).map_err(|_| invalid())?;
+    let mut budget = REF_ENTRIES_MAX;
+    loose_refs(&refs, "refs", 0, &mut budget, &own, &mut found)?;
+    Ok(found)
+}
+
+/// Walks one folder of a clone's loose refs for `other_refs`, opening each inner folder
+/// without following a link, at most `REF_DEPTH_MAX` deep and `REF_ENTRIES_MAX` entries in
+/// all. Inputs: the open folder, its ref path, its depth, the entries left, the branch's
+/// ref and the names found. Output: Ok, else `changes_workspace_invalid` for an entry that
+/// is not a plain file or folder, or `changes_too_large`.
+fn loose_refs(
+    folder: &rustix::fd::OwnedFd,
+    path: &str,
+    depth: usize,
+    budget: &mut usize,
+    own: &str,
+    found: &mut Vec<String>,
+) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
+    if depth > REF_DEPTH_MAX {
+        return Err(failure("changes_too_large"));
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    for entry in Dir::read_from(folder).map_err(|_| invalid())? {
+        let entry = entry.map_err(|_| invalid())?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| failure("changes_too_large"))?;
+        let inner = format!("{path}/{}", name.to_string_lossy());
+        let kind = statat(folder, name, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| invalid())?;
+        match FileType::from_raw_mode(kind.st_mode) {
+            FileType::Directory => {
+                let opened = openat(folder, name, flags, Mode::empty()).map_err(|_| invalid())?;
+                loose_refs(&opened, &inner, depth + 1, budget, own, found)?;
+            }
+            FileType::RegularFile if inner == own => {}
+            FileType::RegularFile => listed(found, inner),
+            _ => return Err(invalid()),
+        }
+    }
+    Ok(())
+}
+
+/// Adds a name to `other_refs`'s list while it holds fewer than `REFS_LISTED_MAX`, so the
+/// list stays capped while the walk still reads every entry within its bounds. Inputs: the
+/// list and the name.
+fn listed(found: &mut Vec<String>, name: String) {
+    if found.len() < REFS_LISTED_MAX {
+        found.push(name);
+    }
+}
+
+/// Reads a small file in a clone's git folder an agent may have replaced: opened without
+/// following a link and without waiting on a FIFO or device, kept only when it is a regular
+/// file of at most `limit` bytes. Inputs: the open folder, the name and the limit. Output:
+/// the bytes, None when it does not exist, else `changes_workspace_invalid` or
+/// `changes_too_large`.
+fn read_at(
+    folder: &rustix::fd::OwnedFd,
+    name: &str,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, EngineError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::io::Read;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let file = match openat(folder, name, flags, Mode::empty()) {
+        Ok(opened) => std::fs::File::from(opened),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(invalid()),
+    };
+    if !file.metadata().map_err(|_| invalid())?.is_file() {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 > limit {
+        return Err(failure("changes_too_large"));
+    }
+    Ok(Some(bytes))
 }
 
 /// The one alternates line `add` writes and `fetch` requires: the owner repository's

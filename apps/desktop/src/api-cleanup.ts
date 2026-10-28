@@ -29,6 +29,7 @@ const REFUSALS: Record<string, string> = {
   cleanup_commits_unlanded: "An agent has commits that haven't landed. CrazyAgent kept it and stopped there.",
   cleanup_folder_failed: "The worktree is gone but CrazyAgent couldn't remove the agent's folder. Try again.",
   cleanup_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
+  cleanup_refs_unlanded: "An agent's working copy has a stash, branch or tag that isn't saved anywhere else. CrazyAgent kept it and stopped there.",
   cleanup_request_invalid: "The engine didn't accept this cleanup request. Reload the page and try again.",
   cleanup_unavailable: "Cleanup isn't available in this engine yet.",
   cleanup_worktree_dirty: "An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.",

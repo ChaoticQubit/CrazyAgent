@@ -138,16 +138,28 @@ pub(super) struct Repo {
     work_tree: Option<PathBuf>,
     overrides: Vec<String>,
     excludes: Option<String>,
+    index: Option<PathBuf>,
 }
 
 impl Repo {
     /// Opens a repository for engine git calls, lists the filter drivers to blank and,
-    /// for a work tree, finds the owner's global ignore file. Inputs: the git folder and
-    /// the work tree, none for object and ref work only. Output: the repository, or
-    /// `changes_git_unsupported` for a git older than 2.40 or a filter name a `-c`
-    /// cannot carry.
+    /// for a work tree, finds the owner's global ignore file. The git folder is always the
+    /// owner checkout's own `.git` or a linked worktree's folder directly in its
+    /// `.git/worktrees`, never an agent's own clone, whose config is the agent's (CC-N1).
+    /// Inputs: the owner checkout root, the git folder and the work tree, none for object
+    /// and ref work only. Output: the repository, or `changes_git_unsupported` for a git
+    /// older than 2.40 or a filter name a `-c` cannot carry.
     #[cfg(unix)]
-    pub(super) fn open(git_dir: &Path, work_tree: Option<&Path>) -> Result<Self, EngineError> {
+    pub(super) fn open(
+        repository: &Path,
+        git_dir: &Path,
+        work_tree: Option<&Path>,
+    ) -> Result<Self, EngineError> {
+        let metadata = repository.join(".git");
+        assert!(
+            git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
+            "engine git opens only the owner checkout's git folder or a linked worktree's"
+        );
         let excludes = work_tree
             .and_then(|_| {
                 let (home, xdg) = owner_folders();
@@ -162,6 +174,7 @@ impl Repo {
             work_tree: work_tree.map(Path::to_path_buf),
             overrides: Vec::new(),
             excludes,
+            index: None,
         };
         repo.check_version()?;
         let listing = repo.capture(
@@ -175,10 +188,14 @@ impl Repo {
     }
 
     /// Refuses engine git where the host git and the research runner's filter listing
-    /// do not exist. Takes the git folder and work tree, unused.
+    /// do not exist. Takes the checkout root, git folder and work tree, unused.
     /// Returns `changes_unavailable`.
     #[cfg(not(unix))]
-    pub(super) fn open(_git_dir: &Path, _work_tree: Option<&Path>) -> Result<Self, EngineError> {
+    pub(super) fn open(
+        _repository: &Path,
+        _git_dir: &Path,
+        _work_tree: Option<&Path>,
+    ) -> Result<Self, EngineError> {
         Err(failure("changes_unavailable"))
     }
 
@@ -193,7 +210,16 @@ impl Repo {
             work_tree: Some(work_tree.to_path_buf()),
             overrides: Vec::new(),
             excludes: None,
+            index: None,
         }
+    }
+
+    /// Points every later git call at a private index file the engine owns, so reading a
+    /// work tree, such as an agent's own clone, neither reads nor writes an index in it.
+    /// Input: the index path, which git creates. Output: the repository.
+    pub(super) fn private_index(mut self, index: &Path) -> Self {
+        self.index = Some(index.to_path_buf());
+        self
     }
 
     fn check_version(&self) -> Result<(), EngineError> {
@@ -224,6 +250,7 @@ impl Repo {
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .envs(env.iter().copied())
+            .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")
             .args(crate::research::runner::GIT_SAFE)
             .args(ENGINE_SETTINGS)
