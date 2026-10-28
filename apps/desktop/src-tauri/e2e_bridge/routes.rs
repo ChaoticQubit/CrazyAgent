@@ -329,6 +329,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .add_memory(project.as_deref(), text, generation) .await }.await;
             routed(result)
         }
+        "desktop_import_memory" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project: String,
+                folder: String,
+                generation: u64,
+            }
+            let Args { project, folder, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .import_memory(&project, &folder, generation) .await }.await;
+            routed(result)
+        }
         "desktop_promote_memory" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -1175,6 +1190,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .resume_master_session(&ticket, &session_id, cancel_running, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_delete_master_session" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                ticket: String,
+                session_id: String,
+                generation: u64,
+            }
+            let Args { ticket, session_id, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .delete_master_session(&ticket, &session_id, generation) .await }.await;
             routed(result)
         }
         "desktop_cancel_master_turn" => {

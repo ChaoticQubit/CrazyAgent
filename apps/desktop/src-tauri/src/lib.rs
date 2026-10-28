@@ -5,7 +5,7 @@ mod updates;
 mod native_refresh_observation;
 
 use bridge::intake::FolderSize;
-use bridge::memory::{MemoryList, MemoryNote};
+use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{MemoryItem, ResearchLog};
 use bridge::terminal::Terminals;
@@ -533,6 +533,21 @@ async fn desktop_add_memory(
     lock(&state)
         .await?
         .add_memory(project.as_deref(), text, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_import_memory(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project: String,
+    folder: String,
+    generation: u64,
+) -> Result<MemoryImport, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .import_memory(&project, &folder, generation)
         .await
 }
 
@@ -2577,6 +2592,7 @@ pub fn run() {
             desktop_memory,
             desktop_approved_memories,
             desktop_add_memory,
+            desktop_import_memory,
             desktop_promote_memory,
             desktop_delete_memory,
             desktop_forget_memory,

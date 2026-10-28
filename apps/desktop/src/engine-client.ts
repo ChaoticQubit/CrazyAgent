@@ -599,7 +599,7 @@ export type SavedMemory = {
   text: string;
   scope: "global" | "project";
   project_id: string | null;
-  origin: "written" | "promoted" | "selected";
+  origin: "written" | "promoted" | "selected" | "imported";
   from_project_id: string | null;
   source_path: string | null;
 };
