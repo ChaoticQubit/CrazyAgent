@@ -824,7 +824,8 @@ impl TeamRuntime {
     /// restart returns it to its queue for the fresh process.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
         let mut stopped_live = Vec::new();
-        for worker in self.workers.values_mut() {
+        let mut stopped_subs = Vec::new();
+        for (id, worker) in &mut self.workers {
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
@@ -842,9 +843,20 @@ impl TeamRuntime {
             if worker.live {
                 stopped_live.push(worker.project.clone());
             }
+            if worker.role == AgentRole::Sub {
+                stopped_subs.push((*id, worker.project.clone()));
+            }
         }
         for project in stopped_live {
             super::master::set_live(&self.connection, &project, false)?;
+        }
+        for (id, project) in stopped_subs {
+            self.connection
+                .execute(
+                    "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                    params![id, project.as_str(), now_ms()],
+                )
+                .map_err(error)?;
         }
         Ok(())
     }
@@ -2161,6 +2173,10 @@ impl TeamRuntime {
             let agent = match (idle, pin) {
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
+                    self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    continue;
+                }
                 (None, Some(pinned)) => {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
@@ -2541,6 +2557,9 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
+        self.connection
+            .execute("DELETE FROM team_owner_stops WHERE agent=?1", [id])
+            .map_err(error)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
@@ -4409,6 +4428,8 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const OWNER_STOPPED_TASK: &str =
+    "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;

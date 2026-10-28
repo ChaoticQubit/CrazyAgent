@@ -901,6 +901,12 @@ fn wake(
             ));
         }
         Err("team_agent_not_found") => return Ok((unknown, true)),
+        Err(super::OWNER_STOPPED) => {
+            return Ok((
+                format!("The owner stopped {label}. Only the owner can wake it."),
+                true,
+            ));
+        }
         Err("team_agent_running") => format!(
             "{label} is running. Reach it with {}().",
             tool::MESSAGE_TOOL
