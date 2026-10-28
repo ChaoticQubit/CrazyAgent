@@ -43,18 +43,25 @@ pub struct Written {
 /// User settings, holding every [`locked`] key, the `extensions.allowed` pin list of the
 /// owner's approved extensions ([`super::extensions::allowed_setting`]), the IDE terminal
 /// profiles ([`super::terminal::machine_profiles`]) and `git.path` naming the git shim
-/// [`super::git::SHIM`] written next to it first ([`super::git::machine_settings`]) over the
-/// owner's own keys there, which are kept; and `<folder>/locked-settings.json` for the
+/// [`super::git::SHIM`] written next to it first ([`super::git::shim_text`],
+/// [`super::git::machine_settings`]) over the owner's own keys there, which are kept; and
+/// `<folder>/locked-settings.json` for the
 /// extension. Each file is written whole in
 /// the engine's private IDE folder and renamed into place, so the server never reads a
 /// partial file and a link to the old file changes nothing. A Remote settings file that is
 /// not a JSON object is kept aside as `settings.json.unreadable`; a link there is replaced,
 /// never followed. The server's profile locks the whole Remote settings folder
 /// ([`machine_folder`]), so the server can never write, add, remove or move anything there.
-/// Inputs: the project's IDE folder, the server data folder inside it and the engine's data
-/// folder above both. Output: the written files, or a plain refusal.
+/// Inputs: the project's IDE folder, the server data folder inside it, the engine's data
+/// folder above both and, when the owner lets the IDE run the project's hooks, the project
+/// folder. Output: the written files, or a plain refusal.
 #[cfg(unix)]
-pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, EngineError> {
+pub fn write(
+    folder: &Path,
+    server_data: &Path,
+    data: &Path,
+    project_hooks: Option<&Path>,
+) -> Result<Written, EngineError> {
     if !folder.is_absolute()
         || !folder.starts_with(data)
         || folder == data
@@ -76,7 +83,7 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
         folder,
         SHIM_TEMPORARY,
         &shim,
-        super::git::SHIM_TEXT.as_bytes(),
+        super::git::shim_text(project_hooks)?.as_bytes(),
         0o700,
     )?;
     let target = machine.join(SETTINGS);
@@ -120,9 +127,14 @@ pub fn write(folder: &Path, server_data: &Path, data: &Path) -> Result<Written, 
 }
 
 /// Refuses the lock where the engine has no Unix file modes, so no IDE server starts.
-/// Takes the folders, unused. Returns `ide_unavailable`.
+/// Takes the folders and the hooks switch, unused. Returns `ide_unavailable`.
 #[cfg(not(unix))]
-pub fn write(_folder: &Path, _server_data: &Path, _data: &Path) -> Result<Written, EngineError> {
+pub fn write(
+    _folder: &Path,
+    _server_data: &Path,
+    _data: &Path,
+    _project_hooks: Option<&Path>,
+) -> Result<Written, EngineError> {
     Err(failure("ide_unavailable"))
 }
 

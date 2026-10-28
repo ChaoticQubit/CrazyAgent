@@ -6,16 +6,44 @@ use std::path::Path;
 #[cfg(all(test, unix))]
 mod tests;
 
-/// The git configuration every git the IDE server starts runs with, as the
-/// `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0` and `GIT_CONFIG_VALUE_0` variables, which outrank
-/// every config file: `diff.ignoreSubmodules=all`, so a status or diff in a section never
-/// enters a repository an agent planted below its worktree and never runs that
-/// repository's fsmonitor or hooks. The server's environment adds them after its allowlist.
-pub const CONFIG_ENV: [(&str, &str); 3] = [
-    ("GIT_CONFIG_COUNT", "1"),
+const KEYS: usize = 10;
+
+/// The git configuration every git the IDE server starts runs with, as `GIT_CONFIG_COUNT`
+/// and numbered `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` variables, which outrank every
+/// config file (INT-1). `diff.ignoreSubmodules=all` keeps a status or diff in a section out
+/// of a repository an agent planted below its worktree; `safe.bareRepository=explicit`
+/// refuses a folder an agent made look like a bare repository; and every key that names a
+/// program git runs and that git lets the environment force is forced off: fsmonitor, the
+/// ssh command, the pager, credential helpers, the signing programs and, last so the shim
+/// can leave it out for the project folder alone ([`shim_text`]), the hooks folder. The
+/// server's environment adds them after its allowlist.
+pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
+    ("GIT_CONFIG_COUNT", "10"),
     ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
     ("GIT_CONFIG_VALUE_0", "all"),
+    ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
+    ("GIT_CONFIG_VALUE_1", "explicit"),
+    ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
+    ("GIT_CONFIG_VALUE_2", "false"),
+    ("GIT_CONFIG_KEY_3", "core.sshCommand"),
+    ("GIT_CONFIG_VALUE_3", "false"),
+    ("GIT_CONFIG_KEY_4", "core.pager"),
+    ("GIT_CONFIG_VALUE_4", "cat"),
+    ("GIT_CONFIG_KEY_5", "credential.helper"),
+    ("GIT_CONFIG_VALUE_5", ""),
+    ("GIT_CONFIG_KEY_6", "gpg.program"),
+    ("GIT_CONFIG_VALUE_6", "false"),
+    ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
+    ("GIT_CONFIG_VALUE_7", "false"),
+    ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
+    ("GIT_CONFIG_VALUE_8", "false"),
+    ("GIT_CONFIG_KEY_9", "core.hooksPath"),
+    ("GIT_CONFIG_VALUE_9", "/dev/null"),
 ];
+
+/// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
+/// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
+const PROJECT_HOOKS_COUNT: &str = "9";
 
 /// The workspace keys that keep the IDE's git to the repository at each section's root: no
 /// submodule detection, and no scan for repositories below a section or around an open
@@ -49,6 +77,39 @@ exit 128\n  \
 ;;\n\
 esac\n\
 exec git \"$@\"\n";
+
+const SHIM_EXEC: &str = "exec git \"$@\"\n";
+
+/// The shim for one IDE server start. Off, it is [`SHIM_TEXT`]. On, with the project folder
+/// the owner let run its own hooks, it first sets `GIT_CONFIG_COUNT` to
+/// [`PROJECT_HOOKS_COUNT`] when its physical working directory is exactly that folder, so
+/// git there runs the project's hooks and every other [`CONFIG_ENV`] key stays forced; an
+/// agent folder below it is never that folder. Input: the canonical project folder, or None
+/// for Off. Output: the text, or `ide_settings_invalid` for a folder that is not absolute,
+/// not UTF-8 or holds a quote or a control character.
+pub fn shim_text(project_hooks: Option<&Path>) -> Result<String, EngineError> {
+    assert_eq!(CONFIG_ENV[0].1.parse::<usize>(), Ok(KEYS));
+    assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
+    assert_eq!(
+        CONFIG_ENV[2 * KEYS - 1],
+        ("GIT_CONFIG_KEY_9", "core.hooksPath")
+    );
+    let Some(project) = project_hooks else {
+        return Ok(SHIM_TEXT.to_owned());
+    };
+    let folder = project
+        .to_str()
+        .filter(|text| project.is_absolute() && !text.chars().any(|c| c.is_control() || c == '\''))
+        .ok_or_else(|| failure("ide_settings_invalid"))?;
+    let head = SHIM_TEXT
+        .strip_suffix(SHIM_EXEC)
+        .expect("the shim ends by running git");
+    let text = format!(
+        "{head}if [ \"$(pwd -P)\" = '{folder}' ]; then\n  GIT_CONFIG_COUNT={PROJECT_HOOKS_COUNT}\n  export GIT_CONFIG_COUNT\nfi\n{SHIM_EXEC}"
+    );
+    assert!(text.starts_with("#!/bin/sh\n") && text.ends_with(SHIM_EXEC));
+    Ok(text)
+}
 
 /// The Remote settings key that points VS Code's git at the shim. `git.path` is a machine
 /// setting, so no workspace or folder setting can point it elsewhere. Input: the shim's

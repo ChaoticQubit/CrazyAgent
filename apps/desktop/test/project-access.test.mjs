@@ -19,15 +19,17 @@ const view = {
     { toolchain: "rust", label: "Rust", installed: true, used: true, allowed: true },
     { toolchain: "node", label: "Node", installed: true, used: false, allowed: false },
   ],
+  ide_git_hooks: false,
 };
 
 test("Save sends the level and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", [true, false]), { access: "own_branch", toolchains: [] });
-  assert.deepEqual(access.policyOf(view, "sandboxed", [false, true]), {
+  assert.deepEqual(access.policyOf(view, "own_branch", [true, false], false), { access: "own_branch", toolchains: [], ide_git_hooks: false });
+  assert.deepEqual(access.policyOf(view, "sandboxed", [false, true], false), {
     access: "sandboxed",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
+    ide_git_hooks: false,
   });
-  assert.throws(() => access.policyOf(view, "full", [true]), /one switch per toolchain/);
+  assert.throws(() => access.policyOf(view, "full", [true], false), /one switch per toolchain/);
 });
 
 test("Full access asks for the plain warning first, and the project page names the level and toolchains", () => {
@@ -65,4 +67,23 @@ test("Settings says beside the level choice that lowering it stops agents runnin
   assert.ok(!page.includes("keep the access they started with"));
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
+});
+
+test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
+  assert.deepEqual(access.policyOf(view, "sandboxed", [true, false], true), { access: "sandboxed", toolchains: [], ide_git_hooks: true });
+  assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
+  assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
+  assert.match(access.IDE_GIT_HOOKS_LINE, /Applies when the IDE next starts\.$/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
+  assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("policyOf(view, access, allowed, ideGitHooks)"));
+  assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
+  assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
+  assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
+  const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
+  assert.ok(created.includes("{ access, toolchains: [], ide_git_hooks: false }"));
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
 });

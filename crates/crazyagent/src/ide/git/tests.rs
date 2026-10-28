@@ -114,3 +114,175 @@ fn the_ide_git_settings_turn_off_nested_repository_and_submodule_detection() {
             .all(|(name, _)| name.starts_with("GIT_CONFIG_"))
     );
 }
+
+/// Writes an executable script that records that it ran by creating `marker`, then passes
+/// its input through. Inputs: the script path and the marker. Output: none.
+fn planted(script: &Path, marker: &Path) {
+    std::fs::write(
+        script,
+        format!("#!/bin/sh\n: > '{}'\nexec cat\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    ok(&repo, &["init", "-q"]);
+    ok(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+    let marks = base.join("marks");
+    std::fs::create_dir(&marks).unwrap();
+    let hooks = repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    for name in ["pre-commit", "post-index-change"] {
+        planted(&hooks.join(name), &marks.join(name));
+    }
+    planted(&base.join("fsmonitor.sh"), &marks.join("fsmonitor"));
+    planted(&base.join("sign.sh"), &marks.join("sign"));
+    ok(
+        &repo,
+        &[
+            "config",
+            "core.fsmonitor",
+            base.join("fsmonitor.sh").to_str().unwrap(),
+        ],
+    );
+    ok(
+        &repo,
+        &[
+            "config",
+            "gpg.program",
+            base.join("sign.sh").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(repo.join("notes.txt"), "first\n").unwrap();
+    let ran = |name: &str| marks.join(name).exists();
+
+    let added = git(&repo, &CONFIG_ENV, &["add", "notes.txt"]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let committed = git(&repo, &CONFIG_ENV, &["commit", "-q", "-m", "guarded"]);
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let signed = git(
+        &repo,
+        &CONFIG_ENV,
+        &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
+    );
+    assert!(!signed.status.success());
+    for name in ["pre-commit", "post-index-change", "fsmonitor", "sign"] {
+        assert!(!ran(name), "{name} ran under the IDE's git configuration");
+    }
+
+    std::fs::write(repo.join("notes.txt"), "second\n").unwrap();
+    assert!(git(&repo, &[], &["status", "--porcelain"]).status.success());
+    assert!(git(&repo, &[], &["add", "notes.txt"]).status.success());
+    assert!(
+        git(&repo, &[], &["commit", "-q", "-m", "open"])
+            .status
+            .success()
+    );
+    assert!(
+        !git(
+            &repo,
+            &[],
+            &["commit", "-q", "-S", "--allow-empty", "-m", "signed"]
+        )
+        .status
+        .success()
+    );
+    for name in ["pre-commit", "post-index-change", "fsmonitor", "sign"] {
+        assert!(ran(name), "without it, git runs the planted {name}");
+    }
+
+    let bare = base.join("agent");
+    std::fs::create_dir(&bare).unwrap();
+    ok(&bare, &["init", "-q", "--bare"]);
+    ok(&bare, &["config", "core.bare", "false"]);
+    ok(&bare, &["config", "core.worktree", bare.to_str().unwrap()]);
+    planted(
+        &base.join("bare-fsmonitor.sh"),
+        &marks.join("bare-fsmonitor"),
+    );
+    ok(
+        &bare,
+        &[
+            "config",
+            "core.fsmonitor",
+            base.join("bare-fsmonitor.sh").to_str().unwrap(),
+        ],
+    );
+    std::fs::write(bare.join("notes.txt"), "planted\n").unwrap();
+    let guarded = git(&bare, &CONFIG_ENV, &["status", "--porcelain"]);
+    assert!(!guarded.status.success());
+    assert!(
+        String::from_utf8_lossy(&guarded.stderr).contains("cannot use bare repository"),
+        "{}",
+        String::from_utf8_lossy(&guarded.stderr)
+    );
+    assert!(!ran("bare-fsmonitor"));
+    assert!(git(&bare, &[], &["status", "--porcelain"]).status.success());
+    assert!(
+        ran("bare-fsmonitor"),
+        "without it, git uses the bare-looking folder and runs its fsmonitor"
+    );
+}
+
+#[test]
+fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
+    assert_eq!(shim_text(None).unwrap(), SHIM_TEXT);
+    for refused in ["relative/project", "/project/it's", "/project/line\nbreak"] {
+        assert!(shim_text(Some(Path::new(refused))).is_err(), "{refused:?}");
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let agent = project
+        .join(".crazyagent")
+        .join("worktrees")
+        .join("agent-1");
+    std::fs::create_dir_all(&agent).unwrap();
+    ok(&project, &["init", "-q"]);
+    let on = base.join("on");
+    let off = base.join("off");
+    for (shim, text) in [
+        (&on, shim_text(Some(&project)).unwrap()),
+        (&off, shim_text(None).unwrap()),
+    ] {
+        assert!(text.starts_with("#!/bin/sh\n") && text.ends_with("exec git \"$@\"\n"));
+        std::fs::write(shim, text).unwrap();
+        std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let hooks_path = |shim: &Path, dir: &Path| {
+        let output = crate::spawn_gate::output(
+            Command::new(shim)
+                .current_dir(dir)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(CONFIG_ENV.iter().copied())
+                .args(["config", "--get", "core.hooksPath"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(hooks_path(&on, &project), "");
+    assert_eq!(hooks_path(&on, &agent), "/dev/null\n");
+    assert_eq!(hooks_path(&on, &project.join(".git")), "/dev/null\n");
+    assert_eq!(hooks_path(&off, &project), "/dev/null\n");
+}

@@ -301,13 +301,14 @@ async fn open(
     if unqualified().is_some() {
         return Err(failure("ide_platform_unqualified"));
     }
-    let (build, written, folder) = tokio::task::spawn_blocking({
+    let (build, written, folder, hooks) = tokio::task::spawn_blocking({
         let project = project.clone();
         move || match fetch::state(&root) {
             BuildState::Ready { root: build, .. } => {
                 let written = crate::ide::workspace::write(&root, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
-                Ok((build, written, folder))
+                let hooks = crate::ide::workspace::project_hooks(&root, &project)?;
+                Ok((build, written, folder, hooks))
             }
             _ => Err(failure("ide_build_not_ready")),
         }
@@ -316,7 +317,7 @@ async fn open(
     .map_err(|_| unknown())??;
     let info = authority
         .ide_servers
-        .open(&project, &folder, &build)
+        .open(&project, &folder, &build, hooks)
         .await?;
     if !info.url.starts_with("http://127.0.0.1:") {
         return Err(failure("ide_server_not_loopback"));

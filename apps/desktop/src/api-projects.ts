@@ -121,19 +121,21 @@ export type AgentAccess = "sandboxed" | "own_branch" | "full";
 /** A toolchain family the engine detects in the owner's home folder and the project. */
 export type Toolchain = "rust" | "node" | "python";
 
-/** A project's saved agent policy: the level and the toolchain switches that differ from the
- * project's own use. */
+/** A project's saved agent policy: the level, the toolchain switches that differ from the
+ * project's own use, and whether git in the IDE runs the project's own hooks. */
 export interface AgentPolicy {
   access: AgentAccess;
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
+  ide_git_hooks: boolean;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
- * with the reason one can't run, and every detected toolchain. */
+ * with the reason one can't run, every detected toolchain and the IDE hooks switch. */
 export interface PolicyView {
   access: AgentAccess;
   levels: { access: AgentAccess; label: string; unavailable: string | null }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
+  ide_git_hooks: boolean;
 }
 
 export interface PoolChoice {

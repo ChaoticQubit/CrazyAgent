@@ -142,7 +142,7 @@ async fn ide_server_listens_only_on_loopback() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("loopback");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -169,7 +169,7 @@ async fn ide_server_listens_only_on_loopback() {
     );
     assert_eq!(
         servers
-            .open(&project, checkout.path(), &cached_build())
+            .open(&project, checkout.path(), &cached_build(), false)
             .await
             .unwrap(),
         info
@@ -188,7 +188,7 @@ async fn request_without_the_token_is_refused() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("refused");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let host = format!("127.0.0.1:{}", info.port);
@@ -265,7 +265,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     let project = project("token");
     let build = cached_build();
     let first = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -286,7 +286,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(servers.stop(&project).await);
     assert!(!first.token_path.exists());
     let second = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(second.token_path, first.token_path);
@@ -424,7 +424,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let project = project("ports");
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let first = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -438,7 +438,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     );
     assert!(servers.stop(&project).await);
     let again = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(
@@ -451,7 +451,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = servers_in(data.path(), IDLE_LIMIT);
     let moved = restarted
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_ne!(moved.server_port, first.server_port);
@@ -466,7 +466,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     drop(held);
     assert!(restarted.stop(&project).await);
     let kept = restarted
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(kept.server_port, moved.server_port);
@@ -482,7 +482,7 @@ async fn idle_server_stops_after_the_idle_limit() {
     let servers = servers_in(data.path(), idle);
     let project = project("idle");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -510,7 +510,7 @@ async fn idle_server_stops_after_the_idle_limit() {
 /// pending its launch cannot have passed `ready`. Inputs: the register, the project, the
 /// checkout and the build. Output: the cut launch's process group.
 async fn cut_open(servers: &Servers, project: &ProjectId, checkout: &Path, build: &Path) -> i32 {
-    let open = servers.open(project, checkout, build);
+    let open = servers.open(project, checkout, build, false);
     tokio::pin!(open);
     let deadline = Instant::now() + START_LIMIT;
     loop {
@@ -563,7 +563,7 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
     assert!(present(cut));
 
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -574,7 +574,7 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
         "the new launch, which passed its port check, holds the server port"
     );
     let again = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(again, info, "a ready launch is handed back");
@@ -603,7 +603,7 @@ async fn no_ide_server_process_survives_engine_stop() {
     let project = project("engine-stop");
     let servers = service.owner_runtime().unwrap().ide_servers();
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     assert!(
@@ -653,10 +653,10 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .unwrap();
         let crashed = servers_in(&left, IDLE_LIMIT);
         let info = runtime
-            .block_on(crashed.open(&name, &opened, &path))
+            .block_on(crashed.open(&name, &opened, &path, false))
             .unwrap();
         runtime
-            .block_on(crashed.open(&other, &other_opened, &path))
+            .block_on(crashed.open(&other, &other_opened, &path, false))
             .unwrap();
         let group = crashed.group(&name).unwrap();
         let other_group = crashed.group(&other).unwrap();
@@ -686,7 +686,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .exists()
     );
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let leader = Pid::from_raw(old_group).unwrap();
@@ -709,7 +709,7 @@ async fn the_server_log_never_holds_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("log");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -755,7 +755,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("page");
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -870,7 +870,7 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("socket");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -928,7 +928,16 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
-    let command = command(&build, &folder, checkout.path(), &info, &socket, writer).unwrap();
+    let command = command(
+        &build,
+        &folder,
+        checkout.path(),
+        &info,
+        &socket,
+        writer,
+        false,
+    )
+    .unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
     let profile = folder.join(sandbox::PROFILE);
     let expected: Vec<OsString> = [
@@ -1059,7 +1068,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
     let servers = Servers::new(data.path(), IDLE_LIMIT, Arc::clone(&grants), socket);
     let project = project("built-in");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
@@ -1099,7 +1108,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         "a stopped server's capability is revoked"
     );
     let again = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let renewed = capability_packet(&again.capability_path);

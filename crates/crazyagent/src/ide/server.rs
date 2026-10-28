@@ -197,13 +197,15 @@ impl Servers {
     /// qualified it never starts. The idle watch starts with the launch, so a launch whose
     /// open is cut while it starts is still stopped once it exits, idles or misses its start
     /// limit, and is never handed back to a later open. Inputs: the project, its canonical
-    /// folder and the canonical root of a verified build. Output: where the IDE is reached,
-    /// or a plain refusal.
+    /// folder, the canonical root of a verified build and whether the owner lets the IDE run
+    /// the project's git hooks in that folder ([`super::git::shim_text`]). Output: where the
+    /// IDE is reached, or a plain refusal.
     pub async fn open(
         &self,
         project: &ProjectId,
         root: &Path,
         build: &Path,
+        project_hooks: bool,
     ) -> Result<ServerInfo, EngineError> {
         if !sandbox::qualified() {
             return Err(failure("ide_platform_unqualified"));
@@ -253,8 +255,17 @@ impl Servers {
         };
         let started = match output::start(&folder.join(LOG), &token)
             .map_err(|_| failure("ide_state_unavailable"))
-            .and_then(|output| command(&build, &folder, root, &info, &self.socket, output))
-        {
+            .and_then(|output| {
+                command(
+                    &build,
+                    &folder,
+                    root,
+                    &info,
+                    &self.socket,
+                    output,
+                    project_hooks,
+                )
+            }) {
             Ok(mut command) => match self.prepare_extensions(&build, &folder).await {
                 Ok(()) => self.spawn(project, &slot, &info, &mut command),
                 Err(error) => Err(error),
@@ -665,7 +676,8 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// grace; a cleared environment holding only [`env::server_env`], with the owner `socket`
 /// the built-in extension connects to and TMPDIR at its short temp folder, its server data
 /// folder as the working directory (the profile lets it read no folder above), stdout and
-/// stderr into the redacting `output` pipe, and its own process group.
+/// stderr into the redacting `output` pipe, and its own process group. The git shim lets
+/// the project's hooks run in `root` only when `project_hooks` is on.
 fn command(
     build: &Path,
     folder: &Path,
@@ -673,6 +685,7 @@ fn command(
     info: &ServerInfo,
     socket: &Path,
     output: PipeWriter,
+    project_hooks: bool,
 ) -> Result<Command, EngineError> {
     let errors = output
         .try_clone()
@@ -682,7 +695,7 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let written = settings::write(folder, &home, data)?;
+    let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
     let tmp = crate::sandbox::toolchains::make_tmp(&home)
         .map_err(|_| failure("ide_state_unavailable"))?;
     let (user_data, extensions) = (settings::user_data_folder(&home), folder.join(EXTENSIONS));

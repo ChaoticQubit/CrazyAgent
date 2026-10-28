@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
-import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -321,6 +321,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [allowed, setAllowed] = useState<boolean[]>([]);
+  const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
@@ -329,6 +330,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     setView(next);
     setAccess(next.access);
     setAllowed(next.toolchains.map((row) => row.allowed));
+    setIdeGitHooks(next.ide_git_hooks);
   }
   useEffect(() => {
     let live = true;
@@ -344,7 +346,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed), nextGeneration());
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed, ideGitHooks), nextGeneration());
     if (result.kind !== "ok") {
       setBusy(false);
       return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
@@ -361,7 +363,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
   }
 
-  const changed = view !== null && (access !== view.access || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
@@ -369,6 +371,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
       onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
