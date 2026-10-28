@@ -612,7 +612,10 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
         gone(&checked).await,
         "what a check wrote while it held the server's secrets must not stay on disk"
     );
-    assert_eq!(holders(&busy.engine_root(), cached.as_bytes()), 0);
+    assert!(
+        none_hold(&busy.engine_root(), cached.as_bytes()).await,
+        "what the check wrote must be deleted after its folder moved aside"
+    );
     assert!(
         gone(&profile).await,
         "the removed server's check profile must not stay behind"
