@@ -116,5 +116,15 @@ test("every agent view refusal has a plain sentence and is an engine code", () =
 
 test("the agent panel reads the view for the open card only", () => {
   const source = readFileSync(new URL("../src/screens/team/index.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AgentInstructions key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} \/>/);
+  assert.match(source, /<AgentSide key=\{openNode\.id\} projectId=\{projectId\} node=\{openNode\} /);
+});
+
+test("the open agent's terminal head carries the reported line once the read is in", () => {
+  const value = { agent: 12, harness: "codex", launched: true, text: "", skills: [], sessions: 1,
+    loaded: [{ name: "AGENTS.md", path: "/w/agent-12/AGENTS.md" }], skills_used: ["tdd"], files: [] };
+  assert.equal(view.headReport({ kind: "ok", value }), "Instructions: AGENTS.md - Skills used: tdd");
+  assert.equal(view.headReport({ kind: "ok", value: { ...value, launched: false } }), undefined, "an agent that never launched has no report");
+  assert.equal(view.headReport({ kind: "loading" }), undefined);
+  const source = readFileSync(new URL("../src/screens/team/agent-instructions.tsx", import.meta.url), "utf8");
+  assert.match(source, /<TerminalPanel [^>]*reported=\{agent === undefined \? undefined : headReport\(read\)\}/);
 });
