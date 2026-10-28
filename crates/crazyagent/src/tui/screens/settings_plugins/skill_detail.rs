@@ -1,4 +1,5 @@
 use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde, unused};
+use crate::plugins::Scope;
 use crate::protocol::ProjectId;
 use crate::skills::SkillDetail;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
@@ -97,7 +98,8 @@ fn md_line(line: &MdLine, theme: &Theme) -> Line<'static> {
 /// One skill read in full, from Settings or from one project's Settings tab: its switch,
 /// description and folder, the rendered SKILL.md and the folder's files. Input: keys and
 /// the engine's skill detail. Output: the scrolled page; Space turns the skill on or off
-/// for every project, or for the project it was opened from, and Esc goes back.
+/// for every project, or for the project it was opened from, and Esc goes back. Only a read
+/// for the same place lands, so a project page never holds an every-project read.
 pub struct SkillDetailPage {
     id: String,
     name: String,
@@ -158,7 +160,24 @@ impl SkillDetailPage {
         );
     }
 
+    /// Whether the page was opened from a project but holds a skill with neither that
+    /// project's switch nor that project as its home, so Space must switch nothing.
+    /// Output: true for such a skill.
+    fn elsewhere(&self) -> bool {
+        match (&self.load, &self.project) {
+            (Load::Ready(detail), Some((project, _))) => {
+                detail.skill.on_here.is_none()
+                    && !matches!(&detail.skill.scope, Scope::Project { project_id } if project_id == project)
+            }
+            _ => false,
+        }
+    }
+
     fn toggle(&mut self, ctx: &mut Ctx) {
+        if self.elsewhere() {
+            self.reload(ctx);
+            return;
+        }
         let Load::Ready(detail) = &self.load else {
             return;
         };
@@ -365,7 +384,9 @@ impl Screen for SkillDetailPage {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match settings_event(arrival) {
-            Some(SettingsEvent::SkillDetail(result)) if self.waiting => {
+            Some(SettingsEvent::SkillDetail(project, result))
+                if self.waiting && project.as_ref() == self.project.as_ref().map(|(id, _)| id) =>
+            {
                 self.waiting = false;
                 match result {
                     Ok(detail) if detail.skill.id == self.id => {
