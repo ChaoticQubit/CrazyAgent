@@ -268,6 +268,38 @@ impl Drop for HarnessProcesses {
     }
 }
 
+/// Kills a running stand-in harness while a waiter already blocks on it, so the waiter, not
+/// the host, reaps it, after which the host can never reap its harness. The host polls its
+/// harness too, so it can still win: the caller then starts over. Takes the stand-in's
+/// working folder. Returns whether the waiter reaped the harness.
+pub(in crate::engine) fn reap_before_the_host(folder: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let harness = loop {
+        if let Some(harness) = fs::read_to_string(folder.join("leader.pid"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .and_then(Pid::from_raw)
+        {
+            break harness;
+        }
+        assert!(Instant::now() < deadline, "stand-in harness never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let waiter = std::thread::spawn(move || {
+        rustix::process::waitpid(Some(harness), rustix::process::WaitOptions::empty())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    rustix::process::kill_process(harness, rustix::process::Signal::KILL).unwrap();
+    match waiter.join().unwrap() {
+        Ok(Some((reaped, _))) => {
+            assert_eq!(reaped, harness);
+            true
+        }
+        Err(rustix::io::Errno::CHILD) => false,
+        waited => panic!("waiting for the harness failed: {waited:?}"),
+    }
+}
+
 /// The three real processes a [`DETACHING_HARNESS`] started: the harness, the process in its
 /// own session and the `nohup` orphan. Dropping it kills all three, so a failing test leaves
 /// none.
