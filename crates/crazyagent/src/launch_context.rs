@@ -32,6 +32,13 @@ pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
     INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
+/// The most bytes of a live master's own instructions: its role, its team tools or the
+/// DELEGATE line, and how the team's work lands.
+pub const LIVE_RULES_BYTES_MAX: usize = 4 * 1024;
+/// The most bytes a live master adds to what its harness reads at launch: its own
+/// instructions and the seed of a fresh conversation for a session with earlier turns.
+pub const LIVE_INSTRUCTIONS_BYTES_MAX: usize =
+    LIVE_RULES_BYTES_MAX + 2 + crate::master_sessions::SEED_BYTES_MAX;
 
 /// How a Sandboxed agent's work lands, given at every launch in a linked worktree:
 /// CrazyAgent, not the agent, turns the edits left in its worktree into a change set the
@@ -55,7 +62,7 @@ pub const SKILL_FILES_MAX: usize = 4096;
 pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
-const NAME_BYTES_MAX: usize = 256;
+pub(crate) const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
@@ -324,6 +331,20 @@ impl AgentContext {
             .collect()
     }
 
+    /// Adds a live master's own instructions to what its harness reads at launch, so they
+    /// reach it as system context and never as a typed message. Input: at most
+    /// `LIVE_INSTRUCTIONS_BYTES_MAX` bytes the engine built. Output: the context.
+    pub fn with_live_instructions(mut self, text: &str) -> Self {
+        assert!(text.len() <= LIVE_INSTRUCTIONS_BYTES_MAX);
+        self.instructions.push('\n');
+        self.instructions.push_str(text);
+        assert!(
+            self.instructions.len()
+                <= MASTER_INSTRUCTIONS_BYTES_MAX + 1 + LIVE_INSTRUCTIONS_BYTES_MAX
+        );
+        self
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
@@ -519,7 +540,9 @@ impl AgentContext {
             }
             assert!(
                 text.len()
-                    <= INSTRUCTIONS_BYTES_MAX
+                    <= MASTER_INSTRUCTIONS_BYTES_MAX
+                        + 1
+                        + LIVE_INSTRUCTIONS_BYTES_MAX
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
                         + crate::agent_home::PROCESS_BYTES_MAX
