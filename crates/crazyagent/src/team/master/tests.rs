@@ -738,3 +738,45 @@ fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
     );
     assert_eq!(pinned(&fixture, agent).len(), 1);
 }
+
+/// A master's wake of a sub-agent the owner stopped is refused in plain words and pins
+/// nothing (AW-1); only the owner's Wake or restart starts it again.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_cannot_wake_an_agent_the_owner_stopped() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let agent = named_sub(&fixture, "page-writer", "stopped");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+            params![agent, PROJECT, NOW],
+        )
+        .unwrap();
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::WAKE_TOOL,
+            json!({"agent": "@page-writer", "text": "You were interrupted, finish it."}),
+        )],
+    );
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    assert_eq!(
+        text(&answers[0]),
+        (
+            format!("The owner stopped {label}. Only the owner can wake it.").as_str(),
+            true
+        )
+    );
+    assert!(pinned(&fixture, agent).is_empty());
+    let tasks: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tasks, 0);
+}

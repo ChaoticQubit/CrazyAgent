@@ -3584,3 +3584,101 @@ fn the_owners_wake_without_a_conversation_hands_the_last_result_to_the_next_task
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+/// The owner's stop holds against the master (AW-1): a sub-agent the owner stopped is
+/// recorded as stopped by the owner, the master's wake of it is refused, a task pinned to
+/// it fails instead of waking it, and only the owner's Wake starts it again, which clears
+/// the record.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    delegate_page(&fixture);
+    fixture.until(&mut team, "the sub-agent finishes its task", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|id| f.agent_status(*id).0 == AgentStatus::Idle)
+    });
+    let member = subs(&fixture)[0];
+    assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the owner stopped the sub-agent", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    assert!(crate::team::owner_stopped(&fixture.connection, member).unwrap());
+
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::admit_wake(
+            &tx,
+            &fixture.access,
+            &fixture.setup,
+            member,
+            "Finish the page.",
+            now_ms()
+        )
+        .unwrap(),
+        Err(crate::team::OWNER_STOPPED)
+    );
+    tx.commit().unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Finish the page.','queued',?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, member],
+        )
+        .unwrap();
+    let ended = |f: &Fixture| -> (String, Option<String>) {
+        f.connection
+            .query_row(
+                "SELECT status,error FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+    fixture.until(&mut team, "a task pinned to the stopped agent fails", |f| {
+        ended(f).0 == "failed"
+    });
+    assert_eq!(ended(&fixture).1.as_deref(), Some(OWNER_STOPPED_TASK));
+    idle_ticks(&mut team);
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing woke it");
+    assert_eq!(fixture.agent_status(member).0, AgentStatus::Stopped);
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: member,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the owner's Wake starts it", |f| {
+        launches(f, member).len() == 2 && f.agent_status(member).0 == AgentStatus::Idle
+    });
+    assert!(!crate::team::owner_stopped(&fixture.connection, member).unwrap());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}

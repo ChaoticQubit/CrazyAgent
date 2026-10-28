@@ -824,7 +824,8 @@ impl TeamRuntime {
     /// restart returns it to its queue for the fresh process.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
         let mut stopped_live = Vec::new();
-        for worker in self.workers.values_mut() {
+        let mut stopped_subs = Vec::new();
+        for (id, worker) in &mut self.workers {
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
@@ -842,9 +843,20 @@ impl TeamRuntime {
             if worker.live {
                 stopped_live.push(worker.project.clone());
             }
+            if worker.role == AgentRole::Sub {
+                stopped_subs.push((*id, worker.project.clone()));
+            }
         }
         for project in stopped_live {
             super::master::set_live(&self.connection, &project, false)?;
+        }
+        for (id, project) in stopped_subs {
+            self.connection
+                .execute(
+                    "INSERT OR REPLACE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                    params![id, project.as_str(), now_ms()],
+                )
+                .map_err(error)?;
         }
         Ok(())
     }
@@ -2111,25 +2123,31 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
-        let queued: Vec<(i64, String, String, Option<i64>)> = {
+        let queued: Vec<(i64, String, String, Option<i64>, bool)> = {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT t.id,t.harness,t.prompt,p.agent FROM team_tasks t
+                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master' FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
                      WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
                 )
                 .map_err(error)?;
             statement
                 .query_map([project.as_str()], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
                 })
                 .map_err(error)?
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
-        for (task, harness, prompt, pin) in queued {
+        for (task, harness, prompt, pin, by_master) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -2161,6 +2179,12 @@ impl TeamRuntime {
             let agent = match (idle, pin) {
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned))
+                    if by_master && super::owner_stopped(&self.connection, pinned)? =>
+                {
+                    self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    continue;
+                }
                 (None, Some(pinned)) => {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
@@ -2541,6 +2565,9 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
+        self.connection
+            .execute("DELETE FROM team_owner_stops WHERE agent=?1", [id])
+            .map_err(error)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
@@ -4409,6 +4436,8 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const OWNER_STOPPED_TASK: &str =
+    "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
