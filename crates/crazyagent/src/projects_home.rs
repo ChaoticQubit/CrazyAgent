@@ -585,6 +585,40 @@ pub(crate) fn save(connection: &rusqlite::Connection, home: &Path) -> Result<(),
     Ok(())
 }
 
+/// Tells whether a projects home move recorded before its folders move holds `folder`: one
+/// is pending and the folder is inside its old home, as given or as it resolves now. No
+/// agent or research run starts there until the move is finished or forgotten.
+/// Input: an engine connection and the folder. Output: the answer, or any SQLite failure.
+pub(crate) fn move_holds(
+    connection: &rusqlite::Connection,
+    folder: &Path,
+) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let present = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects_home_move'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !present {
+        return Ok(false);
+    }
+    let origin: Option<String> = connection
+        .query_row(
+            "SELECT origin FROM projects_home_move WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(origin.is_some_and(|origin| {
+        let origin = Path::new(&origin);
+        folder.starts_with(origin)
+            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+    }))
+}
+
 /// Turns a projects home refusal code into the sentence shown to the owner.
 /// Input: an engine rejection code. Output: the plain sentence, or None for
 /// codes that are not about the projects home.
@@ -649,6 +683,15 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_move_in_progress" => {
             "Your projects folder is still being moved. Try again when it finishes."
+        }
+        "home_move_agent_work" => {
+            "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved."
+        }
+        "home_move_changes_restorable" => {
+            "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved."
+        }
+        "home_move_research_running" => {
+            "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved."
         }
         "projects_home_unreadable" => "Your projects folder cannot be read.",
         "folder_size_unsafe" => "That folder cannot be measured.",

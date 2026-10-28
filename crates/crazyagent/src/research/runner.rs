@@ -548,7 +548,8 @@ impl ResearchRunner {
     /// Runs a claimed job to its end and records how it ended: done with its report,
     /// failed, cancelled, parked for a pool, or handed back. Takes the job store, the job,
     /// its project and the pool connection of the project's account, if known; a run
-    /// refused for a rate or usage limit pauses it, else spends an attempt.
+    /// refused for a rate or usage limit pauses it, else spends an attempt. A job whose
+    /// project folder a projects home move holds goes back to the queue unspent.
     fn run_claimed(
         &self,
         jobs: &ResearchJobs,
@@ -564,6 +565,13 @@ impl ResearchRunner {
             report,
             process_group,
         };
+        if jobs.home_moving(project.root)? {
+            jobs.release(&job)?;
+            let status = jobs
+                .get(job.id)?
+                .map_or(ResearchStatus::Queued, |job| job.status);
+            return Ok(run(status, None, None));
+        }
         let Some(harness) = ResearchHarness::of(&job.harness) else {
             let status = jobs.fail(&job, "This harness cannot run research yet", 1)?;
             return Ok(run(status, None, None));
