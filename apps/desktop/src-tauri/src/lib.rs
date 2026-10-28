@@ -788,6 +788,7 @@ async fn desktop_team_keep_warm(
 
 /// Sets a project team's task and session time limits and sub-agent idle stop from Team
 /// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn desktop_team_time_limits(
     window: WebviewWindow,
@@ -796,12 +797,20 @@ async fn desktop_team_time_limits(
     turn_secs: Option<u32>,
     session_secs: Option<u32>,
     idle_secs: Option<u32>,
+    revision: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation)
+        .team_time_limits(
+            &id,
+            turn_secs,
+            session_secs,
+            idle_secs,
+            revision,
+            generation,
+        )
         .await
 }
 
@@ -811,12 +820,13 @@ async fn desktop_team_on_harness_switch(
     state: State<'_, NativeState>,
     id: String,
     mode: String,
+    revision: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_on_harness_switch(&id, &mode, generation)
+        .team_on_harness_switch(&id, &mode, revision, generation)
         .await
 }
 

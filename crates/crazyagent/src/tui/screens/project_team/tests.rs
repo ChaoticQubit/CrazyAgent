@@ -135,6 +135,7 @@ fn team() -> TeamStatus {
         on_harness_switch: crate::team::SwitchMode::Carry,
         show_finished: false,
         message_settings: crate::team::agent_messages::MessageSettings::default(),
+        settings_revision: 7,
         live_switch: None,
         paused: false,
         live_master: None,
@@ -1344,7 +1345,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: Some(1800),
             session_secs: None,
-            idle_secs: None
+            idle_secs: None,
+            revision: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1375,7 +1377,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: Some(28_800),
             session_secs: None,
-            idle_secs: None
+            idle_secs: None,
+            revision: 7,
         }),
         "past 8 h the session limit goes Off; an Off session holds any task limit"
     );
@@ -1391,7 +1394,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: None,
             session_secs: Some(28_800),
-            idle_secs: None
+            idle_secs: None,
+            revision: 7,
         }),
         "a task limit turned Off leaves the session limit"
     );
@@ -1402,7 +1406,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: None,
             session_secs: Some(1800),
-            idle_secs: None
+            idle_secs: None,
+            revision: 7,
         }),
         "a session limit needs no task limit"
     );
@@ -1419,7 +1424,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: None,
             session_secs: None,
-            idle_secs: Some(3600)
+            idle_secs: Some(3600),
+            revision: 7,
         }),
         "the idle stop steps from 10 min to 1 h and leaves the task and session limits"
     );
@@ -1450,7 +1456,8 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             project_id: project(),
             turn_secs: None,
             session_secs: None,
-            idle_secs: None
+            idle_secs: None,
+            revision: 7,
         }),
         "past 1 h the idle stop goes Off"
     );
@@ -1472,6 +1479,7 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchMode::Fresh,
+            revision: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1500,6 +1508,7 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchMode::Carry,
+            revision: 7,
         })
     );
 }

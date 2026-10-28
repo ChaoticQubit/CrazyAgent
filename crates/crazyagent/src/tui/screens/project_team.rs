@@ -256,6 +256,7 @@ impl TeamView {
                     }
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
                         self.notice = Some(Notice::problem(team_plain(&code)));
+                        self.read_ms = None;
                     }
                     Ok(_) => {}
                 }
@@ -1015,6 +1016,7 @@ impl TeamView {
             status.session_limit_secs,
             status.idle_stop_secs,
         );
+        let revision = status.settings_revision;
         let (turn, kept, idle) = match which {
             Limit::Task => {
                 let next = next_limit(limits, turn);
@@ -1055,6 +1057,7 @@ impl TeamView {
             turn_secs: turn,
             session_secs: kept,
             idle_secs: idle,
+            revision,
         })
     }
 
@@ -1068,6 +1071,16 @@ impl TeamView {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
+<<<<<<< HEAD
+=======
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let revision = status.settings_revision;
+>>>>>>> fix/tui-team-route
         let mode = match status.on_harness_switch {
             SwitchMode::Carry => SwitchMode::Fresh,
             SwitchMode::Fresh => SwitchMode::Carry,
@@ -1086,6 +1099,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: self.project.clone(),
             mode,
+            revision,
         })
     }
 
@@ -1691,6 +1705,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
+        "stale_revision" => {
+            "These settings changed elsewhere. The current ones are shown; pick again.".into()
+        }
         other => plain_problem(other),
     }
 }

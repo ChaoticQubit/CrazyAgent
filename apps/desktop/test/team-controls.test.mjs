@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -113,4 +114,24 @@ test("a team view the engine shortened to fit says older history is hidden", () 
 test("the idle stop says when an idle master stops, which no setting changes", () => {
   const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
+});
+
+test("team settings changes send the revision the window read, so the engine refuses a stale one", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  const source = read("../src/screens/team/controls.tsx");
+  assert.match(source, /setTeamTimeLimits\(projectId, next\.turn, next\.session, next\.idle, status\.settings_revision \?\? 0\)/);
+  assert.match(source, /setOnHarnessSwitch\(projectId, mode, status\.settings_revision \?\? 0\)/);
+  const api = read("../src/api.ts");
+  assert.match(api, /call<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration\(\) \}\)/);
+  assert.match(api, /call<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation: nextGeneration\(\) \}\)/);
+  const client = read("../src/engine-client.ts");
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation \}\)/);
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation \}\)/);
+  assert.match(client, /settings_revision\?: number;/);
+  const lib = read("../src-tauri/src/lib.rs");
+  for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch"]) {
+    const start = lib.indexOf(`fn ${command}(`);
+    assert.ok(start >= 0, command);
+    assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("revision: u64"), `${command} takes the revision`);
+  }
 });

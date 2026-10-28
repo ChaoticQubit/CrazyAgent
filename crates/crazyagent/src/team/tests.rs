@@ -3145,17 +3145,18 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         Some(IDLE_STOP_DEFAULT_SECS),
         "an idle sub-agent stops after 10 minutes until the owner changes it"
     );
-    let limits = |turn_secs, session_secs, idle_secs| TeamAction::TimeLimits {
+    let limits = |turn_secs, session_secs, idle_secs, revision| TeamAction::TimeLimits {
         project_id: project.clone(),
         turn_secs,
         session_secs,
         idle_secs,
+        revision,
     };
     for refused in [
-        limits(Some(60), None, None),
-        limits(Some(3600), Some(1800), None),
-        limits(Some(3600), Some(86_400), None),
-        limits(None, None, Some(300)),
+        limits(Some(60), None, None, 0),
+        limits(Some(3600), Some(1800), None, 0),
+        limits(Some(3600), Some(86_400), None, 0),
+        limits(None, None, Some(300), 0),
     ] {
         assert_eq!(
             refused.validate().unwrap_err().0,
@@ -3164,13 +3165,13 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         );
     }
     assert!(
-        limits(None, Some(3600), None).validate().is_ok(),
+        limits(None, Some(3600), None, 0).validate().is_ok(),
         "a session limit needs no task limit"
     );
     let pool = access("team-limits", &["local-a"]);
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120))).unwrap(),
+        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120), 0)).unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3193,7 +3194,7 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     );
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(None, None, None)).unwrap(),
+        execute(&tx, &pool, &limits(None, None, None, 1)).unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3216,6 +3217,87 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         time_limits(&connection, &project).unwrap_err().0,
         "team_time_limits_invalid"
     );
+}
+
+#[test]
+fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-stale",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-stale", &["local-a"]);
+    let old = status(&connection, &setup).unwrap().settings_revision;
+    let limits = |session_secs, revision| TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs: None,
+        session_secs,
+        idle_secs: Some(IDLE_STOP_DEFAULT_SECS),
+        revision,
+    };
+    let switch = |mode, revision| TeamAction::OnHarnessSwitch {
+        project_id: project.clone(),
+        mode,
+        revision,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(Some(7200), old)).unwrap(),
+        Outcome::Applied,
+        "the desktop change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let newer = status(&connection, &setup).unwrap().settings_revision;
+    assert_ne!(newer, old, "an applied change moves the revision");
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(None, old)).unwrap(),
+        rejected("stale_revision"),
+        "a TUI change from the read before the desktop change is refused"
+    );
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, old)).unwrap(),
+        rejected("stale_revision"),
+        "the On harness switch setting from the old read is refused too"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Carry),
+        "the desktop session limit survives and the switch setting is unchanged"
+    );
+    assert_eq!(
+        shown.settings_revision, newer,
+        "a refusal leaves the revision"
+    );
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, newer)).unwrap(),
+        Outcome::Applied,
+        "a change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Fresh)
+    );
+    assert_ne!(shown.settings_revision, newer);
 }
 
 /// Fills a project's team with long history: `before` finished tasks, two queued tasks,

@@ -178,15 +178,17 @@ impl NativeBridge {
 
     /// Sets the project team's task and session time limits and its sub-agent idle stop, in
     /// seconds from the listed choices, none for no limit. Takes the project id, the three
-    /// limits and the client generation. Returns the actual commit receipt; a value outside
-    /// the choices, or a session limit below a set task limit, is refused as
-    /// `team_action_invalid` with `team_time_limits_invalid` behind it.
+    /// limits, the team settings revision the window read and the client generation. Returns
+    /// the actual commit receipt; a value outside the choices, or a session limit below a set
+    /// task limit, is refused as `team_action_invalid` with `team_time_limits_invalid` behind
+    /// it, and a revision another client moved since is refused as `stale_revision`.
     pub async fn team_time_limits(
         &mut self,
         id: &str,
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
+        revision: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
@@ -195,24 +197,31 @@ impl NativeBridge {
             turn_secs,
             session_secs,
             idle_secs,
+            revision,
         };
         self.team_action(action, generation).await
     }
 
     /// Sets what the live master does with the conversation when the master harness changes:
     /// `carry` hands the new harness the earlier turns and open tasks, `fresh` starts it
-    /// without them. Takes the project id, the mode and the client generation. Returns the
-    /// actual commit receipt, or `team_action_invalid` for any other mode.
+    /// without them. Takes the project id, the mode, the team settings revision the window
+    /// read and the client generation. Returns the actual commit receipt, `team_action_invalid`
+    /// for any other mode, or `stale_revision` once another client moved the revision.
     pub async fn team_on_harness_switch(
         &mut self,
         id: &str,
         mode: &str,
+        revision: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
-        self.team_action(TeamAction::OnHarnessSwitch { project_id, mode }, generation)
-            .await
+        let action = TeamAction::OnHarnessSwitch {
+            project_id,
+            mode,
+            revision,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Sets where the project's finished agents show: in the agents list and team graph, or
