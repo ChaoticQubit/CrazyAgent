@@ -1253,6 +1253,11 @@ impl TeamRuntime {
             self.hold(project);
             return Ok(());
         }
+        if crate::projects_home::move_holds(&self.connection, &stored.project_folder())
+            .map_err(error)?
+        {
+            return Ok(());
+        }
         let paused = self.paused()?;
         self.retire_rejected(project, access);
         self.retire_lowered(project);
@@ -2717,13 +2722,20 @@ impl TeamRuntime {
             )));
         }
         let now = now_ms();
-        self.connection
-            .execute(
-                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6)",
-                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now],
-            )
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
-        let id = self.connection.last_insert_rowid();
+        if crate::projects_home::move_holds(&tx, &stored.project_folder()).map_err(error)? {
+            return Ok(Err(HOME_MOVING.into()));
+        }
+        tx.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6)",
+            params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now],
+        )
+        .map_err(error)?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(error)?;
         assert!(id > 0);
         if role == AgentRole::Sub {
             names::assign_persona(&self.connection, &stored.project_id, id)?;
@@ -4950,6 +4962,7 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+const HOME_MOVING: &str = "the projects folder is being moved, so agents start once the move ends";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";

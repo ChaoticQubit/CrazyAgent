@@ -44,6 +44,8 @@ mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
+#[cfg(all(test, unix))]
+mod projects_home_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -170,6 +172,10 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
+    HomeMoveRecheck(
+        u64,
+        oneshot::Sender<Result<Result<(), String>, EngineError>>,
+    ),
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
@@ -551,6 +557,14 @@ impl Storage {
                                 Err(error("projects_home_readonly"))
                             } else {
                                 projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeMoveRecheck(exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::recheck(&mut connection, exchange)
                             };
                             let _ = reply.send(result);
                         }

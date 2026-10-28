@@ -396,6 +396,13 @@ impl ResearchJobs {
         )
     }
 
+    /// Tells whether a projects home move holds `folder`, so no job of its project launches
+    /// there until the move is finished or forgotten. Takes the project folder. Returns the
+    /// answer.
+    pub(crate) fn home_moving(&self, folder: &Path) -> Result<bool, JobError> {
+        Ok(crate::projects_home::move_holds(&self.connection, folder)?)
+    }
+
     /// Returns the job of the claim `held` to the queue without spending its attempt after
     /// its account hit a rate or usage limit, and pauses that pool account in the pause
     /// master and team turns share before the job is free, so the next pick fails over to

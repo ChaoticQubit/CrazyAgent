@@ -259,7 +259,11 @@ pub(super) fn add_plan(
 
 /// Plans a MoveProjectsHome that moves the project folders and records the
 /// move as pending before any disk work, so a move whose result is never
-/// recorded is still finished from what landed on disk.
+/// recorded is still finished from what landed on disk. The pending record is
+/// also the hold: no agent or research run starts in the old home until the move
+/// is finished or forgotten (`crate::projects_home::move_holds`). The check and
+/// the record are one write transaction, so a launch recorded first refuses the
+/// move and a launch recorded later sees the hold.
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, the new home, the request and the transport exchange that will
 /// run the move. Output: the checked plan, or the refusal code
@@ -275,7 +279,9 @@ pub(super) fn move_plan(
     exchange: u64,
 ) -> Result<MovePlan, EngineError> {
     let exchange = i64::try_from(exchange).map_err(error)?;
-    let tx = db.transaction().map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     check_owner_admission(&tx, a)?;
     if owner_revision(&tx)? != expected.value() {
         return Err(error("stale_revision"));
@@ -303,9 +309,27 @@ pub(super) fn move_plan(
     Ok(plan)
 }
 
+/// Checks again, under the hold of the pending move, that no agent work appeared in the old
+/// home since the plan: the last check before the first folder moves. Inputs: the
+/// connection and the transport exchange running the move. Output: the refusal code when
+/// agent work is there now, or `home_move_not_pending` when this exchange has no move.
+pub(super) fn recheck(
+    db: &mut Connection,
+    exchange: u64,
+) -> Result<Result<(), String>, EngineError> {
+    let exchange = i64::try_from(exchange).map_err(error)?;
+    let tx = db.transaction().map_err(error)?;
+    let pending = pending_move(&tx)?
+        .filter(|pending| pending.exchange == exchange)
+        .ok_or_else(|| error("home_move_not_pending"))?;
+    let found = agent_work_inside(&tx, &pending.origin)?;
+    tx.commit().map_err(error)?;
+    Ok(found.map_or(Ok(()), |code| Err(code.to_owned())))
+}
+
 /// Names the agent work inside the home that a home move would cut off, as its refusal
-/// code: `home_move_agent_work` for a team agent's worktree or own clone, one waiting for
-/// removal, or a change set that is open or has a step in flight;
+/// code: `home_move_agent_work` for a team agent's worktree or own clone, an agent starting
+/// there, one waiting for removal, or a change set that is open or has a step in flight;
 /// `home_move_research_running` for a research job running for a project in the home,
 /// whose worktree is a linked worktree of the project's repository; otherwise
 /// `home_move_changes_restorable` for a discarded change set that can still be restored,
@@ -328,6 +352,13 @@ fn agent_work_inside(
         home,
         "team_retiring",
         "SELECT repository, worktree FROM team_retiring",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "team_agents",
+        "SELECT json_extract(s.body, '$.folder') FROM team_agents a
+         JOIN project_setups s ON s.project=a.project WHERE a.status='starting'",
         params![],
     )? || held_inside(
         tx,

@@ -2311,3 +2311,100 @@ async fn a_running_research_job_holds_a_home_move_until_it_ends() {
     drop(jobs);
     bench.stop().await;
 }
+
+/// Opens the bench engine's database for writing the agent records a test stands in for.
+fn engine_db(root: &Path) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db
+}
+
+/// A team agent that is starting in a project in the home holds a home move, since its
+/// worktree is about to be made there; once it stopped the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_starting_in_the_home_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',0,'local-connection','starting',1,1)",
+        [project.as_str()],
+    )
+    .unwrap();
+    let agent = db.last_insert_rowid();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute(
+        "UPDATE team_agents SET status='failed', stopped_ms=2 WHERE id=?1",
+        [agent],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A projects home move recorded before its folders move holds every research launch in
+/// the home: a job claimed meanwhile goes back to the queue without spending its attempt,
+/// and runs on once the move is finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO projects_home_move VALUES (1,'request-held',1,?1,?2,'[\"demo-app\"]')",
+        rusqlite::params![
+            repo.parent().unwrap().to_str().unwrap(),
+            bench.root.join("next").to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let jobs =
+        crazyagent::research::jobs::ResearchJobs::open(&bench.root.join("engine.db")).unwrap();
+    let id = jobs
+        .enqueue("held-research", "stack", "codex", false)
+        .unwrap();
+    let (runner, _) = bench.runner_without_codex(false);
+    let project = crazyagent::research::runner::ResearchProject {
+        id: "held-research",
+        root: &repo,
+        account: None,
+    };
+    let held = runner
+        .run_once(&project)
+        .unwrap()
+        .expect("the queued job is claimed");
+    assert_eq!(
+        (held.job, held.status),
+        (id, crazyagent::research::jobs::ResearchStatus::Queued)
+    );
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        (job.status, job.attempts),
+        (crazyagent::research::jobs::ResearchStatus::Queued, 0)
+    );
+    db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
+        .unwrap();
+    let ran = runner
+        .run_once(&project)
+        .unwrap()
+        .expect("the job is claimed again");
+    assert_eq!(
+        (ran.job, ran.status),
+        (id, crazyagent::research::jobs::ResearchStatus::NeedsPool)
+    );
+    drop(jobs);
+    drop(db);
+    bench.stop().await;
+}

@@ -5899,3 +5899,52 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
         "a linked .git pointer was followed: {linked:?}"
     );
 }
+
+/// A projects home move recorded before its folders move holds the project: a task
+/// delegated meanwhile stays queued with no agent and no worktree, and starts once the
+/// move is finished.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_delegated_while_the_projects_folder_moves_waits_until_the_move_ends() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        "#!/bin/sh\nexec /bin/sleep 300\n",
+        TeamLimits::default(),
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO projects_home_move VALUES (1,'request-held',1,?1,?2,'[\"project\"]')",
+            params![
+                fixture.base.to_str().unwrap(),
+                fixture.base.join("next").to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Wait for the move")]);
+    for _ in 0..8 {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        task_of(&fixture, "Wait for the move"),
+        ("queued".to_owned(), None)
+    );
+    assert_eq!(
+        count(&fixture.connection, "SELECT count(*) FROM team_agents"),
+        0
+    );
+    let project = fixture.base.join("project");
+    assert!(!project.join("worktrees").exists() && !project.join(".crazyagent").exists());
+    fixture
+        .connection
+        .execute("DELETE FROM projects_home_move WHERE singleton=1", [])
+        .unwrap();
+    fixture.until(&mut team, "the held task starts once the move ends", |f| {
+        task_of(f, "Wait for the move").0 == "running"
+    });
+    assert!(team.shutdown().unwrap().is_empty());
+}
