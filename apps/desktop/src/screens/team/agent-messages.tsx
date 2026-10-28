@@ -21,7 +21,7 @@ function Entry({ entry, name, results, onOpenLink }: { entry: AgentMessage; name
       {entry.state !== null && <span className="am-state">{eventState(entry.state)}</span>}
     </span>
     <span className="am-text">{displayText(entryText(entry))}</span>
-    {entry.result !== null && results === "full" && <span className="am-result am-full">{displayText(entry.result)}</span>}
+    {entry.result !== null && results === "full" && <ResultView name={name} what={what} source={entry.result} plain onOpenLink={onOpenLink} />}
     {entry.result !== null && results === "first_line" && <>
       <span className="am-result">{displayText(resultLine(entry.result))}</span>
       <span><button type="button" className="btn quiet small" aria-expanded={open} onClick={() => setOpen(!open)}>{open ? `Hide ${what}` : `Show ${what}`}</button></span>
@@ -31,13 +31,16 @@ function Entry({ entry, name, results, onOpenLink }: { entry: AgentMessage; name
   </li>;
 }
 
-/** An opened result or problem in a frame named for the agent, so Markdown it holds, a rule or a
- * bold "Master" among it, never reads as another author's row. Inputs: the agent's name, whether
- * it is a result or a problem, the Markdown and the link handler. Output: the framed result. */
-export function ResultView({ name, what, source, onOpenLink }: { name: string; what: "result" | "problem"; source: string; onOpenLink: (href: string) => void }) {
+/** A result or problem in a frame named for the agent, so what it holds, a rule, a bold
+ * "Master" or a line laid out like a row, never reads as another author's row. Inputs: the
+ * agent's name, whether it is a result or a problem, its text, whether to show it as plain
+ * text instead of Markdown, and the link handler. Output: the framed result. */
+export function ResultView({ name, what, source, plain = false, onOpenLink }: { name: string; what: "result" | "problem"; source: string; plain?: boolean; onOpenLink: (href: string) => void }) {
   return <figure className="am-md">
     <figcaption className="am-from">{`${what === "problem" ? "Problem" : "Result"} from ${displayText(name)}`}</figcaption>
-    <div className="pj-md"><MarkdownView source={source} onOpenLink={onOpenLink} /></div>
+    {plain
+      ? <span className="am-result am-full">{displayText(source)}</span>
+      : <div className="pj-md"><MarkdownView source={source} onOpenLink={onOpenLink} /></div>}
   </figure>;
 }
 
