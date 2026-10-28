@@ -526,3 +526,71 @@ fn a_report_from_an_engine_without_step_health_reads_as_healthy() {
         serde_json::json!([{"step": "poll", "panics": 1, "last_ms": 7, "recovered_ms": null}])
     );
 }
+
+#[test]
+fn a_flagged_key_outside_the_top_rows_keeps_its_full_count() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    let listed = ROWS_MAX as u64 + 1;
+    for index in 1..=listed {
+        let project = format!("p-{index:02}");
+        let agent = format!("team-{index}");
+        crate::usage::capture::count_reported(
+            &db,
+            &who(&project, None, "claude-1", &agent, RunKind::Agent),
+            Tokens {
+                input: 1000 - index,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            &format!("s-{index}"),
+            MIDNIGHT + HOUR,
+        )
+        .unwrap();
+    }
+    let last = format!("team-{listed}");
+    let last_project = format!("p-{listed:02}");
+    let trimmed = readerless(&last_project, &last, "opencode", RunKind::Agent);
+    mark_unreported(&db, &trimmed, MIDNIGHT + 2 * HOUR + 5).unwrap();
+    let readerless_only = readerless("p-01", "team-99", "opencode", RunKind::Agent);
+    mark_unreported(&db, &readerless_only, MIDNIGHT + HOUR + 5).unwrap();
+
+    let all = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(all.agents.len(), ROWS_MAX + 2);
+    assert!(
+        all.agents[..ROWS_MAX]
+            .iter()
+            .all(|row| row.not_reported_by.is_none())
+    );
+    assert_eq!(
+        flagged(&all.agents[ROWS_MAX..]),
+        [
+            (last.as_str(), 1000 - listed, Some("OpenCode")),
+            ("team-99", 0, Some("OpenCode")),
+        ],
+        "the trimmed agent shows the tokens it counted, not a bare not reported"
+    );
+    let row = &all.agents[ROWS_MAX];
+    assert_eq!(row.runs, 1);
+    assert_eq!(row.last_ms, MIDNIGHT + 2 * HOUR + 5);
+
+    assert_eq!(all.projects.len(), ROWS_MAX + 1);
+    assert_eq!(
+        flagged(&all.projects[..1]),
+        [("p-01", 999, Some("OpenCode"))],
+        "a listed project is flagged in place"
+    );
+    assert_eq!(
+        flagged(&all.projects[ROWS_MAX..]),
+        [(last_project.as_str(), 1000 - listed, Some("OpenCode"))],
+        "a trimmed project keeps its full count too"
+    );
+
+    let only = crate::protocol::ProjectId::new(last_project.as_str()).unwrap();
+    let alone = report(&db, Some(&only), Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    assert_eq!(
+        flagged(&alone.agents),
+        [(last.as_str(), 1000 - listed, Some("OpenCode"))]
+    );
+}
