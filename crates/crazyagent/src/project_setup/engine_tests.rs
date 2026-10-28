@@ -1289,7 +1289,6 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         .unwrap()
         .home()
         .to_path_buf();
-    assert!(owner_home.join(".cargo").is_dir());
     let probe = engine.root.path().join("read-probe");
     std::fs::create_dir(&probe).unwrap();
     let refusals = [
@@ -1297,14 +1296,19 @@ async fn owner_saves_checked_read_only_folders_and_refuses_unsafe_ones() {
         (text(&real.join("gone")), "read_path_missing"),
         (text(&file), "read_path_not_folder"),
         (text(&owner_home), "read_path_holds_home"),
-        ("/Users".to_owned(), "read_path_holds_home"),
-        (text(&owner_home.join(".cargo")), "read_path_credentials"),
+        (text(owner_home.parent().unwrap()), "read_path_holds_home"),
+        ("/usr/local".to_owned(), "read_path_credentials"),
         (text(&probe), "read_path_engine_data"),
         (
             text(&std::fs::canonicalize(engine.root.path()).unwrap()),
             "read_path_engine_data",
         ),
-    ];
+    ]
+    .into_iter()
+    .chain(
+        cfg!(target_os = "macos")
+            .then(|| (text(&owner_home.join("Library")), "read_path_credentials")),
+    );
     let mut generation = 3;
     for (typed, code) in refusals {
         let refused = owner
