@@ -397,7 +397,10 @@ fn a_job_queued_again_with_a_reason_shows_it_until_it_runs_again() {
     assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
     assert_eq!(job.error.as_deref(), Some(REASON));
     let again = jobs.claim("project-a", "runner", 1).unwrap().unwrap();
-    assert_eq!((again.id, again.attempts, again.error), (id, 1, None));
+    assert_eq!(
+        (again.id, again.attempts, again.error.as_deref()),
+        (id, 1, None)
+    );
 
     assert!(jobs.request_cancel(id).unwrap());
     jobs.release(&again, Some(REASON)).unwrap();
