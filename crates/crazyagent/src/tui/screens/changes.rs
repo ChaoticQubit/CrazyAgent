@@ -5,8 +5,8 @@ use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
 use crate::landing::{
-    AcceptOutcome, AgentKind, ChangeSetId, ChangeSetView, ChangeState, ChangedFile, FileKind,
-    FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
+    AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TurnOutcome,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -19,6 +19,7 @@ const DIFF_AHEAD: usize = 40;
 const DIFF_PAGE_ROWS: usize = 20;
 const LIST_ROWS_MAX: usize = 8;
 const FILES_SHOWN: usize = 10;
+const FILES_MAX: usize = 10_000;
 const CONFLICTS_SHOWN: usize = 5;
 const SHORT_COMMIT: usize = 7;
 const TAB_SPACES: &str = "    ";
@@ -40,6 +41,8 @@ struct Diff {
     id: ChangeSetId,
     head: String,
     files: Vec<ChangedFile>,
+    files_done: bool,
+    files_cut: bool,
     lines: Vec<String>,
     next: Option<u16>,
     truncated: bool,
@@ -47,8 +50,56 @@ struct Diff {
 }
 
 impl Diff {
+    /// Opens a change set's diff with nothing read yet. Inputs: the set's id and the head
+    /// shown. Output: the diff, waiting for its first page.
+    fn of(id: ChangeSetId, head: String) -> Self {
+        Self {
+            id,
+            head,
+            files: Vec::new(),
+            files_done: false,
+            files_cut: false,
+            lines: Vec::new(),
+            next: Some(0),
+            truncated: false,
+            top: 0,
+        }
+    }
+
+    /// Whether the next page is wanted now: while the file list is not complete, so every
+    /// engine risk mark is shown even past the text limit, else while the owner scrolls
+    /// toward the end of the text read so far.
     fn wants_more(&self) -> bool {
-        self.next.is_some() && self.top + DIFF_AHEAD >= self.lines.len()
+        self.next.is_some()
+            && (!self.files_done
+                || (self.lines.len() < DIFF_LINES_MAX && self.top + DIFF_AHEAD >= self.lines.len()))
+    }
+
+    /// Takes one page: its files up to `FILES_MAX` and its text up to `DIFF_LINES_MAX` lines.
+    /// The file list is complete at the first page without files or at the last page; text
+    /// past the limit is not read once the file list is complete. Input: the page.
+    fn add(&mut self, page: &ChangeDiff) {
+        let room = FILES_MAX - self.files.len();
+        self.files_cut |= page.files.len() > room;
+        self.files.extend(page.files.iter().take(room).cloned());
+        self.files_done |= self.files_cut || page.files.is_empty() || page.next.is_none();
+        if self.lines.len() < DIFF_LINES_MAX {
+            self.lines.extend(page.text.lines().map(diff_line));
+        } else {
+            self.truncated |= !page.text.is_empty();
+        }
+        if self.lines.len() > DIFF_LINES_MAX {
+            self.lines.truncate(DIFF_LINES_MAX);
+            self.truncated = true;
+        }
+        self.truncated |= page.truncated;
+        self.next = page.next;
+        if self.files_done && self.lines.len() >= DIFF_LINES_MAX {
+            self.next = None;
+        }
+        assert!(self.lines.len() <= DIFF_LINES_MAX);
+        assert!(self.files.len() <= FILES_MAX);
+        assert!(self.files_done || self.next.is_some());
     }
 }
 
@@ -194,16 +245,7 @@ impl ProjectChanges {
                 if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
                     && diff.next == Some(*page)
                 {
-                    diff.files.extend(page_diff.files.iter().cloned());
-                    diff.lines.extend(page_diff.text.lines().map(diff_line));
-                    diff.truncated |= page_diff.truncated;
-                    diff.next = page_diff.next;
-                    if diff.lines.len() > DIFF_LINES_MAX {
-                        diff.lines.truncate(DIFF_LINES_MAX);
-                        diff.truncated = true;
-                        diff.next = None;
-                    }
-                    assert!(diff.lines.len() <= DIFF_LINES_MAX);
+                    diff.add(page_diff);
                 }
             }
             (ChangesQuery::Diff { .. }, Err(code)) => {
@@ -383,15 +425,7 @@ impl ProjectChanges {
                 let Some(set) = self.chosen() else {
                     return true;
                 };
-                let diff = Diff {
-                    id: set.id.clone(),
-                    head: set.head.clone(),
-                    files: Vec::new(),
-                    lines: Vec::new(),
-                    next: Some(0),
-                    truncated: false,
-                    top: 0,
-                };
+                let diff = Diff::of(set.id.clone(), set.head.clone());
                 self.diff = Some(diff);
             }
             _ => return false,
@@ -590,6 +624,14 @@ impl ProjectChanges {
             lines.push(Row::of(
                 format!("  and {} more files", listed.plain_hidden),
                 look.muted,
+            ));
+        }
+        if diff.files_cut {
+            lines.push(Row::of(
+                format!(
+                    "Only the first {FILES_MAX} changed files are listed. Files after them, and their marks, are not shown."
+                ),
+                look.warning,
             ));
         }
         if diff.truncated {

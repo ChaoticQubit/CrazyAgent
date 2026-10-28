@@ -755,3 +755,109 @@ fn accept_and_discard_name_the_set_they_ask_about() {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
 }
+
+#[test]
+fn marks_on_file_pages_past_the_text_limit_still_load_and_show() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let padded: String = (0..DIFF_LINES_MAX + 5)
+        .map(|n| format!("+line {n}\n"))
+        .collect();
+    let first = ChangeDiff {
+        files: vec![changed(
+            "notes.txt",
+            FileStatus::Modified,
+            FileKind::Text,
+            Vec::new(),
+        )],
+        text: padded,
+        next: Some(1),
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(first)));
+    assert_eq!(view.diff.as_ref().unwrap().lines.len(), DIFF_LINES_MAX);
+    let second = ChangeDiff {
+        files: vec![changed(
+            "zz/hook.sh",
+            FileStatus::Added,
+            FileKind::Text,
+            vec![FileMark::Executable],
+        )],
+        text: "+more\n".into(),
+        next: Some(2),
+        truncated: false,
+    };
+    let query = reply(&mut view, Ok(ChangesView::Diff(second)));
+    assert_eq!(
+        query,
+        ChangesQuery::Diff {
+            id: id('1'),
+            page: 1
+        },
+        "the file list keeps loading past the text limit"
+    );
+    let third = ChangeDiff {
+        files: Vec::new(),
+        text: "+last\n".into(),
+        next: Some(3),
+        truncated: false,
+    };
+    let query = reply(&mut view, Ok(ChangesView::Diff(third)));
+    assert_eq!(
+        query,
+        ChangesQuery::Diff {
+            id: id('1'),
+            page: 2
+        }
+    );
+    assert_eq!(
+        view.next_query(NOW),
+        None,
+        "once every file is known, no text past the limit is read"
+    );
+    let diff = view.diff.as_ref().unwrap();
+    assert_eq!(diff.lines.len(), DIFF_LINES_MAX);
+    assert!(diff.truncated);
+    let shown = tall(&view);
+    for want in [
+        "Added zz/hook.sh",
+        "! Can run as a program",
+        "Part of this diff is not shown",
+    ] {
+        assert!(shown.contains(want), "{want} missing in\n{shown}");
+    }
+}
+
+#[test]
+fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    let files: Vec<ChangedFile> = (0..=FILES_MAX)
+        .map(|n| {
+            changed(
+                &format!("gen/file-{n:05}.txt"),
+                FileStatus::Added,
+                FileKind::Text,
+                Vec::new(),
+            )
+        })
+        .collect();
+    let page = ChangeDiff {
+        files,
+        text: "+x\n".into(),
+        next: None,
+        truncated: false,
+    };
+    reply(&mut view, Ok(ChangesView::Diff(page)));
+    let diff = view.diff.as_ref().unwrap();
+    assert_eq!(diff.files.len(), FILES_MAX);
+    assert!(diff.files_cut && diff.files_done);
+    assert_eq!(view.next_query(NOW), None);
+    let shown = tall(&view);
+    assert!(
+        shown.contains(&format!(
+            "Only the first {FILES_MAX} changed files are listed."
+        )),
+        "{shown}"
+    );
+}
