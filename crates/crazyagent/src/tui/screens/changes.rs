@@ -1013,7 +1013,7 @@ fn done(view: &ChangesView) -> Notice {
         }
         ChangesView::Restored => Notice::plain("Restored. The changes are ready to review again."),
         ChangesView::Updating => Notice::plain(UPDATED_NOTICE),
-        ChangesView::List(_) | ChangesView::Diff(_) => Notice::plain(""),
+        ChangesView::List(_) | ChangesView::Diff(_) | ChangesView::Waiting(_) => Notice::plain(""),
     }
 }
 

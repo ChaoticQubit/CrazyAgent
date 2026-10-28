@@ -435,6 +435,20 @@ pub(super) fn of_project(
         .map_err(storage)
 }
 
+/// Counts the change sets ready to review or conflicting, in projects the engine still has.
+/// Input: the store. Output: the count.
+pub(super) fn waiting(db: &Connection) -> Result<u32, EngineError> {
+    let count: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_change_sets WHERE state IN ('pending','conflict') \
+             AND project IN (SELECT id FROM projects)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    u32::try_from(count).map_err(storage)
+}
+
 /// Reads every change set with owner-checkout or worktree work in flight.
 /// Input: the store. Output: the records, oldest first.
 pub(super) fn in_flight(db: &Connection) -> Result<Vec<Record>, EngineError> {

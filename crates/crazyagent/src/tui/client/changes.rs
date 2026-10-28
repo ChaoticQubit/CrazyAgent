@@ -32,6 +32,7 @@ pub(in crate::tui) enum ChangesQuery {
     Update {
         id: ChangeSetId,
     },
+    Waiting,
 }
 
 /// What the engine answered to one Changes request.
@@ -45,6 +46,7 @@ pub(in crate::tui) enum ChangesView {
     Discarded { restorable_until_ms: u64 },
     Restored,
     Updating,
+    Waiting(u32),
 }
 
 /// One Changes reply for the screens.
@@ -138,6 +140,9 @@ impl NativeOwner {
             ChangesQuery::Update { id } => {
                 controller.update_changes(id).await.map_err(problem)?;
                 ChangesView::Updating
+            }
+            ChangesQuery::Waiting => {
+                ChangesView::Waiting(controller.waiting_changes().await.map_err(problem)?)
             }
         })
     }

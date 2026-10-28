@@ -16,6 +16,13 @@ impl OwnerController {
         self.changes_client()?.change_sets(project).await
     }
 
+    /// Counts the change sets waiting for the owner in Changes, across the projects the engine
+    /// has. Output: the count of change sets ready to review or conflicting, or a
+    /// `CHANGES_CODES` refusal; an older engine refuses it.
+    pub async fn waiting_changes(&self) -> Result<u32, EngineError> {
+        self.changes_client()?.waiting_changes().await
+    }
+
     /// Reads one page of a change set's diff; callers ask for the next page only when
     /// the owner reaches it. Inputs: the change set and the page, 0 first. Output: the
     /// page's files with their marks, its plain text and the next page.

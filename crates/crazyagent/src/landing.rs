@@ -435,6 +435,19 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
     }
 }
 
+/// Counts the change sets waiting for the owner in Changes: ready to review or conflicting
+/// with their branch, in the projects the engine still has. One its agent is updating waits
+/// on the agent instead. Input: the store. Output: the count.
+pub fn waiting(db: &Connection) -> Result<u32, EngineError> {
+    #[cfg(unix)]
+    return store::waiting(db);
+    #[cfg(not(unix))]
+    {
+        let _ = db;
+        Err(unavailable())
+    }
+}
+
 /// Lists one project's change sets, open ones first, then newest first, at most
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {

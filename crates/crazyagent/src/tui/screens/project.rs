@@ -502,6 +502,7 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    TeamSettings,
     Master,
     Process,
     Usage,
@@ -1720,6 +1721,7 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('t') => return ProjectReply::Team,
+            KeyCode::Char('s') => return ProjectReply::TeamSettings,
             KeyCode::Char('r') => {
                 let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
                     return ProjectReply::Handled;
