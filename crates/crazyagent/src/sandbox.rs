@@ -67,6 +67,13 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
+/// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
+/// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
+pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
+
+/// The longest Unix socket path macOS binds or reaches.
+const SOCKET_PATH_MAX: usize = 104;
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -599,6 +606,7 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
+    tmux_socket: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -650,6 +658,7 @@ impl ProjectSandbox {
             engine_secrets: Vec::new(),
             checkout: None,
             clone: None,
+            tmux_socket: None,
         })
     }
 
@@ -934,6 +943,49 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets a native-mode lead run its own tmux server (DEC-104): bind, accept and connect
+    /// on exactly its own socket, which sits in its short temp folder, and read the tmux
+    /// program's folder when no system root covers it. No other Unix socket becomes
+    /// reachable, the engine's own tmux server included, and the server, the teammate panes
+    /// it forks and every engine client on it stay inside this profile. Only Seatbelt holds
+    /// it. Input: the socket (`terminal::harness_socket`) and the canonical tmux program.
+    /// Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
+    pub fn allow_tmux_server(mut self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(SandboxError::Unavailable(TMUX_SERVER_NEEDS_SEATBELT.into()));
+        }
+        if self.tmux_socket.is_some() {
+            return Err(invalid("the sandbox already has a tmux server"));
+        }
+        let scratch = self
+            .scratch
+            .clone()
+            .ok_or_else(|| invalid("a tmux server needs the agent temp folder"))?;
+        if !clean_absolute(socket)
+            || socket.parent() != Some(scratch.as_path())
+            || socket.as_os_str().len() > SOCKET_PATH_MAX
+        {
+            return Err(invalid("the tmux socket must sit in the agent temp folder"));
+        }
+        clear_of_secrets(socket, &self.secret_paths())?;
+        if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
+            return Err(invalid("the tmux program must be a canonical file"));
+        }
+        let folder = tmux
+            .parent()
+            .ok_or_else(|| invalid("the tmux program must sit in a folder"))?;
+        let covered = SYSTEM_READ_ROOTS
+            .iter()
+            .any(|root| folder.starts_with(root))
+            || self.read_roots.iter().any(|root| folder.starts_with(root));
+        if !covered {
+            self = self.allow_read(folder)?;
+        }
+        self.tmux_socket = Some(socket.to_path_buf());
+        assert!(self.writes(socket.parent().unwrap_or(socket)));
+        Ok(self)
+    }
+
     /// The project folder this sandbox confines writes to.
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -1105,6 +1157,12 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
+        if let Some(socket) = &self.tmux_socket {
+            let socket = socket.display();
+            text.push_str(&format!(
+                "(allow network-bind network-inbound\n  (local unix-socket (path-literal \"{socket}\")))\n(allow network-outbound\n  (remote unix-socket (path-literal \"{socket}\")))\n"
+            ));
+        }
         let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {
@@ -1150,6 +1208,11 @@ impl ProjectSandbox {
         );
         assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
+        assert_eq!(
+            text.matches("unix-socket").count(),
+            2 * usize::from(self.tmux_socket.is_some()),
+            "only a native-mode lead's own tmux socket is a reachable Unix socket path rule"
+        );
         assert!(
             MACH_SERVICES
                 .iter()
@@ -1240,6 +1303,13 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
         let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        if let Some(clone) = &self.clone {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                seatbelt_pattern(clone),
+                regex_escape(crate::agent_git::TEAMMATES_FOLDER)
+            ));
+        }
         for worktree in &self.worktrees {
             exempt.push_str(&format!(
                 "\n    (require-not (literal \"{}\"))",
@@ -1248,7 +1318,10 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
+        assert!(
+            text.matches("(regex #\"^/").count()
+                == working.len() + other.len() + 1 + usize::from(self.clone.is_some())
+        );
         assert!(text.ends_with(")\n"));
         text
     }
