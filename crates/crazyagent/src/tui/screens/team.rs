@@ -7,13 +7,17 @@ use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamA
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::Key;
+use crate::tui::screens::new_project_page::{key_event, look};
+use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
-use crate::tui::screens::project_team::account_name;
+use crate::tui::screens::project_team::{TeamReply, TeamView, account_name};
+use crate::tui::screens::project_time::local_offset;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -109,6 +113,7 @@ struct Instructions {
 /// Input: TeamGraph reads, terminal frames and keys; while the terminal has
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
+/// s opens the team settings over the whole body, read with `SetupQuery::Team`.
 /// The master view is the same screen showing only the live master's terminal.
 pub struct Team {
     project: ProjectId,
@@ -128,6 +133,7 @@ pub struct Team {
     finished: finished::Finished,
     questions: questions::Questions,
     instructions: Option<Instructions>,
+    settings: Option<TeamView>,
 }
 
 impl Team {
@@ -152,7 +158,57 @@ impl Team {
             finished: finished::Finished::new(),
             questions: questions::Questions::new(),
             instructions: None,
+            settings: None,
         }
+    }
+
+    /// Opens the team settings of this project over the team tree: keep warm, limits,
+    /// wake rules, branches, merging, stops, caps and the token budget.
+    /// Input: the context. Output: none; the first team read is queued.
+    fn open_settings(&mut self, ctx: &mut Ctx) {
+        let mut view = TeamView::new(self.project.clone());
+        view.offset = local_offset(now_ms());
+        self.settings = Some(view);
+        self.pump_settings(ctx);
+    }
+
+    /// Sends the open team settings' next team read once one is due.
+    /// Input: the context. Output: none; a Setup request may be queued.
+    fn pump_settings(&mut self, ctx: &mut Ctx) {
+        if let Some(query) = self
+            .settings
+            .as_mut()
+            .and_then(|view| view.next_query(now_ms()))
+        {
+            ctx.request(Request::Setup(query));
+        }
+    }
+
+    /// Takes a key while the team settings are open: the settings take it first, a change
+    /// goes to the engine as `SetupQuery::TeamChange`, and Esc the settings left alone
+    /// closes them. Inputs: the key and the context. Output: handled.
+    fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(view) = self.settings.as_mut() else {
+            return Flow::Ignored;
+        };
+        let reply = match key {
+            Key::Paste(text) if view.paste(text) => TeamReply::Handled,
+            Key::Paste(_) => TeamReply::Ignored,
+            other => key_event(other).map_or(TeamReply::Ignored, |event| view.key(event)),
+        };
+        match reply {
+            TeamReply::Change(action) => {
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::TeamChange {
+                    action,
+                    generation,
+                }));
+            }
+            TeamReply::Ignored if *key == Key::Esc => self.settings = None,
+            TeamReply::Ignored | TeamReply::Handled => {}
+        }
+        self.pump_settings(ctx);
+        Flow::Handled
     }
 
     /// The master view of one project: a header with the live master's state, then the
@@ -899,6 +955,13 @@ impl Screen for Team {
             hints.push(hint("r", "Refresh"));
             return hints;
         }
+        if let Some(view) = &self.settings {
+            return view
+                .help()
+                .into_iter()
+                .map(|(key, label)| hint(key, label))
+                .collect();
+        }
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
@@ -940,6 +1003,7 @@ impl Screen for Team {
                 hints.push(hint("Esc", "Back"));
             }
         }
+        hints.push(hint("s", "Settings"));
         hints
     }
 
@@ -948,7 +1012,7 @@ impl Screen for Team {
     }
 
     fn typing(&self) -> bool {
-        self.questions.typing()
+        self.settings.as_ref().is_some_and(TeamView::typing) || self.questions.typing()
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -957,6 +1021,9 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if self.settings.is_some() {
+            return self.settings_key(key, ctx);
         }
         if !self.cleanup.open()
             && !self.finished.open()
@@ -1015,6 +1082,7 @@ impl Screen for Team {
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char('s') => self.open_settings(ctx),
             Key::Esc if self.instructions.is_some() => self.instructions = None,
             Key::Esc => {
                 self.detach(ctx);
@@ -1041,11 +1109,22 @@ impl Screen for Team {
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
-                OwnerEvent::Setup(event) => self.took_setup(&event.query, &event.result, ctx),
+                OwnerEvent::Setup(event) => {
+                    self.took_setup(&event.query, &event.result, ctx);
+                    if let Some(view) = self.settings.as_mut() {
+                        view.apply(&event.query, event.result.clone());
+                    }
+                }
                 _ => {}
             },
+            Arrival::Disconnected(_) => {
+                if let Some(view) = self.settings.as_mut() {
+                    view.forget_reads();
+                }
+            }
             _ => {}
         }
+        self.pump_settings(ctx);
         self.sync(ctx);
         Flow::Handled
     }
@@ -1054,6 +1133,7 @@ impl Screen for Team {
         if self.master {
             self.read_switch(ctx);
         }
+        self.pump_settings(ctx);
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
@@ -1072,6 +1152,23 @@ impl Screen for Team {
             draw_lines(frame.buffer_mut(), head, &[line]);
             return self.draw_right(frame, body, ctx);
         }
+        if let Some(view) = &self.settings {
+            let area = whole(area);
+            let inner = inside(area);
+            let accounts = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
+            let (rows, _, caret) = view.draw(
+                usize::from(inner.width),
+                usize::from(inner.height),
+                accounts,
+                &look(ctx),
+            );
+            let lines = rows.into_iter().map(Row::line).collect();
+            boxed(frame, area, "Team settings", true, lines, ctx);
+            let (row, column) = caret?;
+            let (row, column) = (u16::try_from(row).ok()?, u16::try_from(column).ok()?);
+            return (row < inner.height && column < inner.width)
+                .then(|| Position::new(inner.x + column, inner.y + row));
+        }
         let (left, right) = split(area);
         let inner = inside(left);
         let lines = self.tree_lines(usize::from(inner.width), usize::from(inner.height), ctx);
@@ -1081,6 +1178,17 @@ impl Screen for Team {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         matches!(self.graph, Load::Idle | Load::Loading)
+            || self.settings.as_ref().is_some_and(TeamView::busy)
+    }
+
+    fn draft(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|view| view.draft.is_some())
+    }
+
+    fn loss(&self) -> &'static str {
+        "The task you are writing will be lost."
     }
 
     fn place(&self) -> Option<Place> {

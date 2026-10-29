@@ -101,7 +101,9 @@ pub fn request_valid(request: &TerminalRequest) -> bool {
             !text.trim().is_empty() && text.len() <= PROMPT_BYTES_MAX
         }
         TerminalRequest::Resize { cols, rows } => size.contains(cols) && size.contains(rows),
-        TerminalRequest::Attach { .. } | TerminalRequest::Detach => false,
+        TerminalRequest::Attach { .. }
+        | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::Detach => false,
     }
 }
 
@@ -329,7 +331,9 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
             TerminalRequest::Input { bytes } => control.input(bytes).await,
             TerminalRequest::Prompt { text } => control.prompt(text).await,
             TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
-            TerminalRequest::Attach { .. } | TerminalRequest::Detach => continue,
+            TerminalRequest::Attach { .. }
+            | TerminalRequest::AttachPane { .. }
+            | TerminalRequest::Detach => continue,
         };
         if sent.is_err() {
             return;

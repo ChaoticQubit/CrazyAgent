@@ -1,5 +1,5 @@
 use super::buffer::buffer;
-use super::{AgentId, Host, HostError, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
+use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -150,6 +150,45 @@ impl<H: Host> Host for LastScreenHost<H> {
             screens.keep(agent, &last.screen, last.cols, last.rows, &label);
         }
         Ok(())
+    }
+
+    fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        self.inner.panes(agent)
+    }
+
+    fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.kill_pane(agent, pane)
+    }
+
+    fn attach_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.attach_pane(agent, pane)
+    }
+
+    fn snapshot_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.snapshot_pane(agent, pane)
+    }
+
+    fn input_pane(&self, agent: &AgentId, pane: &str, bytes: &[u8]) -> Result<(), HostError> {
+        self.inner.input_pane(agent, pane, bytes)
+    }
+
+    fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
+        self.inner.input_live_pane(agent, pane)
+    }
+
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.adopt_pane(agent, lead, pane)
+    }
+
+    fn spawn_own_server(
+        &self,
+        agent: &AgentId,
+        command: &InteractiveCommand,
+    ) -> Result<PaneRef, HostError> {
+        let mut screens = self.screens();
+        let pane = self.inner.spawn_own_server(agent, command)?;
+        screens.forget(agent);
+        Ok(pane)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

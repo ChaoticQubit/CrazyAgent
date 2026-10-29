@@ -13,6 +13,8 @@ const NODE_MARKERS: &[&str] = &["package.json"];
 const PYTHON_MARKERS: &[&str] = &["pyproject.toml"];
 const NODE_HOMES: &[&str] = &[".nvm", ".volta", ".local/share/fnm"];
 const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
+/// Where the default pack's `uv tool install graphifyy` keeps graphify's own environment.
+const GRAPHIFY_TOOL: &str = ".local/share/uv/tools/graphifyy";
 const CARGO_SHARED: &[&str] = &["registry", "git"];
 const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"];
 const TMP_PARENT: &str = "/private/tmp";
@@ -237,9 +239,36 @@ pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)
     env
 }
 
+/// The read-only folders graphify needs in an agent's sandbox when the default pack
+/// installed it with uv (I3): its own environment, holding the `graphify` program, and the
+/// uv Python install its interpreter runs from when that sits in the owner's home. Takes the
+/// tool homes. Returns the canonical folders, none when graphify is not installed there.
+pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
+    let Ok(tool) = below(&homes.home, GRAPHIFY_TOOL).canonicalize() else {
+        return Vec::new();
+    };
+    let inside = |folder: &Path| folder.starts_with(&homes.home) && folder != homes.home;
+    let program = std::fs::symlink_metadata(tool.join("bin").join("graphify"))
+        .is_ok_and(|metadata| metadata.is_file());
+    if !program || !inside(&tool) || !tool.is_dir() {
+        return Vec::new();
+    }
+    let install = tool
+        .join("bin")
+        .join("python3")
+        .canonicalize()
+        .ok()
+        .and_then(|python| python.parent()?.parent().map(Path::to_path_buf))
+        .filter(|install| inside(install) && !tool.starts_with(install));
+    let folders: Vec<PathBuf> = std::iter::once(tool).chain(install).collect();
+    assert!((1..=2).contains(&folders.len()));
+    folders
+}
+
 /// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
-/// where they hold `cargo`, then `base`. Inputs: the tool homes and the base path. Output:
-/// the joined path.
+/// where they hold `cargo`, then `base`, then graphify's own program folder when the default
+/// pack installed it (see [`graphify`]), last so it never shadows a toolchain's `python3`.
+/// Inputs: the tool homes and the base path. Output: the joined path.
 pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
     let mut parts: Vec<String> = std::iter::once(homes.cargo.join("bin"))
         .chain(RUSTUP_BINS.iter().map(PathBuf::from))
@@ -251,6 +280,12 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
         })
         .collect();
     parts.push(base.to_owned());
+    parts.extend(
+        graphify(homes)
+            .first()
+            .and_then(|tool| tool.join("bin").to_str().map(str::to_owned))
+            .filter(|bin| !bin.contains(':')),
+    );
     parts.join(":")
 }
 
