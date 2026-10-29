@@ -389,6 +389,7 @@ pub struct TeamRuntime {
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
+    deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
 }
 
@@ -536,6 +537,7 @@ impl TeamRuntime {
             live_starts: BTreeMap::new(),
             resuming: None,
             naming: None,
+            deliveries: crate::coord::delivery::Deliveries::default(),
             adoption_failed: None,
         })
     }
@@ -1773,6 +1775,14 @@ impl TeamRuntime {
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
+        super::events::forward_to_parents(&self.connection, project, now_ms())?;
+        let reach = crate::coord::delivery::Reach {
+            host: self.terminal.as_deref(),
+            owner: self.agents.as_deref().map(Agents::typing),
+            state: &self.state,
+        };
+        self.deliveries
+            .tick(&self.connection, project, now_ms(), &reach)?;
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
@@ -3029,13 +3039,11 @@ impl TeamRuntime {
     }
 
     /// Tells each running lead how its workers' tasks ended (N1): the finished tasks it
-    /// handed off, typed into its terminal as one results message, so the lead hears them
-    /// as the master hears its own. A lead that is not running hears them once it runs again.
+    /// handed off, as one results message from the engine in the coordination layer, which
+    /// delivers it by the lead's harness channel and keeps its receipt (DEC-104 K2b). A
+    /// lead that is not running hears them once it runs again.
     /// Takes the project. Returns any SQLite failure.
     fn deliver_to_leads(&mut self, project: &ProjectId) -> Result<(), EngineError> {
-        let Some(host) = self.terminal.clone() else {
-            return Ok(());
-        };
         let leads: Vec<i64> = self
             .workers
             .iter()
@@ -3072,10 +3080,24 @@ impl TeamRuntime {
                 continue;
             }
             let (text, held) =
-                results_within(&ready, super::events::SEND_BYTES_MAX, LEAD_RESULTS_TRAILER);
-            let sent = super::events::send_to(&self.connection, host.as_ref(), Some(lead), &text)?;
-            if sent.is_err() {
-                continue;
+                results_within(&ready, crate::coord::BODY_BYTES_MAX, LEAD_RESULTS_TRAILER);
+            let message = crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Engine,
+                to: crate::coord::Party::Agent(lead),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: text,
+                idempotency_key: Some(format!("lead-results-{}", ready[0].0)),
+            };
+            match crate::coord::send(&self.connection, message, now_ms()) {
+                Ok(_) => {}
+                Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+                    return Err(problem);
+                }
+                Err(_) => continue,
             }
             for (id, ..) in &ready[..held] {
                 self.connection
@@ -3290,6 +3312,8 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            prompt.push_str(&waiting);
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -3304,6 +3328,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
@@ -4172,6 +4197,12 @@ impl TeamRuntime {
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
         sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        if launch == "codex"
+            && let Some(socket) = crate::coord::delivery::codex::socket(&home)
+            && crate::coord::delivery::codex::prepare_folder().is_ok()
+        {
+            sandbox = sandbox.allow_unix_socket(&socket).map_err(sandboxed)?;
+        }
         if tools {
             for server in context.read_paths() {
                 if let Some(folder) = server.parent() {
@@ -4725,6 +4756,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
                 }
