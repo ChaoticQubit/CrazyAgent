@@ -329,7 +329,10 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(graph.edges.len(), 1);
     let edge = &graph.edges[0];
     assert_eq!(edge.from, masters[0].id);
-    assert_eq!(edge.to, groups[0].id);
+    assert_eq!(
+        edge.to, masters[0].id,
+        "a task no agent took yet waits on the master"
+    );
     assert_eq!(edge.source, TaskSource::Owner);
     assert_eq!(edge.state, EdgeState::Sent);
     assert_eq!(edge.text, "Write chores.md");
