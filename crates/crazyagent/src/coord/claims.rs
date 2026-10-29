@@ -149,6 +149,30 @@ pub fn breadth(claims: &[String]) -> Result<Vec<String>, EngineError> {
     Ok(reasons)
 }
 
+/// The folder and glob claims of a unit of work, each in its stored form with the fixed
+/// beginning every path it covers starts with, so a caller can count the files one claim
+/// covers for the "split this" note. The whole repository is left out, since `breadth`
+/// notes it already. Takes the declared claims. Returns the pairs or `coord_claim_invalid`.
+pub fn path_scopes(claims: &[String]) -> Result<Vec<(String, String)>, EngineError> {
+    Ok(normalize_all(claims)?
+        .into_iter()
+        .filter_map(|claim| {
+            let prefix = match Scope::of(&claim) {
+                Scope::Folder(folder) if !folder.is_empty() => folder.to_owned(),
+                Scope::Glob(glob) => fixed(glob).to_owned(),
+                _ => return None,
+            };
+            Some((claim, prefix))
+        })
+        .collect())
+}
+
+/// Says whether a stored file, folder or glob claim covers one repository path; a label
+/// covers none. Takes the stored claim and the path. Returns the answer.
+pub fn covers(claim: &str, path: &str) -> bool {
+    Scope::of(claim).covers(path)
+}
+
 /// Stores the claims of a unit of work. Takes the transaction, the project, the agent,
 /// the work, the stored forms and the time in ms.
 pub(super) fn add(
@@ -272,6 +296,33 @@ pub(super) fn all_overlaps(
         }
     }
     Ok(found)
+}
+
+/// The overlaps one agent's active claims have with other agents', each turned so
+/// `mine` is that agent's claim. Takes the database, the project, the agent and the time
+/// in ms. Returns the overlaps.
+pub fn overlaps_of(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    now: i64,
+) -> Result<Vec<Overlap>, EngineError> {
+    Ok(all_overlaps(db, project, now)?
+        .into_iter()
+        .filter_map(|overlap| {
+            if overlap.mine.agent == agent {
+                Some(overlap)
+            } else if overlap.theirs.agent == agent {
+                Some(Overlap {
+                    mine: overlap.theirs,
+                    theirs: overlap.mine,
+                    reasons: overlap.reasons,
+                })
+            } else {
+                None
+            }
+        })
+        .collect())
 }
 
 /// Reads a project's claims that still hold scope: not released, on work someone is on
