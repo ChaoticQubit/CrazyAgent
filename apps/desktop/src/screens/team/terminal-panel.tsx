@@ -65,12 +65,18 @@ export function terminalOptions(): ITerminalOptions {
   };
 }
 
+/** The pane a terminal view shows instead of the whole terminal: a native teammate known
+ * only by its pane in its lead's terminal. Input: the node. Output: the pane id, or null. */
+export function teammatePane(node: GraphNode): string | null {
+  return node.kind === "teammate" && typeof node.agent !== "number" && node.pane ? node.pane : null;
+}
+
 /** The note under a live terminal: who reads what the owner types. A native teammate known
- * only by its pane shows its lead's terminal, so typing reaches the lead. Input: the node.
- * Output: one sentence. */
+ * only by its pane gets it in that pane, with no master told. Input: the node. Output: one
+ * sentence. */
 export function typingNote(node: GraphNode): string {
   if (node.kind === "master") return "Typing goes straight to the master.";
-  if (node.kind === "teammate" && typeof node.agent !== "number") return "This teammate works in its lead's terminal, so typing goes to its lead and is not kept.";
+  if (teammatePane(node)) return "Typing goes straight to this teammate's pane and is not kept or told to the master.";
   return "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
 }
 
@@ -84,9 +90,9 @@ export function inputNote(node: GraphNode, input: InputChoice): string {
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
 export function promptCopy(node: GraphNode): { label: string; placeholder: string } {
-  return node.kind === "master"
-    ? { label: "Prompt the master", placeholder: "Tell the master what to do next" }
-    : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
+  if (node.kind === "master") return { label: "Prompt the master", placeholder: "Tell the master what to do next" };
+  if (teammatePane(node)) return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. It goes to its pane only.` };
+  return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
 }
 
 /** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
@@ -301,6 +307,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
   }).current;
   const [round, setRound] = useState(0);
   const name = node.terminal;
+  const pane = teammatePane(node);
 
   useEffect(() => {
     const element = screen.current;
@@ -407,7 +414,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         unsettle();
         terminal.dispose();
       };
-      const result = await attachTerminal(name, channel);
+      const result = await attachTerminal(name, channel, pane);
       if (disposed) {
         if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
@@ -422,7 +429,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       release();
       if (serial !== null) void detachTerminal(name, serial);
     };
-  }, [name, round]);
+  }, [name, pane, round]);
 
   return <section className={embedded ? "tg-terminal embedded" : "tg-terminal"} aria-label={`${node.label} terminal`}>
     {!embedded && <div className="tg-terminal-head">

@@ -21,9 +21,18 @@ pub fn agent(text: &str) -> Result<AgentId, BridgeError> {
     AgentId::new(text).map_err(|_| failure("terminal_agent_invalid"))
 }
 
+/// Checks a pane id the window sent for a native teammate's view, such as `%12`. Takes the
+/// text. Returns the pane id, or `terminal_pane_invalid`.
+pub fn pane(text: &str) -> Result<String, BridgeError> {
+    crazyagent::terminal::pane_id_valid(text)
+        .then(|| text.to_owned())
+        .ok_or_else(|| failure("terminal_pane_invalid"))
+}
+
 fn attach_failure(code: &str) -> BridgeError {
     failure(match code {
         "terminal_unavailable" => "terminal_unavailable",
+        "terminal_pane_unknown" => "terminal_pane_unknown",
         "terminal_agent_unknown" => "terminal_agent_unknown",
         "terminal_agent_invalid" => "terminal_agent_invalid",
         "terminal_viewers_full" => "terminal_viewers_full",
@@ -124,15 +133,20 @@ impl NativeBridge {
         bounded(graph)
     }
 
-    /// Opens one owner terminal session attached to an agent's terminal.
-    /// Takes the terminal name.
+    /// Opens one owner terminal session attached to an agent's terminal, or to one pane of
+    /// its window, such as a native teammate's. Takes the terminal name and the checked pane.
     /// Returns the session with the terminal size, its output and its controls.
-    pub async fn open_terminal(&mut self, agent: AgentId) -> Result<TerminalSession, BridgeError> {
-        let session = self
-            .controller()?
-            .terminal_attach(agent.clone())
-            .await
-            .map_err(|e| attach_failure(&e.0))?;
+    pub async fn open_terminal(
+        &mut self,
+        agent: AgentId,
+        pane: Option<String>,
+    ) -> Result<TerminalSession, BridgeError> {
+        let controller = self.controller()?;
+        let session = match pane {
+            Some(pane) => controller.terminal_attach_pane(agent.clone(), pane).await,
+            None => controller.terminal_attach(agent.clone()).await,
+        }
+        .map_err(|e| attach_failure(&e.0))?;
         if session.agent != agent {
             return Err(failure("terminal_agent_mismatch"));
         }

@@ -104,6 +104,10 @@ pub enum Request {
     TerminalAttach {
         agent: AgentId,
     },
+    TerminalAttachPane {
+        agent: AgentId,
+        pane: String,
+    },
     TerminalInput {
         agent: AgentId,
         bytes: Vec<u8>,
@@ -131,6 +135,7 @@ impl Request {
         matches!(
             self,
             Self::TerminalAttach { .. }
+                | Self::TerminalAttachPane { .. }
                 | Self::TerminalInput { .. }
                 | Self::TerminalResize { .. }
                 | Self::TerminalDetach { .. }
@@ -156,6 +161,7 @@ impl std::fmt::Debug for Request {
             Self::TeamGraph { .. } => "TeamGraph",
             Self::ProjectFiles { .. } => "ProjectFiles",
             Self::TerminalAttach { .. } => "TerminalAttach",
+            Self::TerminalAttachPane { .. } => "TerminalAttachPane",
             Self::TerminalInput { .. } => "TerminalInput",
             Self::TerminalResize { .. } => "TerminalResize",
             Self::TerminalDetach { .. } => "TerminalDetach",

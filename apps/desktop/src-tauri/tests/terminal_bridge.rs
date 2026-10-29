@@ -336,7 +336,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(edge.reply, None);
 
     let unknown = bridge
-        .open_terminal(AgentId::team(99)?)
+        .open_terminal(AgentId::team(99)?, None)
         .await
         .err()
         .map(|e| e.code);

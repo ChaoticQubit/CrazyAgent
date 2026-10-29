@@ -1241,12 +1241,14 @@ async fn desktop_terminal_attach(
     state: State<'_, NativeState>,
     terminals: State<'_, TerminalState>,
     agent: String,
+    pane: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
+    let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
     let room = terminals.0.room(&agent)?;
-    let session = lock(&state).await?.open_terminal(agent).await?;
+    let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
 

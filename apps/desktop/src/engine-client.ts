@@ -1451,8 +1451,8 @@ export function teamGraph(id: string): Promise<TeamGraph> {
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
  * and then live output until the terminal closes or the view detaches. Inputs: the terminal
  * name and the channel. Output: the view's serial once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<number> {
-  return invoke<number>("desktop_terminal_attach", { agent, output });
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<number> {
+  return invoke<number>("desktop_terminal_attach", { agent, pane, output });
 }
 
 /** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name

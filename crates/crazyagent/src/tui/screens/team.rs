@@ -94,6 +94,7 @@ struct LiveSwitch {
 
 struct Attached {
     agent: AgentId,
+    teammate: Option<String>,
     node: String,
     label: String,
     pane: TerminalPane,
@@ -431,22 +432,32 @@ impl Team {
             ));
             return;
         };
+        let teammate = target
+            .pane
+            .clone()
+            .filter(|_| target.kind == NodeKind::Teammate && target.agent.is_none());
+        if teammate
+            .as_deref()
+            .is_some_and(|pane| !crate::terminal::pane_id_valid(pane))
+        {
+            ctx.say(Message::warning(
+                "This teammate's pane can't be opened.",
+                "Press r to read the team again.",
+            ));
+            return;
+        }
         let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
         self.instructions = None;
-        if self
-            .attached
-            .as_ref()
-            .is_some_and(|attached| attached.agent == agent && attached.closed.is_none())
-        {
+        if self.attached.as_ref().is_some_and(|attached| {
+            attached.agent == agent && attached.teammate == teammate && attached.closed.is_none()
+        }) {
             self.focus = Focus::Terminal;
             return;
         }
         self.detach(ctx);
         let (rows, cols) = pane_size(ctx, self.master);
-        ctx.request(Request::TerminalAttach {
-            agent: agent.clone(),
-        });
+        ctx.request(attach_request(&agent, teammate.as_deref()));
         ctx.request(Request::TerminalResize {
             agent: agent.clone(),
             cols,
@@ -454,6 +465,7 @@ impl Team {
         });
         self.attached = Some(Attached {
             agent,
+            teammate,
             node: id,
             label,
             pane: TerminalPane::new(rows, cols),
@@ -489,9 +501,10 @@ impl Team {
         };
         attached.closed = None;
         attached.size = (rows, cols);
-        ctx.request(Request::TerminalAttach {
-            agent: attached.agent.clone(),
-        });
+        ctx.request(attach_request(
+            &attached.agent,
+            attached.teammate.as_deref(),
+        ));
         ctx.request(Request::TerminalResize {
             agent: attached.agent.clone(),
             cols,
@@ -1430,6 +1443,21 @@ fn dead(code: &str) -> bool {
 /// Says whether a terminal code means the engine connection dropped, so the
 /// terminal opens again once the engine is back.
 /// Input: a Closed or Rejected code. Output: true for connection losses.
+/// The request that opens a terminal view: the agent's own terminal, or one pane of its
+/// window, such as a native teammate's, through `OwnerClient::terminal_attach_pane`.
+/// Takes the terminal name and the pane. Returns the request.
+fn attach_request(agent: &AgentId, teammate: Option<&str>) -> Request {
+    match teammate {
+        Some(pane) => Request::TerminalAttachPane {
+            agent: agent.clone(),
+            pane: pane.to_owned(),
+        },
+        None => Request::TerminalAttach {
+            agent: agent.clone(),
+        },
+    }
+}
+
 fn lost(code: &str) -> bool {
     matches!(
         code,

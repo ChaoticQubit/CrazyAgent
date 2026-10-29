@@ -235,7 +235,10 @@ test("the note under a live terminal says typed keys are not kept or told to the
   assert.equal(panel.typingNote(team.nodes[2]), "Typing goes straight to the master.");
   assert.equal(panel.typingNote(team.nodes[0]),
     "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
-  assert.equal(panel.typingNote(team.nodes[1]), "This teammate works in its lead's terminal, so typing goes to its lead and is not kept.");
+  assert.equal(panel.typingNote(team.nodes[1]), "Typing goes straight to this teammate's pane and is not kept or told to the master.");
+  assert.equal(panel.teammatePane(team.nodes[1]), "%12");
+  assert.equal(panel.teammatePane(team.nodes[0]), null);
+  assert.equal(panel.promptCopy(team.nodes[1]).placeholder, "Tell Teammate %12 what to do. It goes to its pane only.");
   assert.equal(panel.typingNote({ ...team.nodes[1], agent: 12 }),
     "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
 });
