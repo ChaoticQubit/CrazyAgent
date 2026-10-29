@@ -940,7 +940,10 @@ impl Team {
         }
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
-                MASTER_WAITING
+                self.switch
+                    .as_ref()
+                    .and_then(|switch| switch.problem.as_deref())
+                    .unwrap_or(MASTER_WAITING)
             } else {
                 "Enter on an agent opens its live terminal here."
             };

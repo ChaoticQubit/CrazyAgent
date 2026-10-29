@@ -480,6 +480,7 @@ struct Authority {
     deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    reproving: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Authority {
@@ -1189,6 +1190,7 @@ impl OwnerServer {
                 deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             });
             Ok::<_, EngineError>((listener, authority))
         })();

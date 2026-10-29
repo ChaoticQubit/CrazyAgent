@@ -69,6 +69,8 @@ const HISTORY_MESSAGE_BYTES_MAX: usize = 1500;
 const HISTORY_BYTES_MAX: usize = 6000;
 pub(crate) const TEAM_HOST: &str = "team";
 const SIGN_IN_REJECTED: &str = "master_sign_in_rejected";
+const SIGN_IN_CHECKING: &str = "master_sign_in_checking";
+const AGENT_RESTART_CHECKING: &str = "The agent did not restart yet: account sign-ins are still being checked after the restart. Restart it again in a moment.";
 const LEFT_RUNNING_NOTE: &str = "Kept running while CrazyAgent was closed";
 const TURN_LIMIT: &str = "team_turn_limit";
 const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
@@ -444,6 +446,7 @@ pub struct TeamRuntime {
     naming: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
+    reproving: Option<Arc<AtomicBool>>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -592,7 +595,16 @@ impl TeamRuntime {
             naming: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             adoption_failed: None,
+            reproving: None,
         })
+    }
+
+    /// Lets the runtime wait for an account whose sign-in this engine run still re-checks
+    /// instead of refusing it (DEC-108). Takes the engine-start re-proof's flag, true while
+    /// that re-proof runs. Returns the runtime; without it no account ever waits.
+    pub fn with_reproof(mut self, reproving: Arc<AtomicBool>) -> Self {
+        self.reproving = Some(reproving);
+        self
     }
 
     /// Records every team agent in the engine's agent register, so the owner can stop,
@@ -1661,7 +1673,8 @@ impl TeamRuntime {
         };
         let paused = self.paused()?;
         let started = match self.account_for(access, &project, &harness, &paused) {
-            Ok(account) if role == AgentRole::Sub => {
+            Ok(None) => return self.note(&project, AGENT_RESTART_CHECKING),
+            Ok(Some(account)) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
                         self.owner_woke(&project, id, resumed, again.is_some())?;
@@ -1670,7 +1683,9 @@ impl TeamRuntime {
                     Err(reason) => Err(reason),
                 }
             }
-            Ok(account) => self.spawn_run(&stored, role, &harness, tools, &account, again, None)?,
+            Ok(Some(account)) => {
+                self.spawn_run(&stored, role, &harness, tools, &account, again, None)?
+            }
             Err(reason) => Err(reason),
         };
         match started {
@@ -1999,7 +2014,9 @@ impl TeamRuntime {
             };
             let usable = matches!(
                 eligible_accounts(access, &stored.project_id, launch),
-                Accounts::Usable(accounts) if accounts.iter().any(|a| self.refusal(access, a).is_none())
+                Accounts::Usable(accounts) if accounts
+                    .iter()
+                    .any(|a| self.refusal(access, a).is_none_or(|code| code == SIGN_IN_CHECKING))
             );
             let (from, to) = if usable {
                 ("needs_pool", "queued")
@@ -2142,13 +2159,17 @@ impl TeamRuntime {
             .count()
     }
 
+    /// Picks the pool account an agent of a harness starts on. Takes the live access, the
+    /// project, the harness and the paused accounts. Returns the account; none while no
+    /// account can take the agent yet but one still waits for this engine run's sign-in
+    /// re-check (DEC-108), so the caller waits instead of failing; or the plain refusal.
     fn account_for(
         &self,
         access: &ModelAccess,
         project: &ProjectId,
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
-    ) -> Result<TeamAccount, String> {
+    ) -> Result<Option<TeamAccount>, String> {
         let Some(launch) = launch_harness(harness) else {
             return Err(format!("{harness} cannot run team agents yet"));
         };
@@ -2175,8 +2196,12 @@ impl TeamRuntime {
                 }
             })
             .collect();
+        let checking = refused.iter().any(|code| code == SIGN_IN_CHECKING);
         if accounts.is_empty() {
             assert!(!refused.is_empty());
+            if checking {
+                return Ok(None);
+            }
             if refused.iter().all(|code| code == SIGN_IN_REJECTED) {
                 return Err(format!(
                     "Sign in again: the provider rejected the sign-in of every account in this project's pool that can run {harness}"
@@ -2222,7 +2247,7 @@ impl TeamRuntime {
             if let Some(account) =
                 pick_account(&unused, &|c: &CredentialRef| self.load(c), paused, &choice)
             {
-                return Ok(account.clone());
+                return Ok(Some(account.clone()));
             }
         }
         if let Some(account) = pick_account(
@@ -2231,7 +2256,10 @@ impl TeamRuntime {
             paused,
             &choice,
         ) {
-            return Ok(account.clone());
+            return Ok(Some(account.clone()));
+        }
+        if checking {
+            return Ok(None);
         }
         if accounts
             .iter()
@@ -2308,7 +2336,8 @@ impl TeamRuntime {
     /// Proves a managed pool account is signed in for this engine run, and that the
     /// provider did not reject that sign-in, with the same check every master turn uses.
     /// Takes the live access and the pool member.
-    /// Returns the active host and the sign-in, or a plain refusal code.
+    /// Returns the active host and the sign-in, or a plain refusal code: `master_sign_in_checking`
+    /// while this engine run still re-checks a sign-in an earlier run proved (DEC-108).
     fn sign_in(
         &self,
         access: &ModelAccess,
@@ -2337,7 +2366,24 @@ impl TeamRuntime {
             .optional()
             .map_err(|_| "team_state_unavailable")?
             .ok_or("team_engine_not_ready")?;
-        let fact = crate::storage::native_sign_in(&tx, &host, connection, None).map_err(|e| e.0)?;
+        let fact = match crate::storage::native_sign_in(&tx, &host, connection, None) {
+            Ok(fact) => fact,
+            Err(problem) => {
+                if !self
+                    .reproving
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+                    || !crate::storage::sign_in_rechecking(&tx, &host, connection)
+                        .map_err(|e| e.0)?
+                {
+                    return Err(problem.0);
+                }
+                if crate::model_gateway::sign_in_rejected(&tx, connection).map_err(|e| e.0)? {
+                    return Err(SIGN_IN_REJECTED.into());
+                }
+                return Err(SIGN_IN_CHECKING.into());
+            }
+        };
         if crate::model_gateway::sign_in_rejected(&tx, connection).map_err(|e| e.0)? {
             return Err(SIGN_IN_REJECTED.into());
         }
@@ -2358,7 +2404,9 @@ impl TeamRuntime {
         let connection = self.workers[&id].connection.clone();
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
-            Err(code) if code == "native_profile_in_use" => return Ok(None),
+            Err(code) if code == "native_profile_in_use" || code == SIGN_IN_CHECKING => {
+                return Ok(None);
+            }
             Err(code) => return Err(sign_in_problem(&code)),
         };
         let generation = self.workers[&id].grants + 1;
@@ -2469,7 +2517,8 @@ impl TeamRuntime {
             None => {
                 let harness = stored.team.master.clone();
                 let started = match self.account_for(access, project, &harness, paused) {
-                    Ok(account) => self.spawn(
+                    Ok(None) => return Ok(()),
+                    Ok(Some(account)) => self.spawn(
                         stored,
                         AgentRole::Master,
                         &harness,
@@ -2643,12 +2692,21 @@ impl TeamRuntime {
                 ),
             );
         }
-        starts.push(Instant::now());
-        let started = match self.account_for(access, project, &harness, paused) {
-            Ok(account) => self.start_master(stored, &harness, &account, session.as_deref())?,
-            Err(reason) => Err(reason),
+        let account = match self.account_for(access, project, &harness, paused) {
+            Ok(Some(account)) => account,
+            Ok(None) => return self.checking_sign_ins(project),
+            Err(reason) => {
+                return self.live_off(
+                    project,
+                    &format!("it could not start: {}", bound_text(&reason, 300)),
+                );
+            }
         };
-        match started {
+        self.live_starts
+            .entry(project.clone())
+            .or_default()
+            .push(Instant::now());
+        match self.start_master(stored, &harness, &account, session.as_deref())? {
             Ok((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
@@ -2858,7 +2916,16 @@ impl TeamRuntime {
         let grant = if self.workers[&id].managed {
             match self.grant(access, id, project) {
                 Ok(Some(grant)) => Some(grant),
-                Ok(None) => return Ok(()),
+                Ok(None) => {
+                    let connection = self.workers[&id].connection.clone();
+                    if self
+                        .sign_in(access, &connection)
+                        .is_err_and(|code| code == SIGN_IN_CHECKING)
+                    {
+                        return self.checking_sign_ins(project);
+                    }
+                    return Ok(());
+                }
                 Err(reason) => {
                     let worker = self.workers.get_mut(&id).expect("master worker exists");
                     worker.stopping = true;
@@ -2889,6 +2956,22 @@ impl TeamRuntime {
             .is_ok()
         {
             worker.briefed = true;
+            super::master::problem(&self.connection, project, None)?;
+        }
+        Ok(())
+    }
+
+    /// Says once, in the live master's problem line and one team note, that it waits for
+    /// this engine run's sign-in re-checks of the pool (DEC-108). It stays on, counts no
+    /// start and starts on a later tick once an account passes. Takes the project.
+    /// Returns any SQLite failure.
+    fn checking_sign_ins(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        if super::master::problem(
+            &self.connection,
+            project,
+            Some(super::master::SIGN_INS_CHECKING),
+        )? {
+            self.note(project, super::master::SIGN_INS_CHECKING)?;
         }
         Ok(())
     }
@@ -3445,7 +3528,8 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let Ok(account) = self.account_for(access, project, &harness, paused) else {
+                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    else {
                         continue;
                     };
                     match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
@@ -3474,7 +3558,8 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let Ok(account) = self.account_for(access, project, &harness, paused) else {
+                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    else {
                         continue;
                     };
                     self.naming = Some(task);
@@ -3617,7 +3702,8 @@ impl TeamRuntime {
                 && self.panes(project) < PANES_PER_PROJECT_MAX
                 && !self.harnesses_full(project, harness_cap)
             {
-                let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
+                let Ok(Some(account)) = self.account_for(access, project, &slot.harness, paused)
+                else {
                     break;
                 };
                 let started = self.spawn(
@@ -6113,6 +6199,7 @@ fn sign_in_problem(code: &str) -> String {
         "master_authentication_unknown" => "the account is not signed in".into(),
         "master_authentication_stale" => "the account needs a fresh sign-in".into(),
         SIGN_IN_REJECTED => "the provider rejected the account's sign-in".into(),
+        SIGN_IN_CHECKING => "the account's sign-in is still being checked after the restart".into(),
         "team_account_left_pool" => "the account left the pool".into(),
         "team_engine_not_ready" => "the engine is not ready".into(),
         _ => with_code("the account's sign-in could not be checked", Some(code)),
@@ -7725,8 +7812,10 @@ pub fn agent_profile(state: &Path, id: i64) -> PathBuf {
 /// pool assignment read live from the engine's settings files on every tick.
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
 /// engine executable that serves masters their `delegate` tool, the engine's agent register
-/// that lists every team agent with its owner controls and the terminal host agents run in.
+/// that lists every team agent with its owner controls, the terminal host agents run in and
+/// the engine-start re-proof's flag, so agents wait for its sign-in re-checks (DEC-108).
 /// Returns the service, or a plain reason.
+#[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
     runtime: &Path,
     global: &Path,
@@ -7735,6 +7824,7 @@ pub fn start_for_engine(
     engine: Option<&Path>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
+    reproving: Option<Arc<AtomicBool>>,
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
@@ -7763,6 +7853,10 @@ pub fn start_for_engine(
     };
     let runtime = match agents {
         Some(agents) => runtime.with_agents(agents),
+        None => runtime,
+    };
+    let runtime = match reproving {
+        Some(reproving) => runtime.with_reproof(reproving),
         None => runtime,
     };
     let runtime = match terminal {

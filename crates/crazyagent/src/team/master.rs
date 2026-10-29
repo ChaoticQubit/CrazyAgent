@@ -216,15 +216,21 @@ pub fn session_conversation(
         .map_err(state)
 }
 
+/// The live master's problem line and team note while every pool account it could run on
+/// still waits for this engine run's sign-in re-check (DEC-108); the views show it as is.
+pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the restart. The live master starts once an account in this project's pool passes its check.";
+
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
-/// running in a terminal; off, the master ends with its next stop. Takes the owner
-/// transaction, the project and the switch. Returns any SQLite failure.
+/// running in a terminal; off, the master ends with its next stop. Turning it on clears why
+/// it last could not start, and either way a sign-in wait line no longer applies. Takes the
+/// owner transaction, the project and the switch. Returns any SQLite failure.
 pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Result<(), EngineError> {
     connection
         .execute(
             "INSERT INTO team_live_masters(project,live) VALUES (?1,?2)
-             ON CONFLICT(project) DO UPDATE SET live=excluded.live",
-            params![project.as_str(), on],
+             ON CONFLICT(project) DO UPDATE SET live=excluded.live,
+               problem=CASE WHEN excluded.live OR problem=?3 THEN NULL ELSE problem END",
+            params![project.as_str(), on, SIGN_INS_CHECKING],
         )
         .map_err(state)?;
     Ok(())
