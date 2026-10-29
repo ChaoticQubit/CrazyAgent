@@ -27,11 +27,14 @@ macro_rules! named {
 }
 
 mod claims;
+pub mod hook;
 mod messages;
 mod presence;
+pub mod relay;
 pub mod settings;
 mod store;
 pub mod tool_switches;
+pub mod watch;
 mod work;
 
 pub use claims::{breadth, overlapping, release_claims};

@@ -385,6 +385,7 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
+    receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
@@ -530,6 +531,7 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             teammates_next: None,
+            receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
             naming: None,
@@ -1537,6 +1539,7 @@ impl TeamRuntime {
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.serve_agent_calls(&stored, access);
+        self.serve_relays(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
@@ -2470,6 +2473,50 @@ impl TeamRuntime {
                     super::master::answer_lead(connection, &answering, id, call)
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
+            );
+        }
+    }
+
+    /// Runs the Claude Code relay (K2a) of each running Claude agent of a project whose home
+    /// holds the relay plugin: delivers its and its native teammates' messages through the
+    /// mailbox, applies their reported activity and waits, answers their overlap questions
+    /// and, at most once each `events::SCAN_EVERY` per project, marks read receipts from
+    /// their transcripts. A relay that fails is skipped until the next tick, like the
+    /// agents' team calls. Takes the project.
+    fn serve_relays(&mut self, project: &ProjectId) {
+        let now = Instant::now();
+        let receipts = self
+            .receipts_next
+            .get(project)
+            .is_none_or(|next| now >= *next);
+        if receipts {
+            self.receipts_next
+                .insert(project.clone(), now + super::events::SCAN_EVERY);
+        }
+        let relays: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && crate::coord::settings::HarnessKind::from_harness(&worker.harness)
+                        == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in relays {
+            let home = agent_home(&self.state, id);
+            if !crate::coord::relay::installed(&home) {
+                continue;
+            }
+            let _ = crate::coord::relay::serve(
+                &self.connection,
+                project,
+                id,
+                &home,
+                &self.mailbox(id),
+                receipts,
+                now_ms(),
             );
         }
     }
