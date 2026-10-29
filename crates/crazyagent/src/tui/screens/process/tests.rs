@@ -361,8 +361,18 @@ fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_
     assert!(kept.contains("Not saved yet"), "{kept}");
 
     shell.key(Key::Ctrl('g'));
-    assert_eq!(requests(&mut shell), vec![ProcessQuery::ImportGlobal]);
-    shell.arrive(reply(ProcessQuery::ImportGlobal, Ok("OWNER-GLOBAL-RULE\n")));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::ReadFile {
+            path: "/owner/CLAUDE.md".into()
+        }]
+    );
+    shell.arrive(reply(
+        ProcessQuery::ReadFile {
+            path: "/owner/CLAUDE.md".into(),
+        },
+        Ok("OWNER-GLOBAL-RULE\n"),
+    ));
     let preview = screen(&mut shell);
     assert!(preview.contains("Your global instructions"), "{preview}");
     assert!(
@@ -382,7 +392,9 @@ fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_
 
     shell.key(Key::Ctrl('g'));
     shell.arrive(reply(
-        ProcessQuery::ImportGlobal,
+        ProcessQuery::ReadFile {
+            path: "/owner/CLAUDE.md".into(),
+        },
         Err("process_import_missing"),
     ));
     assert!(screen(&mut shell).contains("There is no ~/.claude/CLAUDE.md to import."));

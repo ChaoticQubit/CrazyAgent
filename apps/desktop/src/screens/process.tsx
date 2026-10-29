@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
-import { HOOKLESS_WORDS } from "../engine-client";
+import { HOOKLESS_WORDS, type ImportFile } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, flagWords, importGlobalInstructions, loadAdoption,
-  loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments,
-  textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
+  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, confirmInstructionImport, defaultProcess, flagWords, importInstructionsFile,
+  importRefusal, loadAdoption, loadInstructionImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
+  saveProcess, savedMessage, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
@@ -79,7 +79,7 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   const invalid = processTextError(draft);
   const changed = draft !== saved.value;
   const seeds = scope.kind === "app" && <span className="row">
-    <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import my global instructions</Button>
+    <Button icon="upload" pending={busy === "import"} pendingLabel="Reading..." disabled={busy !== null} onClick={onImport}>Import from file</Button>
     <Button icon="sparkles" pending={busy === "default"} pendingLabel="Reading..." disabled={busy !== null} onClick={onDefault}>Use the CrazyAgent default process</Button>
   </span>;
   return <div className="stack">
@@ -98,14 +98,14 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
       </form>
     </Panel>
     {draft.trim() && <Panel title="As agents read it"><TaggedText text={draft} skills={skills} onOpen={onOpenSkill} /></Panel>}
-    <Dialog open={preview !== null} wide title={preview?.source === "import" ? "Your global instructions" : "CrazyAgent default process"}
+    <Dialog open={preview !== null} wide title={preview?.source === "import" ? "Instructions from your file" : "CrazyAgent default process"}
       onClose={onClosePreview}
       footer={<>
         <Button onClick={onClosePreview}>Cancel</Button>
         <Button variant="primary" icon="check" onClick={onUsePreview}>Put in the editor</Button>
       </>}>
       <p className="secondary">{preview?.source === "import"
-        ? "Read from ~/.claude/CLAUDE.md. It replaces the editor's text; nothing is saved until you click Save."
+        ? "Read once from the file you picked; afterwards the instructions live here. It replaces the editor's text; nothing is saved until you click Save."
         : "It replaces the editor's text; nothing is saved until you click Save."}</p>
       {preview && <TaggedText text={preview.text} skills={skills} onOpen={onOpenSkill} />}
     </Dialog>
@@ -116,10 +116,10 @@ export function ProcessView({ scope, saved, draft, skills, failure, busy, previe
   </div>;
 }
 
-/** A project's agent settings as a pure view: which instruction files its agents get and
- * whether headless Claude runs keep their transcript, each saved on its own change. Settings
- * that could not be read say why and show the defaults, so a change replaces them.
- * Inputs: the read, whether a save runs, the last save failure and the save action. */
+/** A project's agent settings as a pure view: which of the app and project instructions its
+ * agents get and whether headless Claude runs keep their transcript, each saved on its own
+ * change. Settings that could not be read say why and show the defaults, so a change replaces
+ * them. Inputs: the read, whether a save runs, the last save failure and the save action. */
 export function AgentSettingsView({ settings, busy, failure, onSave }: {
   settings: Loaded<InstructionSettings>;
   busy: boolean;
@@ -129,16 +129,16 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   if (settings.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
-  const choice = INSTRUCTION_CHOICES.find((option) => option.value === current.files) ?? INSTRUCTION_CHOICES[0];
+  const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
   return <Panel title="Agent settings">
     <div className="stack-small">
       {settings.kind === "error" && <Notice tone="danger" alert>{processMessage(settings)}</Notice>}
       {failure && <Notice tone="danger" alert>{failure}</Notice>}
-      <span>Agent instruction files</span>
-      <Segmented label="Agent instruction files" value={current.files}
-        options={INSTRUCTION_CHOICES.map(({ value, label }) => ({ value, label }))}
-        onValue={(files) => save({ ...current, files })} />
+      <span>Instructions agents get</span>
+      <Segmented label="Instructions agents get" value={choice.value}
+        options={INSTRUCTION_MODES.map(({ value, label }) => ({ value, label }))}
+        onValue={(mode) => save({ ...current, mode })} />
       <p className="secondary">{choice.note}</p>
       <Switch id="agent-transcripts" label="Keep transcripts for headless Claude runs" checked={current.transcripts}
         disabledReason={busy ? "Saving..." : undefined} onChecked={(transcripts) => save({ ...current, transcripts })} />
@@ -296,10 +296,10 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   const seed = async (source: "import" | "default") => {
     setFailure("");
     setBusy(source);
-    const result = session.noteResult(await (source === "import" ? importGlobalInstructions() : defaultProcess()));
+    const result = session.noteResult(await (source === "import" ? importInstructionsFile() : defaultProcess()));
     setBusy(null);
-    if (result.kind === "ok") setPreview({ source, text: result.value });
-    else fail(result);
+    if (result.kind !== "ok") fail(result);
+    else if (result.value !== null) setPreview({ source, text: result.value });
   };
   const save = async () => {
     setFailure("");
@@ -321,6 +321,63 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
     <ProjectAdoption projectId={scope.id} />
     {editor}
   </div>;
+}
+
+/** The found instruction files of a project waiting for the owner's one-time import, as a
+ * pure view: each file with its size, a note when git tracks it (so it shows as deleted after
+ * the move) or why it stays, and the confirm and Not now actions. Inputs: the project name,
+ * the files, whether the import runs, the last failure and the actions. */
+export function InstructionImportView({ name, files, busy, failure, onConfirm, onLater }: {
+  name: string;
+  files: readonly ImportFile[];
+  busy: boolean;
+  failure: string;
+  onConfirm: () => void;
+  onLater: () => void;
+}) {
+  const moving = files.filter((file) => file.refused === null);
+  const tracked = moving.some((file) => file.tracked);
+  return <Dialog open title={`Instruction files found in ${name}`} busy={busy} onClose={onLater}
+    footer={<>
+      <Button disabled={busy} onClick={onLater}>Not now</Button>
+      <Button variant="primary" icon="check" pending={busy} pendingLabel="Moving..." disabled={moving.length === 0} onClick={onConfirm}>Copy into instructions.md and move aside</Button>
+    </>}>
+    <div className="stack-small">
+      <p className="secondary">Agents now get instructions only from the app. These files can be copied once into this project's .crazyagent/instructions.md and moved to .crazyagent/imported/. Nothing changes until you confirm; Not now asks again the next time you open the project.</p>
+      {failure && <Notice tone="danger" alert>{failure}</Notice>}
+      <ul className="instruction-import">{files.map((file) => <li key={file.path}>
+        <strong>{file.path}</strong> <span className="secondary">{byteSize(file.bytes)}{file.tracked ? ", tracked by git" : ""}</span>
+        {file.refused !== null && <span className="secondary"> Stays in place: {importRefusal(file.refused)}</span>}
+      </li>)}</ul>
+      {tracked && <Notice tone="warn">Git tracks some of these files, so after the move your checkout shows them as deleted.</Notice>}
+    </div>
+  </Dialog>;
+}
+
+/** Asks once per opening of a project to import its found instruction files: reads the
+ * pending list, shows it when not empty, copies and moves on confirm and lists the moved
+ * files in a toast. Not now closes it until the project is opened again. Inputs: the project
+ * id and name. */
+export function InstructionImportPrompt({ projectId, name }: { projectId: string; name: string }) {
+  const session = useAppSession();
+  const [pending] = useLoad(() => loadInstructionImport(projectId), [projectId]);
+  const [closed, setClosed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  useEffect(() => { setClosed(false); setFailure(""); }, [projectId]);
+  if (closed || pending.kind !== "ok" || pending.value.length === 0) return null;
+  const confirm = async () => {
+    setFailure("");
+    setBusy(true);
+    const result = session.noteResult(await confirmInstructionImport(projectId));
+    setBusy(false);
+    if (result.kind !== "ok") { setFailure(processMessage(result)); return; }
+    setClosed(true);
+    const moved = result.value.map((file) => file.path).join(", ");
+    session.showToast(moved ? `Moved to .crazyagent/imported/: ${moved}. Their text is in the project's instructions.` : "Nothing was moved.");
+  };
+  return <InstructionImportView name={name} files={pending.value} busy={busy} failure={failure}
+    onConfirm={() => void confirm()} onLater={() => setClosed(true)} />;
 }
 
 /** Settings, Process: the app-wide instructions every agent gets. */

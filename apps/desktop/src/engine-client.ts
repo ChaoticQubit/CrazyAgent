@@ -1138,6 +1138,17 @@ export interface MappingFacts {
   entry_points: string[];
 }
 
+/** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
+ * CLAUDE.local.md): its path inside the project with `/`, its size, whether git tracks it (so
+ * moving it shows as a deletion) and the plain code of why it stays in place, null when it is
+ * or was imported (DEC-106). */
+export interface ImportFile {
+  path: string;
+  bytes: number;
+  tracked: boolean;
+  refused: string | null;
+}
+
 export interface OnboardingView {
   project_id: string;
   graph: OnboardingStep;
@@ -1149,6 +1160,7 @@ export interface OnboardingView {
   overview: string | null;
   folder_overview: string | null;
   finished: boolean;
+  imported?: ImportFile[];
 }
 
 export interface GitHubDeviceCode {

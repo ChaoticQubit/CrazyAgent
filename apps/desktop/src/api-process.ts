@@ -1,7 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode } from "./engine-client";
+import type { GraphNode, ImportFile } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -27,7 +27,12 @@ const REFUSALS: Record<string, string> = {
   process_text_unwritable: "The instructions couldn't be saved. Check the folder, then try again.",
   process_project_folder_missing: "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.",
   process_project_unknown: "This project has no setup yet, so it can't hold instructions.",
-  process_import_missing: "There is no ~/.claude/CLAUDE.md to import.",
+  process_import_missing: "That file no longer exists. Pick another one.",
+  process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
+  process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_import_outside: "That file links outside the project folder, so it stays where it is.",
+  process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
+  process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
   process_folder_missing: "CrazyAgent's data folder is missing. Restart the engine, then try again.",
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
@@ -91,10 +96,31 @@ export function savedMessage(saved: ProcessSaved): string {
   return `Instructions saved, but a project's agents now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
 }
 
-/** Reads the owner's ~/.claude/CLAUDE.md for a preview. Only the owner's Import click calls
- * this; nothing is saved until the owner saves. Output: the text. */
-export function importGlobalInstructions(): Promise<Result<string>> {
-  return call<string>("desktop_import_global_instructions");
+/** Opens the native chooser for one instructions file and reads the picked file's text for a
+ * preview. Only the owner's Import click calls this; nothing is saved until the owner saves.
+ * Output: the text, or null when the owner closed the chooser. */
+export function importInstructionsFile(): Promise<Result<string | null>> {
+  return call<string | null>("desktop_import_instructions_file");
+}
+
+/** Lists a project's own instruction files an import would copy into its instructions and
+ * move into .crazyagent/imported/; nothing changes. Input: the project id. Output: the files,
+ * empty when there is nothing to import. */
+export function loadInstructionImport(projectId: string): Promise<Result<ImportFile[]>> {
+  return call<ImportFile[]>("desktop_instruction_import", { projectId });
+}
+
+/** Copies a project's own instruction files into its instructions and moves them into
+ * .crazyagent/imported/, on the owner's confirm only. Input: the project id. Output: the
+ * moved files. */
+export function confirmInstructionImport(projectId: string): Promise<Result<ImportFile[]>> {
+  return call<ImportFile[]>("desktop_confirm_instruction_import", { projectId });
+}
+
+/** Why one found instruction file stays in place, in plain words. Input: its refusal code.
+ * Output: the sentence. */
+export function importRefusal(code: string): string {
+  return Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : "CrazyAgent won't import this file.";
 }
 
 /** Reads the CrazyAgent default process for a preview. Output: the text. */
@@ -160,24 +186,24 @@ export interface LoadedFile {
   path: string;
 }
 
-/** Which instruction files the engine hands a project's agents. */
-export type InstructionChoice = "project" | "project_and_user" | "none";
+/** Which of the owner's two instruction texts a project's agents get (DEC-106). */
+export type InstructionMode = "project_only" | "app_only" | "both";
 
-/** One project's agent settings: the instruction files its agents get and whether headless
+/** One project's agent settings: which instructions its agents get and whether headless
  * Claude runs keep their transcript. */
 export interface InstructionSettings {
-  files: InstructionChoice;
+  mode: InstructionMode;
   transcripts: boolean;
 }
 
 /** The settings of a project the owner never changed. */
-export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { files: "project", transcripts: true };
+export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true };
 
-/** Every instruction files option in the order the page lists them, with what it hands agents. */
-export const INSTRUCTION_CHOICES: readonly { value: InstructionChoice; label: string; note: string }[] = [
-  { value: "project", label: "Project files", note: "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets." },
-  { value: "project_and_user", label: "Project and user files", note: "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md." },
-  { value: "none", label: "None", note: "Agents get no instruction files, only the project's Process instructions." },
+/** Every instructions option in the order the page lists them, with what it hands agents. */
+export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string; note: string }[] = [
+  { value: "project_only", label: "Project only", note: "Agents get only this project's instructions, from its .crazyagent/instructions.md." },
+  { value: "app_only", label: "App only", note: "Agents get only the app instructions from Settings > Process." },
+  { value: "both", label: "Both (app, then project appended)", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the

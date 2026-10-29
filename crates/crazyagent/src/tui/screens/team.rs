@@ -623,7 +623,8 @@ impl Team {
                 ProcessReply::Text(_)
                 | ProcessReply::Saved(_)
                 | ProcessReply::Settings(_)
-                | ProcessReply::Adoption(_),
+                | ProcessReply::Adoption(_)
+                | ProcessReply::Files(_),
             ) => {
                 return;
             }

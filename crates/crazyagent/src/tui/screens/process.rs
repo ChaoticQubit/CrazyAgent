@@ -31,6 +31,7 @@ const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
 const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
 const ADOPTION_ROWS_MAX: usize = 6;
+const PATH_BYTES_MAX: usize = 4096;
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,7 +180,12 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_text_unwritable" => "The instructions couldn't be saved. Check the folder, then try again.".into(),
         "process_project_folder_missing" => "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.".into(),
         "process_project_unknown" => "This project has no setup yet, so it can't hold instructions.".into(),
-        "process_import_missing" => "There is no ~/.claude/CLAUDE.md to import.".into(),
+        "process_import_missing" => "That file doesn't exist. Check the path.".into(),
+        "process_import_unsafe" => "That file isn't a plain file you own, so CrazyAgent won't read it.".into(),
+        "process_import_unreadable" => "That file couldn't be read. Check it, then try again.".into(),
+        "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
+        "process_import_unmovable" => "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.".into(),
+        "process_request_invalid" => "Type the file's full path, starting with / or ~/.".into(),
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
@@ -464,6 +470,7 @@ pub(in crate::tui) struct ProcessPage {
     pending: Option<ProcessQuery>,
     preview: Option<(Seed, String)>,
     preview_top: usize,
+    path: Option<String>,
     skills: Vec<Skill>,
 }
 
@@ -481,6 +488,7 @@ impl ProcessPage {
             pending: None,
             preview: None,
             preview_top: 0,
+            path: None,
             skills: Vec::new(),
         }
     }
@@ -640,7 +648,8 @@ impl ProcessPage {
                 ProcessReply::Saved(_)
                 | ProcessReply::Agent(_)
                 | ProcessReply::Settings(_)
-                | ProcessReply::Adoption(_),
+                | ProcessReply::Adoption(_)
+                | ProcessReply::Files(_),
             ) => {
                 return;
             }
@@ -659,19 +668,58 @@ impl ProcessPage {
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
             (ProcessQuery::Save { .. }, Ok(_)) => {}
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
-            (ProcessQuery::ImportGlobal, Ok(text)) => self.open_preview(Seed::Import, text),
+            (ProcessQuery::ReadFile { .. }, Ok(text)) => self.open_preview(Seed::Import, text),
             (ProcessQuery::Default, Ok(text)) => self.open_preview(Seed::Default, text),
-            (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
+            (ProcessQuery::ReadFile { .. } | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
             (
                 ProcessQuery::Agent { .. }
                 | ProcessQuery::Settings { .. }
                 | ProcessQuery::SaveSettings { .. }
-                | ProcessQuery::Adoption { .. },
+                | ProcessQuery::Adoption { .. }
+                | ProcessQuery::PendingImport { .. }
+                | ProcessQuery::ConfirmImport { .. },
                 _,
             ) => {}
         }
+    }
+
+    /// Edits the path of the file to import while its field is open: typed characters up to
+    /// `PATH_BYTES_MAX` bytes, Backspace, Enter to read the file as a preview (a leading `~/`
+    /// is the owner's home folder) and Esc to close the field. Inputs: the key and the
+    /// context. Output: handled, so no key reaches the editor meanwhile.
+    fn path_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(path) = self.path.as_mut() else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Char(character) if path.len() + character.len_utf8() <= PATH_BYTES_MAX => {
+                path.push(*character);
+            }
+            Key::Backspace => {
+                path.pop();
+            }
+            Key::Esc => self.path = None,
+            Key::Enter if !path.trim().is_empty() => {
+                let typed = path.trim().to_owned();
+                self.path = None;
+                let path = match typed.strip_prefix("~/") {
+                    Some(rest) => crate::projects_home::owner_home()
+                        .map(|home| home.join(rest))
+                        .unwrap_or_else(|_| std::path::PathBuf::from(&typed)),
+                    None => std::path::PathBuf::from(&typed),
+                };
+                self.send(ProcessQuery::ReadFile { path }, ctx);
+            }
+            _ => {}
+        }
+        assert!(
+            self.path
+                .as_ref()
+                .is_none_or(|path| path.len() <= PATH_BYTES_MAX)
+        );
+        Flow::Handled
     }
 
     fn open_preview(&mut self, seed: Seed, text: &str) {
@@ -714,7 +762,7 @@ impl ProcessPage {
             Scope::App => "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these.".to_owned(),
             Scope::Project { name, .. } => format!("Instructions every agent in {name} gets, after the app-wide ones. Kept in the project's .crazyagent/instructions.md, which git ignores."),
         };
-        let seeds = "Ctrl-G imports your ~/.claude/CLAUDE.md and Ctrl-D the CrazyAgent default process, each as a preview first.";
+        let seeds = "Ctrl-G imports an instructions file you name, such as a CLAUDE.md, and Ctrl-D the CrazyAgent default process, each as a preview first.";
         let intro = match self.scope {
             Scope::App => format!("{intro} {seeds}"),
             Scope::Project { .. } => intro,
@@ -744,11 +792,40 @@ impl ProcessPage {
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
             .max(EDITOR_ROWS_MIN);
+        if let Some(path) = &self.path {
+            lines.push(styled("Import from file", Role::Heading, theme));
+            lines.extend(
+                wrap("Type the file's full path; ~/ is your home folder. Enter reads it as a preview, Esc cancels. Nothing is saved until Ctrl-S.", width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            let room = width.saturating_sub(3).max(1);
+            let mut used = 0;
+            let mut tail: Vec<char> = path
+                .chars()
+                .rev()
+                .map(shown)
+                .take_while(|character| {
+                    used += char_width(*character);
+                    used <= room
+                })
+                .collect();
+            tail.reverse();
+            let column = 2 + tail.iter().copied().map(char_width).sum::<usize>();
+            assert!(column <= room + 2);
+            let tail: String = tail.into_iter().collect();
+            let at = lines.len();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", ctx.glyphs.vline), theme.accent),
+                Span::raw(tail),
+            ]));
+            return (lines, Some(Position::new(column as u16, at as u16)));
+        }
         if let Some((seed, text)) = &self.preview {
             let (title, note) = match seed {
                 Seed::Import => (
-                    "Your global instructions",
-                    "Read from ~/.claude/CLAUDE.md. Enter puts it in the editor in place of its text; nothing is saved until Ctrl-S.",
+                    "Instructions from your file",
+                    "Read once from the file you named; afterwards the instructions live here. Enter puts it in the editor in place of its text; nothing is saved until Ctrl-S.",
                 ),
                 Seed::Default => (
                     "CrazyAgent default process",
@@ -985,6 +1062,9 @@ impl Screen for ProcessPage {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.path.is_some() {
+            return vec![hint("Enter", "Read file"), hint("Esc", "Cancel")];
+        }
         if self.preview.is_some() {
             return vec![
                 hint("Enter", "Put in the editor"),
@@ -1006,11 +1086,11 @@ impl Screen for ProcessPage {
             hints.push(hint("Ctrl-O", "Open skill"));
         }
         if matches!(self.scope, Scope::Project { .. }) && self.settings.is_some() {
-            hints.push(hint("Ctrl-F", "Instruction files"));
+            hints.push(hint("Ctrl-F", "Instructions"));
             hints.push(hint("Ctrl-T", "Transcripts"));
         }
         if self.scope == Scope::App {
-            hints.push(hint("Ctrl-G", "Import global"));
+            hints.push(hint("Ctrl-G", "Import from file"));
             hints.push(hint("Ctrl-D", "Default process"));
             hints.push(sections_hint(ctx.glyphs));
         }
@@ -1023,6 +1103,9 @@ impl Screen for ProcessPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.path.is_some() {
+            return self.path_key(key, ctx);
+        }
         if self.preview.is_some() {
             return self.preview_key(key);
         }
@@ -1040,7 +1123,9 @@ impl Screen for ProcessPage {
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('g')) if self.scope == Scope::App => {
-                self.send(ProcessQuery::ImportGlobal, ctx);
+                if self.pending.is_none() {
+                    self.path = Some(String::new());
+                }
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('d')) if self.scope == Scope::App => {
