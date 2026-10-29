@@ -1836,7 +1836,7 @@ impl TeamRuntime {
             state: &self.state,
         };
         self.deliveries
-            .tick(&self.connection, project, now_ms(), &reach)?;
+            .tick_logged(&self.connection, project, now_ms(), &reach);
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
