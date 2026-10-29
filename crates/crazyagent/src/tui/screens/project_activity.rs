@@ -45,7 +45,7 @@ fn agent_lines(graph: &TeamGraph, height: usize, look: &Look, lines: &mut Vec<Ro
     let mut agents: Vec<&GraphNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind.agent())
         .collect();
     agents.sort_by(|a, b| {
         live(b)
@@ -136,16 +136,18 @@ mod tests {
     fn agent(id: &str, label: &str, status: AgentStatus) -> GraphNode {
         GraphNode {
             id: id.into(),
-            kind: NodeKind::Agent,
-            parent: Some("group-codex".into()),
+            kind: NodeKind::Lead,
+            parent: Some("master".into()),
             label: label.into(),
             harness: "codex".into(),
             status: Some(status),
             status_label: None,
             account: None,
-            agents: None,
+            branch: None,
             terminal: None,
             questions: None,
+            agent: None,
+            pane: None,
         }
     }
 

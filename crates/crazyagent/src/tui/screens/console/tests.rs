@@ -16,9 +16,11 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         status: None,
         status_label: None,
         account: None,
-        agents: None,
+        branch: None,
         terminal: None,
         questions: None,
+        agent: None,
+        pane: None,
     }
 }
 
@@ -26,11 +28,11 @@ fn team() -> TeamGraph {
     TeamGraph {
         project_id: ProjectId::new("notes-cli").unwrap(),
         nodes: vec![
-            node("master", NodeKind::Master, "Master"),
-            node("group-codex", NodeKind::HarnessGroup, "Codex (@group)"),
-            node("agent-1", NodeKind::Agent, "Ada (@page)"),
-            node("agent-2", NodeKind::Agent, "Grace"),
-            node("agent-3", NodeKind::Agent, "Linus (@onboarding-fix)"),
+            node("master", NodeKind::Master, "Codex (@group)"),
+            node("team-1", NodeKind::Lead, "Ada (@page)"),
+            node("team-2", NodeKind::Sub, "Grace"),
+            node("team-3", NodeKind::Sub, "Linus (@onboarding-fix)"),
+            node("teammate-3-12", NodeKind::Teammate, "Teammate %12"),
         ],
         edges: vec![],
     }
@@ -143,7 +145,7 @@ fn an_at_word_at_the_cursor_is_completed_from_master_handles_and_project_files()
             "@docs/brief.md",
             "@README.md"
         ],
-        "only sub-agents with a handle, never the group; listed files, then documents; paths with spaces are left out"
+        "only sub-agents with a handle, never the master node; listed files, then documents; paths with spaces are left out"
     );
     assert_eq!(tags(None, None, None), ["@master"]);
     assert_eq!(

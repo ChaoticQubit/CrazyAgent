@@ -1234,16 +1234,18 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         project_id: project,
         nodes: vec![crate::team::GraphNode {
             id: "team-1".into(),
-            kind: crate::team::NodeKind::Agent,
-            parent: Some("group-codex".into()),
+            kind: crate::team::NodeKind::Lead,
+            parent: Some("master".into()),
             label: "Ada (@onboarding-fix)".into(),
             harness: "codex".into(),
             status: Some(crate::team::AgentStatus::Working),
             status_label: None,
             account: None,
-            agents: None,
+            branch: None,
             terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
             questions: None,
+            agent: Some(1),
+            pane: None,
         }],
         edges: Vec::new(),
     }));
@@ -2069,15 +2071,17 @@ fn console_screen() -> ProjectScreen {
         status: None,
         status_label: None,
         account: None,
-        agents: None,
+        branch: None,
         terminal: None,
         questions: None,
+        agent: None,
+        pane: None,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
         nodes: vec![
             node("master", NodeKind::Master, "Master"),
-            node("agent-1", NodeKind::Agent, "Ada (@page)"),
+            node("team-1", NodeKind::Lead, "Ada (@page)"),
         ],
         edges: vec![],
     }));

@@ -1,5 +1,5 @@
 use super::*;
-use crate::team::{DelegationPath, TeamHarness, TeamTask};
+use crate::team::{DelegationPath, TeamHarness, TeamTask, Teammate};
 
 fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAgent {
     TeamAgent {
@@ -121,73 +121,130 @@ fn status() -> TeamStatus {
     }
 }
 
+fn none() -> BTreeMap<i64, String> {
+    BTreeMap::new()
+}
+
+fn teammate(pane: &str, ended: bool, stopped: bool) -> Teammate {
+    Teammate {
+        pane: pane.into(),
+        ended,
+        stopped,
+        seen_ms: 1,
+    }
+}
+
+/// The base status with a lead tree under harness lead 3: worker 7, its own worker 8, and
+/// two teammate panes of 3's terminal, one open and one ended.
+fn tree() -> TeamStatus {
+    let mut status = status();
+    status.master_branch = Some("main".into());
+    status.agents[2].teammates = vec![teammate("%12", false, false), teammate("%13", true, true)];
+    status.agents.push(TeamAgent {
+        parent: Some(3),
+        ..agent(7, AgentRole::Sub, "claude-code", AgentStatus::Working)
+    });
+    status.agents.push(TeamAgent {
+        parent: Some(7),
+        ..agent(8, AgentRole::Sub, "codex", AgentStatus::Idle)
+    });
+    status
+        .tasks
+        .push(task(15, "claude-code", TaskStatus::Running, Some(7)));
+    status
+        .tasks
+        .push(task(16, "codex", TaskStatus::Queued, Some(8)));
+    status
+}
+
+fn kinds(graph: &TeamGraph) -> Vec<(&str, NodeKind, Option<&str>)> {
+    graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.kind, node.parent.as_deref()))
+        .collect()
+}
+
+fn agents(graph: &TeamGraph) -> Vec<String> {
+    graph
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Lead | NodeKind::Sub))
+        .map(|node| node.id.clone())
+        .collect()
+}
+
 #[test]
-fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
-    let graph = graph(&status());
+fn the_team_graph_is_a_tree_of_who_leads_whom() {
+    let branches = BTreeMap::from([
+        (3, "crazyagent/charts".to_owned()),
+        (7, "crazyagent/charts--axis".to_owned()),
+    ]);
+    let graph = graph(&tree(), &branches);
     assert_eq!(graph.project_id.as_str(), "tidepool");
-    let ids: Vec<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(
-        ids,
+        kinds(&graph),
         [
-            "master",
-            "group:claude-code",
-            "group:codex",
-            "team-3",
-            "team-4",
-            "team-5",
-            "team-6"
+            ("master", NodeKind::Master, None),
+            ("team-3", NodeKind::Lead, Some("master")),
+            ("teammate-3-12", NodeKind::Teammate, Some("team-3")),
+            ("team-7", NodeKind::Sub, Some("team-3")),
+            ("team-8", NodeKind::Sub, Some("team-7")),
+            ("team-4", NodeKind::Lead, Some("master")),
+            ("team-5", NodeKind::Lead, Some("master")),
+            ("team-6", NodeKind::Lead, Some("master")),
         ],
-        "a recently stopped sub-agent stays listed and the live master is the master node"
+        "the master leads every harness lead, each lead its own workers depth first, and an ended teammate pane leaves"
     );
 
     let master = &graph.nodes[0];
-    assert_eq!(master.kind, NodeKind::Master);
     assert_eq!(master.harness, "codex");
     assert_eq!(master.status, Some(AgentStatus::Idle));
     assert_eq!(master.account.as_deref(), Some("acct-2"));
     assert_eq!(master.terminal, Some(AgentId::team(2).unwrap()));
-
-    let claude = &graph.nodes[1];
-    assert_eq!(claude.kind, NodeKind::HarnessGroup);
-    assert_eq!(claude.parent.as_deref(), Some("master"));
-    assert_eq!(claude.agents, Some(2));
-    assert_eq!(claude.status_label.as_deref(), Some("2 of 3 agents"));
-    assert_eq!(claude.terminal, None);
-
-    let working = &graph.nodes[3];
-    assert_eq!(working.kind, NodeKind::Agent);
-    assert_eq!(working.parent.as_deref(), Some("group:claude-code"));
-    assert_eq!(working.status, Some(AgentStatus::Working));
-    assert_eq!(working.terminal, Some(AgentId::team(3).unwrap()));
-    assert_eq!(
-        working.label, "Ada (@charts)",
-        "an agent node carries the engine's one name for the agent"
-    );
+    assert_eq!(master.branch.as_deref(), Some("main"));
+    assert_eq!(master.agent, Some(2), "the live master is the master node");
     assert_eq!(master.label, "Master");
-    let stopped = &graph.nodes[4];
-    assert_eq!(stopped.status, Some(AgentStatus::Stopped));
-    assert_eq!(
-        stopped.terminal, None,
-        "a stopped agent has no live terminal"
-    );
-    let failed = &graph.nodes[5];
-    assert_eq!(failed.label, "Sub-agent 5");
-    assert_eq!(failed.status, Some(AgentStatus::Failed));
-    assert_eq!(failed.terminal, None, "a failed agent has no live terminal");
-    assert_eq!(
-        graph.nodes[6].parent.as_deref(),
-        Some("master"),
-        "an agent whose harness left the plan hangs off the master"
-    );
 
-    let edges: Vec<(i64, &str, EdgeState, Option<&str>)> = graph
+    let node = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
+    let lead = node("team-3");
+    assert_eq!(lead.label, "Ada (@charts)");
+    assert_eq!(lead.status, Some(AgentStatus::Working));
+    assert_eq!(lead.terminal, Some(AgentId::team(3).unwrap()));
+    assert_eq!(lead.branch.as_deref(), Some("crazyagent/charts"));
+    assert_eq!((lead.agent, lead.pane.as_deref()), (Some(3), None));
+    assert_eq!(
+        node("team-7").branch.as_deref(),
+        Some("crazyagent/charts--axis")
+    );
+    assert_eq!(node("team-8").branch, None, "an agent with no worktree has no branch");
+
+    let mate = node("teammate-3-12");
+    assert_eq!(mate.label, "Teammate %12");
+    assert_eq!(mate.harness, "claude-code");
+    assert_eq!(mate.account.as_deref(), Some("acct-3"));
+    assert_eq!(mate.status, None);
+    assert_eq!(mate.status_label.as_deref(), Some("Running"));
+    assert_eq!(
+        mate.terminal,
+        Some(AgentId::team(3).unwrap()),
+        "an open teammate pane opens its lead's terminal"
+    );
+    assert_eq!((mate.agent, mate.pane.as_deref()), (None, Some("%12")));
+    assert_eq!(mate.questions, None);
+
+    assert_eq!(node("team-4").terminal, None, "a stopped agent has no live terminal");
+    assert_eq!(node("team-5").label, "Sub-agent 5");
+    assert_eq!(node("team-5").terminal, None, "a failed agent has no live terminal");
+
+    let edges: Vec<(i64, &str, &str, EdgeState, Option<&str>)> = graph
         .edges
         .iter()
         .map(|edge| {
-            assert_eq!(edge.from, "master");
             assert_eq!(edge.text, format!("Task {}", edge.task_id));
             (
                 edge.task_id,
+                edge.from.as_str(),
                 edge.to.as_str(),
                 edge.state,
                 edge.reply.as_deref(),
@@ -197,12 +254,91 @@ fn the_team_graph_shows_the_master_harness_groups_agents_and_task_edges() {
     assert_eq!(
         edges,
         [
-            (10, "team-4", EdgeState::Done, Some("Result 10")),
-            (11, "team-3", EdgeState::Running, None),
-            (12, "group:codex", EdgeState::Sent, None),
-            (13, "team-5", EdgeState::Failed, Some("Problem 13")),
-            (14, "master", EdgeState::Sent, None),
-        ]
+            (10, "master", "team-4", EdgeState::Done, Some("Result 10")),
+            (11, "master", "team-3", EdgeState::Running, None),
+            (12, "master", "master", EdgeState::Sent, None),
+            (13, "master", "team-5", EdgeState::Failed, Some("Problem 13")),
+            (14, "master", "master", EdgeState::Sent, None),
+            (15, "team-3", "team-7", EdgeState::Running, None),
+            (16, "team-7", "team-8", EdgeState::Sent, None),
+        ],
+        "each task runs from the node leading its agent, and one no agent took waits on the master"
+    );
+}
+
+#[test]
+fn a_hidden_lead_moves_its_workers_up_to_the_master() {
+    let mut status = tree();
+    status.agents[2].finished = true;
+    status.agents[2].teammates.clear();
+    let graph = graph(&status, &none());
+    assert_eq!(
+        kinds(&graph),
+        [
+            ("master", NodeKind::Master, None),
+            ("team-4", NodeKind::Lead, Some("master")),
+            ("team-5", NodeKind::Lead, Some("master")),
+            ("team-6", NodeKind::Lead, Some("master")),
+            ("team-7", NodeKind::Sub, Some("master")),
+            ("team-8", NodeKind::Sub, Some("team-7")),
+        ],
+        "a worker keeps its kind while its finished lead is hidden"
+    );
+    assert_eq!(
+        graph
+            .edges
+            .iter()
+            .find(|edge| edge.task_id == 15)
+            .map(|edge| (edge.from.as_str(), edge.to.as_str())),
+        Some(("master", "team-7"))
+    );
+}
+
+#[test]
+fn stopped_and_ended_teammates_show_as_stopped_and_ended_ones_only_with_finished_agents() {
+    let mut status = tree();
+    status.agents[2].teammates = vec![teammate("%12", false, true), teammate("%13", true, true)];
+    let shown = |graph: &TeamGraph| -> Vec<(String, Option<AgentStatus>, Option<String>, bool)> {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Teammate)
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    node.status,
+                    node.status_label.clone(),
+                    node.terminal.is_some(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(
+        shown(&graph(&status, &none())),
+        [(
+            "teammate-3-12".to_owned(),
+            Some(AgentStatus::Stopped),
+            Some("Stopped".to_owned()),
+            false
+        )],
+        "a teammate the owner stopped shows stopped with no terminal while its pane closes"
+    );
+    status.show_finished = true;
+    assert_eq!(
+        shown(&graph(&status, &none()))[1],
+        (
+            "teammate-3-13".to_owned(),
+            Some(AgentStatus::Stopped),
+            Some("Ended".to_owned()),
+            false
+        )
+    );
+    status.show_finished = false;
+    status.agents[2].teammates = vec![teammate("%12", false, false)];
+    status.agents[2].status = AgentStatus::Stopped;
+    assert!(
+        shown(&graph(&status, &none())).iter().all(|mate| !mate.3),
+        "a teammate of a stopped harness has no terminal to open"
     );
 }
 
@@ -246,15 +382,7 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
         [4, 5],
         "stopped and failed sub-agents are finished"
     );
-    let agents = |graph: &TeamGraph| {
-        graph
-            .nodes
-            .iter()
-            .filter(|node| node.kind == NodeKind::Agent)
-            .map(|node| node.id.clone())
-            .collect::<Vec<_>>()
-    };
-    let hidden = graph(&status);
+    let hidden = graph(&status, &none());
     assert_eq!(agents(&hidden), ["team-3", "team-6"]);
     assert_eq!(hidden.nodes[0].kind, NodeKind::Master);
     assert_eq!(
@@ -272,28 +400,29 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
     );
     status.show_finished = true;
     assert_eq!(
-        agents(&graph(&status)),
+        agents(&graph(&status, &none())),
         ["team-3", "team-4", "team-5", "team-6"]
     );
 }
 
 #[test]
-fn a_team_with_no_agents_yet_is_the_master_and_its_groups() {
+fn a_team_with_no_agents_yet_is_the_master_alone() {
     let mut empty = status();
     empty.agents.clear();
     empty.tasks.clear();
-    let graph = graph(&empty);
-    assert_eq!(graph.nodes.len(), 3);
+    let graph = graph(&empty, &none());
+    assert_eq!(kinds(&graph), [("master", NodeKind::Master, None)]);
     assert_eq!(graph.nodes[0].status, None);
     assert_eq!(graph.nodes[0].terminal, None);
+    assert_eq!(graph.nodes[0].agent, None);
     assert!(graph.edges.is_empty());
 }
 
 #[test]
 fn only_agent_nodes_carry_their_queued_question_count() {
-    let mut status = status();
+    let mut status = tree();
     status.events.questions = vec![crate::team::events::AgentQuestions { agent: 3, count: 4 }];
-    let graph = graph(&status);
+    let graph = graph(&status, &none());
     let questions = |id: &str| {
         graph
             .nodes
@@ -305,14 +434,21 @@ fn only_agent_nodes_carry_their_queued_question_count() {
     assert_eq!(questions("team-3"), Some(4));
     assert_eq!(questions("team-5"), Some(0));
     assert_eq!(questions("master"), None);
-    assert_eq!(questions("group:claude-code"), None);
+    assert_eq!(questions("teammate-3-12"), None);
     let text = serde_json::to_value(&graph.nodes[0]).unwrap();
     let mut old = text.clone();
-    old.as_object_mut().unwrap().remove("questions");
+    for field in ["questions", "branch", "agent", "pane"] {
+        old.as_object_mut().unwrap().remove(field);
+    }
+    let read = serde_json::from_value::<GraphNode>(old).unwrap();
     assert_eq!(
-        serde_json::from_value::<GraphNode>(old).unwrap().questions,
-        None,
-        "a node from a build before the count still reads"
+        (read.questions, read.branch, read.agent, read.pane),
+        (None, None, None, None),
+        "a node from a build before these fields still reads"
+    );
+    assert_eq!(
+        serde_json::to_value(NodeKind::Teammate).unwrap(),
+        serde_json::json!("teammate")
     );
 }
 
@@ -333,11 +469,11 @@ fn stopped_sub_agents_of_the_latest_round_stay_in_the_graph_with_their_tasks() {
         task(3, "codex", TaskStatus::Done, Some(kept + 2)),
         task(4, "codex", TaskStatus::Done, Some(3)),
     ];
-    let graph = graph(&owner);
+    let graph = graph(&owner, &none());
     let agents: Vec<&GraphNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind == NodeKind::Lead)
         .collect();
     assert_eq!(
         agents.len(),
@@ -352,7 +488,7 @@ fn stopped_sub_agents_of_the_latest_round_stay_in_the_graph_with_their_tasks() {
     for node in &agents {
         assert_eq!(node.status, Some(AgentStatus::Stopped));
         assert_eq!(node.status_label.as_deref(), Some("Stopped"));
-        assert_eq!(node.parent.as_deref(), Some("group:codex"));
+        assert_eq!(node.parent.as_deref(), Some("master"));
         assert_eq!(node.terminal, None, "a stopped agent has no live terminal");
     }
     let targets: Vec<(i64, String)> = graph
@@ -363,11 +499,58 @@ fn stopped_sub_agents_of_the_latest_round_stay_in_the_graph_with_their_tasks() {
     assert_eq!(
         targets,
         [
-            (1, "group:codex".to_owned()),
+            (1, "master".to_owned()),
             (2, "team-3".to_owned()),
             (3, format!("team-{}", kept + 2)),
             (4, "team-3".to_owned()),
         ],
-        "a listed stopped agent's tasks point at it"
+        "a listed stopped agent's tasks point at it, an unlisted one's wait on the master"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn branches_come_from_each_agent_worktree_record_with_no_git_run() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = crate::landing::open(directory.path()).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    let mut status = tree();
+    let linked = directory.path().join("worktrees").join("agent-3");
+    let own = directory.path().join("worktrees").join("agent-7");
+    for (agent, worktree, git_dir) in [
+        (
+            3,
+            &linked,
+            directory.path().join(".git").join("worktrees").join("agent-3"),
+        ),
+        (7, &own, crate::agent_git::git_dir(&own)),
+        (2, &own, crate::agent_git::git_dir(&own)),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    agent,
+                    status.project_id.as_str(),
+                    directory.path().to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let found = branches(&connection, &status).unwrap();
+    assert_eq!(
+        found,
+        BTreeMap::from([
+            (3, "crazyagent/agent-3".to_owned()),
+            (7, "agent/agent-7".to_owned()),
+        ]),
+        "a linked worktree and an own clone name their branch by layout, and the master has none"
+    );
+    status.project_id = ProjectId::new("other").unwrap();
+    assert!(
+        branches(&connection, &status).unwrap().is_empty(),
+        "another project's worktree records are not read"
     );
 }

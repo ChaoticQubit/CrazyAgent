@@ -3155,16 +3155,17 @@ pub fn owner_status(
 }
 
 /// The project's team graph as the owner reads it, built from a status `fit_status` fitted
-/// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
-/// the graph, or `team_status_bounds` when even an empty view does not fit.
+/// until the graph fits one owner reply, with each sub-agent's branch from `graph::branches`.
+/// Takes a connection and the stored setup. Returns the graph, or `team_status_bounds` when
+/// even an empty view does not fit.
 pub fn owner_graph(
     connection: &Connection,
     stored: &StoredSetup,
 ) -> Result<TeamGraph, EngineError> {
-    let status = fit_status(status(connection, stored)?, |status| {
-        encoded_len(&graph(status))
-    })?;
-    Ok(graph(&status))
+    let status = status(connection, stored)?;
+    let branches = graph::branches(connection, &status)?;
+    let status = fit_status(status, |status| encoded_len(&graph(status, &branches)))?;
+    Ok(graph(&status, &branches))
 }
 
 /// Fits a status to one owner reply. First every free-form text is cut to one shared cap,
