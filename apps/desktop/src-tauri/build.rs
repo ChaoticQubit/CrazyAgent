@@ -48,6 +48,7 @@ fn main() {
         "desktop_team_stop_teammate",
         "desktop_team_max_harnesses",
         "desktop_team_max_teammates",
+        "desktop_team_spread_accounts",
         "desktop_team_token_budget",
         "desktop_team_graph",
         "desktop_team_events",

@@ -864,11 +864,8 @@ impl TeamRuntime {
             .collect();
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
-            if let Some(cap) = cap
-                && let Some(text) = self.cap_native(&project, agent, cap)?
-            {
-                let _ =
-                    super::events::send_to(&self.connection, host.as_ref(), Some(agent), &text)?;
+            if let Some(cap) = cap {
+                self.cap_native(&project, agent, cap)?;
             }
             let spawned = self
                 .workers
@@ -1320,18 +1317,13 @@ impl TeamRuntime {
 
     /// Ends a running lead's newest native teammates past the owner's Max teammates per
     /// harness, counted with its app-spawned sub-agents (DEC-104 K8). App-spawned ones are
-    /// never ended here: the engine admits them against the cap before they start. Takes
-    /// the project, the lead and the cap. Returns the line to type into the lead, none when
-    /// nothing ended, or a SQLite failure.
-    fn cap_native(
-        &self,
-        project: &ProjectId,
-        lead: i64,
-        cap: u8,
-    ) -> Result<Option<String>, EngineError> {
+    /// never ended here: the engine admits them against the cap before they start. The lead
+    /// gets a note naming the ones ended. Takes the project, the lead and the cap. Returns
+    /// any SQLite or coordination store failure.
+    fn cap_native(&self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
         let running = super::caps::running_sub_agents(&self.connection, project, lead)?;
         if running <= u32::from(cap) {
-            return Ok(None);
+            return Ok(());
         }
         let native: Vec<i64> = {
             let mut statement = self
@@ -1343,7 +1335,11 @@ impl TeamRuntime {
                 .map_err(error)?;
             statement
                 .query_map(
-                    params![project.as_str(), lead, crate::terminal::PANES_LISTED_MAX as i64],
+                    params![
+                        project.as_str(),
+                        lead,
+                        crate::terminal::PANES_LISTED_MAX as i64
+                    ],
                     |row| row.get(0),
                 )
                 .map_err(error)?
@@ -1363,22 +1359,46 @@ impl TeamRuntime {
             }
         }
         assert!(ended.len() <= over);
-        Ok((!ended.is_empty()).then(|| {
+        if ended.is_empty() {
+            return Ok(());
+        }
+        self.note_lead(
+            project,
+            lead,
             format!(
-                "[team] The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
+                "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
                 ended.join(", ")
-            )
-        }))
+            ),
+        )
+    }
+
+    /// Sends a lead an engine note through the coordination layer (DEC-104), which delivers
+    /// it natively or by typing. A lead the layer no longer knows is skipped. Takes the
+    /// project, the lead and the note. Returns any coordination store failure.
+    fn note_lead(&self, project: &ProjectId, lead: i64, body: String) -> Result<(), EngineError> {
+        let note = crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Engine,
+            to: crate::coord::Party::Agent(lead),
+            kind: crate::coord::MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body,
+            idempotency_key: None,
+        };
+        match crate::coord::send(&self.connection, note, now_ms()) {
+            Ok(_) => Ok(()),
+            Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+            Err(_) => Ok(()),
+        }
     }
 
     /// Tells each running lead which of its sub-agents the owner just stopped, once per
     /// stop, so it neither waits for them nor hands their work to another agent. A lead the
     /// owner stopped too is not told. Takes the stopped agents. Returns any SQLite failure.
     fn tell_leads(&self, stopped: &[(i64, ProjectId)]) -> Result<(), EngineError> {
-        let Some(host) = self.terminal.clone() else {
-            return Ok(());
-        };
-        for (id, _) in stopped {
+        for (id, project) in stopped {
             let lead: Option<i64> = self
                 .connection
                 .query_row("SELECT parent FROM team_agents WHERE id=?1", [*id], |row| {
@@ -1398,10 +1418,10 @@ impl TeamRuntime {
             };
             let name = names::name(&self.connection, *id)?;
             let text = format!(
-                "[team] The owner stopped your sub-agent {}. Its task waits for it until the owner wakes it; do not start another sub-agent for that work unless the owner asks.",
+                "The owner stopped your sub-agent {}. Its task waits for it until the owner wakes it; do not start another sub-agent for that work unless the owner asks.",
                 names::label(AgentRole::Sub, *id, name.as_ref())
             );
-            let _ = super::events::send_to(&self.connection, host.as_ref(), Some(lead), &text)?;
+            self.note_lead(project, lead, text)?;
         }
         Ok(())
     }
@@ -1881,12 +1901,7 @@ impl TeamRuntime {
     /// the lead runs fewer than Max teammates per harness in both modes, any other agent
     /// while the project runs fewer harnesses than Max harnesses per project. Takes the
     /// project, the lead, if any, and the harness cap. Returns true when the cap is reached.
-    fn capped(
-        &self,
-        project: &ProjectId,
-        lead: Option<i64>,
-        harness_cap: Option<u8>,
-    ) -> bool {
+    fn capped(&self, project: &ProjectId, lead: Option<i64>, harness_cap: Option<u8>) -> bool {
         match lead {
             Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead).is_err(),
             None => self.harnesses_full(project, harness_cap),
@@ -5884,8 +5899,7 @@ const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX)
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
 const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
 const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with the lead's.";
-const OVER_TEAMMATE_CAP: &str =
-    "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
+const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
 

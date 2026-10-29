@@ -1081,6 +1081,21 @@ async fn desktop_team_token_budget(
 }
 
 #[tauri::command]
+async fn desktop_team_spread_accounts(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_spread_accounts(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_wake_agent(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2782,6 +2797,7 @@ pub fn run() {
             desktop_team_max_harnesses,
             desktop_team_max_teammates,
             desktop_team_token_budget,
+            desktop_team_spread_accounts,
             desktop_team_graph,
             desktop_team_events,
             desktop_team_wake_rule,

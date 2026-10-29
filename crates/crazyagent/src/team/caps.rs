@@ -1,4 +1,5 @@
 use super::{AgentRole, CAP_CHOICES, error};
+use crate::coord::AgentId;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -49,7 +50,7 @@ pub fn read(connection: &Connection, project: &ProjectId) -> Result<Caps, Engine
 pub fn running_sub_agents(
     connection: &Connection,
     project: &ProjectId,
-    lead: i64,
+    lead: AgentId,
 ) -> Result<u32, EngineError> {
     let (spawned, native, panes): (i64, i64, i64) = connection
         .query_row(
@@ -74,7 +75,7 @@ pub fn running_sub_agents(
 fn running_harnesses(
     connection: &Connection,
     project: &ProjectId,
-    master: Option<i64>,
+    master: Option<AgentId>,
 ) -> Result<u32, EngineError> {
     let running: i64 = connection
         .query_row(
@@ -93,7 +94,7 @@ fn running_harnesses(
 /// harness in both modes. A master lead starts harnesses, so Max harnesses per project
 /// counts for it instead. Takes a connection, the project and the lead. Returns Ok, or the
 /// plain refusal sentence for the agent that asked.
-pub fn admit_sub_agent(db: &Connection, project: &ProjectId, lead: i64) -> Result<(), String> {
+pub fn admit_sub_agent(db: &Connection, project: &ProjectId, lead: AgentId) -> Result<(), String> {
     let unreadable = |_: EngineError| "Could not read this project's agent limits.".to_owned();
     let role: Option<String> = db
         .query_row(

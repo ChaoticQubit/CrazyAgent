@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setOnHarnessSwitch, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -154,6 +154,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [lands, setLands] = useState<ChildLanding | null>(null);
   const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [stopAsked, setStopAsked] = useState(false);
+  const [spread, setSpread] = useState<"off" | "on" | null>(null);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
@@ -271,6 +272,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseSpread(choice: "off" | "on") {
+    setSpread(choice);
+    setBusy(true);
+    const message = changeNote(await setSpreadAccounts(projectId, choice === "on"), "the account spread setting");
+    setBusy(false);
+    setSpread(null);
+    setNote(message);
+    reload();
+  }
+
   async function budget(value: string) {
     const tokens = chosen(value, BUDGET_CHOICES);
     if (busy || tokens === undefined) return;
@@ -344,7 +355,13 @@ export function TeamControls({ projectId, status, harness, reload }: {
       helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />
     <Select id={`tg-max-teammates-${projectId}`} label="Max teammates per harness" value={status.max_teammates == null ? NO_LIMIT : String(status.max_teammates)} options={capOptions()}
       onValue={(value) => void cap("teammates", value)}
-      helper="How many teammates each harness splits off in its terminal. The engine closes the newest past the limit and tells the harness." />
+      helper="How many sub-agents each harness runs at once: app-spawned sub-agents and native teammates alike. A new sub-agent waits at the limit; the engine ends the newest native teammates past it and tells the harness." />
+    <div className="pj-row">
+      <span aria-hidden="true">Spread harnesses across accounts</span>
+      <Segmented label="Spread harnesses across accounts" value={spread ?? (status.spread_accounts === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseSpread(choice); }}
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+      <span className="tg-terminal-note">On, a new harness or sub-agent takes a signed-in pool account no running agent of this project uses, when there is one. Off, your account strategy picks. Teammates run on their harness's account.</span>
+    </div>
     <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={status.token_budget == null ? NO_LIMIT : String(status.token_budget)} options={budgetOptions()}
       onValue={(value) => void budget(value)}
       helper={status.token_budget == null
