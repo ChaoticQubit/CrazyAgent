@@ -258,6 +258,7 @@ impl Cleanup {
             let role = match agent.role {
                 AgentRole::Master => "master",
                 AgentRole::Sub => "sub-agent",
+                AgentRole::Teammate => "teammate",
             };
             let row = wrap(
                 &format!(

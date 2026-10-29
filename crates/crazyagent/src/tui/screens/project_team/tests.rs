@@ -78,6 +78,7 @@ fn agent(
         parent: None,
         owner_stopped: false,
         teammates: Vec::new(),
+        pane: None,
     }
 }
 

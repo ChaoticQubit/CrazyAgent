@@ -80,6 +80,10 @@ pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
 /// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
 /// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
 pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// The Claude Code team tools a native-team lead keeps (DEC-104 Q10): `TeamCreate` starts
+/// its agent team and `Agent` starts each teammate. `Workflow` stays denied, and every
+/// teammate is denied both again.
+pub(crate) const CLAUDE_NATIVE_TEAM_TOOLS: [&str; 2] = ["Agent", "TeamCreate"];
 /// Turns off Claude Code's background Bash commands and background agents for a tools-on
 /// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
 /// the turn's result, which the engine would read as the next task's reply.
@@ -592,6 +596,36 @@ fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
     settings.to_string()
 }
 
+/// Lists what a Claude Code launch passes after `--disallowedTools`: with tools on, Claude
+/// Code's own sub-agent tools, less `CLAUDE_NATIVE_TEAM_TOOLS` for a native-team lead, then
+/// every MCP tool the owner switched off. Input: the tools switch, whether the launch is a
+/// native-team lead and what it installed. Output: the names, empty when none is denied.
+pub(crate) fn claude_denied(
+    tools: bool,
+    native: bool,
+    installed: Option<&Installed>,
+) -> Vec<String> {
+    assert!(!native || tools);
+    let mut denied: Vec<String> = Vec::new();
+    if tools {
+        denied.extend(
+            CLAUDE_BUILT_IN_AGENTS
+                .iter()
+                .filter(|tool| !(native && CLAUDE_NATIVE_TEAM_TOOLS.contains(tool)))
+                .map(|tool| (*tool).to_owned()),
+        );
+    }
+    if let Some(installed) = installed {
+        denied.extend(installed.denied_tools().iter().cloned());
+    }
+    assert!(
+        denied
+            .iter()
+            .all(|name| !name.is_empty() && !name.starts_with('-'))
+    );
+    denied
+}
+
 fn claude_invocation(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -626,13 +660,16 @@ fn claude_invocation(
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
-                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
-        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
         arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
+    }
+    let denied = claude_denied(request.tools, false, installed);
+    if !denied.is_empty() {
+        arguments.push(OsString::from(CLAUDE_DENY_FLAG));
+        arguments.extend(denied.into_iter().map(OsString::from));
     }
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR", home.clone()),

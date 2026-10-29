@@ -148,7 +148,8 @@ struct Grant {
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `native` marks a
-/// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile.
+/// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
+/// and `tmux` is that server's program, which its teammates are split off with.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -165,6 +166,7 @@ struct Plan {
     resume: Option<Resume>,
     continues: bool,
     native: bool,
+    tmux: Option<PathBuf>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -172,6 +174,17 @@ struct Plan {
 const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
 
 impl Plan {
+    /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. Other plans
+    /// keep the context as it is. Takes the context. Returns it.
+    fn team_context(&self, context: AgentContext) -> AgentContext {
+        assert_eq!(self.native, self.tmux.is_some());
+        match &self.tmux {
+            Some(tmux) => context.with_native_team(tmux, &self.working_dir),
+            None => context,
+        }
+    }
+
     /// Builds one start of the plan at `access`, the level the owner saved when this start
     /// happens (AL-2): Full access runs without Seatbelt, any other level in the agent's
     /// profile, and a clone at Sandboxed is refused, see [`confinement`]. Takes the account
@@ -691,6 +704,7 @@ impl TeamRuntime {
                     && self.live(&project, AgentRole::Sub, None)
                         < usize::from(stored.team.max_agents.saturating_sub(1))
             }),
+            AgentRole::Teammate => false,
         };
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
@@ -876,6 +890,7 @@ impl TeamRuntime {
                 [at],
             )
             .map_err(error)?;
+        teammates::end_orphans(&self.connection, at)?;
         let harnesses: Vec<(i64, ProjectId)> = self
             .workers
             .iter()
@@ -920,6 +935,24 @@ impl TeamRuntime {
                 .filter(|pane| pane.pid != lead.pid && !pane.dead)
                 .collect();
             self.teammates_seen(&project, agent, &team, at)?;
+            let live: Vec<&str> = team.iter().map(|pane| pane.id.as_str()).collect();
+            teammates::register(
+                &self.connection,
+                &project,
+                agent,
+                &agent_home(&self.state, agent),
+                &live,
+                i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
+                at,
+            )?;
+            for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
+                if !live.contains(&pane.as_str()) {
+                    continue;
+                }
+                if let Ok(own) = AgentId::team(teammate) {
+                    let _ = host.adopt_pane(&own, &name, &pane);
+                }
+            }
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
             if let Some(text) = ended {
@@ -1517,7 +1550,15 @@ impl TeamRuntime {
             return Ok(());
         };
         match (role, wakes, again) {
-            (AgentRole::Sub, false, None) | (AgentRole::Master, _, None) => return Ok(()),
+            (AgentRole::Sub, false, None)
+            | (AgentRole::Master, _, None)
+            | (AgentRole::Teammate, _, None) => return Ok(()),
+            (AgentRole::Teammate, _, Some(_)) => {
+                return self.note(
+                    &project,
+                    "That teammate was not restarted: a teammate starts only from its harness.",
+                );
+            }
             (AgentRole::Sub, false, Some(_)) => {
                 return self.note(
                     &project,
@@ -1544,6 +1585,7 @@ impl TeamRuntime {
                 );
             }
             AgentRole::Master => (stored.team.master.clone(), stored.team.master_tools),
+            AgentRole::Teammate => return Ok(()),
             AgentRole::Sub => match super::slot(&stored.team, &harness) {
                 None => {
                     return self.note(
@@ -3471,6 +3513,7 @@ impl TeamRuntime {
                         Some(limit) => limit,
                         None => continue,
                     },
+                    AgentRole::Teammate => continue,
                 };
                 if worker.idle_since.elapsed() < limit
                     || (worker.role == AgentRole::Sub && warm && live_subs <= floor)
@@ -3975,8 +4018,6 @@ impl TeamRuntime {
         }
     }
 
-    /// Tells whether a team agent was started by a lead agent rather than by the master,
-    /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
     /// Whether an agent starts as a native-mode lead (DEC-104): a harness the master leads,
     /// not a lead's own sub-agent, on a harness kind with native teammates whose project
     /// setting picks Native, with a terminal host to start its own server in. Takes the
@@ -4002,6 +4043,8 @@ impl TeamRuntime {
         Ok(chosen == SubagentMode::Native)
     }
 
+    /// Tells whether a team agent was started by a lead agent rather than by the master,
+    /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
     fn has_lead(&self, id: i64) -> bool {
         self.connection
             .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
@@ -4393,6 +4436,7 @@ impl TeamRuntime {
         }
         .map_err(sandboxed)?;
         let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        let mut native_tmux = None;
         if native {
             if confinement(layout, policy.access)? {
                 return Err(with_code(
@@ -4424,6 +4468,7 @@ impl TeamRuntime {
             sandbox = sandbox
                 .allow_tmux_server(&socket, &tmux)
                 .map_err(sandboxed)?;
+            native_tmux = Some(tmux);
         }
         expose_graph(&root, &working_dir);
         if let Some(engine) = self
@@ -4466,6 +4511,7 @@ impl TeamRuntime {
             resume: None,
             continues: role == AgentRole::Sub,
             native,
+            tmux: native_tmux,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -4547,7 +4593,7 @@ impl TeamRuntime {
                 .ok()
                 .and_then(|harness| launch_harness(&harness))
                 .is_some_and(|harness| self.live_master(project, role, harness));
-        match &self.delegation_tool {
+        let context = match &self.delegation_tool {
             Some(engine) if master && tools && live => {
                 let engine = engine
                     .verified_path()
@@ -4582,7 +4628,17 @@ impl TeamRuntime {
                     .map_err(unread)
             }
             _ => Ok(context),
-        }
+        }?;
+        let context = match &self.delegation_tool {
+            Some(engine) => context.with_relay(
+                engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                &self.mailbox(id),
+            ),
+            None => context,
+        };
+        Ok(context)
     }
 
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
@@ -4639,6 +4695,7 @@ impl TeamRuntime {
                 crate::agents::AgentRole::SubAgent,
                 format!("Team sub-agent {id}"),
             ),
+            AgentRole::Teammate => return Ok(None),
         };
         let agent = HostedAgent {
             project: stored.project_id.clone(),
@@ -5652,13 +5709,18 @@ fn work(
             Mode::Kept { account, context } => {
                 let resume = plan.resume.as_ref();
                 plan.request(account, plan.access).and_then(|request| {
-                    AgentSession::start_resuming(request, context, plan.pane.clone(), resume)
-                        .map_err(|problem| {
-                            if resume.is_some() && problem.0 == RESUME_REFUSED {
-                                let _ = reports.send(Report::ResumeRefused);
-                            }
-                            with_code("The agent could not start", Some(&problem.0))
-                        })
+                    AgentSession::start_resuming(
+                        request,
+                        plan.team_context(context),
+                        plan.pane.clone(),
+                        resume,
+                    )
+                    .map_err(|problem| {
+                        if resume.is_some() && problem.0 == RESUME_REFUSED {
+                            let _ = reports.send(Report::ResumeRefused);
+                        }
+                        with_code("The agent could not start", Some(&problem.0))
+                    })
                 })
             }
             Mode::PerTurn { home } => {
@@ -5720,7 +5782,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    context.with_live_instructions(&instructions),
+                    plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),
@@ -5755,7 +5817,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    context.with_live_instructions(&instructions),
+                    plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),
@@ -6095,8 +6157,12 @@ fn per_turn(
                 ));
             }
         };
-        let started =
-            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.as_ref());
+        let started = AgentSession::start_resuming(
+            request,
+            plan.team_context(context),
+            plan.pane.clone(),
+            resume.as_ref(),
+        );
         let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
@@ -6955,6 +7021,8 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+mod teammates;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]

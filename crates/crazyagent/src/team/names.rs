@@ -141,7 +141,7 @@ pub(crate) fn numbered(name: &str) -> bool {
 pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
     match (role, name) {
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: Some(handle),
@@ -150,13 +150,15 @@ pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
             format!("{persona} (@{handle})")
         }
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: None,
             }),
         ) => persona.clone(),
-        (AgentRole::Master, _) | (AgentRole::Sub, None) => role.agent_label(id),
+        (AgentRole::Master, _) | (AgentRole::Sub | AgentRole::Teammate, None) => {
+            role.agent_label(id)
+        }
     }
 }
 
@@ -187,7 +189,7 @@ fn sub_agent(
 ) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role IN ('sub','teammate')",
             params![agent, project.as_str()],
             |_| Ok(()),
         )

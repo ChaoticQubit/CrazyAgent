@@ -134,6 +134,9 @@ pub fn admit_sub_agent(db: &Connection, project: &ProjectId, lead: AgentId) -> R
                 ));
             }
         }
+        AgentRole::Teammate => {
+            return Err("A teammate does not start sub-agents. Its lead starts them.".into());
+        }
     }
     Ok(())
 }

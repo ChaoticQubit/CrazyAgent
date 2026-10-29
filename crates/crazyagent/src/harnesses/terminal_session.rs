@@ -173,6 +173,9 @@ impl TerminalSession {
                 resume: resume.is_some(),
             },
         )?;
+        if let Some(team) = installed.as_ref().and_then(Installed::native) {
+            interactive::write_teammate_command(&home, &command, &request, team)?;
+        }
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
         }
