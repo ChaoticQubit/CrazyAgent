@@ -2,6 +2,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
+use crate::coord::adoption::AgentAdoption;
 use crate::engine::owner::{Adoption, InstructionSettings};
 use crate::instruction_files::Choice;
 use crate::plugins::SkillView;
@@ -236,6 +237,34 @@ pub(in crate::tui) fn size(bytes: usize) -> String {
     } else {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     }
+}
+
+/// One agent's grounding and skill counts as one line of words: graphify, `ctx_*`, then
+/// every skill its project enabled by name with zero included, then the other skills it
+/// called. Inputs: the view's skill names and the agent's row. Output: the words.
+fn skill_words(skills: &[String], agent: &AgentAdoption) -> String {
+    let mut words = vec![
+        format!("graphify {}", agent.graphify),
+        format!("ctx_* {}", agent.context_mode),
+        if skills.is_empty() {
+            "Skills: none enabled".to_owned()
+        } else {
+            "Skills:".to_owned()
+        },
+    ];
+    words.extend(
+        skills
+            .iter()
+            .zip(&agent.skills)
+            .map(|(skill, count)| format!("{skill} {count}")),
+    );
+    words.extend(
+        agent
+            .other_skills
+            .iter()
+            .map(|other| format!("{} {} (not enabled)", other.name, other.count)),
+    );
+    words.join("  ")
 }
 
 /// The character the editor draws for one text character: a tab as a space, and a
@@ -921,6 +950,12 @@ impl ProcessPage {
                     .into_iter()
                     .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
             );
+            let skills = skill_words(&adoption.skills, agent);
+            lines.extend(
+                wrap(&skills, width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
             for flag in &agent.flags {
                 let reminded = if agent.reminded.contains(flag) {
                     ", reminded"
@@ -934,8 +969,9 @@ impl ProcessPage {
                 ));
             }
         }
-        if adoption.agents.len() > ADOPTION_ROWS_MAX {
-            let more = adoption.agents.len() - ADOPTION_ROWS_MAX;
+        if adoption.agents.len() > ADOPTION_ROWS_MAX || adoption.hidden > 0 {
+            let more = adoption.agents.len().saturating_sub(ADOPTION_ROWS_MAX)
+                + usize::try_from(adoption.hidden).unwrap_or(usize::MAX);
             lines.push(styled(
                 format!("and {more} older agents, shown in the desktop app"),
                 Role::Muted,
