@@ -123,6 +123,7 @@ pub(in crate::tui) struct ProjectChanges {
     wanted_branches: Option<ChangeSetId>,
     message: TextInput,
     notice: Option<Notice>,
+    notice_set: Option<ChangeSetId>,
     queued: Option<ChangesQuery>,
     sent: Option<ChangesQuery>,
     stale: bool,
@@ -150,6 +151,7 @@ impl ProjectChanges {
             wanted_branches: None,
             message: TextInput::multi(MESSAGE_BYTES_MAX),
             notice: None,
+            notice_set: None,
             queued: None,
             sent: None,
             stale: true,
@@ -205,9 +207,12 @@ impl ProjectChanges {
             lost,
             ChangesQuery::List { .. } | ChangesQuery::Diff { .. } | ChangesQuery::Branches { .. }
         ) {
-            self.notice = Some(Notice::problem(
-                "The engine connection dropped before it answered. Check the list before trying again.",
-            ));
+            self.say(
+                Notice::problem(
+                    "The engine connection dropped before it answered. Check the list before trying again.",
+                ),
+                None,
+            );
         }
     }
 
@@ -233,8 +238,10 @@ impl ProjectChanges {
             self.diff = None;
             self.asking = None;
             self.notice = None;
+            self.notice_set = None;
             return;
         }
+        let about = about(&event.query).cloned();
         match (&event.query, &event.result) {
             (ChangesQuery::List { .. }, Ok(ChangesView::List(sets))) => {
                 self.sets = sets.clone();
@@ -247,10 +254,10 @@ impl ProjectChanges {
                 }
             }
             (ChangesQuery::List { .. }, Err(code)) => {
-                self.notice = Some(Notice::problem(format!(
-                    "Couldn't load changes. {}",
-                    refusal(code)
-                )));
+                self.say(
+                    Notice::problem(format!("Couldn't load changes. {}", refusal(code))),
+                    None,
+                );
             }
             (ChangesQuery::Diff { id, page }, Ok(ChangesView::Diff(page_diff))) => {
                 if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
@@ -263,10 +270,10 @@ impl ProjectChanges {
                 if let Some(diff) = self.diff.as_mut() {
                     diff.next = None;
                 }
-                self.notice = Some(Notice::problem(format!(
-                    "Couldn't load the changes. {}",
-                    refusal(code)
-                )));
+                self.say(
+                    Notice::problem(format!("Couldn't load the changes. {}", refusal(code))),
+                    about,
+                );
             }
             (ChangesQuery::Branches { id }, Ok(ChangesView::Branches(listed))) => {
                 if self.target.as_ref().is_some_and(|(asked, _)| asked == id) {
@@ -279,21 +286,24 @@ impl ProjectChanges {
                 }
             }
             (ChangesQuery::Branches { .. }, Err(code)) => {
-                self.notice = Some(Notice::problem(format!(
-                    "Couldn't list your branches, so these changes land on the checked-out branch. {}",
-                    refusal(code)
-                )));
+                self.say(
+                    Notice::problem(format!(
+                        "Couldn't list your branches, so these changes land on the checked-out branch. {}",
+                        refusal(code)
+                    )),
+                    about,
+                );
             }
             (_, Ok(view)) => {
                 self.stale = true;
-                self.notice = Some(done(view));
+                self.say(done(view), about);
                 if !matches!(view, ChangesView::Accepted(AcceptOutcome::Conflict { .. })) {
                     self.diff = None;
                 }
             }
             (_, Err(code)) => {
                 self.stale = true;
-                self.notice = Some(Notice::problem(refusal(code)));
+                self.say(Notice::problem(refusal(code)), about);
             }
         }
         self.clamp();
@@ -335,6 +345,24 @@ impl ProjectChanges {
                 .as_ref()
                 .is_none_or(|id| self.sets.get(self.cursor).is_some_and(|set| &set.id == id))
         );
+    }
+
+    /// Shows one notice: page-wide when it is about no change set, else only while that set
+    /// is chosen, so the outcome of an action on one set never reads as another set's
+    /// details. Inputs: the notice and the set it is about. Output: none.
+    fn say(&mut self, notice: Notice, about: Option<ChangeSetId>) {
+        self.notice = Some(notice);
+        self.notice_set = about;
+    }
+
+    /// The notice to draw now: a page-wide one, or one about the chosen change set.
+    /// Input: the view. Output: the notice, or None.
+    fn shown_notice(&self) -> Option<&Notice> {
+        assert!(self.notice_set.is_none() || self.notice.is_some());
+        let chosen = self.chosen().map(|set| &set.id);
+        self.notice
+            .as_ref()
+            .filter(|_| self.notice_set.as_ref().is_none_or(|id| chosen == Some(id)))
     }
 
     /// Moves the highlight to a place in the list and remembers the set there by its id.
@@ -498,12 +526,14 @@ impl ProjectChanges {
                 )
             })
         {
-            self.notice = Some(Notice::problem(
-                "Still working on the last change. Try again in a moment.",
-            ));
+            self.say(
+                Notice::problem("Still working on the last change. Try again in a moment."),
+                None,
+            );
             return;
         }
         self.notice = None;
+        self.notice_set = None;
         self.queued = Some(query);
     }
 
@@ -606,7 +636,7 @@ impl ProjectChanges {
         if !self.loaded {
             lines.push(Row::of("Changes", look.heading));
             lines.push(Row::of("Loading changes...", look.muted));
-            lines.extend(self.notice.iter().map(|notice| notice.row(look)));
+            lines.extend(self.shown_notice().map(|notice| notice.row(look)));
             return (lines, None, vec![TABS, ("Esc", "Home")]);
         }
         let (footer, at) = self.footer(content, look);
@@ -745,7 +775,11 @@ impl ProjectChanges {
 
     fn footer(&self, content: usize, look: &Look) -> (Vec<Row>, Option<(usize, usize)>) {
         let Some(ask) = self.asking else {
-            let rows = self.notice.iter().map(|notice| notice.row(look)).collect();
+            let rows = self
+                .shown_notice()
+                .into_iter()
+                .map(|notice| notice.row(look))
+                .collect();
             return (rows, None);
         };
         if ask == Ask::Accept {
@@ -971,7 +1005,22 @@ fn restore_note(set: &ChangeSetView, now_ms: i64) -> String {
 fn agent_name(set: &ChangeSetView) -> String {
     match set.agent.kind {
         AgentKind::Master => "Master".to_owned(),
-        AgentKind::Sub => format!("Sub-agent {}", set.agent.label),
+        AgentKind::Sub => set.agent.label.clone(),
+    }
+}
+
+/// The change set a Changes request is about. Input: the request. Output: its id, or None
+/// for the list read, which is about the whole page.
+fn about(query: &ChangesQuery) -> Option<&ChangeSetId> {
+    match query {
+        ChangesQuery::List { .. } => None,
+        ChangesQuery::Diff { id, .. }
+        | ChangesQuery::Accept { id, .. }
+        | ChangesQuery::AcceptInto { id, .. }
+        | ChangesQuery::Branches { id }
+        | ChangesQuery::Discard { id, .. }
+        | ChangesQuery::Restore { id }
+        | ChangesQuery::Update { id } => Some(id),
     }
 }
 
