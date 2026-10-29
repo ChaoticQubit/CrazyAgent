@@ -62,6 +62,12 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <Button pending={retrying} pendingLabel="Retrying..." onClick={() => onRetryMapping?.()}>Retry mapping</Button>
       <Button disabled={retrying} onClick={() => onSkipMapping?.()}>Skip mapping</Button>
     </span>}
+    {(value.imported ?? []).length > 0 && <Notice tone="info">
+      <span className="pj-stack">
+        <span>CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:</span>
+        <ul>{(value.imported ?? []).map((file) => <li key={file.path}>{file.path}{file.tracked ? " (git shows it as deleted)" : ""}</li>)}</ul>
+      </span>
+    </Notice>}
     {value.overview && <Panel title="Overview"><MarkdownView source={value.overview} onOpenLink={onOpenLink} /></Panel>}
     {value.folder_overview && <Panel title="Overview found in the folder"><p className="pj-help">The mapping agent did not write this: it came with the folder or was changed since.</p><MarkdownView source={value.folder_overview} onOpenLink={onOpenLink} /></Panel>}
     {draft && missing.length > 0 && <Notice tone="warn">Not found: {missing.join(", ")}. Add them below.</Notice>}

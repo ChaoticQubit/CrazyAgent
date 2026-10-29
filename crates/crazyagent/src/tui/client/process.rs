@@ -5,9 +5,11 @@ use super::*;
 mod tests;
 
 /// One Process request the TUI sends.
-/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
-/// reads what one team agent received at its last launch (none for the newest master),
-/// reads or saves one project's agent instruction settings, or reads its workflow adoption.
+/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview
+/// (the default process or one file the owner named), reads what one team agent received at
+/// its last launch (none for the newest master), reads or saves one project's agent
+/// instruction settings, reads its workflow adoption, or lists or confirms the one-time
+/// import of its own instruction files (DEC-106).
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -18,7 +20,9 @@ pub(in crate::tui) enum ProcessQuery {
         project: Option<ProjectId>,
         text: String,
     },
-    ImportGlobal,
+    ReadFile {
+        path: std::path::PathBuf,
+    },
     Default,
     Agent {
         project: ProjectId,
@@ -34,11 +38,18 @@ pub(in crate::tui) enum ProcessQuery {
     Adoption {
         project: ProjectId,
     },
+    PendingImport {
+        project: ProjectId,
+    },
+    ConfirmImport {
+        project: ProjectId,
+    },
 }
 
 /// What one Process request returned: the text read, what a save comes to beside what a
 /// Claude master takes, what one team agent received at its last launch, one project's
-/// agent instruction settings as stored, or its workflow adoption.
+/// agent instruction settings as stored, its workflow adoption, or the instruction files an
+/// import would move or moved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
@@ -46,6 +57,7 @@ pub(in crate::tui) enum ProcessReply {
     Agent(Box<crate::engine::owner::AgentInstructions>),
     Settings(crate::engine::owner::InstructionSettings),
     Adoption(Box<crate::engine::owner::Adoption>),
+    Files(Vec<crate::engine::owner::ImportFile>),
 }
 
 /// One Process reply for the screens.
@@ -118,13 +130,10 @@ impl NativeOwner {
                 .save_process_text(project, text)
                 .await
                 .map(ProcessReply::Saved),
-            ProcessQuery::ImportGlobal => match crate::projects_home::owner_home() {
-                Ok(home) => controller
-                    .read_instruction_file(home.join(".claude").join("CLAUDE.md"))
-                    .await
-                    .map(ProcessReply::Text),
-                Err(_) => Err(crate::engine::EngineError("process_import_missing".into())),
-            },
+            ProcessQuery::ReadFile { path } => controller
+                .read_instruction_file(path)
+                .await
+                .map(ProcessReply::Text),
             ProcessQuery::Default => controller.default_process().await.map(ProcessReply::Text),
             ProcessQuery::Agent { project, agent } => controller
                 .agent_instructions(project, agent)
@@ -142,6 +151,14 @@ impl NativeOwner {
                 .adoption(project)
                 .await
                 .map(|view| ProcessReply::Adoption(Box::new(view))),
+            ProcessQuery::PendingImport { project } => controller
+                .instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
+            ProcessQuery::ConfirmImport { project } => controller
+                .confirm_instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
         }
         .map_err(problem)
     }

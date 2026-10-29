@@ -23,6 +23,9 @@ const MEMORY_FOLDER_TITLE: &str = "Choose a folder of markdown memory files to i
 const PLUGIN_FOLDER_TITLE: &str = "Choose a plugin folder. Its hooks are added.";
 #[cfg(target_os = "linux")]
 const DOCUMENTS_TITLE: &str = "Choose documents to add";
+#[cfg(target_os = "linux")]
+const INSTRUCTIONS_TITLE: &str =
+    "Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
 const CANCELED: &str = "(-128)";
@@ -54,6 +57,10 @@ set reply to reply & POSIX path of chosen & linefeed
 end repeat
 return reply";
 
+/// The macOS file chooser for one instructions file whose text goes into the app-wide
+/// instructions editor, such as a CLAUDE.md or AGENTS.md. Fixed text.
+pub const INSTRUCTIONS_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.\")";
+
 /// The Windows folder chooser, a fixed PowerShell script that prints the chosen folder.
 /// Nothing the owner or the web view sends is ever placed into it.
 pub const WINDOWS_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a skill folder. It holds a SKILL.md file.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
@@ -72,6 +79,9 @@ pub const WINDOWS_PLUGIN_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Tex
 
 /// The Windows document chooser, a fixed PowerShell script that prints one chosen path per line.
 pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose documents to add'; $d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { foreach ($f in $d.FileNames) { [Console]::Out.Write($f + [char]10) } }";
+
+/// The Windows instructions file chooser, a fixed PowerShell script that prints the chosen path.
+pub const WINDOWS_INSTRUCTIONS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.'; $d.Multiselect = $false; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName + [char]10) }";
 
 /// What a folder chooser is for: a skill folder, an existing project folder to add, the
 /// folder that holds the owner's projects, a folder of memory files to import, or a plugin
@@ -162,7 +172,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
     let purpose = FolderPurpose::ALL
         .into_iter()
         .find(|purpose| purpose.script() == script);
-    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT);
+    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT || script == INSTRUCTIONS_SCRIPT);
     #[cfg(target_os = "macos")]
     {
         let _ = purpose;
@@ -187,6 +197,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                         .arg("--directory")
                         .arg(format!("--title={}", linux_title(purpose)));
                 }
+                None if script == INSTRUCTIONS_SCRIPT => {
+                    command.arg(format!("--title={INSTRUCTIONS_TITLE}"));
+                }
                 None => {
                     command
                         .args(["--multiple", "--separator=\n"])
@@ -200,6 +213,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
             if let Some(purpose) = purpose {
                 command.args(["--getexistingdirectory", "."]);
                 command.args(["--title", linux_title(purpose)]);
+            } else if script == INSTRUCTIONS_SCRIPT {
+                command.args(["--getopenfilename", "."]);
+                command.args(["--title", INSTRUCTIONS_TITLE]);
             } else {
                 command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
                 command.args(["--title", DOCUMENTS_TITLE]);
@@ -229,6 +245,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 Some(FolderPurpose::ProjectsHome) => WINDOWS_PROJECTS_HOME_SCRIPT,
                 Some(FolderPurpose::Memory) => WINDOWS_MEMORY_FOLDER_SCRIPT,
                 Some(FolderPurpose::Plugin) => WINDOWS_PLUGIN_FOLDER_SCRIPT,
+                None if script == INSTRUCTIONS_SCRIPT => WINDOWS_INSTRUCTIONS_SCRIPT,
                 None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);

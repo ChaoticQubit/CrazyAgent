@@ -2585,12 +2585,41 @@ async fn desktop_save_process_text(
 }
 
 #[tauri::command]
-async fn desktop_import_global_instructions(
+async fn desktop_import_instructions_file(
     window: WebviewWindow,
     state: State<'_, NativeState>,
-) -> Result<String, BridgeError> {
+) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.import_global_instructions()?;
+    let path = match bridge::picker::choose(bridge::picker::INSTRUCTIONS_SCRIPT).await? {
+        Pick::Canceled => return Ok(None),
+        Pick::Paths(mut paths) => {
+            assert!(!paths.is_empty());
+            paths.swap_remove(0)
+        }
+    };
+    let call = lock(&state).await?.read_instruction_file(path)?;
+    call.await.map(Some)
+}
+
+#[tauri::command]
+async fn desktop_instruction_import(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<crazyagent::engine::owner::ImportFile>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.instruction_import(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_confirm_instruction_import(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<crazyagent::engine::owner::ImportFile>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.confirm_instruction_import(project_id)?;
     call.await
 }
 
@@ -3088,7 +3117,9 @@ pub fn run() {
             desktop_update_change,
             desktop_process_text,
             desktop_save_process_text,
-            desktop_import_global_instructions,
+            desktop_import_instructions_file,
+            desktop_instruction_import,
+            desktop_confirm_instruction_import,
             desktop_default_process,
             desktop_agent_instructions,
             desktop_instruction_settings,

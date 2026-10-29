@@ -1,5 +1,6 @@
 use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
+use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
@@ -535,6 +536,29 @@ impl OnboardingPage {
         let mut lines =
             Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
         lines.push(Line::default());
+        if !review.onboarding.imported.is_empty() {
+            lines.extend(
+                wrap(
+                    "CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:",
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+            );
+            for file in &review.onboarding.imported {
+                let tracked = if file.tracked {
+                    " (git shows it as deleted)"
+                } else {
+                    ""
+                };
+                lines.extend(
+                    wrap(&format!("- {}{tracked}", sanitize(&file.path)), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+            }
+            lines.push(Line::default());
+        }
         if let Step::Failed { reason } = &review.onboarding.mapping
             && !review.onboarding.finished
         {

@@ -5,6 +5,7 @@ use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
     plain_problem, project_pool,
 };
+use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
@@ -12,23 +13,26 @@ use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
-use crate::engine::owner::{OwnerResponse, OwnerResult};
+use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Link, Load};
-use crate::tui::frame::{Hint, Message};
+use crate::tui::frame::{Hint, Message, Modal, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
     Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
     Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
+use crate::tui::text::{styled, wrap};
+use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -39,6 +43,8 @@ const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
+const IMPORT_MODAL_WIDTH: u16 = 72;
+const IMPORT_ROWS_MAX: usize = 12;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -193,6 +199,35 @@ pub(in crate::tui) struct ProjectPage {
     covered: bool,
     from_master: bool,
     reopen_master: bool,
+    import: Option<Vec<ImportFile>>,
+    import_asked: bool,
+    import_sent: Option<ProcessQuery>,
+}
+
+/// Says in a few words why the engine leaves one instruction file in place (DEC-106).
+/// Input: the refusal code from the pending import list. Output: the reason, read after
+/// "stays in place,".
+fn import_reason(code: &str) -> &'static str {
+    match code {
+        "process_import_outside" => "it links outside the project folder",
+        "process_import_unsafe" => "it isn't a plain file you own",
+        "process_import_unreadable" => "it couldn't be read",
+        "process_text_too_large" => "it is over 64 KB",
+        "process_text_invalid" => "it has characters CrazyAgent can't keep",
+        _ => "CrazyAgent can't import it",
+    }
+}
+
+/// Words a whole refusal of the confirmed import, when nothing was moved (DEC-106).
+/// Input: the refusal code. Output: the message for the status line.
+fn import_problem(code: &str) -> String {
+    match code {
+        "process_text_too_large" => {
+            "Together these files are over 64 KB, so nothing moved. Shorten one, then try again."
+                .into()
+        }
+        other => super::process::message(other),
+    }
 }
 
 impl ProjectPage {
@@ -223,6 +258,9 @@ impl ProjectPage {
             covered: false,
             from_master: false,
             reopen_master: false,
+            import: None,
+            import_asked: false,
+            import_sent: None,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -256,6 +294,78 @@ impl ProjectPage {
     /// Reads the team graph for the panel beside the master, while this page is on top on
     /// the Conversation tab: at most one read out at a time, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
+    /// Asks the engine, once per opening, which instruction files wait to be copied into the
+    /// project's instructions.md (DEC-106). Input: the context. Output: none; the list arrives
+    /// as a process event and shows as a prompt when it isn't empty.
+    fn ask_import(&mut self, ctx: &mut Ctx) {
+        if self.import_asked || self.import_sent.is_some() {
+            return;
+        }
+        let query = ProcessQuery::PendingImport {
+            project: self.screen.project.clone(),
+        };
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.import_asked = true;
+            self.import_sent = Some(query);
+        }
+    }
+
+    /// Applies the engine's answer to the pending-import read or the confirmed move.
+    /// Inputs: the process event and the context. Output: none; a list shows the prompt,
+    /// a move closes it and names the moved files, a refusal keeps it open and says why.
+    fn import_arrived(&mut self, event: &ProcessEvent, ctx: &mut Ctx) {
+        if self.import_sent.as_ref() != Some(&event.query) {
+            return;
+        }
+        self.import_sent = None;
+        match (&event.query, &event.result) {
+            (ProcessQuery::PendingImport { .. }, Ok(ProcessReply::Files(files))) => {
+                self.import = (!files.is_empty()).then(|| files.clone());
+            }
+            (ProcessQuery::PendingImport { .. }, _) => self.import_asked = false,
+            (ProcessQuery::ConfirmImport { .. }, Ok(ProcessReply::Files(moved))) => {
+                self.import = None;
+                let names: Vec<String> = moved.iter().map(|file| sanitize(&file.path)).collect();
+                ctx.say(Message::success(
+                    "Moved to .crazyagent/imported/:",
+                    &names.join(", "),
+                ));
+            }
+            (ProcessQuery::ConfirmImport { .. }, Err(code)) => {
+                ctx.say(Message::error(&import_problem(code), ""));
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles a key while the pending-import prompt shows: Enter or y copies the files into
+    /// instructions.md and moves them aside, Esc or n closes it until the next opening.
+    /// Inputs: the key and the context. Output: handled, so no key reaches the page meanwhile.
+    fn import_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let movable = self
+            .import
+            .as_ref()
+            .is_some_and(|files| files.iter().any(|file| file.refused.is_none()));
+        match key {
+            Key::Enter | Key::Char('y') if movable && self.import_sent.is_none() => {
+                let query = ProcessQuery::ConfirmImport {
+                    project: self.screen.project.clone(),
+                };
+                if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+                    self.import_sent = Some(query);
+                } else {
+                    ctx.say(Message::error(
+                        "The files weren't moved: too many requests are waiting.",
+                        "",
+                    ));
+                }
+            }
+            Key::Esc | Key::Char('n') if self.import_sent.is_none() => self.import = None,
+            _ => {}
+        }
+        Flow::Handled
+    }
+
     fn ask_team(&mut self, ctx: &mut Ctx) {
         if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
             return;
@@ -1046,7 +1156,8 @@ impl Screen for ProjectPage {
     }
 
     fn typing(&self) -> bool {
-        self.screen.edit.is_some()
+        self.import.is_some()
+            || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
             || self.screen.access.is_some()
@@ -1056,6 +1167,9 @@ impl Screen for ProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.import.is_some() {
+            return self.import_key(key, ctx);
+        }
         self.screen.width = ctx.width;
         if self.changes_have_keys()
             && let Some(event) = key_event(key)
@@ -1130,6 +1244,10 @@ impl Screen for ProjectPage {
                     self.screen.plugins.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
+                OwnerEvent::Process(event) => {
+                    self.import_arrived(event, ctx);
+                    return Flow::Handled;
+                }
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -1137,8 +1255,12 @@ impl Screen for ProjectPage {
             Arrival::Connected(_) => {
                 self.select_master(ctx);
                 self.master.access();
+                self.ask_import(ctx);
             }
             Arrival::Disconnected(_) => {
+                if let Some(ProcessQuery::PendingImport { .. }) = self.import_sent.take() {
+                    self.import_asked = false;
+                }
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;
@@ -1190,6 +1312,7 @@ impl Screen for ProjectPage {
             let _ = self.reply(reply, ctx);
         }
         self.ask_team(ctx);
+        self.ask_import(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
@@ -1209,8 +1332,84 @@ impl Screen for ProjectPage {
         paint(frame, area, &self.view)
     }
 
+    fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        let files = self.import.as_ref()?;
+        let theme = &ctx.theme;
+        let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
+        let mut body: Vec<Line<'static>> = wrap(
+            "CrazyAgent keeps this project's instructions in .crazyagent/instructions.md and no longer reads these files when agents start:",
+            room,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+        for file in files.iter().take(IMPORT_ROWS_MAX) {
+            let size = if file.bytes < 1024 {
+                format!("{} bytes", file.bytes)
+            } else {
+                format!("{} KB", file.bytes.div_ceil(1024))
+            };
+            let path = sanitize(&file.path);
+            let text = match &file.refused {
+                None if file.tracked => format!("- {path} ({size}, tracked by git)"),
+                None => format!("- {path} ({size})"),
+                Some(code) => format!("- {path}: stays in place, {}", import_reason(code)),
+            };
+            body.extend(wrap(&text, room).into_iter().map(Line::raw));
+        }
+        if files.len() > IMPORT_ROWS_MAX {
+            body.push(styled(
+                format!("and {} more", files.len() - IMPORT_ROWS_MAX),
+                Role::Muted,
+                theme,
+            ));
+        }
+        body.push(Line::default());
+        if files
+            .iter()
+            .any(|file| file.refused.is_none() && file.tracked)
+        {
+            body.extend(
+                wrap(
+                    "Git tracks some of them, so after the move git shows them as deleted.",
+                    room,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Warning, theme)),
+            );
+        }
+        let movable = files.iter().any(|file| file.refused.is_none());
+        let note = if movable {
+            "Enter copies them into instructions.md and moves them to .crazyagent/imported/. Not now asks again the next time you open the project."
+        } else {
+            "None of them can be moved. Not now asks again the next time you open the project."
+        };
+        body.extend(
+            wrap(note, room)
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+        );
+        let mut hints = Vec::new();
+        if self.import_sent.is_none() {
+            if movable {
+                hints.push(hint("Enter", "Copy into instructions.md and move aside"));
+            }
+            hints.push(hint("Esc", "Not now"));
+        }
+        Some((
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: "Instruction files found".into(),
+                body,
+                top: None,
+            },
+            hints,
+        ))
+    }
+
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.screen.counts().0 > 0
+        self.import_sent.is_some()
+            || self.screen.counts().0 > 0
             || self.master.has_pending()
             || self.waiting.is_some()
             || self.screen.plugins.busy()

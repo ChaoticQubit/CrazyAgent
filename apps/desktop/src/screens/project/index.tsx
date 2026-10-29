@@ -11,7 +11,7 @@ import { ContextTab } from "./context";
 import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { OverviewTab } from "./overview";
-import { ProcessEditor } from "../process";
+import { InstructionImportPrompt, ProcessEditor } from "../process";
 import { pauseSummary, shouldPoll } from "./research";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -170,6 +170,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <Tabs label="Project" current={active}
       tabs={TABS.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     {active !== "changes" && <WaitingChanges projectId={projectId} />}
+    <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
