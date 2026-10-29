@@ -9,7 +9,7 @@ use crate::agents::{
     AgentState as RunState, Agents, Hosted, HostedAgent, HostedRequest, HostedRestart,
 };
 use crate::config::ModelAccess;
-use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::bootstrap::{AgentCredential, NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
@@ -367,6 +367,7 @@ struct Worker {
     hosted: Option<Hosted>,
     live: bool,
     briefed: bool,
+    kept_session: bool,
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
@@ -644,7 +645,9 @@ impl TeamRuntime {
 
     /// Takes over one live team pane when its agent may still run: the project's setup and
     /// team plan still hold its role and harness, the team is not paused, the project has
-    /// room, and its account is still an endpoint in the project's pool. The pane keeps the
+    /// room, and its account is still in the project's pool, as an endpoint, or as a
+    /// signed-in account for a live master or a native-mode lead, whose worker hands the
+    /// credential to its home again before it serves. The pane keeps the
     /// access level its record says it started at, Full access for a record without one, so
     /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
@@ -715,6 +718,7 @@ impl TeamRuntime {
             )));
         }
         let live = self.live_master(&project, role, launch);
+        let native = !live && matches!(self.native_lead(&project, id, role, launch), Ok(true));
         let reach = match eligible_accounts(access, &project, launch) {
             Accounts::Usable(accounts) => accounts
                 .iter()
@@ -724,14 +728,19 @@ impl TeamRuntime {
         };
         let managed = match reach {
             Some(true) => None,
-            Some(false) if live => match self.executables.get(launch) {
+            Some(false) if live || native => match self.executables.get(launch) {
                 Some(executable) => Some(Managed {
                     home: self.agent_folder(id).join("home"),
                     executable: executable.clone(),
                 }),
                 None => return Ok(Err("its harness is not installed".into())),
             },
-            _ => return Ok(Err("its account is no longer in the project's pool".into())),
+            Some(false) => {
+                return Ok(Err(
+                    "its signed-in account starts it again for each turn".into()
+                ));
+            }
+            None => return Ok(Err("its account is no longer in the project's pool".into())),
         };
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
@@ -1840,6 +1849,7 @@ impl TeamRuntime {
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
+        self.hand_leads(project, access)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -2162,7 +2172,7 @@ impl TeamRuntime {
             .workers
             .iter()
             .filter(|(_, w)| &w.project == project && !w.stopping && w.access.wider_than(saved))
-            .filter(|(_, w)| !w.managed || w.live || w.busy.is_some())
+            .filter(|(_, w)| !w.managed || w.live || w.kept_session || w.busy.is_some())
             .map(|(id, _)| *id)
             .collect();
         for id in lowered {
@@ -2762,6 +2772,55 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Hands the signed-in account to each kept native-lead session of the project that has
+    /// not had it yet, such as a lead an earlier engine left running, so the lead and its
+    /// teammates have a credential again without waiting for a task. A profile still in use
+    /// waits for the next tick; a refused sign-in stops the lead and leaves a team note.
+    /// Takes the project and the live access. Returns any SQLite failure.
+    fn hand_leads(&mut self, project: &ProjectId, access: &ModelAccess) -> Result<(), EngineError> {
+        let waiting: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| {
+                &w.project == project
+                    && w.kept_session
+                    && !w.briefed
+                    && w.busy.is_none()
+                    && !w.stopping
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in waiting {
+            assert!(self.workers[&id].managed && !self.workers[&id].live);
+            let grant = match self.grant(access, id, project) {
+                Ok(Some(grant)) => grant,
+                Ok(None) => continue,
+                Err(reason) => {
+                    let worker = self.workers.get_mut(&id).expect("lead worker exists");
+                    worker.stopping = true;
+                    let _ = worker.orders.send(Order::Stop);
+                    self.note(
+                        project,
+                        &full_stop(format!(
+                            "Team agent {id} could not get its signed-in account: {}",
+                            bound_text(&reason, 300)
+                        )),
+                    )?;
+                    continue;
+                }
+            };
+            let worker = self.workers.get_mut(&id).expect("lead worker exists");
+            if worker
+                .orders
+                .send(Order::Start(String::new(), Some(grant)))
+                .is_ok()
+            {
+                worker.briefed = true;
+            }
+        }
+        Ok(())
+    }
+
     /// Answers the team calls a project's live master made since the last tick.
     /// Takes the setup and live access. Returns any SQLite failure.
     fn serve_live_calls(
@@ -3320,7 +3379,8 @@ impl TeamRuntime {
                     }
                 }
             };
-            let grant = if self.workers[&agent].managed {
+            let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
+            let grant = if self.workers[&agent].managed && !handed {
                 match self.grant(access, agent, project) {
                     Ok(Some(grant)) => Some(grant),
                     Ok(None) => continue,
@@ -3392,6 +3452,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            worker.briefed |= worker.kept_session;
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
@@ -3920,6 +3981,11 @@ impl TeamRuntime {
             Launch::Fresh(plan, _) => (plan.live, false),
             Launch::Adopt(adoption) => (adoption.live, adoption.managed.is_none()),
         };
+        let kept_session = match &launch {
+            Launch::Fresh(plan, mode) => plan.native && matches!(**mode, Mode::PerTurn { .. }),
+            Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
+        };
+        assert!(!(kept_session && live));
         let access = match &launch {
             Launch::Fresh(plan, _) => plan.access,
             Launch::Adopt(adoption) => adoption.access,
@@ -3964,6 +4030,7 @@ impl TeamRuntime {
                 hosted: seat.hosted,
                 live,
                 briefed,
+                kept_session,
                 turn_started: None,
                 session: None,
                 seed: None,
@@ -5733,6 +5800,11 @@ fn work(
             let _ = reports.send(Report::Ended { problem });
             return;
         }
+        Launch::Adopt(adoption) if adoption.managed.is_some() => {
+            let problem = native_adopted(*adoption, &orders, &reports, &cancel, &interrupt, &leave);
+            let _ = reports.send(Report::Ended { problem });
+            return;
+        }
         other => other,
     };
     let adopted_live = matches!(&launch, Launch::Adopt(adoption) if adoption.live);
@@ -5754,6 +5826,12 @@ fn work(
                         with_code("The agent could not start", Some(&problem.0))
                     })
                 })
+            }
+            Mode::PerTurn { home } if plan.native => {
+                let problem =
+                    native_session(&plan, &home, &orders, &reports, &cancel, &interrupt, &leave);
+                let _ = reports.send(Report::Ended { problem });
+                return;
             }
             Mode::PerTurn { home } => {
                 let problem = per_turn(&plan, &home, &orders, &reports, &cancel, &interrupt);
@@ -5782,7 +5860,9 @@ fn work(
         Ok(AgentSession::Terminal(session)) if adopted_live => {
             live_serve(*session, &orders, &reports, &cancel, &leave, true)
         }
-        Ok(session) => serve(session, &orders, &reports, &cancel, &interrupt, &leave),
+        Ok(session) => serve(
+            session, None, &orders, &reports, &cancel, &interrupt, &leave,
+        ),
         Err(problem) => Some(problem),
     };
     let _ = reports.send(Report::Ended { problem });
@@ -6070,18 +6150,207 @@ fn next_turn(
     }
 }
 
-/// Serves turns on an agent whose harness keeps running between them. At the end it stops
-/// the agent, or, when the engine quits with the agent kept, stops the running turn and
-/// leaves the pane running for the next engine. A stop its warden did not confirm ends the
-/// agent with that problem.
-fn serve(
-    mut session: AgentSession,
+/// One process of a signed-in account's agent kept across turns: the turn it starts with,
+/// if any, and the account's credential copy in its home with the custody use it was
+/// handed under, both held while the process runs.
+struct Kept {
+    first: Option<(String, Option<Duration>)>,
+    held: (AgentCredential, NativeProfileUse),
+}
+
+/// Sends the end of a turn the agent took but could not run, so its task does not wait on
+/// an agent that ended. Takes the reports channel, whether a turn was taken and the cause.
+fn turn_closed(reports: &Sender<Report>, taken: bool, cause: Option<String>) {
+    if taken {
+        let _ = reports.send(Report::Finished {
+            text: String::new(),
+            end: TurnEnd::Closed,
+            cause,
+        });
+    }
+}
+
+/// Runs a native-mode lead on a signed-in account (DEC-104) as one kept session: its first
+/// order, a turn or a start, carries the account, whose credential copy is handed to the
+/// lead's home once; its app starts once in its own server and every turn runs on that
+/// session, so its pane record, server and teammates outlive a turn. Later turns carry no
+/// account. Takes the plan, the lead's home and the worker's channels and flags. Returns the
+/// problem that ended it, if any.
+fn native_session(
+    plan: &Plan,
+    home: &Path,
     orders: &Receiver<Order>,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
 ) -> Option<String> {
+    assert!(plan.native && !plan.live && plan.pane.is_some());
+    let (first, grant) = match next_turn(orders, cancel, None) {
+        Next::Turn(prompt, grant, limit) => (Some((prompt, limit)), grant),
+        Next::Start(_, grant) => (None, grant),
+        Next::Stop | Next::Closed(_) => return None,
+    };
+    let taken = first.is_some();
+    let Some(grant) = grant else {
+        turn_closed(reports, taken, None);
+        return Some("The native lead was started without its signed-in account".into());
+    };
+    let Grant {
+        profile,
+        context,
+        access,
+    } = *grant;
+    let request = match plan.request(
+        AccountBinding::Subscription {
+            home: home.to_path_buf(),
+        },
+        access,
+    ) {
+        Ok(request) => request,
+        Err(problem) => {
+            turn_closed(reports, taken, Some(problem.clone()));
+            return Some(problem);
+        }
+    };
+    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.executable) {
+        Ok(credential) => credential,
+        Err(problem) => {
+            turn_closed(reports, taken, Some(problem.0.clone()));
+            return Some(with_code(
+                "The signed-in account could not reach the agent",
+                Some(&problem.0),
+            ));
+        }
+    };
+    let resume = plan.resume.as_ref();
+    match AgentSession::start_resuming(
+        request,
+        plan.team_context(context),
+        plan.pane.clone(),
+        resume,
+    ) {
+        Ok(session) => serve(
+            session,
+            Some(Kept {
+                first,
+                held: (credential, profile),
+            }),
+            orders,
+            reports,
+            cancel,
+            interrupt,
+            leave,
+        ),
+        Err(problem) => {
+            if resume.is_some() && problem.0 == RESUME_REFUSED {
+                let _ = reports.send(Report::ResumeRefused);
+            }
+            turn_closed(reports, taken, Some(problem.0.clone()));
+            Some(with_code("The agent could not start", Some(&problem.0)))
+        }
+    }
+}
+
+/// Takes over a native-mode lead on a signed-in account that an earlier engine left running
+/// in its own server: waits for the runtime's first order, a turn or a start, which carries
+/// a fresh custody use of the account, hands the credential to the lead's home again, then
+/// serves turns on the running session, so the lead and its teammates never run on without
+/// the account. A first order without the account ends the lead. Takes the adoption and the
+/// worker's channels and flags. Returns the problem that ended it, if any.
+fn native_adopted(
+    adoption: Adoption,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    interrupt: &AtomicBool,
+    leave: &AtomicBool,
+) -> Option<String> {
+    let Adoption {
+        host,
+        agent,
+        record,
+        limits,
+        managed,
+        live,
+        ..
+    } = adoption;
+    assert!(!live);
+    let managed = managed.expect("a managed adoption names its home");
+    let end = |taken: bool, cause: Option<String>| {
+        let _ = host.kill(&agent);
+        record.remove_context_files();
+        turn_closed(reports, taken, cause);
+    };
+    let (first, grant) = match next_turn(orders, cancel, None) {
+        Next::Turn(prompt, grant, limit) => (Some((prompt, limit)), grant),
+        Next::Start(_, grant) => (None, grant),
+        Next::Stop | Next::Closed(_) => {
+            if !leave.load(Ordering::SeqCst) {
+                end(false, None);
+            }
+            return None;
+        }
+    };
+    let taken = first.is_some();
+    let Some(grant) = grant else {
+        end(taken, None);
+        return Some("The native lead was taken over without its signed-in account".into());
+    };
+    let Grant { profile, .. } = *grant;
+    let credential = match profile.hand_to_agent(
+        &managed.home,
+        record.run_time_left(limits.run_time),
+        &managed.executable,
+    ) {
+        Ok(credential) => credential,
+        Err(problem) => {
+            end(taken, Some(problem.0.clone()));
+            return Some(with_code(
+                "The signed-in account could not reach the agent",
+                Some(&problem.0),
+            ));
+        }
+    };
+    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+        Ok(session) => serve(
+            session,
+            Some(Kept {
+                first,
+                held: (credential, profile),
+            }),
+            orders,
+            reports,
+            cancel,
+            interrupt,
+            leave,
+        ),
+        Err(problem) => {
+            end(taken, Some(problem.0.clone()));
+            Some(with_code(
+                "The agent's running terminal could not be taken over",
+                Some(&problem.0),
+            ))
+        }
+    }
+}
+
+/// Serves turns on an agent whose harness keeps running between them, the kept turn first
+/// when one is given. At the end it stops the agent, or, when the engine quits with the
+/// agent kept, stops the running turn and leaves the pane running for the next engine. A
+/// kept session's credential copy and custody use are released once its process stopped
+/// or was left. A stop its warden did not confirm keeps both for the engine's life and
+/// ends the agent with that problem.
+fn serve(
+    mut session: AgentSession,
+    kept: Option<Kept>,
+    orders: &Receiver<Order>,
+    reports: &Sender<Report>,
+    cancel: &AtomicBool,
+    interrupt: &AtomicBool,
+    leave: &AtomicBool,
+) -> Option<String> {
+    let (mut first, held) = kept.map_or((None, None), |kept| (kept.first, Some(kept.held)));
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
         pane: session.pane_record(),
@@ -6089,7 +6358,11 @@ fn serve(
     let mut problem = None;
     let mut named = false;
     loop {
-        let (prompt, grant, limit) = match next_turn(orders, cancel, Some(&mut session)) {
+        let next = match first.take() {
+            Some((prompt, limit)) => Next::Turn(prompt, None, limit),
+            None => next_turn(orders, cancel, Some(&mut session)),
+        };
+        let (prompt, grant, limit) = match next {
             Next::Turn(prompt, grant, limit) => (prompt, grant, limit),
             Next::Start(..) => unreachable!("only a live master is started with its instructions"),
             Next::Stop => break,
@@ -6118,11 +6391,16 @@ fn serve(
         let _ = session.interrupt();
         session.leave();
     } else if let Err(uncertain) = session.stop() {
-        problem = Some(with_code(
+        if let Some((credential, profile)) = held {
+            credential.retain();
+            std::mem::forget(profile);
+        }
+        return Some(with_code(
             crate::sandbox::warden::CLEANUP_UNCERTAIN,
             Some(&uncertain.0),
         ));
     }
+    drop(held);
     problem
 }
 
