@@ -48,7 +48,12 @@ const RESULT_IN_MESSAGE_BYTES_MAX: usize = 3000;
 /// the text typed into a live master, with its speaker tag, ever loses a line.
 const RESULTS_MESSAGE_BYTES_MAX: usize = super::MESSAGE_BYTES_MAX * 2 - 64;
 const RESULTS_TRAILER: &str = "\nTell the owner what was done.";
-const LEAD_RESULTS_TRAILER: &str = "\nAccept what is ready with accept().";
+const LEAD_RESULTS_TRAILER: &str =
+    "\nMerge each finished worker into your task branch with merge(agent).";
+/// What a lead hears when its worker's change set is ready, under the Lands setting Lead.
+const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) once it is done.";
+/// What a lead hears when its worker's change set is ready, under the Lands setting Owner.
+const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
@@ -73,7 +78,7 @@ const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works i
 const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with spawn(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. inspect_work() shows your workers, their work and their change sets, update_work(to, text) reaches one of them and wakes a finished one, stop(agent) stops one, and merge(agent) lands a finished worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
 /// What a lead's worker is told with each task (N3).
 const WORKER_LINE: &str =
-    "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
+    "\nYou are a worker of a lead agent: your lead merges your work into its task branch.";
 /// How many words of a task a harness's task branch name is made from, when the master
 /// gave the task no role.
 const TASK_NAME_WORDS: usize = 6;
@@ -5227,9 +5232,11 @@ impl TeamRuntime {
         self.land_turn(id, project, turn, line, &what, end)
     }
 
-    /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
-    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
-    /// note and how it ended. Output: any SQLite failure writing the note.
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does. A
+    /// lead's worker's new change set is told to its lead to merge, never to the owner,
+    /// while the owner's Lands setting is Lead (F3). Inputs: the agent, its project, the
+    /// turn key, the prompt line, what ended for the note and how it ended. Output: any
+    /// SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -5239,11 +5246,11 @@ impl TeamRuntime {
         what: &str,
         end: TurnEnd,
     ) -> Result<(), EngineError> {
-        type Row = (String, String, String, String, String);
+        type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
             .query_row(
-                "SELECT a.role,a.harness,w.repository,w.worktree,w.git_dir FROM team_worktrees w
+                "SELECT a.role,a.harness,w.repository,w.worktree,w.git_dir,a.parent FROM team_worktrees w
                  JOIN team_agents a ON a.id=w.agent WHERE w.agent=?1 AND w.project=?2",
                 params![id, project.as_str()],
                 |row| {
@@ -5253,13 +5260,18 @@ impl TeamRuntime {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
             .optional()
             .map_err(error)?;
-        let Some((role, harness, repository, worktree, git_dir)) = row else {
+        let Some((role, harness, repository, worktree, git_dir, lead)) = row else {
             return Ok(());
+        };
+        let lands = match lead {
+            Some(_) => Some(super::nesting(&self.connection, project)?.lands),
+            None => None,
         };
         let harness = excerpt(&harness, 64);
         let seat = if AgentRole::parse(&role) == Some(AgentRole::Master) {
@@ -5311,6 +5323,11 @@ impl TeamRuntime {
             }
             Ok(crate::landing_turns::Landed::Added(_)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
+                let told = match lands {
+                    Some(super::ChildLanding::Lead) => LEAD_MERGES,
+                    Some(super::ChildLanding::Owner) => OWNER_ACCEPTS,
+                    None => note.as_str(),
+                };
                 if AgentRole::parse(&role) == Some(AgentRole::Sub) {
                     super::events::record(
                         &self.connection,
@@ -5318,9 +5335,12 @@ impl TeamRuntime {
                         id,
                         task,
                         super::events::EventKind::ChangeSetReady,
-                        &note,
+                        told,
                         now_ms(),
                     )?;
+                }
+                if lands == Some(super::ChildLanding::Lead) {
+                    return Ok(());
                 }
                 note
             }
