@@ -1,6 +1,6 @@
 use super::new_project::harness_name;
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TeamGraph};
+use crate::team::{AgentStatus, EdgeState, GraphNode, TeamGraph};
 use crate::tui::ctx::Load;
 use ratatui::style::Style;
 
@@ -131,7 +131,7 @@ fn task_line(graph: &TeamGraph, agent: &GraphNode) -> String {
 mod tests {
     use super::*;
     use crate::protocol::ProjectId;
-    use crate::team::{GraphEdge, TaskSource};
+    use crate::team::{GraphEdge, NodeKind, TaskSource};
 
     fn agent(id: &str, label: &str, status: AgentStatus) -> GraphNode {
         GraphNode {

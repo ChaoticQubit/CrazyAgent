@@ -467,18 +467,18 @@ fn message_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
         if from == to {
             continue;
         }
-        match merged
+        if let Some(edge) = merged
             .iter_mut()
             .find(|edge| edge.from == from && edge.to == to)
         {
-            Some(edge) => edge.unread = edge.unread.saturating_add(*unread),
-            None if merged.len() < MESSAGE_EDGES_MAX => merged.push(MessageEdge {
+            edge.unread = edge.unread.saturating_add(*unread);
+        } else if merged.len() < MESSAGE_EDGES_MAX {
+            merged.push(MessageEdge {
                 from,
                 to,
                 unread: *unread,
                 receipt: *receipt,
-            }),
-            None => {}
+            });
         }
     }
     merged
@@ -501,15 +501,13 @@ fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
             continue;
         }
         let stale = overlap.mine.stale || overlap.theirs.stale;
-        let found = merged.iter_mut().find(|edge| {
+        if let Some(edge) = merged.iter_mut().find(|edge| {
             (edge.from == mine && edge.to == theirs) || (edge.from == theirs && edge.to == mine)
-        });
-        match found {
-            Some(edge) => {
-                edge.count = edge.count.saturating_add(1);
-                edge.stale &= stale;
-            }
-            None if merged.len() < OVERLAP_EDGES_MAX => merged.push(OverlapEdge {
+        }) {
+            edge.count = edge.count.saturating_add(1);
+            edge.stale &= stale;
+        } else if merged.len() < OVERLAP_EDGES_MAX {
+            merged.push(OverlapEdge {
                 from: mine,
                 to: theirs,
                 count: 1,
@@ -518,8 +516,7 @@ fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
                     OVERLAP_REASON_BYTES_MAX,
                 ),
                 stale,
-            }),
-            None => {}
+            });
         }
     }
     assert!(
