@@ -278,24 +278,41 @@ export function flagWords(flag: AdoptionFlag): string {
   return FLAG_WORDS[flag];
 }
 
+/** One skill an agent called by name, with how many times. */
+export interface SkillCount {
+  name: string;
+  count: number;
+}
+
 /** One agent's adoption row: who it is, whether it still runs, its count for each counted
- * tool in the settings' order, its flags now and the flags it was already reminded of. */
+ * tool in the settings' order, its calls of each enabled skill in the view's skill order
+ * (zero included), the skills it called that the project has not enabled, its graphify and
+ * ctx_* calls, its flags now and the flags it was already reminded of, and whether its
+ * launch fires no hooks, so no counts or flags exist. */
 export interface AgentAdoption {
   agent: number;
   role: string;
   harness: string;
   active: boolean;
   counts: number[];
+  skills?: number[];
+  other_skills?: SkillCount[];
+  graphify?: number;
+  context_mode?: number;
   flags: AdoptionFlag[];
   reminded: AdoptionFlag[];
+  hookless?: boolean;
 }
 
 /** A project's workflow adoption: whether nudges are on, the counted tools that name the
- * count columns, and its newest agents. */
+ * count columns, the skills its agents receive, its newest agents, and how many older agents
+ * the view's size limit left out. */
 export interface Adoption {
   nudges: boolean;
   counted: string[];
+  skills?: string[];
   agents: AgentAdoption[];
+  hidden?: number;
 }
 
 /** Reads one project's workflow adoption. Input: the project id. Output: the view. */

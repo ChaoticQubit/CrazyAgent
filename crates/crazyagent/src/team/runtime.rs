@@ -15,7 +15,7 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RUN_TIME_MAX,
+    RUN_TIME_MAX, claude_bare,
 };
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
 use crate::harnesses::transcript::TranscriptEvent;
@@ -48,7 +48,12 @@ const RESULT_IN_MESSAGE_BYTES_MAX: usize = 3000;
 /// the text typed into a live master, with its speaker tag, ever loses a line.
 const RESULTS_MESSAGE_BYTES_MAX: usize = super::MESSAGE_BYTES_MAX * 2 - 64;
 const RESULTS_TRAILER: &str = "\nTell the owner what was done.";
-const LEAD_RESULTS_TRAILER: &str = "\nAccept what is ready with accept().";
+const LEAD_RESULTS_TRAILER: &str =
+    "\nMerge each finished worker into your task branch with merge(agent).";
+/// What a lead hears when its worker's change set is ready, under the Lands setting Lead.
+const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) once it is done.";
+/// What a lead hears when its worker's change set is ready, under the Lands setting Owner.
+const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
@@ -73,7 +78,7 @@ const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works i
 const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with spawn(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. inspect_work() shows your workers, their work and their change sets, update_work(to, text) reaches one of them and wakes a finished one, stop(agent) stops one, and merge(agent) lands a finished worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
 /// What a lead's worker is told with each task (N3).
 const WORKER_LINE: &str =
-    "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
+    "\nYou are a worker of a lead agent: your lead merges your work into its task branch.";
 /// How many words of a task a harness's task branch name is made from, when the master
 /// gave the task no role.
 const TASK_NAME_WORDS: usize = 6;
@@ -149,7 +154,8 @@ struct Grant {
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
-/// and `tmux` is that server's program, which its teammates are split off with.
+/// and `tmux` is that server's program, which its teammates are split off with; `hookless`
+/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -167,11 +173,20 @@ struct Plan {
     continues: bool,
     native: bool,
     tmux: Option<PathBuf>,
+    hookless: bool,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
 /// panes and the engine's client on that server must all run inside its Seatbelt profile.
 const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
+
+/// Why a lead Claude Code starts `--bare` does not run native teammates: no hook fires there,
+/// so the relay that counts, guards and reports its teammates never runs (DEC-104 bare-hooks).
+const NATIVE_NEEDS_HOOKS: &str = "Native teammates need hooks, and this account starts Claude Code without them. Switch Sub-agents to App-spawned, or use a signed-in account.";
+
+/// Why an agent with tools that Claude Code starts `--bare` does not start while Overlaps is
+/// Block: the edit guard is a hook, and no hook fires there (DEC-104 bare-hooks).
+const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
@@ -201,6 +216,13 @@ impl Plan {
                 Some("team_native_needs_sandbox"),
             ));
         }
+        assert_eq!(
+            self.hookless,
+            crate::coord::settings::HarnessKind::from_harness(&self.harness)
+                == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+                && claude_bare(&account),
+            "an agent's recorded hooks state is the one its launch gets"
+        );
         Ok(LaunchRequest {
             harness: self.harness.clone(),
             executable: self.executable.clone(),
@@ -1839,10 +1861,12 @@ impl TeamRuntime {
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
         super::events::forward_to_parents(&self.connection, project, now_ms())?;
+        let asleep = self.asleep(project);
         let reach = crate::coord::delivery::Reach {
             host: self.terminal.as_deref(),
             owner: self.agents.as_deref().map(Agents::typing),
             state: &self.state,
+            asleep: &asleep,
         };
         self.deliveries
             .tick_logged(&self.connection, project, now_ms(), &reach);
@@ -1850,9 +1874,101 @@ impl TeamRuntime {
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
         self.hand_leads(project, access)?;
+        self.wake_for_messages(&stored, access, &asleep)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
+    }
+
+    /// Lists a project's idle sub-agents that run no process between turns (a signed-in
+    /// account runs one session per turn, except a native lead's kept session, whose pane
+    /// takes typed messages), so no message can be typed into them; they get their
+    /// messages through the turn `wake_for_messages` starts. Takes the project. Returns
+    /// their ids.
+    fn asleep(&self, project: &ProjectId) -> BTreeSet<i64> {
+        self.workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && worker.role == AgentRole::Sub
+                    && worker.managed
+                    && !worker.live
+                    && !worker.kept_session
+                    && worker.busy.is_none()
+                    && !worker.stopping
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Gives each agent from `asleep` with a waking coordination message a task pinned to it
+    /// with `WAKE_TASK`, which `dispatch` runs on that agent with its messages under
+    /// "Messages for you", marking them Delivered; one pinned task at a time, a worker's
+    /// reporting to its lead. A refusal is logged once; the messages stay Sent for it.
+    /// Takes the setup, live model access and the agents. Returns any SQLite failure.
+    fn wake_for_messages(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        asleep: &BTreeSet<i64>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        for &agent in asleep {
+            if !crate::coord::delivery::waking(&self.connection, agent)? {
+                continue;
+            }
+            let Some(harness) = self.workers.get(&agent).map(|w| w.harness.clone()) else {
+                continue;
+            };
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            let pinned: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                     WHERE p.project=?1 AND p.agent=?2 AND t.status IN ('queued','needs_pool','running'))",
+                    params![project.as_str(), agent],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if pinned {
+                continue;
+            }
+            let admitted = super::admit(
+                &tx,
+                access,
+                stored,
+                Some(&harness),
+                super::master::WAKE_TASK,
+                TaskSource::Master,
+                None,
+                now_ms(),
+            )?;
+            let task = match admitted {
+                Ok(task) => task,
+                Err(code) => {
+                    drop(tx);
+                    if self.deliveries.wake_refused(agent, Some(code)) {
+                        eprintln!("team agent {agent} not woken for its messages: {code}");
+                    }
+                    continue;
+                }
+            };
+            tx.execute(
+                "INSERT OR REPLACE INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, project.as_str(), agent],
+            )
+            .map_err(error)?;
+            tx.execute(
+                "UPDATE team_tasks SET parent=(SELECT parent FROM team_agents WHERE id=?2) WHERE id=?1",
+                params![task, agent],
+            )
+            .map_err(error)?;
+            tx.commit().map_err(error)?;
+            self.deliveries.wake_refused(agent, None);
+        }
+        Ok(())
     }
 
     /// Checks the project's agents for missed workflow habits and sends each reminder due.
@@ -3209,7 +3325,11 @@ impl TeamRuntime {
                 work: None,
                 reply_to: None,
                 body: text,
-                idempotency_key: Some(format!("lead-results-{}", ready[0].0)),
+                idempotency_key: Some(format!(
+                    "{}{}",
+                    crate::coord::delivery::RESULTS_KEY,
+                    ready[0].0
+                )),
             };
             match crate::coord::send(&self.connection, message, now_ms()) {
                 Ok(_) => {}
@@ -4378,6 +4498,39 @@ impl TeamRuntime {
                 (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
+        let hookless = crate::coord::settings::HarnessKind::from_harness(launch)
+            == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            && matches!(account.reach, TeamReach::Endpoint { .. });
+        self.connection
+            .execute(
+                "UPDATE team_agents SET hookless=?2 WHERE id=?1",
+                params![id, hookless],
+            )
+            .map_err(|_| with_code("the agent's hooks state could not be saved", None))?;
+        if hookless
+            && tools
+            && crate::coord::settings::read(&self.connection, &stored.project_id)
+                .map_err(|e| {
+                    with_code(
+                        "the project's coordination settings could not be read",
+                        Some(&e.0),
+                    )
+                })?
+                .overlaps
+                == crate::coord::settings::Overlaps::Block
+        {
+            return Err(with_code(
+                OVERLAP_BLOCK_NEEDS_HOOKS,
+                Some("overlap_block_needs_hooks"),
+            ));
+        }
+        let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        if native && hookless {
+            return Err(with_code(
+                NATIVE_NEEDS_HOOKS,
+                Some("native_team_needs_hooks"),
+            ));
+        }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
         if (live && tools) || agent_tools {
@@ -4534,7 +4687,6 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
-        let native = self.native_lead(&stored.project_id, id, role, launch)?;
         let mut native_tmux = None;
         if native {
             if confinement(layout, policy.access)? {
@@ -4611,6 +4763,7 @@ impl TeamRuntime {
             continues: role == AgentRole::Sub,
             native,
             tmux: native_tmux,
+            hookless,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -5244,9 +5397,11 @@ impl TeamRuntime {
         self.land_turn(id, project, turn, line, &what, end)
     }
 
-    /// Lands one ended turn of an agent under its change-set turn key, as `land` does.
-    /// Inputs: the agent, its project, the turn key, the prompt line, what ended for the
-    /// note and how it ended. Output: any SQLite failure writing the note.
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does. A
+    /// lead's worker's new change set is told to its lead to merge, never to the owner,
+    /// while the owner's Lands setting is Lead (F3). Inputs: the agent, its project, the
+    /// turn key, the prompt line, what ended for the note and how it ended. Output: any
+    /// SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -5256,11 +5411,11 @@ impl TeamRuntime {
         what: &str,
         end: TurnEnd,
     ) -> Result<(), EngineError> {
-        type Row = (String, String, String, String, String);
+        type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
             .query_row(
-                "SELECT a.role,a.harness,w.repository,w.worktree,w.git_dir FROM team_worktrees w
+                "SELECT a.role,a.harness,w.repository,w.worktree,w.git_dir,a.parent FROM team_worktrees w
                  JOIN team_agents a ON a.id=w.agent WHERE w.agent=?1 AND w.project=?2",
                 params![id, project.as_str()],
                 |row| {
@@ -5270,13 +5425,18 @@ impl TeamRuntime {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
             .optional()
             .map_err(error)?;
-        let Some((role, harness, repository, worktree, git_dir)) = row else {
+        let Some((role, harness, repository, worktree, git_dir, lead)) = row else {
             return Ok(());
+        };
+        let lands = match lead {
+            Some(_) => Some(super::nesting(&self.connection, project)?.lands),
+            None => None,
         };
         let harness = excerpt(&harness, 64);
         let seat = if AgentRole::parse(&role) == Some(AgentRole::Master) {
@@ -5328,6 +5488,11 @@ impl TeamRuntime {
             }
             Ok(crate::landing_turns::Landed::Added(_)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
+                let told = match lands {
+                    Some(super::ChildLanding::Lead) => LEAD_MERGES,
+                    Some(super::ChildLanding::Owner) => OWNER_ACCEPTS,
+                    None => note.as_str(),
+                };
                 if AgentRole::parse(&role) == Some(AgentRole::Sub) {
                     super::events::record(
                         &self.connection,
@@ -5335,9 +5500,12 @@ impl TeamRuntime {
                         id,
                         task,
                         super::events::EventKind::ChangeSetReady,
-                        &note,
+                        told,
                         now_ms(),
                     )?;
+                }
+                if lands == Some(super::ChildLanding::Lead) {
+                    return Ok(());
                 }
                 note
             }

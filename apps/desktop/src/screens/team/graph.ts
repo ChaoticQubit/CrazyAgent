@@ -1,4 +1,4 @@
-import type { GraphEdge, GraphEdgeState, GraphNode, MessageEdge, OverlapEdge, Presence, Receipt, TeamAgentStatus, TeamGraph } from "../../engine-client";
+import { HOOKLESS_WORDS, type GraphEdge, type GraphEdgeState, type GraphNode, type MessageEdge, type OverlapEdge, type Presence, type Receipt, type TeamAgentStatus, type TeamGraph } from "../../engine-client";
 import type { Tone } from "../../ui";
 
 export const CARD_WIDTH = 216;
@@ -42,8 +42,9 @@ export interface PlacedCard extends Box { node: GraphNode }
 
 /** The solid assignment line from a lead's card down to one card it leads, with its badge
  * above that card: the live tasks the card's agent runs, the questions it waits on, and the
- * messages the lead sent it that are still unread, with the newest one's receipt. Unread
- * messages the other way, to the lead, arc like any other pair's. */
+ * messages the lead sent it that are still unread, with the newest one's receipt, unless the
+ * card's agent fires no hooks and has none. Unread messages the other way, to the lead, arc
+ * like any other pair's. */
 export interface Link {
   from: string;
   to: string;
@@ -53,6 +54,7 @@ export interface Link {
   questions: number;
   unread: number;
   receipt: Receipt | null;
+  hookless: boolean;
 }
 
 /** A line between two cards that are not lead and led: unread messages (dashed) or a claim
@@ -150,6 +152,13 @@ const TICKS: Record<Receipt, { ticks: string; word: string }> = {
  * Output: the tick marks and what they mean. */
 export function receiptTicks(receipt: Receipt): { ticks: string; word: string } {
   return Object.hasOwn(TICKS, receipt) ? TICKS[receipt] : TICKS.sent;
+}
+
+/** What a receipt to one node shows: its ticks and words, or no ticks and the hookless words
+ * when the node's launch fires no hooks (DEC-104 bare-hooks). Inputs: the receipt and whether
+ * the node is hookless. Output: the tick marks and what they mean. */
+export function receiptShown(receipt: Receipt, hookless: boolean): { ticks: string; word: string } {
+  return hookless ? { ticks: "", word: `receipts ${HOOKLESS_WORDS}` } : receiptTicks(receipt);
 }
 
 /** The messages the owner sent one node that it has not read yet, with the newest one's
@@ -252,6 +261,7 @@ export function layoutGraph(graph: TeamGraph): GraphLayout {
       questions: questionCount(card.node),
       unread: message ? count(message.unread) : 0,
       receipt: message?.receipt ?? null,
+      hookless: card.node.hookless === true,
     });
   };
   const place = (node: GraphNode, left: number, top: number, depth: number): PlacedCard => {
@@ -316,11 +326,11 @@ export function layoutCards(layout: GraphLayout): PlacedCard[] {
 
 /** What a link's badges say to a screen reader. Input: the counts. Output: one phrase, empty
  * when there is nothing to show. */
-export function badgeLabel(link: Pick<Link, "tasks" | "questions"> & Partial<Pick<Link, "unread" | "receipt">>): string {
+export function badgeLabel(link: Pick<Link, "tasks" | "questions"> & Partial<Pick<Link, "unread" | "receipt" | "hookless">>): string {
   const parts = [];
   if (link.tasks > 0) parts.push(plural(link.tasks, "live task"));
   if (link.questions > 0) parts.push(`${plural(link.questions, "question")} waiting`);
-  if ((link.unread ?? 0) > 0) parts.push(`${plural(link.unread ?? 0, "unread message")}${link.receipt ? `, ${receiptTicks(link.receipt).word}` : ""}`);
+  if ((link.unread ?? 0) > 0) parts.push(`${plural(link.unread ?? 0, "unread message")}${link.receipt ? `, ${receiptShown(link.receipt, link.hookless === true).word}` : ""}`);
   return parts.join(", ");
 }
 
@@ -416,15 +426,16 @@ export function cardText(node: GraphNode, edges: readonly GraphEdge[], harness?:
   };
 }
 
-/** The full text a card shows on hover: title, role line, branch, status and presence, why it
- * waits on the owner, the messages it has not read and who sent them, its claim overlaps, its task and the reply
- * once it came, each kept to `TIP_CHARS`. Inputs: the node, the graph and a harness name
- * lookup. Output: the lines. */
+/** The full text a card shows on hover: title, role line, branch, status and presence, that
+ * its receipts and adoption are unavailable when its launch fires no hooks, why it waits on
+ * the owner, the messages it has not read and who sent them, its claim overlaps, its task and
+ * the reply once it came, each kept to `TIP_CHARS`. Inputs: the node, the graph and a harness
+ * name lookup. Output: the lines. */
 export function cardTip(node: GraphNode, graph: TeamGraph, harness?: (id: string) => string): string[] {
   const reply = node.kind === "master" ? null : latestTask(node, graph.edges)?.reply;
   const status = [nodeStatus(node)?.word, presenceWord(node)].filter(Boolean).join(", ");
   const unread = (graph.messages ?? []).filter((edge) => edge.to === node.id && count(edge.unread) > 0)
-    .map((edge) => `${plural(count(edge.unread), "unread message")} from ${partyName(graph, edge.from)}, ${receiptTicks(edge.receipt).word}.`);
+    .map((edge) => `${plural(count(edge.unread), "unread message")} from ${partyName(graph, edge.from)}, ${receiptShown(edge.receipt, node.hookless === true).word}.`);
   const overlaps = (graph.overlaps ?? []).filter((edge) => edge.from === node.id || edge.to === node.id)
     .map((edge) => `${edge.stale ? "Stale overlap" : "Overlap"} with ${labelOf(graph, edge.from === node.id ? edge.to : edge.from)}: ${edge.reason}`);
   return [
@@ -432,6 +443,7 @@ export function cardTip(node: GraphNode, graph: TeamGraph, harness?: (id: string
     nodeDetail(node, harness),
     node.branch?.trim() ? `Branch ${node.branch.trim()}` : undefined,
     status || undefined,
+    node.hookless ? `Receipts and adoption ${HOOKLESS_WORDS}.` : undefined,
     waitingOnOwner(node)?.sentence,
     ...unread,
     ...overlaps,

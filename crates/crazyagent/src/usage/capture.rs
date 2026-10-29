@@ -294,27 +294,33 @@ fn codex_line(
 
 /// Names the tool call one Codex rollout line records, the way adoption counts it: a
 /// function or custom tool call by its name and parsed arguments, a local shell call by its
-/// command. Arguments longer than `ARGUMENTS_BYTES_MAX` count the call by its name alone.
-/// Input: the parsed line. Output: the counted name, none for any other line.
-fn codex_tool(value: &Value) -> Option<String> {
+/// command, and a skill it read by `skill:` and the skill's name too. Arguments longer than
+/// `ARGUMENTS_BYTES_MAX` count the call by its name alone. Input: the parsed line. Output:
+/// the counted names, at most two, none for any other line.
+fn codex_tools(value: &Value) -> Vec<String> {
     let payload = &value["payload"];
     if value["type"] != "response_item" {
-        return None;
+        return Vec::new();
     }
-    let (name, input) = match payload["type"].as_str()? {
-        "function_call" => (
-            payload["name"].as_str()?,
+    let (name, input) = match payload["type"].as_str() {
+        Some("function_call") => (
+            payload["name"].as_str().unwrap_or_default(),
             payload["arguments"]
                 .as_str()
                 .filter(|arguments| arguments.len() <= ARGUMENTS_BYTES_MAX)
                 .and_then(|arguments| serde_json::from_str(arguments).ok())
                 .unwrap_or(Value::Null),
         ),
-        "custom_tool_call" => (payload["name"].as_str()?, Value::Null),
-        "local_shell_call" => ("local_shell_call", payload["action"].clone()),
-        _ => return None,
+        Some("custom_tool_call") => (payload["name"].as_str().unwrap_or_default(), Value::Null),
+        Some("local_shell_call") => ("local_shell_call", payload["action"].clone()),
+        _ => return Vec::new(),
     };
-    crate::coord::adoption::tool_key(name, &input)
+    let names: Vec<String> = crate::coord::adoption::tool_key(name, &input)
+        .into_iter()
+        .chain(crate::coord::adoption::skill_key(name, &input))
+        .collect();
+    assert!(names.len() <= 2);
+    names
 }
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
@@ -525,11 +531,12 @@ fn read_opened_with(
                 let (gained, observed) = codex_line(&value, progress, now_ms);
                 growth = growth.plus(gained);
                 limits = observed.or(limits);
-                if let Some(tools) = tools.as_deref_mut()
-                    && tools.len() < TOOLS_PER_READ_MAX
-                    && let Some(tool) = codex_tool(&value)
-                {
-                    tools.push(tool);
+                if let Some(tools) = tools.as_deref_mut() {
+                    for tool in codex_tools(&value) {
+                        if tools.len() < TOOLS_PER_READ_MAX {
+                            tools.push(tool);
+                        }
+                    }
                 }
             }
         }

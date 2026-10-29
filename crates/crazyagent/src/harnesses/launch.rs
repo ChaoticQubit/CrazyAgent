@@ -596,6 +596,14 @@ fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
     settings.to_string()
 }
 
+/// Tells whether Claude Code starts `--bare` on an account: every account but a signed-in
+/// subscription, so a key or endpoint account never authenticates through an OAuth login or
+/// the keychain. Claude Code 2.1.309 fires no settings or plugin hooks under `--bare`
+/// (DEC-104 bare-hooks). Input: the account. Output: the answer.
+pub fn claude_bare(account: &AccountBinding) -> bool {
+    !matches!(account, AccountBinding::Subscription { .. })
+}
+
 /// Lists what a Claude Code launch passes after `--disallowedTools`: with tools on, Claude
 /// Code's own sub-agent tools, less `CLAUDE_NATIVE_TEAM_TOOLS` for a native-team lead, then
 /// every MCP tool the owner switched off. Input: the tools switch, whether the launch is a
@@ -689,7 +697,7 @@ fn claude_invocation(
             OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
         ));
     }
-    if !matches!(request.account, AccountBinding::Subscription { .. }) {
+    if claude_bare(&request.account) {
         arguments.push(OsString::from("--bare"));
         if key_file.is_none() {
             environment.push(("ANTHROPIC_API_KEY", OsString::from(LOCAL_PLACEHOLDER_KEY)));

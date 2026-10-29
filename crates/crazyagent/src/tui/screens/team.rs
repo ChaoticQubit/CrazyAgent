@@ -71,6 +71,7 @@ enum Body {
     Detail {
         account: Option<String>,
         branch: Option<String>,
+        hookless: bool,
     },
     Heading(&'static str),
     Blank,
@@ -1357,13 +1358,14 @@ fn lead_rows(
 }
 
 fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
-    if node.account.is_some() || node.branch.is_some() {
+    if node.account.is_some() || node.branch.is_some() || node.hookless {
         out.push(TreeRow {
             item: None,
             prefix,
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
+                hookless: node.hookless,
             },
         });
     }
@@ -1402,17 +1404,28 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                 },
             }
         }
-        Body::Detail { account, branch } => {
+        Body::Detail {
+            account,
+            branch,
+            hookless,
+        } => {
             let account = account.as_ref().map(|account| {
                 account_name(
                     Some(account),
                     ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
                 )
             });
+            let hookless = hookless.then(|| {
+                format!(
+                    "Receipts and adoption {}",
+                    crate::coord::adoption::HOOKLESS_WORDS
+                )
+            });
             styled(
                 account
                     .into_iter()
                     .chain(branch.iter().cloned())
+                    .chain(hookless)
                     .collect::<Vec<_>>()
                     .join("  "),
                 Role::Muted,

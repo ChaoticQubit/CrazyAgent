@@ -1177,7 +1177,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 session TEXT,
                 parent INTEGER,
                 pane TEXT,
-                mode TEXT
+                mode TEXT,
+                hookless INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -2489,6 +2490,8 @@ pub struct TeamAgent {
     pub teammates: Vec<Teammate>,
     #[serde(default)]
     pub pane: Option<String>,
+    #[serde(default)]
+    pub hookless: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2719,10 +2722,11 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         owner_stopped: false,
         teammates: Vec::new(),
         pane: row.get(17)?,
+        hookless: row.get(18)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane,hookless";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -2937,16 +2941,18 @@ pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineErro
 const DEPTH_WALK_MAX: i64 = 8;
 const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 
-/// Gives team tables made before later columns those columns, NULL on older rows:
-/// `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
-/// sub-agent mode a lead started in, DEC-104) and `team_tasks.mode` (the mode the master
-/// asked for a lead's task). Runs on every open and adds each column once. Takes the
-/// engine connection. Returns any SQLite failure.
+/// Gives team tables made before later columns those columns, older rows taking the
+/// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
+/// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
+/// for a lead's task) and `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// DEC-104 bare-hooks). Runs on every open and adds each column once. Takes the engine
+/// connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
-    for (table, column) in [
-        ("team_agents", "pane"),
-        ("team_agents", "mode"),
-        ("team_tasks", "mode"),
+    for (table, column, definition) in [
+        ("team_agents", "pane", "TEXT"),
+        ("team_agents", "mode", "TEXT"),
+        ("team_tasks", "mode", "TEXT"),
+        ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present: bool = connection
             .query_row(
@@ -2957,7 +2963,9 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
             .map_err(error)?;
         if !present {
             connection
-                .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"))
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
                 .map_err(error)?;
         }
     }

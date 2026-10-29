@@ -8,7 +8,7 @@ use crate::team::{MessageAuthor, MessageState};
 use crate::terminal::{Host, PROMPT_BYTES_MAX};
 use codex::Bridged;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use typing::Typing;
 
@@ -25,6 +25,10 @@ pub const RETRY_MS: i64 = 2_000;
 pub const RECIPIENTS_PER_TICK_MAX: usize = 16;
 /// The most message text one engine-started turn carries in its prompt.
 pub const NEXT_TURN_BYTES_MAX: usize = 8 * 1024;
+/// The idempotency key prefix of the engine's note of a lead's workers' results.
+pub const RESULTS_KEY: &str = "lead-results-";
+/// The idempotency key prefix of the engine's note of a lead's workers' events.
+pub const EVENTS_KEY: &str = "events-";
 const SENDER_BYTES_MAX: usize = 48;
 const HEAD_BYTES_MAX: usize = 160;
 const CUT: &str = " [cut here; read the whole message with inspect_work]";
@@ -35,23 +39,48 @@ const _: () = assert!(NEXT_TURN_BYTES_MAX >= super::BODY_BYTES_MAX + HEAD_BYTES_
 const _: () = assert!(SENDER_BYTES_MAX + 100 < HEAD_BYTES_MAX);
 
 /// What a tick needs besides the database: the terminal host team agents run in, none
-/// when they run headless; the owner typing signal; and the team state folder that holds
-/// each agent's home (`crate::team::runtime::agent_home`).
+/// when they run headless; the owner typing signal; the team state folder that holds
+/// each agent's home (`crate::team::runtime::agent_home`); and the idle agents that run
+/// no process between turns, whose messages wait for the turn the engine wakes them with.
 pub struct Reach<'a> {
     pub host: Option<&'a dyn Host>,
     pub owner: Option<&'a OwnerTyping>,
     pub state: &'a Path,
+    pub asleep: &'a BTreeSet<AgentId>,
 }
 
 /// The delivery loop's memory between ticks: when each agent whose messages could not go
-/// may be tried again, at most `RETRIES_KEPT_MAX` agents, and the last tick's failure code.
+/// may be tried again, the last refused wake of each agent, at most `RETRIES_KEPT_MAX`
+/// agents each, and the last tick's failure code.
 #[derive(Debug, Default)]
 pub struct Deliveries {
     retry: BTreeMap<AgentId, i64>,
+    refused: BTreeMap<AgentId, &'static str>,
     failed: Option<String>,
 }
 
 impl Deliveries {
+    /// Remembers why the engine could not wake an agent for its messages, so the engine log
+    /// names a refusal once until it changes or the agent is woken. Takes the agent and the
+    /// refusal code, none once it was woken. Returns true when the refusal is new.
+    pub fn wake_refused(&mut self, agent: AgentId, code: Option<&'static str>) -> bool {
+        let new = match code {
+            Some(code) => self.refused.insert(agent, code) != Some(code),
+            None => {
+                self.refused.remove(&agent);
+                false
+            }
+        };
+        while self.refused.len() > RETRIES_KEPT_MAX {
+            let first = self.refused.keys().next().copied();
+            if let Some(first) = first {
+                self.refused.remove(&first);
+            }
+        }
+        assert!(self.refused.len() <= RETRIES_KEPT_MAX);
+        new
+    }
+
     /// Runs [`Deliveries::tick`] for the team loop, which goes on when it fails: a failure
     /// code is written to the engine log once, until a different failure or a clean tick
     /// replaces it, as the adoption check does. Takes the database, the project, the time in
@@ -90,6 +119,10 @@ impl Deliveries {
     ) -> Result<(), EngineError> {
         requeue_stopped(db, project, now)?;
         for agent in recipients(db, project)? {
+            if reach.asleep.contains(&agent) {
+                self.retry.remove(&agent);
+                continue;
+            }
             if self.retry.get(&agent).is_some_and(|at| *at > now) {
                 continue;
             }
@@ -274,6 +307,21 @@ fn to_master(
     Ok(carried.len() == messages.len())
 }
 
+/// Tells whether an agent has a waiting message worth a turn of its own: a prompt, a
+/// question or a reply, or the engine's note of its workers' results or events. Other
+/// notes wait for its next turn. Takes the database and the agent. Returns the answer, or
+/// a database failure.
+pub fn waking(db: &Connection, agent: AgentId) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+         AND receipt='sent' AND (kind IN ('prompt','question','reply') OR (from_kind='engine'
+         AND (substr(idem_key,1,length(?2))=?2 OR substr(idem_key,1,length(?3))=?3))))",
+        params![agent, RESULTS_KEY, EVENTS_KEY],
+        |row| row.get(0),
+    )
+    .map_err(state)
+}
+
 /// Takes the messages waiting for an agent that fit in `NEXT_TURN_BYTES_MAX`, as the lines
 /// the prompt of the turn the engine starts for it now ends with, "the next turn" of
 /// DEC-104 Q13. Mark them with [`delivered`] once that prompt went out. Takes the database
@@ -347,6 +395,7 @@ fn line(db: &Connection, message: &Message, max: usize) -> Result<String, Engine
         ),
         (MessageKind::Prompt, ..) => "work for you, answer with update_work: ".to_owned(),
         (MessageKind::Reply, _, Some(earlier)) => format!("Reply to msg {earlier}: "),
+        (MessageKind::Note, ..) => "note, it takes no reply: ".to_owned(),
         _ => String::new(),
     };
     let head = format!("[crazyagent msg {}] from {sender}: {what}", message.id);

@@ -363,7 +363,7 @@ fn deliver(folder: &Mailbox, tag: &str) -> Option<String> {
     }
     taken.sort_by_key(|letter| letter.id);
     let mut text = format!(
-        "CrazyAgent team messages for you ({}). Answer or ask with update_work in the crazyagent-team tools, naming the message id.",
+        "CrazyAgent team messages for you ({}). Answer a question or work for you with update_work kind reply and its id in reply_to. A note takes no reply; to answer one, send kind note with to.",
         taken.len()
     );
     for letter in &taken {
@@ -406,9 +406,10 @@ fn touch(folder: &Mailbox, tag: &str) {
     }
 }
 
-/// Appends the tool a session called to its tool log in one write: the tool name and,
-/// for a graphify command or skill, `graphify` too (Q18). Nothing is logged past
-/// `TOOLS_LOG_BYTES_MAX` or for a name that is not plain.
+/// Appends the tool a session called to its tool log in one write: the tool name, for a
+/// graphify command or skill `graphify` too (Q18), and for a skill `skill:` and its name,
+/// so each skill counts by name (F7). Nothing is logged past `TOOLS_LOG_BYTES_MAX` or for
+/// a name that is not plain.
 fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     let Some(key) = relay::tag_key(tag) else {
         return;
@@ -435,6 +436,10 @@ fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     };
     if graphify {
         lines.push_str(GRAPHIFY);
+        lines.push('\n');
+    }
+    if let Some(skill) = super::adoption::skill_key(tool, &input["tool_input"]) {
+        lines.push_str(&skill);
         lines.push('\n');
     }
     let Ok(mut file) = folder.append(&format!("{key}{TOOLS}")) else {

@@ -298,7 +298,13 @@ impl OwnerClient {
         {
             (Reply::Adoption { adoption }, None)
                 if adoption.agents.len() <= crate::coord::adoption::AGENTS_SHOWN_MAX
-                    && adoption.counted.len() <= crate::coord::settings::COUNTED_TOOLS_MAX =>
+                    && adoption.counted.len() <= crate::coord::settings::COUNTED_TOOLS_MAX
+                    && adoption.skills.len() <= crate::coord::adoption::SKILLS_SHOWN_MAX
+                    && adoption.agents.iter().all(|agent| {
+                        agent.counts.len() == adoption.counted.len()
+                            && agent.skills.len() == adoption.skills.len()
+                            && agent.other_skills.len() <= crate::coord::adoption::OTHER_SKILLS_MAX
+                    }) =>
             {
                 Ok(adoption)
             }
@@ -796,9 +802,10 @@ fn instruction_settings(
     Ok(stored)
 }
 
-/// Reads one set-up project's workflow adoption from the engine store, read-only.
-/// Inputs: the engine root and the project. Output: the view, `process_project_unknown`
-/// for a project with no setup, or `process_adoption_unavailable`.
+/// Reads one set-up project's workflow adoption from the engine store, read-only, with a
+/// count for each skill its agents receive. Inputs: the engine root and the project.
+/// Output: the view, `process_project_unknown` for a project with no setup, or
+/// `process_adoption_unavailable`.
 fn adoption(root: &Path, project: &ProjectId) -> Result<Adoption, EngineError> {
     let unavailable = |_| failure("process_adoption_unavailable");
     let connection = read_only(root)?;
@@ -813,7 +820,13 @@ fn adoption(root: &Path, project: &ProjectId) -> Result<Adoption, EngineError> {
     if !known {
         return Err(failure("process_project_unknown"));
     }
-    crate::coord::adoption::view(&tx, project, crate::team::now_ms())
+    let skills: Vec<String> = crate::storage::plugins::effective(&tx, root, project)
+        .map_err(|_| failure("process_adoption_unavailable"))?
+        .skills
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    crate::coord::adoption::view(&tx, project, &skills, crate::team::now_ms())
         .map_err(|_| failure("process_adoption_unavailable"))
 }
 

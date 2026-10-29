@@ -79,6 +79,7 @@ fn agent(
         owner_stopped: false,
         teammates: Vec::new(),
         pane: None,
+        hookless: false,
     }
 }
 
