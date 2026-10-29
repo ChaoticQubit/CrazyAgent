@@ -432,7 +432,7 @@ impl NativeBridge {
             .await
     }
 
-    async fn team_action(
+    pub(super) async fn team_action(
         &mut self,
         action: TeamAction,
         generation: u64,

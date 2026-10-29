@@ -1,4 +1,5 @@
 import type { AppTeamEvents, TeamEvent, TeamEventKind, TeamNotification, WakeRule, WakeRuleLevel } from "../../engine-client";
+import type { Route } from "../../ui";
 
 export const HOURLY_CAP_MAX = 500;
 
@@ -89,13 +90,26 @@ export function unseenByProject(events: Pick<AppTeamEvents, "projects">): Map<st
   return new Map(events.projects.filter((item) => item.unseen > 0).map((item) => [item.project_id, item.unseen]));
 }
 
-/** Finds the notifications that arrived since the window last looked. The first read only
- * remembers where it is, so an app start never alerts for old notifications. Inputs: the
- * newest id seen before, or null before the first read, and the app events. Output: the newest
- * id now and the unseen notifications newer than the old one, newest first. */
+const BADGE_ONLY: ReadonlySet<TeamNotification["kind"]> = new Set(["question"]);
+
+/** Finds the notifications that arrived since the window last looked and should alert. The
+ * first read only remembers where it is, so an app start never alerts for old notifications;
+ * a Normal question only counts toward the badge (Q14b). Inputs: the newest id seen before, or
+ * null before the first read, and the app events. Output: the newest id now and the unseen
+ * alerting notifications newer than the old one, newest first. */
 export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "notifications">): { last: number; fresh: TeamNotification[] } {
   const newest = events.notifications.reduce((max, item) => Math.max(max, item.id), last ?? 0);
   if (last === null) return { last: newest, fresh: [] };
-  const fresh = events.notifications.filter((item) => item.id > last && item.seen_ms === null).sort((a, b) => b.id - a.id);
+  const fresh = events.notifications
+    .filter((item) => item.id > last && item.seen_ms === null && !BADGE_ONLY.has(item.kind))
+    .sort((a, b) => b.id - a.id);
   return { last: newest, fresh };
+}
+
+/** Where the toast for one notification leads: an urgent question or an agent waiting in its
+ * terminal opens the project's Agents tab, where the Questions inbox lists it (Q14, Q14b).
+ * Input: the notification. Output: the route, or undefined for one that only informs. */
+export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
+  if (item.kind !== "urgent_question" && item.kind !== "waiting_on_you") return undefined;
+  return { name: "project", id: item.project_id, tab: "agents" };
 }

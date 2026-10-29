@@ -917,6 +917,35 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.team_seen(&id, upto, generation).await }.await;
             routed(result)
         }
+        "desktop_coord_questions" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.coord_questions(&id).await }.await;
+            routed(result)
+        }
+        "desktop_coord_answer" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                message: i64,
+                text: String,
+                generation: u64,
+            }
+            let Args { id, message, text, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .coord_answer(&id, message, text, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_graph" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

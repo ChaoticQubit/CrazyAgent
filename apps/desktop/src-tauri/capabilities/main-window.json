@@ -58,6 +58,8 @@
     "allow-desktop-team-events",
     "allow-desktop-team-wake-rule",
     "allow-desktop-team-seen",
+    "allow-desktop-coord-questions",
+    "allow-desktop-coord-answer",
     "allow-desktop-team-attention",
     "allow-desktop-terminal-attach",
     "allow-desktop-terminal-input",

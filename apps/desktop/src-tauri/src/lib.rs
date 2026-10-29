@@ -1108,6 +1108,32 @@ async fn desktop_team_seen(
 }
 
 #[tauri::command]
+async fn desktop_coord_questions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::team::questions::Inbox, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.coord_questions(&id).await
+}
+
+#[tauri::command]
+async fn desktop_coord_answer(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    message: i64,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .coord_answer(&id, message, text, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_attention(
     window: WebviewWindow,
     unseen: u32,
@@ -2786,6 +2812,8 @@ pub fn run() {
             desktop_team_events,
             desktop_team_wake_rule,
             desktop_team_seen,
+            desktop_coord_questions,
+            desktop_coord_answer,
             desktop_team_attention,
             desktop_terminal_attach,
             desktop_terminal_input,

@@ -1,7 +1,7 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
@@ -1030,6 +1030,20 @@ export function listProjects(): Promise<Result<ProjectList>> {
  * Input: the project id. Output: the graph, not ready, or a plain error. */
 export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
   return call<TeamGraph>("desktop_team_graph", { id });
+}
+
+/** Reads one project's Questions inbox: the open questions agents put to the owner, most
+ * urgent first, and the agents waiting on the owner in their own terminal.
+ * Input: the project id. Output: the inbox, not ready, or a plain error. */
+export function loadQuestions(id: string): Promise<Result<QuestionsInbox>> {
+  return call<QuestionsInbox>("desktop_coord_questions", { id });
+}
+
+/** Answers one open question an agent put to the owner; it reaches the asker as the owner's
+ * reply. Inputs: the project id, the question's message id and the answer. Output: the engine
+ * receipt. */
+export function answerQuestion(id: string, message: number, text: string): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_answer", { id, message, text, generation: nextGeneration() });
 }
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
