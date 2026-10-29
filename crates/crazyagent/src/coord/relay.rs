@@ -257,7 +257,7 @@ pub fn installed(home: &Path) -> bool {
 /// Runs one engine tick of an agent's relay: refreshes `relay.json`, marks Delivered each
 /// message a session took, drops letters no longer waiting, writes the next waiting
 /// messages of the agent and its native teammates (none under the Typing only delivery
-/// setting), applies the sessions' tool counts, activity and waits, answers their overlap
+/// setting, nor for a master, which K2b feeds through its engine input), applies the sessions' tool counts, activity and waits, answers their overlap
 /// questions, and, when `receipts` is set, marks Read each delivered message its session
 /// answered after (from the home's newest transcripts). Everything a session wrote is
 /// validated; nothing from the mailbox is trusted. Inputs: the database, the project, the
@@ -286,9 +286,17 @@ pub fn serve(
         root: worktree(db, project, lead)?,
     };
     write_roster(&folder, &roster);
+    let master: bool = db
+        .query_row(
+            "SELECT role='master' FROM team_agents WHERE id=?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    let posts = delivery != Delivery::TypingOnly && !master;
     collect_shown(db, &folder, &team, now)?;
-    sweep_letters(db, &folder, &team, delivery)?;
-    if delivery != Delivery::TypingOnly {
+    sweep_letters(db, &folder, &team, posts)?;
+    if posts {
         post_letters(db, &folder, &team)?;
     }
     take_activity(db, &folder, &team, now)?;
@@ -490,16 +498,17 @@ fn collect_shown(
 }
 
 /// Removes each letter whose message no longer waits for delivery here: unknown, for
-/// another agent, typed, failed or expired, or every letter under Typing only.
+/// another agent, typed, failed or expired, or every letter when the relay does not post
+/// (Typing only, or a master, which hears its messages through its own engine input).
 fn sweep_letters(
     db: &Connection,
     folder: &Mailbox,
     team: &BTreeMap<String, AgentId>,
-    delivery: Delivery,
+    posts: bool,
 ) -> Result<(), EngineError> {
     for (_, stem) in folder.entries(INBOX) {
         let keep = match letter_id(&stem) {
-            Some(id) if delivery != Delivery::TypingOnly => match message(db, id) {
+            Some(id) if posts => match message(db, id) {
                 Ok(found) => addressed(found.to, team) && found.receipt == Receipt::Sent,
                 Err(problem) if problem.0 == "coord_message_unknown" => false,
                 Err(problem) => return Err(problem),
