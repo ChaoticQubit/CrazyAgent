@@ -3179,7 +3179,7 @@ impl TeamRuntime {
             let mut statement = self
                 .connection
                 .prepare(
-                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master',t.parent FROM team_tasks t
+                    "SELECT t.id,t.harness,t.prompt,p.agent,t.source='master',t.parent,t.mode FROM team_tasks t
                      LEFT JOIN team_task_pins p ON p.task=t.id AND p.project=t.project
                      WHERE t.project=?1 AND t.status='queued' ORDER BY t.id LIMIT 64",
                 )
@@ -3193,6 +3193,7 @@ impl TeamRuntime {
                         row.get(3)?,
                         row.get(4)?,
                         row.get(5)?,
+                        row.get(6)?,
                     ))
                 })
                 .map_err(error)?
@@ -3201,7 +3202,7 @@ impl TeamRuntime {
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
-        for (task, harness, prompt, pin, by_master, parent) in queued {
+        for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
             } else {
@@ -3227,6 +3228,9 @@ impl TeamRuntime {
                         && !w.stopping
                         && !paused.contains(&w.connection)
                         && pin.map_or(w.parent == parent, |pin| pin == **id)
+                        && mode
+                            .as_deref()
+                            .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
                 })
                 .map(|(id, _)| *id);
             let mut woken_fresh = false;
@@ -3595,8 +3599,9 @@ impl TeamRuntime {
         let now = now_ms();
         self.connection
             .execute(
-                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent) VALUES (?1,?2,?3,?4,?5,'starting',?6,?6,?7)",
-                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now, parent],
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,mode)
+                 VALUES (?1,?2,?3,?4,?5,'starting',?6,?6,?7,(SELECT mode FROM team_tasks WHERE id=?8 AND project=?1))",
+                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now, parent, self.naming],
             )
             .map_err(error)?;
         let id = self.connection.last_insert_rowid();
@@ -4023,11 +4028,11 @@ impl TeamRuntime {
         }
     }
 
-    /// Whether an agent starts as a native-mode lead (DEC-104): a harness the master leads,
-    /// not a lead's own sub-agent, on a harness kind with native teammates whose project
-    /// setting picks Native, with a terminal host to start its own server in. Takes the
-    /// project, the agent, its role and its launch harness. Returns the answer, or the plain
-    /// reason the setting could not be read.
+    /// Whether an agent starts as a native-mode lead (DEC-104): its own stored mode
+    /// ([`super::lead_mode`], fixed at its first start, never the live setting) is Native.
+    /// A Native lead also needs to be a Sub the master started on a harness kind with
+    /// native teammates and a terminal host to start its own server in. Takes the project,
+    /// the agent, its role and its launch harness. Returns the answer, or the plain reason.
     fn native_lead(
         &self,
         project: &ProjectId,
@@ -4035,17 +4040,39 @@ impl TeamRuntime {
         role: AgentRole,
         launch: &str,
     ) -> Result<bool, String> {
-        use crate::coord::settings::{HarnessKind, SubagentMode, mode, native_supported};
-        let Some(kind) = HarnessKind::from_harness(launch).filter(|kind| native_supported(*kind))
-        else {
-            return Ok(false);
-        };
-        if role != AgentRole::Sub || self.terminal.is_none() || self.has_lead(id) {
+        use crate::coord::settings::{HarnessKind, SubagentMode, native_supported};
+        let chosen = super::lead_mode(&self.connection, project, id)
+            .map_err(|e| with_code("the agent's sub-agent mode could not be read", Some(&e.0)))?;
+        if chosen == SubagentMode::AppSpawned {
             return Ok(false);
         }
-        let chosen = mode(&self.connection, project, kind)
-            .map_err(|e| with_code("the project's sub-agent mode could not be read", Some(&e.0)))?;
-        Ok(chosen == SubagentMode::Native)
+        let kind_native = HarnessKind::from_harness(launch).is_some_and(native_supported);
+        if role != AgentRole::Sub || !kind_native || self.has_lead(id) {
+            return Err(with_code(
+                "only a Claude Code lead the master starts runs sub-agents as native teammates",
+                Some("native_mode_unsupported"),
+            ));
+        }
+        if self.terminal.is_none() {
+            return Err(with_code(
+                "this lead runs sub-agents as native teammates, which needs the engine's terminal host",
+                Some("native_mode_unavailable"),
+            ));
+        }
+        Ok(true)
+    }
+
+    /// The sub-agent mode name stored on an agent's row, if any. Takes the agent. Returns
+    /// the name, or None for a row without one or a failed read.
+    fn stored_mode(&self, id: i64) -> Option<String> {
+        self.connection
+            .query_row("SELECT mode FROM team_agents WHERE id=?1", [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
     }
 
     /// Tells whether a team agent was started by a lead agent rather than by the master,
@@ -4635,13 +4662,13 @@ impl TeamRuntime {
             _ => Ok(context),
         }?;
         let context = match &self.delegation_tool {
-            Some(engine) => context.with_relay(
+            Some(engine) if tools => context.with_relay(
                 engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
                 &self.mailbox(id),
             ),
-            None => context,
+            _ => context,
         };
         Ok(context)
     }
@@ -6365,8 +6392,17 @@ fn conversation_note(ended: &EndedTask) -> String {
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
-/// whether the master handed it off and the lead whose worker runs it.
-type QueuedTask = (i64, String, String, Option<i64>, bool, Option<i64>);
+/// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
+/// the master asked for the lead that takes it.
+type QueuedTask = (
+    i64,
+    String,
+    String,
+    Option<i64>,
+    bool,
+    Option<i64>,
+    Option<String>,
+);
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
 /// task's line, then its problem and its result on lines of their own, every agent-written

@@ -80,6 +80,8 @@ const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const SPAWN_INVALID: &str = "Not started: give a task of plain text up to 4000 bytes and, if you choose one, a harness name such as codex or claude-code.";
+const MODE_INVALID: &str =
+    "Not started: mode is native or app_spawned, or left out for the owner's setting.";
 const ROLE_INVALID: &str =
     "Not started: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const START_INVALID: &str = "Not started: give a title of one plain line up to 200 bytes and at most 32 claims, each a file, folder/, glob, module:<name> or domain:<name> of up to 512 bytes.";
@@ -179,6 +181,7 @@ pub enum Call {
         task: String,
         harness: Option<String>,
         role: Option<String>,
+        mode: Option<crate::coord::settings::SubagentMode>,
     },
     Stop {
         agent: String,
@@ -482,6 +485,7 @@ fn spec(name: &str) -> Value {
                 "task": {"type": "string", "description": "What the agent should do, in plain words."},
                 "harness": {"type": "string", "description": "Optional harness, such as codex or claude-code."},
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
+                "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
             }, "required": ["task"], "additionalProperties": false}),
         ),
         STOP_TOOL => (
@@ -714,10 +718,14 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 Some(Ok(role)) => role,
                 None => None,
             };
+            let Some(mode) = named(arguments, "mode") else {
+                return Some(Err(MODE_INVALID));
+            };
             Ok(Call::Spawn {
                 task: proposed.prompt,
                 harness: proposed.harness,
                 role,
+                mode,
             })
         }
         STOP_TOOL | MERGE_TOOL => match argument("agent") {
@@ -829,7 +837,8 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             task,
             harness,
             role,
-        } => json!({"task": task, "harness": harness, "role": role}),
+            mode,
+        } => json!({"task": task, "harness": harness, "role": role, "mode": mode}),
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
