@@ -4660,6 +4660,14 @@ impl TeamRuntime {
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        let leads = role == AgentRole::Sub
+            && super::agent_depth(&self.connection, id).is_ok_and(|depth| {
+                super::nesting(&self.connection, &stored.project_id)
+                    .is_ok_and(|nested| depth < nested.depth)
+            });
+        if leads && let Err(error) = toolchains::lead_git(&scratch) {
+            eprintln!("agent_lead_git_not_written kind={:?}", error.kind());
+        }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
         let kept = if tools {
