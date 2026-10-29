@@ -738,7 +738,7 @@ fn read_reply(path: &Path) -> Option<(String, bool)> {
     Some((reply.text, reply.error))
 }
 
-fn call_id() -> std::io::Result<String> {
+pub(crate) fn call_id() -> std::io::Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| std::io::Error::other("no random bytes"))?;
     let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -746,7 +746,7 @@ fn call_id() -> std::io::Result<String> {
     Ok(id)
 }
 
-fn call_id_valid(id: &str) -> bool {
+pub(crate) fn call_id_valid(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
@@ -766,12 +766,12 @@ fn calls(mailbox: &Path, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
 /// claim, answer and removal then goes through this handle, so a link the master swaps in
 /// for the folder's path afterwards is never followed.
 #[cfg(unix)]
-struct Mailbox(rustix::fd::OwnedFd);
+pub(crate) struct Mailbox(rustix::fd::OwnedFd);
 
 /// A live master's mailbox where no directory-relative no-follow open exists; it cannot be
 /// opened, so every use is unreachable by construction.
 #[cfg(not(unix))]
-enum Mailbox {}
+pub(crate) enum Mailbox {}
 
 #[cfg(unix)]
 impl Mailbox {
@@ -781,7 +781,7 @@ impl Mailbox {
 
     /// Opens a mailbox folder, refusing a link at its own name. Takes its path. Returns
     /// the handle or the I/O error.
-    fn open(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
         Ok(Self(rustix::fs::open(
             path,
             Self::folder_flags(),
@@ -792,7 +792,7 @@ impl Mailbox {
     /// Opens a live master's mailbox for the engine from the folder above the master's
     /// temporary folder, refusing a link at the temporary folder or the mailbox: the master
     /// can replace both. Takes the mailbox path. Returns the handle or the I/O error.
-    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open_for_engine(path: &Path) -> std::io::Result<Self> {
         let refused = || std::io::Error::other("the mailbox is not inside a folder");
         let mailbox = path.file_name().ok_or_else(refused)?;
         let holder = path.parent().ok_or_else(refused)?;
@@ -811,7 +811,7 @@ impl Mailbox {
 
     /// Lists the entries with one suffix whose names carry a valid call id and that are
     /// plain files, oldest first, never more than `MAILBOX_SCAN_MAX` entries looked at.
-    fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+    pub(crate) fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
         let Ok(listed) = rustix::fs::Dir::read_from(&self.0) else {
             return Vec::new();
         };
@@ -838,7 +838,7 @@ impl Mailbox {
 
     /// Creates a new entry 0600 for writing, failing when anything, a link included, is
     /// there. Takes its name. Returns the open file or the I/O error.
-    fn create(&self, name: &str) -> std::io::Result<File> {
+    pub(crate) fn create(&self, name: &str) -> std::io::Result<File> {
         Ok(File::from(rustix::fs::openat(
             &self.0,
             name,
@@ -847,9 +847,25 @@ impl Mailbox {
         )?))
     }
 
+    /// Opens an entry to append to, creating it 0600 when missing, without following a link
+    /// or blocking on a FIFO. Takes its name. Returns the open file or the I/O error.
+    pub(crate) fn append(&self, name: &str) -> std::io::Result<File> {
+        Ok(File::from(rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::APPEND
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?))
+    }
+
     /// Opens an entry to read without following a link or blocking on a FIFO. Takes its
     /// name. Returns the open file or the I/O error.
-    fn read(&self, name: &str) -> std::io::Result<File> {
+    pub(crate) fn read(&self, name: &str) -> std::io::Result<File> {
         Ok(File::from(rustix::fs::openat(
             &self.0,
             name,
@@ -860,13 +876,13 @@ impl Mailbox {
 
     /// Renames an entry within the mailbox; a link is moved, never followed. Takes both
     /// names. Returns the I/O error.
-    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+    pub(crate) fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
         rustix::fs::renameat(&self.0, from, &self.0, to).map_err(std::io::Error::from)
     }
 
     /// Removes an entry; a link is removed, never followed. Takes its name. Returns the
     /// I/O error.
-    fn remove(&self, name: &str) -> std::io::Result<()> {
+    pub(crate) fn remove(&self, name: &str) -> std::io::Result<()> {
         rustix::fs::unlinkat(&self.0, name, AtFlags::empty()).map_err(std::io::Error::from)
     }
 }
@@ -876,34 +892,38 @@ impl Mailbox {
 /// cannot be reached.
 #[cfg(not(unix))]
 impl Mailbox {
-    fn open(_path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open(_path: &Path) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "team_mailbox_unavailable",
         ))
     }
 
-    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open_for_engine(path: &Path) -> std::io::Result<Self> {
         Self::open(path)
     }
 
-    fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+    pub(crate) fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
         match *self {}
     }
 
-    fn create(&self, _name: &str) -> std::io::Result<File> {
+    pub(crate) fn create(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn read(&self, _name: &str) -> std::io::Result<File> {
+    pub(crate) fn append(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn rename(&self, _from: &str, _to: &str) -> std::io::Result<()> {
+    pub(crate) fn read(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn remove(&self, _name: &str) -> std::io::Result<()> {
+    pub(crate) fn rename(&self, _from: &str, _to: &str) -> std::io::Result<()> {
+        match *self {}
+    }
+
+    pub(crate) fn remove(&self, _name: &str) -> std::io::Result<()> {
         match *self {}
     }
 }
