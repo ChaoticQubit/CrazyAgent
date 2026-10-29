@@ -137,6 +137,29 @@ impl OwnerClient {
         self.attach_with(agent, &request).await
     }
 
+    /// Opens a live view like `terminal_attach`, or `terminal_attach_pane` with a pane, after
+    /// the engine sizes the agent's window to the viewer, so the screen and every output
+    /// byte after it are drawn for that size and a viewer that cannot reflow stays in step.
+    /// Takes the terminal name, the pane if any, and the viewer's columns and rows within
+    /// `SIZE_MIN..=SIZE_MAX`; fails like those, or with `terminal_size_bounds`.
+    /// Returns the session with the size the engine reports.
+    #[cfg(unix)]
+    pub async fn terminal_attach_sized(
+        &self,
+        agent: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, EngineError> {
+        let request = TerminalRequest::AttachSized {
+            agent_id: agent.clone(),
+            pane,
+            cols,
+            rows,
+        };
+        self.attach_with(agent, &request).await
+    }
+
     #[cfg(unix)]
     async fn attach_with(
         &self,
@@ -276,6 +299,7 @@ async fn act(
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::AttachSized { .. }
         | TerminalRequest::Detach => Ok(()),
     })
     .await
@@ -292,8 +316,9 @@ async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<b
 }
 
 /// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
-/// owner grant, reads the `Attach` or `AttachPane` request and attaches to the agent
-/// terminal or that one pane of its window. Takes the connection, its packet, the engine and
+/// owner grant, reads the `Attach`, `AttachPane` or `AttachSized` request, sizes the window
+/// first for `AttachSized`, and attaches to the agent terminal or that one pane of its
+/// window. Takes the connection, its packet, the engine and
 /// the authority. Writes nothing, so a refusal can still be sent whole. Returns the
 /// admission, the attached viewer, its host and the team agent the owner's prompts and
 /// typing count for, none for a pane, which is not that agent's own app.
@@ -306,11 +331,17 @@ async fn open(
     verify_peer(stream)?;
     let admission = granted(engine, authority, packet).await?;
     let frame = read_frame(stream).await?;
-    let (agent_id, pane) = match serde_json::from_slice(&frame[4..])
+    let (agent_id, pane, size) = match serde_json::from_slice(&frame[4..])
         .map_err(|_| failure("terminal_request_invalid"))?
     {
-        TerminalRequest::Attach { agent_id } => (agent_id, None),
-        TerminalRequest::AttachPane { agent_id, pane } => (agent_id, Some(pane)),
+        TerminalRequest::Attach { agent_id } => (agent_id, None, None),
+        TerminalRequest::AttachPane { agent_id, pane } => (agent_id, Some(pane), None),
+        TerminalRequest::AttachSized {
+            agent_id,
+            pane,
+            cols,
+            rows,
+        } => (agent_id, pane, Some((cols, rows))),
         _ => return Err(failure("terminal_request_invalid")),
     };
     let member = agent_id.team_agent().filter(|_| pane.is_none());
@@ -320,9 +351,14 @@ async fn open(
         None => engine_host,
     };
     let attaching = host.clone();
-    let viewer = tokio::task::spawn_blocking(move || attaching.attach(&agent_id))
-        .await
-        .map_err(|_| failure("terminal_unavailable"))??;
+    let viewer = tokio::task::spawn_blocking(move || {
+        if let Some((cols, rows)) = size {
+            attaching.resize(&agent_id, cols, rows)?;
+        }
+        attaching.attach(&agent_id)
+    })
+    .await
+    .map_err(|_| failure("terminal_unavailable"))??;
     Ok((admission, viewer, host, member))
 }
 
@@ -407,6 +443,18 @@ impl OwnerClient {
     ) -> Result<TerminalSession, EngineError> {
         Err(failure("terminal_owner_unavailable"))
     }
+
+    /// Refuses a sized view for the same reason. Takes the terminal name, pane and size,
+    /// unused. Returns `terminal_owner_unavailable`.
+    pub async fn terminal_attach_sized(
+        &self,
+        _agent: AgentId,
+        _pane: Option<String>,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<TerminalSession, EngineError> {
+        Err(failure("terminal_owner_unavailable"))
+    }
 }
 
 /// Never runs where no Unix domain socket can exist: its stream has no value, so there is
@@ -470,7 +518,11 @@ async fn watch(
                 },
                 request = asked.recv() => match request {
                     None | Some(TerminalRequest::Detach) => break "terminal_detached",
-                    Some(TerminalRequest::Attach { .. } | TerminalRequest::AttachPane { .. }) => {
+                    Some(
+                        TerminalRequest::Attach { .. }
+                        | TerminalRequest::AttachPane { .. }
+                        | TerminalRequest::AttachSized { .. },
+                    ) => {
                         break "terminal_request_invalid";
                     }
                     Some(_) if !still_granted(authority, packet, &admission) => {

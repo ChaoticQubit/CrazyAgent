@@ -1332,6 +1332,7 @@ impl ProjectScreen {
                 ProjectReply::Send(text)
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {
