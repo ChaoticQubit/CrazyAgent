@@ -67,6 +67,10 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
+/// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
+/// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
+pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -974,6 +978,53 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
+    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
+    /// access to the tmux program's folder when no system root covers it. No other Unix
+    /// socket becomes reachable, the engine's own tmux server included, and the server, the
+    /// teammate panes it forks and every engine client on it stay inside this profile. Only
+    /// Seatbelt holds it. Input: the socket (`terminal::harness_socket`) and the canonical
+    /// tmux program. Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
+    pub fn allow_tmux_server(mut self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(SandboxError::Unavailable(TMUX_SERVER_NEEDS_SEATBELT.into()));
+        }
+        let scratch = self
+            .scratch
+            .clone()
+            .ok_or_else(|| invalid("a tmux server needs the agent temp folder"))?;
+        if self
+            .sockets
+            .iter()
+            .any(|known| known.parent() == Some(scratch.as_path()))
+        {
+            return Err(invalid("the sandbox already has a tmux server"));
+        }
+        if !clean_absolute(socket)
+            || socket.parent() != Some(scratch.as_path())
+            || socket.as_os_str().len() > SOCKET_PATH_BYTES_MAX
+        {
+            return Err(invalid("the tmux socket must sit in the agent temp folder"));
+        }
+        clear_of_secrets(socket, &self.secret_paths())?;
+        if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
+            return Err(invalid("the tmux program must be a canonical file"));
+        }
+        let folder = tmux
+            .parent()
+            .ok_or_else(|| invalid("the tmux program must sit in a folder"))?;
+        let covered = SYSTEM_READ_ROOTS
+            .iter()
+            .any(|root| folder.starts_with(root))
+            || self.read_roots.iter().any(|root| folder.starts_with(root));
+        if !covered {
+            self = self.allow_read(folder)?;
+        }
+        self = self.allow_unix_socket(socket)?;
+        assert!(self.writes(socket.parent().unwrap_or(socket)));
+        Ok(self)
+    }
+
     /// The project folder this sandbox confines writes to.
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -1288,6 +1339,13 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
         let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        if let Some(clone) = &self.clone {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                seatbelt_pattern(clone),
+                regex_escape(crate::agent_git::TEAMMATES_FOLDER)
+            ));
+        }
         for worktree in &self.worktrees {
             exempt.push_str(&format!(
                 "\n    (require-not (literal \"{}\"))",
@@ -1296,7 +1354,10 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
+        assert!(
+            text.matches("(regex #\"^/").count()
+                == working.len() + other.len() + 1 + usize::from(self.clone.is_some())
+        );
         assert!(text.ends_with(")\n"));
         text
     }
