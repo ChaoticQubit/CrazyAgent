@@ -79,6 +79,7 @@ fn status() -> TeamStatus {
         token_budget: None,
         budget_used: None,
         budget_reached: false,
+        spread_accounts: false,
         show_finished: false,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
