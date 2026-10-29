@@ -33,7 +33,7 @@ pub(super) fn merge(
     let Some(id) = found else {
         return Ok((
             format!(
-                "Not merged: no harness of this project is called {shown}. Call status() for their names."
+                "Not merged: no harness of this project is called {shown}. Call inspect_work() for their names."
             ),
             true,
         ));
@@ -102,7 +102,7 @@ pub(super) fn merge(
     let Some(set) = waiting(sets, id) else {
         return Ok((
             format!(
-                "Nothing to merge: {label} has no change set waiting. Its work becomes one when its turn ends; call changes() to see what waits."
+                "Nothing to merge: {label} has no change set waiting. Its work becomes one when its turn ends; call inspect_work() to see what waits."
             ),
             true,
         ));
@@ -209,7 +209,7 @@ pub(super) fn merge(
 
 /// The change set of one harness that waits to land, if any. Takes the project's change
 /// sets and the harness. Returns its pending, conflicting or updating set.
-fn waiting(sets: Vec<ChangeSetView>, agent: i64) -> Option<ChangeSetView> {
+pub(super) fn waiting(sets: Vec<ChangeSetView>, agent: i64) -> Option<ChangeSetView> {
     let id = agent.to_string();
     sets.into_iter().find(|set| {
         set.agent.kind == AgentKind::Sub

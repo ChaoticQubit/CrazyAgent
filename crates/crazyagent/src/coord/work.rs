@@ -2,7 +2,8 @@ use super::store::{
     Change, agent_in, check_text, failure, master_of, party_columns, party_in, state,
 };
 use super::{
-    AgentId, BODY_BYTES_MAX, Finish, Overlap, Party, TITLE_BYTES_MAX, Transfer, WorkId, WorkState,
+    AgentId, BODY_BYTES_MAX, CLAIMS_PER_WORK_MAX, Finish, Overlap, Party, TITLE_BYTES_MAX,
+    Transfer, WORKS_LISTED_MAX, Work, WorkId, WorkState,
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -250,6 +251,69 @@ pub fn finish(
     super::presence::seen(tx, by, now)?;
     change.commit()?;
     Ok(next)
+}
+
+/// Lists a project's unfinished work, everything not Complete, Closed or Declined, most
+/// recently changed first, each with its claims that still hold. Takes the database, the
+/// project and the most to return, capped at `WORKS_LISTED_MAX`. Returns the work.
+pub fn works(db: &Connection, project: &ProjectId, limit: usize) -> Result<Vec<Work>, EngineError> {
+    let limit = i64::try_from(limit.min(WORKS_LISTED_MAX)).map_err(state)?;
+    let mut statement = db
+        .prepare(
+            "SELECT id FROM coord_work WHERE project=?1
+             AND state NOT IN ('complete','closed','declined')
+             ORDER BY updated DESC, id DESC LIMIT ?2",
+        )
+        .map_err(state)?;
+    let ids = statement
+        .query_map(params![project.as_str(), limit], |row| {
+            row.get::<_, WorkId>(0)
+        })
+        .map_err(state)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(state)?;
+    let mut found = Vec::with_capacity(ids.len());
+    for id in ids {
+        found.push(work(db, id)?);
+    }
+    assert!(found.len() <= WORKS_LISTED_MAX);
+    Ok(found)
+}
+
+/// Reads one unit of work with its claims that still hold. Takes the database and the
+/// work. Returns it, or `coord_work_unknown`.
+pub fn work(db: &Connection, id: WorkId) -> Result<Work, EngineError> {
+    let row: Option<(String, Option<AgentId>, String, i64)> = db
+        .query_row(
+            "SELECT title,owner_agent,state,version FROM coord_work WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((title, owner, text, version)) = row else {
+        return Err(failure("coord_work_unknown"));
+    };
+    let mut statement = db
+        .prepare(
+            "SELECT pattern FROM coord_claims WHERE work=?1 AND released IS NULL
+             ORDER BY id LIMIT ?2",
+        )
+        .map_err(state)?;
+    let limit = i64::try_from(CLAIMS_PER_WORK_MAX).map_err(state)?;
+    let claims = statement
+        .query_map(params![id, limit], |row| row.get::<_, String>(0))
+        .map_err(state)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(state)?;
+    Ok(Work {
+        id,
+        title,
+        owner,
+        state: WorkState::parse(&text).ok_or_else(|| failure("coord_state_unavailable"))?,
+        version,
+        claims,
+    })
 }
 
 /// Reads a unit of work for a transition at the version the caller read. Returns it,

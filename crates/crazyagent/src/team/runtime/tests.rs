@@ -3625,7 +3625,7 @@ fn delegate_page(fixture: &Fixture) {
     tx.commit().unwrap();
 }
 
-/// Plants one live master `wake` call in a mailbox and answers it the way the runtime's
+/// Plants one live master `update_work` message in a mailbox and answers it the way the runtime's
 /// tick does. Takes the fixture, the mailbox, a call number and the call's agent and text.
 /// Returns the reply text and whether it is an error.
 #[cfg(target_os = "macos")]
@@ -3639,7 +3639,7 @@ fn wake_call(
     let id = format!("{call:032x}");
     std::fs::write(
         mailbox.join(format!("{id}.call")),
-        serde_json::to_vec(&serde_json::json!({"tool": "wake", "agent": agent, "text": text}))
+        serde_json::to_vec(&serde_json::json!({"tool": "update_work", "to": agent, "text": text}))
             .unwrap(),
     )
     .unwrap();
@@ -3653,7 +3653,13 @@ fn wake_call(
         host: None,
     };
     assert_eq!(
-        super::super::master::serve_calls(&mut connection, &answering, mailbox).unwrap(),
+        super::super::master::serve_calls(
+            &mut connection,
+            &answering,
+            masters(&fixture.connection)[0],
+            mailbox
+        )
+        .unwrap(),
         1
     );
     let reply: serde_json::Value =

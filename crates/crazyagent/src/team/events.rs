@@ -318,8 +318,8 @@ impl EventsStatus {
         }
         if !self.finished.is_empty() {
             text.push_str(&format!(
-                "Finished sub-agents you can wake with {}(agent, text), newest first:\n",
-                super::tool::WAKE_TOOL
+                "Finished sub-agents you can wake with {}(to, text), newest first:\n",
+                super::tool::UPDATE_WORK_TOOL
             ));
             for line in &self.finished {
                 text.push_str(line);
