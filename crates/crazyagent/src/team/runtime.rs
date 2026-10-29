@@ -1880,11 +1880,11 @@ impl TeamRuntime {
         self.reap_idle(&stored)
     }
 
-    /// Lists a project's idle sub-agents that run no process between turns (a signed-in
-    /// account runs one session per turn, except a native lead's kept session, whose pane
-    /// takes typed messages), so no message can be typed into them; they get their
-    /// messages through the turn `wake_for_messages` starts. Takes the project. Returns
-    /// their ids.
+    /// Lists a project's idle sub-agents on a signed-in account, whose messages go through
+    /// a turn `wake_for_messages` starts instead of typing: one session per turn runs no
+    /// process to type into, and a native lead's kept session shares its window with its
+    /// teammates and takes only engine-started turns as tracked work. Takes the project.
+    /// Returns their ids.
     fn asleep(&self, project: &ProjectId) -> BTreeSet<i64> {
         self.workers
             .iter()
@@ -1893,7 +1893,6 @@ impl TeamRuntime {
                     && worker.role == AgentRole::Sub
                     && worker.managed
                     && !worker.live
-                    && !worker.kept_session
                     && worker.busy.is_none()
                     && !worker.stopping
             })
