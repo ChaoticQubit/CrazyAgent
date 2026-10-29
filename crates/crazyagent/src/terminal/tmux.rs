@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer, skipped_marker};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, PANES_LISTED_MAX, PaneInfo, PaneRef,
-    SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, end_except, failure,
-    pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
+    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, end_except,
+    failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 pub use servers::Servers;
@@ -327,15 +327,15 @@ impl Tmux {
 
     /// The tmux target of an agent's own pane: its window on the engine's server, where it
     /// holds only the agent's app, or on a lead's own server the pane tagged with the agent's
-    /// name at spawn, since its teammates split the lead's window. Takes the control client
-    /// and the agent. Returns the target, or `terminal_agent_unknown`.
+    /// name, the lead's at spawn and each teammate's at `adopt_pane`, since teammates split
+    /// the lead's window. Takes the control client and the agent. Returns the target, or
+    /// `terminal_agent_unknown`.
     fn agent_target(&self, control: &Control, agent: &AgentId) -> Result<String, HostError> {
         if self.confined.is_none() {
             return Ok(target(agent));
         }
         let lines = control.ask(&format!(
-            "list-panes -t {} -F '#{{pane_id}} #{{{AGENT_TAG}}}{FORMAT_END}'",
-            target(agent)
+            "list-panes -s -t {SESSION} -F '#{{pane_id}} #{{{AGENT_TAG}}}{FORMAT_END}'"
         ))?;
         lines
             .iter()
@@ -345,6 +345,15 @@ impl Tmux {
                 (tag == agent.as_str() && pane_id_valid(pane)).then(|| pane.to_owned())
             })
             .ok_or_else(|| failure("terminal_agent_unknown"))
+    }
+
+    /// Whether this lead server holds a pane tagged with the agent's name. Takes the agent.
+    /// Returns false on the engine's server or when the server cannot answer.
+    pub(super) fn holds(&self, agent: &AgentId) -> bool {
+        self.confined.is_some()
+            && self
+                .live_control()
+                .is_ok_and(|control| self.agent_target(&control, agent).is_ok())
     }
 
     /// Checks that a pane belongs to an agent terminal's own window. Takes the agent and the
@@ -1382,10 +1391,28 @@ impl Host for Tmux {
         Self::paste_on(&*self.live_control()?, &pane)
     }
 
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        if self.confined.is_none() {
+            return Err(failure(OWN_SERVER_UNAVAILABLE));
+        }
+        if agent == lead || agent.team_agent().is_none() {
+            return Err(failure("terminal_agent_invalid"));
+        }
+        let pane = self.member_pane(lead, pane)?;
+        let control = self.live_control()?;
+        if self.agent_target(&control, lead)? == pane {
+            return Err(failure("terminal_pane_unknown"));
+        }
+        control
+            .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
+            .map(drop)
+    }
+
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
-        let lines = self.live_control()?.ask(&format!(
-            "display-message -p -t {} '#{{window_activity}}{FORMAT_END}'",
-            target(agent)
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        let lines = control.ask(&format!(
+            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
         ))?;
         let activity = lines
             .first()
@@ -1404,16 +1431,20 @@ impl Host for Tmux {
         if !size.contains(&cols) || !size.contains(&rows) {
             return Err(failure("terminal_size_bounds"));
         }
-        self.live_control()?
-            .run(&format!(
-                "resize-window -t {} -x {cols} -y {rows}",
-                target(agent)
-            ))
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        control
+            .run(&format!("resize-window -t {target} -x {cols} -y {rows}"))
             .map(drop)
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        self.live_control()?
+        let control = self.live_control()?;
+        if self.confined.is_some() {
+            let pane = self.agent_target(&control, agent)?;
+            return control.run(&format!("kill-pane -t {pane}")).map(drop);
+        }
+        control
             .run(&format!("kill-window -t {}", target(agent)))
             .map(drop)
     }

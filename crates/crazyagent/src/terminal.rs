@@ -288,6 +288,16 @@ pub trait Host: Send + Sync {
         Err(failure("terminal_unavailable"))
     }
 
+    /// Gives a native teammate's pane its own name (DEC-104 K5a), so later calls by that
+    /// name, `kill` included, reach that one pane of its lead's own server. Calling it again
+    /// for the same pane changes nothing, so discovery may repeat it each pass and an engine
+    /// restart relearns the name. Takes the teammate, its lead and a pane id the lead's
+    /// `panes` lists other than the lead's own. Returns Ok, `terminal_pane_unknown`, or
+    /// `terminal_own_server_unavailable` when the lead has no server of its own.
+    fn adopt_pane(&self, _agent: &AgentId, _lead: &AgentId, _pane: &str) -> Result<(), HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
     /// Starts a native-mode lead in a tmux server of its own, started inside the Seatbelt
     /// profile its sandboxed command names, so every pane it splits off for a teammate runs
     /// under that profile and the lead never reaches the engine's own server. Takes the
@@ -388,6 +398,10 @@ impl Host for OwnServer {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.0.input_live_pane(agent, pane)
+    }
+
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.0.adopt_pane(agent, lead, pane)
     }
 
     fn spawn_own_server(

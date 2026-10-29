@@ -176,6 +176,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_live_pane(agent, pane)
     }
 
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.adopt_pane(agent, lead, pane)
+    }
+
     fn spawn_own_server(
         &self,
         agent: &AgentId,
