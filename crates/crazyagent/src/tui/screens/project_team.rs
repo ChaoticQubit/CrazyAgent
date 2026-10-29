@@ -327,7 +327,8 @@ impl TeamView {
     }
 
     /// Lists the agents in display order: live agents first with the master on
-    /// top, then stopped agents, each oldest first.
+    /// top, then stopped agents, each oldest first. Finished agents wait in the team
+    /// view's Finished box instead unless the owner chose Show (DEC-102).
     /// Takes the view. Returns the agents, empty before the first read.
     pub fn agents(&self) -> Vec<&TeamAgent> {
         self.agent_tree()
@@ -342,7 +343,12 @@ impl TeamView {
         let mut agents: Vec<&TeamAgent> = self
             .status
             .iter()
-            .flat_map(|status| status.agents.iter())
+            .flat_map(|status| {
+                status
+                    .agents
+                    .iter()
+                    .filter(|agent| status.show_finished || !agent.finished)
+            })
             .collect();
         agents.sort_by_key(|agent| {
             (
@@ -352,6 +358,38 @@ impl TeamView {
             )
         });
         crate::team::lead_tree(&agents)
+    }
+
+    /// Finds one agent of the last read by id, a finished one the list leaves out too, for
+    /// names. Takes the view and the agent id. Returns the agent, or none.
+    fn agent(&self, id: i64) -> Option<&TeamAgent> {
+        self.status
+            .iter()
+            .flat_map(|status| status.agents.iter())
+            .find(|agent| agent.id == id)
+    }
+
+    /// Counts the finished agents the list leaves for the Finished box: none under Show.
+    /// Takes the view. Returns the count.
+    fn finished_hidden(&self) -> usize {
+        self.status
+            .iter()
+            .filter(|status| !status.show_finished)
+            .flat_map(|status| status.agents.iter())
+            .filter(|agent| agent.finished)
+            .count()
+    }
+
+    /// Names who handed a task out: the lead that started it, by its name, "A lead" for one
+    /// the read does not list, else the master or the owner as the task's source says.
+    /// Takes the view and the task. Returns the name.
+    fn task_from(&self, task: &TeamTask) -> String {
+        match task.parent {
+            Some(lead) => self
+                .agent(lead)
+                .map_or_else(|| "A lead".to_owned(), |lead| lead.label.clone()),
+            None => source_word(task.source).to_owned(),
+        }
     }
 
     /// Lists the tasks in display order: unfinished first, oldest first, then
@@ -1082,9 +1120,7 @@ impl TeamView {
             WakeLevel::App => "every project".to_owned(),
             WakeLevel::Project => "this project".to_owned(),
             WakeLevel::Agent(id) => self
-                .agents()
-                .into_iter()
-                .find(|agent| agent.id == id)
+                .agent(id)
                 .map_or_else(|| "this sub-agent".to_owned(), |agent| agent.label.clone()),
         };
         let source = match (own.is_some(), edit.level) {
@@ -1849,7 +1885,8 @@ impl TeamView {
             },
         };
         let footer = self.footer(look);
-        let fixed = lines.len() + 5 + panel.len() + footer.len();
+        let hidden = self.finished_hidden();
+        let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -1905,11 +1942,22 @@ impl TeamView {
                 look,
             ));
         }
+        if hidden > 0 {
+            let finished = if hidden == 1 {
+                "1 finished agent is".to_owned()
+            } else {
+                format!("{hidden} finished agents are")
+            };
+            lines.push(Row::of(
+                format!("  {finished} in Finished: press Esc, then f."),
+                look.muted,
+            ));
+        }
         lines.push(Row::default());
 
         lines.push(Row::of("Tasks", look.heading).push(format!("  {}", tasks.len()), look.muted));
         let task_widths = if wide {
-            vec![36, 13, 8, content.saturating_sub(2 + 36 + 13 + 8 + 6)]
+            vec![28, 13, 16, content.saturating_sub(2 + 28 + 13 + 16 + 6)]
         } else {
             vec![30, 13, content.saturating_sub(2 + 30 + 13 + 4)]
         };
@@ -1933,7 +1981,7 @@ impl TeamView {
                 Row::of(harness_name(&task.harness, None), look.fg),
             ];
             if wide {
-                cells.push(Row::of(source_word(task.source), look.fg));
+                cells.push(Row::of(self.task_from(task), look.fg));
             }
             cells.push(task_status(task, self.now_ms, self.offset, look));
             lines.push(list_row(
@@ -2182,9 +2230,13 @@ impl TeamView {
                     ),
                     (None, None) => format!("Added {}", clock(task.created_ms, self.offset)),
                 };
-                let heading = match task.source {
-                    TaskSource::Master => "Task from the master",
-                    TaskSource::Owner => "Task from you",
+                let heading = match (task.parent, task.source) {
+                    (Some(lead), _) => self.agent(lead).map_or_else(
+                        || "Task from a lead".to_owned(),
+                        |lead| format!("Task from {}", lead.label),
+                    ),
+                    (None, TaskSource::Master) => "Task from the master".to_owned(),
+                    (None, TaskSource::Owner) => "Task from you".to_owned(),
                 };
                 rows.push(spread(
                     content,
@@ -2197,10 +2249,7 @@ impl TeamView {
                         .take(PANEL_TEXT_LINES)
                         .map(|line| Row::of(line, look.fg)),
                 );
-                if let Some(agent) = task
-                    .agent
-                    .and_then(|id| self.agents().into_iter().find(|agent| agent.id == id))
-                {
+                if let Some(agent) = task.agent.and_then(|id| self.agent(id)) {
                     rows.push(entry("Agent", agent.label.clone()));
                 }
                 if task.attempts > 1 {
@@ -2226,9 +2275,7 @@ impl TeamView {
     fn footer(&self, look: &Look) -> Vec<Row> {
         if let Some(ask) = self.ask {
             let label = |id: i64| {
-                self.agents()
-                    .into_iter()
-                    .find(|agent| agent.id == id)
+                self.agent(id)
                     .map_or_else(|| "that harness".to_owned(), |agent| agent.label.clone())
             };
             let question = match ask {

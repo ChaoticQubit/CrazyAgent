@@ -164,6 +164,7 @@ mod tests {
             text: text.into(),
             state,
             reply: None,
+            lead: None,
         }
     }
 

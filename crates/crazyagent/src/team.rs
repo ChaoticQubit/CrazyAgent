@@ -2504,19 +2504,18 @@ pub struct Teammate {
 
 impl TeamAgent {
     /// Tells whether this agent belongs in the Finished fold-out rather than the agents
-    /// list and team graph (DEC-102): a stopped or failed sub-agent or teammate, or an idle one that ran
-    /// a turn since it last started, holding no task and with no question waiting for the
-    /// master. The master, every starting or working agent and an idle agent still waiting
-    /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
-    /// questions the agent has waiting. Returns true for a finished agent.
+    /// list and team graph (DEC-102, narrowed by the owner after the DEC-104 trial): a
+    /// stopped or failed sub-agent or teammate holding no task and with no question waiting
+    /// for the master. The master and every live agent stay in view, an idle one waiting
+    /// for work or for its own workers too; Idle stop ends an idle agent, which then moves
+    /// here. Takes the questions the agent has waiting. Returns true for a finished agent.
     pub fn finished_with(&self, questions: u16) -> bool {
         matches!(self.role, AgentRole::Sub | AgentRole::Teammate)
             && questions == 0
             && self.task.is_none()
             && match self.status {
-                AgentStatus::Idle => self.turns > 0,
                 AgentStatus::Stopped | AgentStatus::Failed => true,
-                AgentStatus::Starting | AgentStatus::Working => false,
+                AgentStatus::Starting | AgentStatus::Idle | AgentStatus::Working => false,
             }
     }
 }
@@ -2561,7 +2560,8 @@ pub fn lead_tree<'a>(agents: &[&'a TeamAgent]) -> Vec<(&'a TeamAgent, usize)> {
     ordered
 }
 
-/// One sub-agent task as the clients poll it.
+/// One sub-agent task as the clients poll it. `parent` is the lead that handed it out, none
+/// for a task of the master or the owner, so clients name the lead it came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamTask {
     pub id: i64,
@@ -2580,6 +2580,8 @@ pub struct TeamTask {
     pub created_ms: i64,
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
+    #[serde(default)]
+    pub parent: Option<i64>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -2727,7 +2729,7 @@ pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktre
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
 /// tab, Team view and TUI say it came from the master.
-pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms";
+pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent";
 
 pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     let source: String = row.get(1)?;
@@ -2750,6 +2752,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         created_ms: row.get(12)?,
         started_ms: row.get(13)?,
         finished_ms: row.get(14)?,
+        parent: row.get(15)?,
     })
 }
 
@@ -3098,8 +3101,8 @@ pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<
     Ok(ask.unwrap_or(false))
 }
 
-/// Tells whether the owner chose to show finished agents (idle, stopped and failed
-/// sub-agents) in the agents list and team graph instead of their Finished fold-out.
+/// Tells whether the owner chose to show finished agents (stopped and failed sub-agents)
+/// in the agents list and team graph instead of their Finished fold-out.
 /// Takes a connection and the project.
 /// Returns false, the Hide default, until the owner picks Show.
 pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {

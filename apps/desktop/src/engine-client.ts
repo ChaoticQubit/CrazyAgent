@@ -778,6 +778,7 @@ export interface TeamTask {
   created_ms: number;
   started_ms: number | null;
   finished_ms: number | null;
+  parent?: number | null;
 }
 
 export interface TeamMessage {
@@ -1384,6 +1385,7 @@ export interface GraphEdge {
   text: string;
   state: GraphEdgeState;
   reply: string | null;
+  lead?: string | null;
 }
 
 /** One project's team as a tree of who leads whom, its assignment edges, and the unread

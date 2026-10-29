@@ -210,7 +210,7 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
   }
 
   return <details className="pj-stack-s" aria-label="Finished agents">
-    <summary><strong>{finishedLabel(rows.length)}</strong> <span className="pj-small pj-muted">Idle, stopped and failed agents. Their results and worktrees stay until you clean them up.</span></summary>
+    <summary><strong>{finishedLabel(rows.length)}</strong> <span className="pj-small pj-muted">Stopped and failed agents. Their results and worktrees stay until you clean them up.</span></summary>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
     <ul className="pj-rows" aria-label="Finished agents">{rows.map((row) => <li key={row.key} className="pj-task">
       <span className="pj-row between">
