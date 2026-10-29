@@ -19,6 +19,8 @@ mod owner;
 mod retire;
 #[cfg(unix)]
 mod store;
+#[cfg(unix)]
+mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -239,6 +241,24 @@ pub struct TargetBranches {
     pub current: Option<String>,
 }
 
+/// What merging a sub-agent's branch into its lead's task branch did (DEC-104 K5b):
+/// merged as the commit named, already in the task branch, or conflicting on the listed
+/// files, with the merge undone and the branch left in the lead's clone to merge by hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MergeOutcome {
+    Merged { commit: String, branch: String },
+    AlreadyMerged { branch: String },
+    Conflict { branch: String, files: Vec<String> },
+}
+
+/// The lead's own rights for the git steps of a sub-agent merge: the lead's sandbox and
+/// the profile the engine installed for it, under which every step in its clone runs.
+pub struct LeadGit<'a> {
+    pub sandbox: &'a crate::sandbox::ProjectSandbox,
+    pub profile: &'a Path,
+}
+
 /// The most local branches a target listing carries.
 pub const BRANCHES_MAX: usize = 256;
 
@@ -383,6 +403,68 @@ pub fn agent_tip(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
+/// Lists the branches of a lead's sub-agents (DEC-104 K5b) whose work is not yet in the
+/// lead's task branch, so a lead cannot report its work complete while a sub-agent's work
+/// waits. Read through the engine's checked fetch; no git runs in any agent's clone.
+/// Inputs: the engine database, the project and the lead's team agent id. Output: the
+/// unmerged branches, empty when every sub-agent's work is in, or a plain `changes_*` code.
+pub fn unmerged_sub_agents(
+    db: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(unix)]
+    return subagent::unmerged(db, project, lead);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, lead);
+        Err(unavailable())
+    }
+}
+
+/// Names and stores the branch a new sub-agent of a lead works on (DEC-104 K5b),
+/// `<task branch>--<name>` or its first free `-2` to `-64` form, before its worktree is
+/// made. Inputs: the store, the owner checkout root, the new worktree, the lead's task
+/// branch, the lead's own clone (None for a linked worktree) and the name. Output: the
+/// branch, None when the lead's branch cannot carry sub-agent branches, or a plain code.
+pub fn claim_sub_agent_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    task_branch: &str,
+    lead_clone: Option<&Path>,
+    name: &str,
+) -> Result<Option<String>, EngineError> {
+    #[cfg(unix)]
+    return subagent::claim(db, repository, worktree, task_branch, lead_clone, name);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, task_branch, lead_clone, name);
+        Err(unavailable())
+    }
+}
+
+/// Merges a sub-agent's branch into its lead's task branch in the lead's own clone
+/// (DEC-104 K5b): the engine's checked fetch reads the sub-agent's work, then git runs in
+/// the lead's clone only with the lead's rights. Inputs: the engine database, the project,
+/// the lead, the sub-agent and the lead's git. Output: what the merge did, or a plain
+/// `changes_*` refusal.
+pub fn merge_sub_agent(
+    db: &Connection,
+    project: &ProjectId,
+    lead: i64,
+    sub: i64,
+    git: &LeadGit<'_>,
+) -> Result<MergeOutcome, EngineError> {
+    #[cfg(unix)]
+    return subagent::merge(db, project, lead, sub, git);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, lead, sub, git);
         Err(unavailable())
     }
 }

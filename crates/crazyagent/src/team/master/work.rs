@@ -580,10 +580,10 @@ pub(super) fn finish_work(
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which
-/// keep its work from Complete: its native teammates' branches and teammate worktrees in
-/// its clone (S3 `teammates_landed`). Takes the database, what the answers need and the
-/// lead. Returns the names, none for an agent without a clone or teammates, or the
-/// failure that kept them from being read.
+/// keep its work from Complete: native teammates' branches and worktrees in its clone (S3
+/// `teammates_landed`) and its app-spawned sub-agents' branches (K5b). Takes the database,
+/// what the answers need and the lead. Returns the names, none for an agent without a
+/// worktree or workers, or the failure that kept them from being read.
 fn unmerged_for_finish(
     connection: &Connection,
     answering: &Answering<'_>,
@@ -607,8 +607,15 @@ fn unmerged_for_finish(
         .canonicalize()
         .map_err(|_| EngineError("changes_workspace_invalid".into()))?;
     let db = crate::landing::open(answering.landing)?;
-    crate::landing::unlanded_teammates(&db, &repository, Path::new(&worktree), Path::new(&git_dir))?
-        .map_err(|code| EngineError(code.into()))
+    let mut unmerged = crate::landing::unlanded_teammates(
+        &db,
+        &repository,
+        Path::new(&worktree),
+        Path::new(&git_dir),
+    )?
+    .map_err(|code| EngineError(code.into()))?;
+    unmerged.extend(crate::landing::unmerged_sub_agents(&db, project, lead)?);
+    Ok(unmerged)
 }
 
 /// Stops an agent for the `stop` tool through the owner's own stop (S4), so only the owner
@@ -673,66 +680,18 @@ pub(super) fn stop(
     })
 }
 
-/// Merges one of a lead's own workers for the `merge` tool (N2): the worker's waiting
-/// change set lands on the lead's branch through the lead accept path. K5b swaps this one
-/// call for its worker merge. Takes the database, what the answers need, the lead and the
-/// worker's name. Returns the sentence and whether it is a refusal.
+/// Merges one of a lead's own workers for the `merge` tool (N2, DEC-104 K5b): in the
+/// lead's own clone the worker's branch merges with the lead's own rights, in a linked
+/// worktree its waiting change set lands on the lead's branch (`sub_merge`). Takes the
+/// database, what the answers need, the lead and the worker's name. Returns the sentence
+/// and whether it is a refusal.
 pub(super) fn lead_merge(
     connection: &Connection,
     answering: &Answering<'_>,
     lead: i64,
     name: &str,
 ) -> Result<(String, bool), EngineError> {
-    accept_worker(connection, answering, lead, name)
-}
-
-/// Lands a lead's worker's waiting change set on the lead's branch through
-/// `lead_accept`, found by the worker's name. Takes the database, what the answers need,
-/// the lead and the name. Returns the sentence and whether it is a refusal.
-fn accept_worker(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    name: &str,
-) -> Result<(String, bool), EngineError> {
-    let project = &answering.stored.project_id;
-    let worker = match named_agent(connection, project, lead, name)? {
-        Some(worker) if super::is_worker(connection, project, lead, worker)? => worker,
-        _ => {
-            return Ok((
-                format!(
-                    "Not merged: none of your own workers is called {}. Call {}() for their names.",
-                    bound_text(name, AGENT_SHOWN_MAX),
-                    tool::INSPECT_WORK_TOOL
-                ),
-                true,
-            ));
-        }
-    };
-    let label = who(connection, project, Party::Agent(worker))?;
-    let listed =
-        crate::landing::open(answering.landing).and_then(|db| crate::landing::list(&db, project));
-    let sets = match listed {
-        Ok(sets) => sets,
-        Err(problem) => {
-            return Ok((
-                format!(
-                    "Not merged: the change sets could not be read ({}).",
-                    bound_text(&problem.0, 120)
-                ),
-                true,
-            ));
-        }
-    };
-    match super::merge::waiting(sets, worker) {
-        Some(set) => super::lead_accept(connection, answering, lead, set.id.as_str()),
-        None => Ok((
-            format!(
-                "Nothing to merge: {label} has no change set waiting. Its work becomes one when its turn ends."
-            ),
-            true,
-        )),
-    }
+    super::sub_merge::merge_worker(connection, answering, lead, name)
 }
 
 /// Finds the agent a call names: `master`, `lead` for the caller's own lead, or a

@@ -28,7 +28,6 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const MASTER_LABEL: &str = "Master";
-const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
 
@@ -997,12 +996,11 @@ fn is_worker(
         .map_err(state)
 }
 
-/// Starts a worker of a lead (N1) when the owner's Sub-agent depth setting allows the lead
-/// one: the task is admitted as the master's would be, against the same plan and running
-/// agent limits, and records the lead, so its worktree is cut from the lead's commit and
-/// its result goes back to the lead. Takes the database, what the answers need, the lead,
-/// the task, harness and role. Returns the sentence the lead reads and whether it is a
-/// refusal, or a SQLite failure.
+/// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
+/// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
+/// signed-in account, cut from the lead's commit and reporting back to the lead. Takes the
+/// database, what the answers need, the lead, the task, harness and role. Returns the
+/// sentence the lead reads and whether it is a refusal, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -1030,6 +1028,28 @@ fn lead_delegate(
             true,
         ));
     }
+    let lead_harness: String = tx
+        .query_row(
+            "SELECT harness FROM team_agents WHERE id=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if let Some(kind) = crate::coord::settings::HarnessKind::from_harness(&lead_harness)
+        && crate::coord::settings::mode(&tx, project, kind)?
+            == crate::coord::settings::SubagentMode::Native
+    {
+        return Ok((
+            format!(
+                "Not started: the owner set {} leads to run sub-agents as native teammates. Start them in your own agent team instead.",
+                super::bound_text(&lead_harness, AGENT_SHOWN_MAX)
+            ),
+            true,
+        ));
+    }
+    if let Err(reason) = super::caps::admit_sub_agent(&tx, project, lead) {
+        return Ok((format!("Not started: {reason}"), true));
+    }
     let admitted = super::admit(
         &tx,
         answering.access,
@@ -1054,28 +1074,71 @@ fn lead_delegate(
         params![id, lead],
     )
     .map_err(state)?;
-    let (chosen, status): (String, String) = tx
-        .query_row(
-            "SELECT harness,status FROM team_tasks WHERE id=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let chosen: String = tx
+        .query_row("SELECT harness FROM team_tasks WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
         .map_err(state)?;
+    let ready = super::launch_harness(&chosen)
+        .map(|launch| signed_in_account(&tx, answering.access, project, launch))
+        .transpose()?
+        .unwrap_or(false);
+    if !ready {
+        return Ok((
+            format!(
+                "Not started: no account in this project's pool that runs {} is signed in. Pick a harness kind with a signed-in account, or tell the master to ask the owner to sign one in.",
+                super::bound_text(&chosen, AGENT_SHOWN_MAX)
+            ),
+            true,
+        ));
+    }
     if let Some(role) = role {
         super::names::set_task_role(&tx, project, id, role)?;
     }
     tx.commit().map_err(state)?;
-    let waiting = if status == "needs_pool" {
-        " It waits until the pool has a ready account for that harness."
-    } else {
-        ""
-    };
     Ok((
         format!(
-            "Task {id} is queued for a {chosen} worker of yours, in its own worktree and branch cut from your current commit.{waiting} The engine tells you when it ends."
+            "Task {id} is queued for a {chosen} worker of yours, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
         ),
         false,
     ))
+}
+
+/// Tells whether a project's pool holds an account a harness kind can run on now
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
+/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// database, the live access, the project and the launch harness. Returns the answer, or
+/// a SQLite failure.
+fn signed_in_account(
+    connection: &Connection,
+    access: &ModelAccess,
+    project: &ProjectId,
+    launch: &str,
+) -> Result<bool, EngineError> {
+    let super::Accounts::Usable(accounts) = super::eligible_accounts(access, project, launch)
+    else {
+        return Ok(false);
+    };
+    for account in &accounts {
+        let profile = match &account.reach {
+            super::TeamReach::Endpoint { .. } => return Ok(true),
+            super::TeamReach::Managed { profile_ref, .. } => profile_ref,
+        };
+        let key = crate::memory::hash(profile.as_str().as_bytes());
+        let phase: Option<String> = connection
+            .query_row(
+                "SELECT phase FROM native_auth_operations WHERE profile_key=?1
+                 ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(state)?;
+        if phase.as_deref() == Some("authenticated_observed") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Describes a lead's own workers as `status` does the team for the master: the running
@@ -1224,67 +1287,6 @@ fn worker_set(set: &crate::landing::ChangeSetView, workers: &[i64]) -> bool {
             .id
             .parse::<i64>()
             .is_ok_and(|agent| workers.contains(&agent))
-}
-
-/// Lands one of a lead's own workers' change sets on the lead's branch (N2), unless the
-/// owner's landing setting keeps it for the owner's Accept. Takes the database, what the
-/// answers need, the lead and the change set id. Returns the sentence the lead reads and
-/// whether it is a refusal, or a SQLite failure.
-fn lead_accept(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    change_set: &str,
-) -> Result<(String, bool), EngineError> {
-    let project = &answering.stored.project_id;
-    if super::nesting(connection, project)?.lands == super::ChildLanding::Owner {
-        return Ok((OWNER_LANDS.to_owned(), true));
-    }
-    let not_yours = format!(
-        "Not accepted: no change set of your own workers has that id. Call {}() for them.",
-        tool::INSPECT_WORK_TOOL
-    );
-    let Ok(id) = crate::landing::ChangeSetId::new(change_set) else {
-        return Ok((not_yours, true));
-    };
-    let workers = workers_of(connection, project, lead)?;
-    let found = crate::landing::open(answering.landing).and_then(|db| {
-        let set = crate::landing::change_set(&db, &id)?;
-        Ok((db, set))
-    });
-    let (db, set) = match found {
-        Ok(found) => found,
-        Err(problem) => {
-            return Ok((
-                format!(
-                    "The change set could not be read ({}).",
-                    super::bound_text(&problem.0, 120)
-                ),
-                true,
-            ));
-        }
-    };
-    let view = match set {
-        Some((owner, view)) if &owner == project && worker_set(&view, &workers) => view,
-        _ => return Ok((not_yours, true)),
-    };
-    let worktree: Option<String> = connection
-        .query_row(
-            "SELECT worktree FROM team_worktrees WHERE agent=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(state)?;
-    let branch =
-        worktree.and_then(|worktree| crate::agent_git::linked_branch(Path::new(&worktree)));
-    let Some(branch) = branch else {
-        return Ok((
-            "Not accepted: your worktree has no branch of its own to land on. The owner accepts this change set in Changes.".to_owned(),
-            true,
-        ));
-    };
-    Ok(land_on_lead(&db, &id, &view.head, &branch))
 }
 
 /// Lands a worker's change set on its lead's branch as one squash commit through landing's
@@ -1699,4 +1701,5 @@ fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, S
 mod tests;
 
 mod merge;
+mod sub_merge;
 mod work;

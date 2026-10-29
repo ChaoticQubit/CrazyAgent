@@ -4125,10 +4125,59 @@ impl TeamRuntime {
         if recorded_layout(&worktree, &git_dir) == Layout::Linked {
             return format!("\nYour branch is {branch}; the engine commits your edits there.");
         }
+        if self.has_lead(agent) {
+            return format!(
+                "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
+                finish = super::tool::FINISH_WORK_TOOL
+            );
+        }
         format!(
             "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
         )
+    }
+
+    /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
+    /// branch>--<name>`, claimed and stored before its own clone or linked worktree is made,
+    /// so it commits there and its lead merges it by that name. Takes the project, the new
+    /// agent, the owner checkout root and the new worktree. Returns the branch, None when the
+    /// lead's branch cannot carry one, so the folder's own branch is used, or the reason.
+    fn sub_agent_branch(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        root: &Path,
+        worktree: &Path,
+    ) -> Result<Option<String>, String> {
+        let lead: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT w.worktree,w.git_dir FROM team_agents a
+                 JOIN team_worktrees w ON w.agent=a.parent AND w.project=a.project
+                 WHERE a.id=?1 AND a.project=?2",
+                params![id, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| with_code("the agent's lead could not be read", None))?;
+        let Some((lead_worktree, lead_git_dir)) = lead else {
+            return Err("the lead's worktree is no longer known".into());
+        };
+        let (lead_worktree, lead_git_dir) = (Path::new(&lead_worktree), Path::new(&lead_git_dir));
+        let lead_clone =
+            (lead_git_dir == crate::agent_git::git_dir(lead_worktree)).then_some(lead_worktree);
+        let name = self.task_name(project, id);
+        crate::landing::open(&self.root)
+            .and_then(|db| {
+                let Some(task) = crate::landing::agent_branch(&db, lead_worktree, lead_git_dir)?
+                else {
+                    return Ok(None);
+                };
+                crate::landing::claim_sub_agent_branch(
+                    &db, root, worktree, &task, lead_clone, &name,
+                )
+            })
+            .map_err(|e| with_code("the sub-agent's branch could not be named", Some(&e.0)))
     }
 
     /// The commit a new worker of a lead starts from (N1): the commit the lead's worktree
@@ -4319,8 +4368,10 @@ impl TeamRuntime {
             || super::agent_branches(&self.connection, &stored.project_id)
                 .map_err(|e| with_code("the agent branch setting could not be read", Some(&e.0)))?
                 == super::BranchMode::Named;
-        let task_branch = if adopt || role != AgentRole::Sub || !named || self.has_lead(id) {
+        let task_branch = if adopt || role != AgentRole::Sub || !named {
             None
+        } else if self.has_lead(id) {
+            self.sub_agent_branch(&stored.project_id, id, &root, &worktree)?
         } else {
             let name = self.task_name(&stored.project_id, id);
             let claimed = crate::landing::open(&self.root)
