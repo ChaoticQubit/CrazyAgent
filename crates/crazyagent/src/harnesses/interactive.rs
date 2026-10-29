@@ -673,10 +673,11 @@ fn tmux_on_path(env: &mut [(String, String)], tmux: &Path) -> Result<(), LaunchE
 }
 
 /// Writes the command a native-team lead's Claude Code runs for each teammate
-/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's own executable with the lead's variables, the
-/// teammates' instruction file and the lead's `--bare`, which Claude Code does not pass on,
-/// and Agent and TeamCreate denied, before the arguments Claude Code adds. It runs in a pane
-/// of the lead's own terminal, inside the lead's sandbox, so it starts no sandbox of its own.
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's executable and variables, the teammates'
+/// instruction file and `--bare`, which Claude Code does not pass on, and Agent and TeamCreate
+/// denied. Claude Code 2.1.309 appends the lead's `--mcp-config`, `--strict-mcp-config`,
+/// `--plugin-dir`, `--settings`, deny rules and tools itself, so the script repeats none of
+/// them and no MCP server loads twice. It runs in the lead's pane, inside the lead's sandbox.
 /// Inputs: the agent home, the lead's built command, its request and what its teammates get.
 /// Output: Ok, or a plain code.
 #[cfg(unix)]
