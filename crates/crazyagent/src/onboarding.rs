@@ -57,8 +57,9 @@ pub struct MappingFacts {
 /// The onboarding of one found or cloned project as clients read it: the graph and mapping
 /// steps, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
 /// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
-/// engine wrote as `overview` or one it did not write as `folder_overview`, and `finished`
-/// once the owner saved the setup, when name and draft are the saved ones.
+/// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
+/// once the owner saved the setup, when name and draft are the saved ones, and the
+/// project's own instruction files the start moved into `.crazyagent/imported/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
@@ -72,6 +73,7 @@ pub struct OnboardingView {
     pub overview: Option<String>,
     pub folder_overview: Option<String>,
     pub finished: bool,
+    pub imported: Vec<crate::instruction_files::ImportFile>,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -613,5 +615,6 @@ pub(crate) fn status(
         overview,
         folder_overview,
         finished,
+        imported: crate::instruction_files::moved(tx, project_id)?,
     }))
 }

@@ -27,10 +27,34 @@ impl OwnerController {
             .await
     }
 
-    /// Reads the owner's `~/.claude/CLAUDE.md` for a preview, only on this explicit call.
-    /// Output: the text, or `process_import_missing`.
-    pub async fn import_global_instructions(&self) -> Result<String, EngineError> {
-        self.process_client()?.import_global_instructions().await
+    /// Reads one file the owner picked for the app-wide instructions editor; nothing is
+    /// saved. Input: the absolute path. Output: the text, or a refusal such as
+    /// `process_import_unsafe`.
+    pub async fn read_instruction_file(
+        &self,
+        path: std::path::PathBuf,
+    ) -> Result<String, EngineError> {
+        self.process_client()?.read_instruction_file(path).await
+    }
+
+    /// Lists the project's own instruction files an import would copy and move, changing
+    /// nothing. Input: the project. Output: the files, empty when none.
+    pub async fn instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<crate::engine::owner::ImportFile>, EngineError> {
+        self.process_client()?.instruction_import(project).await
+    }
+
+    /// Copies the project's own instruction files into its project instructions and moves
+    /// them into `.crazyagent/imported/`. Input: the project. Output: the moved files.
+    pub async fn confirm_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<crate::engine::owner::ImportFile>, EngineError> {
+        self.process_client()?
+            .confirm_instruction_import(project)
+            .await
     }
 
     /// Reads the CrazyAgent default process for a preview.

@@ -118,10 +118,13 @@ impl NativeOwner {
                 .save_process_text(project, text)
                 .await
                 .map(ProcessReply::Saved),
-            ProcessQuery::ImportGlobal => controller
-                .import_global_instructions()
-                .await
-                .map(ProcessReply::Text),
+            ProcessQuery::ImportGlobal => match crate::projects_home::owner_home() {
+                Ok(home) => controller
+                    .read_instruction_file(home.join(".claude").join("CLAUDE.md"))
+                    .await
+                    .map(ProcessReply::Text),
+                Err(_) => Err(crate::engine::EngineError("process_import_missing".into())),
+            },
             ProcessQuery::Default => controller.default_process().await.map(ProcessReply::Text),
             ProcessQuery::Agent { project, agent } => controller
                 .agent_instructions(project, agent)

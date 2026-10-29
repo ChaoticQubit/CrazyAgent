@@ -280,8 +280,8 @@ pub(crate) fn teammate_command(home: &Path) -> PathBuf {
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
-/// engine data folder (the folder of `engine.db`), the project's recorded folder, the
-/// instruction files the owner chose for its agents and the owner's home.
+/// engine data folder (the folder of `engine.db`), the project's recorded folder and which
+/// of the owner's two instruction texts its agents get.
 /// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
@@ -291,15 +291,14 @@ pub(crate) fn agent_project(
         .map_err(unavailable)?
         .map(|setup| setup.project_folder())
         .filter(|folder| folder.is_absolute());
-    let files = crate::instruction_files::load(tx, project)
+    let mode = crate::instruction_files::load(tx, project)
         .map_err(failure)?
-        .files;
+        .mode;
     Ok(crate::agent_home::AgentProject {
         data: engine_root(tx)?,
         id: project.clone(),
         folder,
-        files,
-        owner_home: crate::instruction_files::owner_home(),
+        mode,
     })
 }
 

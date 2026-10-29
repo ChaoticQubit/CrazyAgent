@@ -4,7 +4,7 @@ use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
 use crate::coord::adoption::AgentAdoption;
 use crate::engine::owner::{Adoption, InstructionSettings};
-use crate::instruction_files::Choice;
+use crate::instruction_files::Mode;
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -197,36 +197,34 @@ pub(in crate::tui) fn message(code: &str) -> String {
     }
 }
 
-/// The owner's words for one instruction files option. Input: the option. Output: its name.
-pub(in crate::tui) fn files_label(choice: Choice) -> &'static str {
-    match choice {
-        Choice::Project => "Project files",
-        Choice::ProjectAndUser => "Project and user files",
-        Choice::None => "None",
+/// The owner's words for one instructions option. Input: the option. Output: its name.
+pub(in crate::tui) fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::ProjectOnly => "Project only",
+        Mode::AppOnly => "App only",
+        Mode::Both => "Both (app, then project appended)",
     }
 }
 
 /// The option Ctrl-F moves to from one option, in the order the page lists them.
 /// Input: the option. Output: the next one, wrapping to the first.
-fn next_files(choice: Choice) -> Choice {
-    match choice {
-        Choice::Project => Choice::ProjectAndUser,
-        Choice::ProjectAndUser => Choice::None,
-        Choice::None => Choice::Project,
+fn next_mode(mode: Mode) -> Mode {
+    match mode {
+        Mode::ProjectOnly => Mode::AppOnly,
+        Mode::AppOnly => Mode::Both,
+        Mode::Both => Mode::ProjectOnly,
     }
 }
 
-/// What one instruction files option hands the project's agents, in one sentence.
+/// What one instructions option hands the project's agents, in one sentence.
 /// Input: the option. Output: the sentence.
-fn files_note(choice: Choice) -> &'static str {
-    match choice {
-        Choice::Project => {
-            "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets."
+fn mode_note(mode: Mode) -> &'static str {
+    match mode {
+        Mode::ProjectOnly => "Agents get only this project's instructions.md.",
+        Mode::AppOnly => "Agents get only the app instructions from Settings.",
+        Mode::Both => {
+            "Agents get the app instructions, then this project's instructions.md appended."
         }
-        Choice::ProjectAndUser => {
-            "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md."
-        }
-        Choice::None => "Agents get no instruction files, only the instructions on this page.",
     }
 }
 
@@ -855,11 +853,7 @@ impl ProcessPage {
         };
         let transcripts = if settings.transcripts { "On" } else { "Off" };
         for (name, option, key) in [
-            (
-                "Agent instruction files",
-                files_label(settings.files),
-                "Ctrl-F",
-            ),
+            ("Agent instructions", mode_label(settings.mode), "Ctrl-F"),
             (
                 "Keep transcripts for headless Claude runs",
                 transcripts,
@@ -877,7 +871,7 @@ impl ProcessPage {
             ));
         }
         lines.extend(
-            wrap(files_note(settings.files), width)
+            wrap(mode_note(settings.mode), width)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme)),
         );
@@ -1054,7 +1048,7 @@ impl Screen for ProcessPage {
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('f')) if self.settings.is_some() => {
-                self.change_settings(|settings| settings.files = next_files(settings.files), ctx);
+                self.change_settings(|settings| settings.mode = next_mode(settings.mode), ctx);
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('t')) if self.settings.is_some() => {

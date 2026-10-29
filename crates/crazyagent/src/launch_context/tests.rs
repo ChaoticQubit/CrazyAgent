@@ -523,8 +523,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
