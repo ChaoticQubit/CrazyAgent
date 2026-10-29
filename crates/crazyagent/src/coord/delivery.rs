@@ -40,8 +40,8 @@ const _: () = assert!(SENDER_BYTES_MAX + 100 < HEAD_BYTES_MAX);
 
 /// What a tick needs besides the database: the terminal host team agents run in, none
 /// when they run headless; the owner typing signal; the team state folder that holds
-/// each agent's home (`crate::team::runtime::agent_home`); and the idle agents that run
-/// no process between turns, whose messages wait for the turn the engine wakes them with.
+/// each agent's home (`crate::team::runtime::agent_home`); and the idle agents whose
+/// messages wait for the turn the engine wakes them with instead of being typed in.
 pub struct Reach<'a> {
     pub host: Option<&'a dyn Host>,
     pub owner: Option<&'a OwnerTyping>,

@@ -1880,11 +1880,11 @@ impl TeamRuntime {
         self.reap_idle(&stored)
     }
 
-    /// Lists a project's idle sub-agents that run no process between turns (a signed-in
-    /// account runs one session per turn, except a native lead's kept session, whose pane
-    /// takes typed messages), so no message can be typed into them; they get their
-    /// messages through the turn `wake_for_messages` starts. Takes the project. Returns
-    /// their ids.
+    /// Lists a project's idle sub-agents on a signed-in account, whose messages go through
+    /// a turn `wake_for_messages` starts instead of typing: one session per turn runs no
+    /// process to type into, and a native lead's kept session shares its window with its
+    /// teammates and takes only engine-started turns as tracked work. Takes the project.
+    /// Returns their ids.
     fn asleep(&self, project: &ProjectId) -> BTreeSet<i64> {
         self.workers
             .iter()
@@ -1893,7 +1893,6 @@ impl TeamRuntime {
                     && worker.role == AgentRole::Sub
                     && worker.managed
                     && !worker.live
-                    && !worker.kept_session
                     && worker.busy.is_none()
                     && !worker.stopping
             })
@@ -5397,11 +5396,11 @@ impl TeamRuntime {
         self.land_turn(id, project, turn, line, &what, end)
     }
 
-    /// Lands one ended turn of an agent under its change-set turn key, as `land` does. A
-    /// lead's worker's new change set is told to its lead to merge, never to the owner,
-    /// while the owner's Lands setting is Lead (F3). Inputs: the agent, its project, the
-    /// turn key, the prompt line, what ended for the note and how it ended. Output: any
-    /// SQLite failure writing the note.
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does, and
+    /// closes its workers' sets its tip now holds (F3). A lead's worker's new change set is
+    /// told to its lead to merge, never to the owner, while Lands is Lead. Inputs: the agent,
+    /// its project, the turn key, the prompt line, what ended for the note and how it ended.
+    /// Output: any SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -5478,8 +5477,16 @@ impl TeamRuntime {
             turn,
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
-        let landed = crate::landing::open(&self.root)
-            .and_then(|db| crate::landing_turns::record(&db, &workspace, &ended));
+        let landed = crate::landing::open(&self.root).and_then(|db| {
+            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
+                eprintln!(
+                    "landing_settle_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+            landed
+        });
         let note = match landed {
             Ok(
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
