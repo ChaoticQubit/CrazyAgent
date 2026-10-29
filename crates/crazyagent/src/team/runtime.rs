@@ -387,6 +387,7 @@ pub struct TeamRuntime {
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
+    adoption_failed: Option<String>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -531,6 +532,7 @@ impl TeamRuntime {
             live_starts: BTreeMap::new(),
             resuming: None,
             naming: None,
+            adoption_failed: None,
         })
     }
 
@@ -1288,9 +1290,26 @@ impl TeamRuntime {
         self.deliver_to_leads(project)?;
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
+        self.check_adoption(project);
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
+    }
+
+    /// Checks the project's agents for missed workflow habits and sends each reminder due.
+    /// A failure leaves the team step running and is logged once by its plain code until
+    /// the check succeeds again. Input: the project. Output: unit.
+    fn check_adoption(&mut self, project: &ProjectId) {
+        let failed = crate::coord::adoption::tick(&self.connection, project, now_ms())
+            .err()
+            .map(|problem| crate::protocol::plain_code(&problem.0).to_owned());
+        if failed.is_some() && failed != self.adoption_failed {
+            eprintln!(
+                "team adoption not checked: {}",
+                failed.as_deref().unwrap_or_default()
+            );
+        }
+        self.adoption_failed = failed;
     }
 
     fn sync_pool(&mut self, stored: &StoredSetup, access: &ModelAccess) -> Result<(), EngineError> {
