@@ -203,7 +203,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         process: None,
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
@@ -244,7 +244,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         process: None,
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
@@ -351,7 +351,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         process: None,
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     }
     .with_index(&plugins);
@@ -393,7 +393,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         process: None,
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     };
 
@@ -535,7 +535,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         })),
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     };
     let home = |name: &str| {
@@ -628,7 +628,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             process: None,
             transcripts: true,
             off_tools: Vec::new(),
-            native_team: false,
+            native_team: None,
             relay: None,
         };
         let claude = home(&format!("claude-{layout:?}"));
@@ -708,7 +708,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         process: None,
         transcripts: true,
         off_tools: Vec::new(),
-        native_team: false,
+        native_team: None,
         relay: None,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
@@ -802,7 +802,7 @@ impl LeftPane {
             process: None,
             transcripts: true,
             off_tools: Vec::new(),
-            native_team: false,
+            native_team: None,
             relay: None,
         };
         let request = crate::harnesses::launch::LaunchRequest {

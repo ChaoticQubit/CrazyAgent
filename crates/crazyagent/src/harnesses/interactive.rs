@@ -4,7 +4,7 @@ use super::launch::{
     TOOLS_ON_PATH, claude_denied, codex_configuration, failure, harness_id, key_file_text,
     validate,
 };
-use crate::launch_context::Installed;
+use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
 #[cfg(unix)]
@@ -301,8 +301,11 @@ pub fn command(
         "claude-code" => {
             argv.push(executable);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
-            let teammates = installed
-                .filter(|installed| installed.native_team())
+            let team = installed.and_then(Installed::native);
+            if let Some(team) = team {
+                tmux_on_path(&mut env, &team.tmux)?;
+            }
+            let teammates = team
                 .map(|_| {
                     text(&crate::launch_context::teammate_command(
                         request.account.home(),
@@ -646,17 +649,42 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     Ok(path)
 }
 
+/// Puts the folder of the tmux program a native-team lead splits teammate panes with at the
+/// end of its PATH, unless PATH already names it, so no other program in that folder hides
+/// one the agent finds first. Inputs: the variables and the tmux program. Output: Ok, or
+/// `launch_path_invalid`.
+fn tmux_on_path(env: &mut [(String, String)], tmux: &Path) -> Result<(), LaunchError> {
+    let folder = tmux
+        .parent()
+        .map(text)
+        .transpose()?
+        .filter(|folder| !folder.is_empty() && !folder.contains(':'))
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    let (_, path) = env
+        .iter_mut()
+        .find(|(name, _)| name == "PATH")
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    if !path.split(':').any(|entry| entry == folder) {
+        path.push(':');
+        path.push_str(&folder);
+    }
+    assert!(path.split(':').any(|entry| entry == folder));
+    Ok(())
+}
+
 /// Writes the command a native-team lead's Claude Code runs for each teammate
-/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's own executable with the lead's variables, its
-/// instruction file and its `--bare`, which Claude Code does not pass on, and Agent and
-/// TeamCreate denied, before the arguments Claude Code adds. It runs in a pane of the lead's
-/// own terminal, inside the lead's sandbox, so it starts no sandbox of its own. Inputs: the
-/// agent home, the lead's built command and its request. Output: Ok, or a plain code.
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's own executable with the lead's variables, the
+/// teammates' instruction file and the lead's `--bare`, which Claude Code does not pass on,
+/// and Agent and TeamCreate denied, before the arguments Claude Code adds. It runs in a pane
+/// of the lead's own terminal, inside the lead's sandbox, so it starts no sandbox of its own.
+/// Inputs: the agent home, the lead's built command, its request and what its teammates get.
+/// Output: Ok, or a plain code.
 #[cfg(unix)]
 pub fn write_teammate_command(
     home: &Path,
     built: &InteractiveCommand,
     request: &LaunchRequest,
+    team: &NativeTeam,
 ) -> Result<(), LaunchError> {
     let refused = || failure("launch_teammate_command_invalid");
     let start = if built.argv.first().map(String::as_str) == Some(SANDBOX_EXEC) {
@@ -665,12 +693,7 @@ pub fn write_teammate_command(
         0
     };
     let executable = built.argv.get(start).ok_or_else(refused)?;
-    let instructions = built
-        .argv
-        .iter()
-        .position(|argument| argument == CLAUDE_INSTRUCTIONS_FLAG)
-        .and_then(|index| built.argv.get(index + 1))
-        .ok_or_else(refused)?;
+    let instructions = text(&team.instructions)?;
     let mut words = vec!["/usr/bin/env".to_owned()];
     words.extend(
         built
@@ -681,7 +704,7 @@ pub fn write_teammate_command(
     words.extend([
         executable.clone(),
         CLAUDE_INSTRUCTIONS_FLAG.to_owned(),
-        instructions.clone(),
+        instructions,
     ]);
     if built.argv[start..]
         .iter()
@@ -727,12 +750,13 @@ pub fn write_teammate_command(
 }
 
 /// Refuses a native-team lead where no tmux teammate panes exist. Takes the agent home,
-/// command and request, all unused. Returns `launch_teammate_command_unavailable`.
+/// command, request and team, all unused. Returns `launch_teammate_command_unavailable`.
 #[cfg(not(unix))]
 pub fn write_teammate_command(
     _home: &Path,
     _built: &InteractiveCommand,
     _request: &LaunchRequest,
+    _team: &NativeTeam,
 ) -> Result<(), LaunchError> {
     Err(failure("launch_teammate_command_unavailable"))
 }

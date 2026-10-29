@@ -75,6 +75,7 @@ const STATE: &str = "crazyagent";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 const TEAMMATE_COMMAND: &str = "teammate";
+const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 /// The most switched-off tools one launch passes to its harness, across every server.
 pub const DENIED_TOOLS_MAX: usize = 256;
 #[cfg(unix)]
@@ -122,7 +123,7 @@ pub struct AgentContext {
     process: Option<Box<Process>>,
     transcripts: bool,
     off_tools: Vec<(String, Vec<String>)>,
-    native_team: bool,
+    native_team: Option<(PathBuf, PathBuf)>,
     relay: Option<(PathBuf, PathBuf)>,
 }
 
@@ -147,8 +148,17 @@ pub struct Installed {
     hooks: bool,
     relay: bool,
     denied: Vec<String>,
-    native_team: bool,
+    native: Option<NativeTeam>,
     _lock: File,
+}
+
+/// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
+/// Claude Code splits their panes with, which is on the lead's PATH, and the instruction
+/// file each teammate starts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTeam {
+    pub tmux: PathBuf,
+    pub instructions: PathBuf,
 }
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
@@ -198,7 +208,7 @@ pub fn for_project(
         })),
         transcripts,
         off_tools,
-        native_team: false,
+        native_team: None,
         relay: None,
     })
 }
@@ -246,6 +256,20 @@ fn tool_name_plain(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+/// The part only a native lead's teammates read after the lead's own instructions: they work
+/// in the lead's agent team, and graphify finds the project graph through the lead's
+/// worktree, since its read-only graph links exist only there. Input: the lead's worktree.
+/// Output: the section, or `launch_path_invalid` for a path with a control character.
+fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
+    let folder = worktree
+        .to_str()
+        .filter(|text| !text.chars().any(|c| c.is_control() || c == '`'))
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    Ok(format!(
+        "\n## You are a teammate\n\nYou are a teammate in the Claude Code agent team of a CrazyAgent lead, which works in `{folder}`. Your own worktree has no project graph: run graphify with `--graph {folder}/graphify-out/graph.json`.\n"
+    ))
 }
 
 /// Where a native-team lead's launch writes the command Claude Code runs for each teammate
@@ -447,10 +471,12 @@ impl AgentContext {
 
     /// Lets a Claude Code lead with tools on run its own agent team (DEC-104 Q10, native mode):
     /// its launch keeps Agent and TeamCreate, starts teammates in tmux panes of its own
-    /// terminal and gives each the lead's instructions. Other harnesses and tools-off launches
-    /// ignore it. Output: the context.
-    pub fn with_native_team(mut self) -> Self {
-        self.native_team = true;
+    /// terminal and gives each the lead's instructions and where the project graph is.
+    /// Other harnesses and tools-off launches ignore it. Input: the tmux program the lead's
+    /// own server runs and the lead's worktree. Output: the context.
+    pub fn with_native_team(mut self, tmux: &Path, worktree: &Path) -> Self {
+        assert!(tmux.is_absolute() && worktree.is_absolute());
+        self.native_team = Some((tmux.to_path_buf(), worktree.to_path_buf()));
         self
     }
 
@@ -636,7 +662,7 @@ impl AgentContext {
             hooks: false,
             relay: false,
             denied: Vec::new(),
-            native_team: self.native_team && tools && id == "claude-code",
+            native: None,
             _lock: lock,
         };
         remove(&state);
@@ -733,6 +759,16 @@ impl AgentContext {
             );
             let instructions = state.join("instructions.md");
             write_private(&instructions, text.as_bytes())?;
+            if let Some((tmux, worktree)) = self.native_team.as_ref().filter(|_| tools) {
+                let mut mate = text.clone();
+                mate.push_str(&teammate_section(worktree)?);
+                let file = state.join(TEAMMATE_INSTRUCTIONS);
+                write_private(&file, mate.as_bytes())?;
+                installed.native = Some(NativeTeam {
+                    tmux: tmux.clone(),
+                    instructions: file,
+                });
+            }
             installed.arguments.extend([
                 OsString::from("--append-system-prompt-file"),
                 instructions.into_os_string(),
@@ -746,6 +782,7 @@ impl AgentContext {
         assert!(!installed.relay || id == "claude-code");
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
+        assert!(installed.native.is_none() || (id == "claude-code" && tools));
         Ok(installed)
     }
 
@@ -799,7 +836,12 @@ impl Installed {
 
     /// Tells whether this Claude Code launch is a lead that runs its own agent team.
     pub fn native_team(&self) -> bool {
-        self.native_team
+        self.native.is_some()
+    }
+
+    /// Names what this native-team lead's teammates get, none for any other launch.
+    pub fn native(&self) -> Option<&NativeTeam> {
+        self.native.as_ref()
     }
 
     /// Names where this launch wrote its files, for the record of a pane that may outlive
@@ -822,7 +864,7 @@ impl Installed {
             hooks: false,
             relay: false,
             denied: Vec::new(),
-            native_team: false,
+            native: None,
             _lock: lock,
         })
     }

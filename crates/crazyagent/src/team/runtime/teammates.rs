@@ -191,6 +191,32 @@ pub(super) fn register(
     Ok(())
 }
 
+/// Lists a lead's running teammate rows with their pane ids, so the terminal host learns
+/// each teammate's own name for its pane (`Host::adopt_pane`) on every discovery pass.
+/// Inputs: the connection, the project and the lead. Output: the rows, or a SQLite failure.
+pub(super) fn working(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<(i64, String)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id,pane FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
+             AND pane IS NOT NULL AND status IN ('starting','idle','working')
+             ORDER BY id LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows: Vec<(i64, String)> = statement
+        .query_map(params![project.as_str(), lead, MEMBERS_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= MEMBERS_MAX);
+    Ok(rows)
+}
+
 /// Stops every teammate row whose lead no longer runs, so no teammate outlives its lead in
 /// the agents list or the graph, with the reason the lead's own end gives. Inputs: the
 /// connection and the time. Output: any SQLite failure.

@@ -148,7 +148,8 @@ struct Grant {
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `native` marks a
-/// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile.
+/// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
+/// and `tmux` is that server's program, which its teammates are split off with.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -165,6 +166,7 @@ struct Plan {
     resume: Option<Resume>,
     continues: bool,
     native: bool,
+    tmux: Option<PathBuf>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -172,6 +174,17 @@ struct Plan {
 const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
 
 impl Plan {
+    /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. Other plans
+    /// keep the context as it is. Takes the context. Returns it.
+    fn team_context(&self, context: AgentContext) -> AgentContext {
+        assert_eq!(self.native, self.tmux.is_some());
+        match &self.tmux {
+            Some(tmux) => context.with_native_team(tmux, &self.working_dir),
+            None => context,
+        }
+    }
+
     /// Builds one start of the plan at `access`, the level the owner saved when this start
     /// happens (AL-2): Full access runs without Seatbelt, any other level in the agent's
     /// profile, and a clone at Sandboxed is refused, see [`confinement`]. Takes the account
@@ -932,6 +945,14 @@ impl TeamRuntime {
                 i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
                 at,
             )?;
+            for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
+                if !live.contains(&pane.as_str()) {
+                    continue;
+                }
+                if let Ok(own) = AgentId::team(teammate) {
+                    let _ = host.adopt_pane(&own, &name, &pane);
+                }
+            }
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
             if let Some(text) = ended {
@@ -3997,8 +4018,6 @@ impl TeamRuntime {
         }
     }
 
-    /// Tells whether a team agent was started by a lead agent rather than by the master,
-    /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
     /// Whether an agent starts as a native-mode lead (DEC-104): a harness the master leads,
     /// not a lead's own sub-agent, on a harness kind with native teammates whose project
     /// setting picks Native, with a terminal host to start its own server in. Takes the
@@ -4024,6 +4043,8 @@ impl TeamRuntime {
         Ok(chosen == SubagentMode::Native)
     }
 
+    /// Tells whether a team agent was started by a lead agent rather than by the master,
+    /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
     fn has_lead(&self, id: i64) -> bool {
         self.connection
             .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
@@ -4364,6 +4385,7 @@ impl TeamRuntime {
         }
         .map_err(sandboxed)?;
         let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        let mut native_tmux = None;
         if native {
             if confinement(layout, policy.access)? {
                 return Err(with_code(
@@ -4395,6 +4417,7 @@ impl TeamRuntime {
             sandbox = sandbox
                 .allow_tmux_server(&socket, &tmux)
                 .map_err(sandboxed)?;
+            native_tmux = Some(tmux);
         }
         expose_graph(&root, &working_dir);
         if let Some(engine) = self
@@ -4437,6 +4460,7 @@ impl TeamRuntime {
             resume: None,
             continues: role == AgentRole::Sub,
             native,
+            tmux: native_tmux,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -4563,45 +4587,7 @@ impl TeamRuntime {
             ),
             None => context,
         };
-        Ok(if self.native_lead(project, id, role, tools)? {
-            context.with_native_team()
-        } else {
-            context
-        })
-    }
-
-    /// Tells whether a team agent launches as a native-team lead (DEC-104 Q10): a lead the
-    /// master started, Claude Code with tools on, with a terminal host for its panes, in a
-    /// project whose owner chose Native sub-agents for Claude Code. Takes the project, the
-    /// agent, its role and tools switch. Returns the answer, or the line shown when the
-    /// agent record or the setting cannot be read.
-    fn native_lead(
-        &self,
-        project: &ProjectId,
-        id: i64,
-        role: AgentRole,
-        tools: bool,
-    ) -> Result<bool, String> {
-        if role != AgentRole::Sub || !tools || self.terminal.is_none() || self.has_lead(id) {
-            return Ok(false);
-        }
-        let harness: Option<String> = self
-            .connection
-            .query_row("SELECT harness FROM team_agents WHERE id=?1", [id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|_| with_code("the agent record could not be read", None))?;
-        let Some(kind) = harness
-            .as_deref()
-            .and_then(crate::coord::settings::HarnessKind::from_harness)
-            .filter(|kind| crate::coord::settings::native_supported(*kind))
-        else {
-            return Ok(false);
-        };
-        let mode = crate::coord::settings::mode(&self.connection, project, kind)
-            .map_err(|e| with_code("the project's sub-agent mode could not be read", Some(&e.0)))?;
-        Ok(mode == crate::coord::settings::SubagentMode::Native)
+        Ok(context)
     }
 
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
@@ -5672,13 +5658,18 @@ fn work(
             Mode::Kept { account, context } => {
                 let resume = plan.resume.as_ref();
                 plan.request(account, plan.access).and_then(|request| {
-                    AgentSession::start_resuming(request, context, plan.pane.clone(), resume)
-                        .map_err(|problem| {
-                            if resume.is_some() && problem.0 == RESUME_REFUSED {
-                                let _ = reports.send(Report::ResumeRefused);
-                            }
-                            with_code("The agent could not start", Some(&problem.0))
-                        })
+                    AgentSession::start_resuming(
+                        request,
+                        plan.team_context(context),
+                        plan.pane.clone(),
+                        resume,
+                    )
+                    .map_err(|problem| {
+                        if resume.is_some() && problem.0 == RESUME_REFUSED {
+                            let _ = reports.send(Report::ResumeRefused);
+                        }
+                        with_code("The agent could not start", Some(&problem.0))
+                    })
                 })
             }
             Mode::PerTurn { home } => {
@@ -5740,7 +5731,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    context.with_live_instructions(&instructions),
+                    plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),
@@ -5775,7 +5766,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    context.with_live_instructions(&instructions),
+                    plan.team_context(context.with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),
@@ -6115,8 +6106,12 @@ fn per_turn(
                 ));
             }
         };
-        let started =
-            AgentSession::start_resuming(request, context, plan.pane.clone(), resume.as_ref());
+        let started = AgentSession::start_resuming(
+            request,
+            plan.team_context(context),
+            plan.pane.clone(),
+            resume.as_ref(),
+        );
         let mut session = match started {
             Ok(session) => session,
             Err(problem) => {
