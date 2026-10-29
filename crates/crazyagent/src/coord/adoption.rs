@@ -18,6 +18,9 @@ pub const NUDGES_PER_TICK_MAX: usize = 16;
 pub const UNGROUNDED_MS: i64 = 10 * 60_000;
 /// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
+/// What the clients show in place of receipts and adoption counts for an agent whose
+/// launch fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank.
+pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
 /// The most bytes one adoption view takes once encoded.
 pub const VIEW_BYTES_MAX: usize = AGENTS_SHOWN_MAX * (COUNTED_TOOLS_MAX * 11 + 256)
     + COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 4)

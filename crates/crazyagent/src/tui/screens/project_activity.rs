@@ -152,6 +152,7 @@ mod tests {
             waiting: None,
             owner_questions: 0,
             no_worktree: false,
+            hookless: false,
         }
     }
 

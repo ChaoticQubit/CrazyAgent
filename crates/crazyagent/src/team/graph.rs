@@ -52,6 +52,7 @@ impl NodeKind {
 /// agent row and `pane` a native teammate's pane in its lead's terminal, for Stop.
 /// `presence`, `waiting` (on the owner in its terminal), `owner_questions` (open For: Me
 /// questions) and `no_worktree` (a teammate working with none, Q17) come from coordination.
+/// `hookless` marks an agent whose launch fires no hooks, so it has no receipts or adoption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -79,6 +80,8 @@ pub struct GraphNode {
     pub owner_questions: u16,
     #[serde(default)]
     pub no_worktree: bool,
+    #[serde(default)]
+    pub hookless: bool,
 }
 
 /// Where one handed-out task stands, as the graph draws it.
@@ -305,6 +308,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         waiting: master_state.and_then(|state| state.waiting),
         owner_questions: master.map_or(0, |agent| asked.get(&agent.id).copied().unwrap_or(0)),
         no_worktree: false,
+        hookless: master.is_some_and(|agent| agent.hookless),
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
     let adopted: BTreeSet<(i64, &str)> = status
@@ -364,6 +368,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             owner_questions: asked.get(&agent.id).copied().unwrap_or(0),
             no_worktree: agent.role == AgentRole::Teammate
                 && state.is_some_and(|state| !state.has_worktree),
+            hookless: agent.hookless,
         });
         for mate in agent.teammates.iter().filter(|mate| {
             (status.show_finished || !mate.ended)
@@ -396,6 +401,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                 waiting: None,
                 owner_questions: 0,
                 no_worktree: false,
+                hookless: agent.hookless,
             });
         }
     }

@@ -279,7 +279,8 @@ export function flagWords(flag: AdoptionFlag): string {
 }
 
 /** One agent's adoption row: who it is, whether it still runs, its count for each counted
- * tool in the settings' order, its flags now and the flags it was already reminded of. */
+ * tool in the settings' order, its flags now and the flags it was already reminded of, and
+ * whether its launch fires no hooks, so no counts or flags exist. */
 export interface AgentAdoption {
   agent: number;
   role: string;
@@ -288,6 +289,7 @@ export interface AgentAdoption {
   counts: number[];
   flags: AdoptionFlag[];
   reminded: AdoptionFlag[];
+  hookless?: boolean;
 }
 
 /** A project's workflow adoption: whether nudges are on, the counted tools that name the

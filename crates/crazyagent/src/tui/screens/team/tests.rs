@@ -42,6 +42,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         waiting: None,
         owner_questions: 0,
         no_worktree: false,
+        hookless: false,
     }
 }
 

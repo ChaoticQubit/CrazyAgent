@@ -25,6 +25,7 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         waiting: None,
         owner_questions: 0,
         no_worktree: false,
+        hookless: false,
     }
 }
 
