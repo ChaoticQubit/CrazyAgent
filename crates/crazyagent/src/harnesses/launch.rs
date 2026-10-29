@@ -439,11 +439,14 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
-    let path = if request.tools {
-        toolchains::agent_path(&homes, TOOLS_ON_PATH)
-    } else {
-        TOOLS_OFF_PATH.to_owned()
-    };
+    let path = toolchains::with_agent_git(
+        home,
+        if request.tools {
+            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+        } else {
+            TOOLS_OFF_PATH.to_owned()
+        },
+    );
     let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
         toolchains::agent_env(home, &homes)

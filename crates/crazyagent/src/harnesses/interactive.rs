@@ -252,11 +252,14 @@ pub fn command(
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
-            if request.tools {
-                toolchains::agent_path(&homes, TOOLS_ON_PATH)
-            } else {
-                TOOLS_OFF_PATH.to_owned()
-            },
+            toolchains::with_agent_git(
+                request.account.home(),
+                if request.tools {
+                    toolchains::agent_path(&homes, TOOLS_ON_PATH)
+                } else {
+                    TOOLS_OFF_PATH.to_owned()
+                },
+            ),
         ),
         ("LANG".to_owned(), LOCALE.to_owned()),
         ("LC_ALL".to_owned(), LOCALE.to_owned()),

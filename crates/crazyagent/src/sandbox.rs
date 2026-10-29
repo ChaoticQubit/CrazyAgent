@@ -1444,7 +1444,7 @@ impl ProjectSandbox {
     /// process leads its own group so the whole tree can be stopped.
     #[cfg(unix)]
     pub fn command(&self, profile: &Path, program: &Path) -> Command {
-        let base = self.base_env();
+        let base = self.base_env(false);
         let mut command = agent_command(
             profile,
             program,
@@ -1458,17 +1458,22 @@ impl ProjectSandbox {
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
-    /// C locale and [`toolchains::agent_env`].
-    fn base_env(&self) -> Vec<(&'static str, OsString)> {
+    /// C locale and [`toolchains::agent_env`]. A harness's PATH also starts with the agent's
+    /// own `git` ([`toolchains::with_agent_git`]); an engine command's never does. Takes
+    /// whether the command is a harness. Returns the variables.
+    fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
+        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = if harness {
+            toolchains::with_agent_git(&self.agent_home, path)
+        } else {
+            path
+        };
         let mut env = vec![
             ("HOME", self.agent_home.clone().into_os_string()),
             ("TMPDIR", tmp.clone().into_os_string()),
-            (
-                "PATH",
-                OsString::from(toolchains::agent_path(&homes, AGENT_PATH)),
-            ),
+            ("PATH", OsString::from(path)),
             ("LANG", OsString::from("C")),
             ("LC_ALL", OsString::from("C")),
         ];
@@ -1482,7 +1487,7 @@ impl ProjectSandbox {
     /// agent's own dirs, whatever the harness set.
     pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;
-        let base = self.base_env();
+        let base = self.base_env(true);
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), SANDBOX_EXEC);
@@ -1496,7 +1501,7 @@ impl ProjectSandbox {
     #[cfg(unix)]
     pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;
-        let base = self.base_env();
+        let base = self.base_env(false);
         let mut command = unconfined_command(program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
         assert_ne!(command.get_program(), SANDBOX_EXEC);
