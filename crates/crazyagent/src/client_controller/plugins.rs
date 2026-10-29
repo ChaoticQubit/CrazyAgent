@@ -1,6 +1,9 @@
 use super::*;
 use crate::engine::owner::{AccountSecret, OwnerClient};
-use crate::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
+use crate::coord::tool_switches::Switch;
+use crate::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crate::protocol::ProjectId;
 
 const PAGES_MAX: usize = 64;
@@ -277,5 +280,41 @@ impl OwnerController {
         project: ProjectId,
     ) -> Result<EffectivePlugins, EngineError> {
         self.plugins_client()?.project_plugins(project).await
+    }
+
+    /// Reads one server's tools with their switches. Inputs: project (none for every
+    /// project) and server id (none for the CrazyAgent built-in tools). Output: the tools.
+    pub async fn tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?.tool_switches(project, server).await
+    }
+
+    /// Sets one tool's switch in that scope. Inputs: project, server id, tool and switch.
+    /// Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?
+            .set_tool_switch(project, server, tool, switch)
+            .await
+    }
+
+    /// Clears one server's stored switches in that scope. Inputs: project and server id.
+    /// Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?
+            .restore_tool_switches(project, server)
+            .await
     }
 }

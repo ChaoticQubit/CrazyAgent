@@ -29,7 +29,11 @@ use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
-use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
+use crazyagent::coord::tool_switches::Switch;
+use crazyagent::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
@@ -885,6 +889,53 @@ async fn desktop_team_ask_before_merge(
     lock(&state)
         .await?
         .team_ask_before_merge(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_coordination(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    settings: CoordSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_coordination(&id, settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_harness_mode(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    harness: HarnessKind,
+    mode: SubagentMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_harness_mode(&id, harness, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_harness_delivery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    harness: HarnessKind,
+    delivery: Delivery,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_harness_delivery(&id, harness, delivery, generation)
         .await
 }
 
@@ -2113,6 +2164,50 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_tool_switches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .tool_switches(project_id, server_id)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_tool_switch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+    tool: String,
+    value: Switch,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_tool_switch(project_id, server_id, tool, value)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_restore_tool_switches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .restore_tool_switches(project_id, server_id)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_agents(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2696,6 +2791,9 @@ pub fn run() {
             desktop_team_agent_branches,
             desktop_team_master_branch,
             desktop_team_ask_before_merge,
+            desktop_team_coordination,
+            desktop_team_harness_mode,
+            desktop_team_harness_delivery,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
@@ -2817,6 +2915,9 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_tool_switches,
+            desktop_set_tool_switch,
+            desktop_restore_tool_switches,
             desktop_agents,
             desktop_stop_agent,
             desktop_account_use,

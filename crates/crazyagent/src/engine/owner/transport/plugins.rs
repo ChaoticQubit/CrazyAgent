@@ -1,6 +1,9 @@
 use super::*;
 use crate::engine::owner::AccountSecret;
-use crate::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, check};
+use crate::coord::tool_switches::Switch;
+use crate::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView, check,
+};
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue};
 use serde::{Deserialize, Serialize};
@@ -103,6 +106,20 @@ enum Action {
     Effective {
         project: ProjectId,
     },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -168,6 +185,9 @@ enum Reply {
     Effective {
         plugins: EffectivePlugins,
     },
+    Tools {
+        tools: Vec<ToolView>,
+    },
     Rejected {
         code: String,
     },
@@ -212,7 +232,27 @@ impl Action {
         if id.is_some_and(|id| !valid_id(id)) {
             return Err(failure("plugin_not_found"));
         }
+        if let Self::Tools {
+            server: Some(id), ..
+        }
+        | Self::SetTool {
+            server: Some(id), ..
+        }
+        | Self::RestoreTools {
+            server: Some(id), ..
+        } = self
+            && !valid_id(id)
+        {
+            return Err(failure("server_not_found"));
+        }
         match self {
+            Self::SetTool { tool, .. }
+                if tool.is_empty()
+                    || tool.len() > crate::plugins::TOOL_NAME_BYTES_MAX
+                    || tool.chars().any(char::is_control) =>
+            {
+                Err(failure("tool_unknown"))
+            }
             Self::AddSkill { folder, .. }
             | Self::ImportSkill { folder, .. }
             | Self::AddHooks { folder, .. }
@@ -252,7 +292,8 @@ impl Action {
             | Self::Server { .. }
             | Self::ImportScan
             | Self::Hooks { .. }
-            | Self::Effective { .. } => false,
+            | Self::Effective { .. }
+            | Self::Tools { .. } => false,
             Self::AddSkill { .. }
             | Self::ImportSkill { .. }
             | Self::SetSkill { .. }
@@ -267,7 +308,9 @@ impl Action {
             | Self::Switch { .. }
             | Self::SetSecret { .. }
             | Self::RemoveSecret { .. }
-            | Self::Check { .. } => true,
+            | Self::Check { .. }
+            | Self::SetTool { .. }
+            | Self::RestoreTools { .. } => true,
         }
     }
 }
@@ -558,6 +601,57 @@ impl OwnerClient {
                 return Err(failure("server_check_timeout"));
             }
             tokio::time::sleep(CHECK_POLL).await;
+        }
+    }
+
+    /// Reads one server's tools with their switches: the CrazyAgent built-in tools (no server
+    /// id) or one MCP server's checked tools, for every project (no project) or one project.
+    /// Output: each tool with its every-project switch and the project's own switch.
+    pub async fn tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::Tools { project, server }).await
+    }
+
+    /// Sets one tool's switch for every project (no project) or one project; Hidden deletes a
+    /// built-in tool until its defaults are restored. Inputs: project, server id (none for the
+    /// built-in tools), tool and switch. Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        })
+        .await
+    }
+
+    /// Clears every stored switch of one server in that scope. Inputs: project (none for every
+    /// project) and server id (none for the built-in tools). Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::RestoreTools { project, server })
+            .await
+    }
+
+    async fn tools_reply(&self, action: Action) -> Result<Vec<ToolView>, EngineError> {
+        match self
+            .plugins_exchange(action, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Tools { tools } => Ok(tools),
+            _ => Err(unknown()),
         }
     }
 
@@ -1095,6 +1189,29 @@ async fn handle(
             actor(engine, Command::Switch { project, id, on }).await?;
             Reply::Done
         }
+        Action::Tools { project, server } => {
+            tools(actor(engine, Command::Tools { project, server }).await?)?
+        }
+        Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => tools(
+            actor(
+                engine,
+                Command::SetTool {
+                    project,
+                    server,
+                    tool,
+                    switch,
+                },
+            )
+            .await?,
+        )?,
+        Action::RestoreTools { project, server } => {
+            tools(actor(engine, Command::RestoreTools { project, server }).await?)?
+        }
         Action::SetSecret { id, name } => {
             let secret = secrets
                 .into_iter()
@@ -1190,6 +1307,13 @@ async fn handle(
             Reply::Hook { hook: *hook }
         }
     })
+}
+
+fn tools(value: ResultValue) -> Result<Reply, EngineError> {
+    match value {
+        ResultValue::Tools(tools) => Ok(Reply::Tools { tools }),
+        _ => Err(unknown()),
+    }
 }
 
 fn server(value: ResultValue) -> Result<Reply, EngineError> {

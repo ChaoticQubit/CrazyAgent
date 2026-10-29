@@ -2,7 +2,10 @@ use super::{BridgeError, NativeBridge, Unlocked, failure};
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::AccountSecret;
-use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::coord::tool_switches::Switch;
+use crazyagent::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crazyagent::protocol::ProjectId;
 
 fn plugin_failure(error: EngineError) -> BridgeError {
@@ -325,6 +328,53 @@ impl NativeBridge {
             project(Some(project_id))?.ok_or_else(|| failure("plugin_project_unknown"))?;
         self.controller()?
             .project_plugins(project)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Reads one server's tools with their switches: the CrazyAgent built-in tools (no server
+    /// id) or one MCP server's checked tools, for every project (no project id) or one.
+    pub async fn tool_switches(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .tool_switches(project, server_id)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Sets one tool's switch for every project or one project; Hidden deletes a built-in
+    /// tool until its defaults are restored. Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+        tool: String,
+        value: Switch,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .set_tool_switch(project, server_id, tool, value)
+            .await
+            .map_err(plugin_failure)
+    }
+
+    /// Clears one server's stored switches for every project or one project.
+    /// Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &mut self,
+        project_id: Option<String>,
+        server_id: Option<String>,
+    ) -> Result<Vec<ToolView>, BridgeError> {
+        self.plugins_ready()?;
+        let project = project(project_id)?;
+        self.controller()?
+            .restore_tool_switches(project, server_id)
             .await
             .map_err(plugin_failure)
     }

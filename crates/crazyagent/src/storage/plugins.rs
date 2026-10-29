@@ -4,8 +4,9 @@ use crate::plugins::{
     HOOKS_PER_SCOPE_MAX, HookView, LaunchPlugins, LaunchSecret, LaunchServer,
     SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX, SKILLS_PER_SCOPE_MAX, Scope, SecretValue,
     SecretView, ServerSpec, ServerStatus, ServerView, SkillView, TOOL_NAME_BYTES_MAX,
-    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, hook_folder, skill_folder,
+    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, ToolView, hook_folder, skill_folder,
 };
+use crate::coord::tool_switches::{self, BUILTIN_TOOLS, CRAZYAGENT_SERVER, Switch};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -143,6 +144,20 @@ pub(crate) enum Command {
     Launch {
         project: ProjectId,
     },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
 }
 
 pub(crate) struct SkillChange {
@@ -165,6 +180,7 @@ pub(crate) enum ResultValue {
     HooksAdded(Vec<HookView>, PathBuf),
     Hooks(Vec<HookView>, Option<u16>),
     Hook(Box<HookView>),
+    Tools(Vec<ToolView>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1680,7 +1696,94 @@ pub(super) fn run(
         Command::Launch { project } => {
             ResultValue::Launch(Box::new(launch_set(tx, root, &project)?))
         }
+        Command::Tools { project, server } => {
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
+        Command::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => {
+            let (key, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            let Some(found) = views.iter().find(|view| view.tool == tool) else {
+                return Err(error("tool_unknown"));
+            };
+            if switch == Switch::Hidden && !found.builtin {
+                return Err(error("tool_delete_builtin_only"));
+            }
+            tool_switches::set(tx, project.as_ref(), &key, &tool, switch)?;
+            let (_, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            assert!(views.iter().any(|view| view.tool == tool));
+            ResultValue::Tools(views)
+        }
+        Command::RestoreTools { project, server } => {
+            let (key, _) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            tool_switches::restore_defaults(tx, project.as_ref(), &key)?;
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
     })
+}
+
+/// Lists one server's tools with their switches: the CrazyAgent built-in tools when no server
+/// id is given, else the checked tools of that MCP server, keyed by its name as agents see it.
+/// A project-only server is listed only in its own project.
+/// Inputs: the transaction, the plugin store root, the project (none for every project) and the
+/// server id. Output: the switch key of the server and its tools in order, or a plain refusal.
+fn tool_views(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: Option<&ProjectId>,
+    server: Option<&str>,
+) -> Result<(String, Vec<ToolView>), EngineError> {
+    if let Some(project) = project
+        && !project_exists(tx, project)?
+    {
+        return Err(error("plugin_project_unknown"));
+    }
+    let (key, tools): (String, Vec<(String, String)>) = match server {
+        None => (
+            CRAZYAGENT_SERVER.to_owned(),
+            BUILTIN_TOOLS
+                .iter()
+                .map(|(tool, description)| ((*tool).to_owned(), (*description).to_owned()))
+                .collect(),
+        ),
+        Some(id) => {
+            let record: ServerRecord = load(tx, "server", id)?;
+            let view = server_view(&record, root, None);
+            if let Scope::Project { project_id } = &view.scope
+                && project != Some(project_id)
+            {
+                return Err(error("server_not_found"));
+            }
+            let tools = view.tools.into_iter().map(|tool| (tool, String::new()));
+            (view.name, tools.collect())
+        }
+    };
+    let global: std::collections::BTreeMap<String, Switch> =
+        tool_switches::overrides(tx, None, &key)?.into_iter().collect();
+    let here: std::collections::BTreeMap<String, Switch> = match project {
+        Some(project) => tool_switches::overrides(tx, Some(project), &key)?
+            .into_iter()
+            .collect(),
+        None => std::collections::BTreeMap::new(),
+    };
+    let views: Vec<ToolView> = tools
+        .into_iter()
+        .map(|(tool, description)| ToolView {
+            server: key.clone(),
+            server_id: server.map(str::to_owned),
+            global: global.get(&tool).copied().unwrap_or(Switch::On),
+            here: here.get(&tool).copied(),
+            builtin: server.is_none(),
+            tool,
+            description,
+        })
+        .collect();
+    assert!(views.len() <= TOOLS_MAX.max(BUILTIN_TOOLS.len()));
+    assert!(project.is_some() || views.iter().all(|view| view.here.is_none()));
+    Ok((key, views))
 }
 
 #[cfg(all(test, unix))]

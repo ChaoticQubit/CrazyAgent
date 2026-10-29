@@ -1692,6 +1692,13 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
+        "coord_native_unsupported" => {
+            "This harness has no native teammates, so its sub-agents are app-spawned.".into()
+        }
+        "coord_settings_invalid" => {
+            "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
+        }
+        "coord_project_unknown" => "This project was not found.".into(),
         "team_master_branch_invalid" => {
             "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
         }
