@@ -4118,6 +4118,7 @@ impl TeamRuntime {
                 crate::agents::AgentRole::SubAgent,
                 format!("Team sub-agent {id}"),
             ),
+            AgentRole::Teammate => return Ok(None),
         };
         let agent = HostedAgent {
             project: stored.project_id.clone(),
