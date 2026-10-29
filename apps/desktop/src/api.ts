@@ -1,10 +1,11 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BranchMode, ChildLanding, PendingIntent, SwitchMode } from "./engine-client";
+import type { ActionReceipt, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -823,6 +824,26 @@ export function switchPlugin(projectId: string, id: string, on: boolean): Promis
   return call<void>("desktop_switch_plugin", { projectId, id, on });
 }
 
+/** Reads tool switches: the CrazyAgent built-in tools (no server id) or one MCP server's
+ * checked tools, for global settings (no project) or one project. Output: each tool with its
+ * every-project switch and the project's own switch. */
+export function toolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_tool_switches", { projectId: projectId ?? null, serverId });
+}
+
+/** Sets one tool's switch for every project (no project) or for one project; hidden deletes a
+ * built-in tool until Restore defaults. Inputs: project, server id (null for built-in), the tool
+ * and the switch. Output: the server's tools after the change. */
+export function setToolSwitch(projectId: string | undefined, serverId: string | null, tool: string, value: ToolSwitch): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_set_tool_switch", { projectId: projectId ?? null, serverId, tool, value });
+}
+
+/** Clears every tool switch of one server in that scope, bringing deleted built-in tools back.
+ * Inputs: project (none for every project) and server id (null for built-in). Output: the tools. */
+export function restoreToolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_restore_tool_switches", { projectId: projectId ?? null, serverId });
+}
+
 /** Lists launched agents, newest first. Input: a project id, or none for every project.
  * Output: each agent's plain status and the controls usable now. */
 export function agents(projectId?: string): Promise<Result<AgentView[]>> {
@@ -1158,6 +1179,26 @@ export function setMasterBranch(id: string, branch: string | null): Promise<Resu
  * error. */
 export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
+/** Saves a project's coordination settings: where sub-agent questions go, what overlapping
+ * claims do, workflow nudges and the counted tools. Inputs: the project id and the settings.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setCoordSettings(id: string, settings: CoordSettings): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_coordination", { id, settings, generation: nextGeneration() });
+}
+
+/** Sets how one harness kind's sub-agents start in a project: app-spawned, or native teammates
+ * where that kind has them. Inputs: the project id, the harness kind and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setHarnessMode(id: string, harness: CoordHarness, mode: SubagentMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_mode", { id, harness, mode, generation: nextGeneration() });
+}
+
+/** Sets how messages reach one harness kind's agents in a project. Inputs: the project id, the
+ * harness kind and the delivery. Output: the engine receipt, not ready, or a plain error. */
+export function setHarnessDelivery(id: string, harness: CoordHarness, delivery: Delivery): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_delivery", { id, harness, delivery, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running

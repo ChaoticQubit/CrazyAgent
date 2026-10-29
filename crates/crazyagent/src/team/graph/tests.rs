@@ -84,6 +84,7 @@ fn status() -> TeamStatus {
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         ask_before_merge: false,
+        coordination: None,
         live_switch: None,
         paused: false,
         live_master: None,

@@ -3,14 +3,18 @@ use super::new_project_input::TextInput;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
+use crate::coord::settings::{
+    COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
+    Overlaps, QuestionsTo, SubagentMode,
+};
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BranchMode, ChildLanding, DelegationPath, MASTER_BRANCH_BYTES_MAX,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    AgentRole, AgentStatus, BranchMode, ChildLanding, CoordinationView, DelegationPath,
+    MASTER_BRANCH_BYTES_MAX, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction,
+    TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -112,6 +116,42 @@ pub(in crate::tui) struct WakeEdit {
 
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
 
+/// The open coordination editor (DEC-104): the row with the cursor and, while the owner
+/// types the counted tools, their input. Rows follow `COORD_ROWS`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct CoordEdit {
+    pub row: usize,
+    pub counted: Option<TextInput>,
+}
+
+/// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
+/// where sub-agent questions go, overlapping edits, workflow nudges or the counted tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum CoordRow {
+    Mode(HarnessKind),
+    Delivery(HarnessKind),
+    Questions,
+    Overlaps,
+    Nudges,
+    Counted,
+}
+
+const COORD_ROWS: [CoordRow; 10] = [
+    CoordRow::Mode(HarnessKind::ClaudeCode),
+    CoordRow::Delivery(HarnessKind::ClaudeCode),
+    CoordRow::Mode(HarnessKind::Codex),
+    CoordRow::Delivery(HarnessKind::Codex),
+    CoordRow::Mode(HarnessKind::Rcli),
+    CoordRow::Delivery(HarnessKind::Rcli),
+    CoordRow::Questions,
+    CoordRow::Overlaps,
+    CoordRow::Nudges,
+    CoordRow::Counted,
+];
+const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
+const OVERLAPS: [Overlaps; 3] = [Overlaps::Warn, Overlaps::Block, Overlaps::Off];
+const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
+
 /// A stop the owner pressed that waits on one more key: Stop all asks y or n, Stop harness
 /// asks y or n for that agent, and Stop teammate asks which running teammate of that agent
 /// by its number, 1 to 9.
@@ -138,6 +178,7 @@ pub(in crate::tui) struct TeamView {
     pub draft: Option<Draft>,
     pub branch_edit: Option<TextInput>,
     pub wake: Option<WakeEdit>,
+    pub coord: Option<CoordEdit>,
     pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
@@ -163,6 +204,7 @@ impl TeamView {
             draft: None,
             branch_edit: None,
             wake: None,
+            coord: None,
             alerts: false,
             notice: None,
             now_ms: 0,
@@ -225,6 +267,11 @@ impl TeamView {
                         if matches!(action, TeamAction::MasterBranch { .. }) {
                             self.branch_edit = None;
                         }
+                        if matches!(action, TeamAction::CoordSettings { .. })
+                            && let Some(edit) = &mut self.coord
+                        {
+                            edit.counted = None;
+                        }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
                     }
@@ -250,7 +297,12 @@ impl TeamView {
     /// sends pastes here, keeps its own letter keys off and shows the cursor.
     /// Takes the view. Returns true while the task composer or the branch editor is open.
     pub fn typing(&self) -> bool {
-        self.draft.is_some() || self.branch_edit.is_some()
+        self.draft.is_some()
+            || self.branch_edit.is_some()
+            || self
+                .coord
+                .as_ref()
+                .is_some_and(|edit| edit.counted.is_some())
     }
 
     /// Adds pasted text to the task or the Master's branch being written.
@@ -258,6 +310,10 @@ impl TeamView {
     /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
         if let Some(input) = &mut self.branch_edit {
+            input.insert_str(text);
+            return true;
+        }
+        if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut()) {
             input.insert_str(text);
             return true;
         }
@@ -357,6 +413,9 @@ impl TeamView {
         if self.wake.is_some() {
             return self.wake_key(key);
         }
+        if self.coord.is_some() {
+            return self.coord_key(key);
+        }
         if self.alerts {
             return match key.code {
                 KeyCode::Char('s') => self.mark_seen(),
@@ -423,6 +482,10 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
+            KeyCode::Char('c') => {
+                self.open_coord();
+                TeamReply::Handled
+            }
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -1357,6 +1420,361 @@ impl TeamView {
         })
     }
 
+    /// Opens the coordination editor on its first row. Output: none; a notice while the team
+    /// is loading or when the engine sends no coordination settings.
+    fn open_coord(&mut self) {
+        match &self.status {
+            None => self.notice = Some(Notice::plain("The team is still loading.")),
+            Some(status) if status.coordination.is_none() => {
+                self.notice = Some(Notice::plain(
+                    "This engine does not report coordination settings yet.",
+                ));
+            }
+            Some(_) => {
+                self.notice = None;
+                self.coord = Some(CoordEdit {
+                    row: 0,
+                    counted: None,
+                });
+            }
+        }
+    }
+
+    /// Handles one key while the coordination editor is open: move, change the row's value,
+    /// edit or reset the counted tools, or close. Takes the key. Output: the change to send,
+    /// or Handled.
+    fn coord_key(&mut self, key: KeyEvent) -> TeamReply {
+        let Some(edit) = self.coord.clone() else {
+            return TeamReply::Ignored;
+        };
+        if edit.counted.is_some() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.coord = Some(CoordEdit {
+                        counted: None,
+                        ..edit
+                    });
+                    TeamReply::Handled
+                }
+                KeyCode::Enter => self.save_counted(),
+                _ => {
+                    if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut())
+                    {
+                        input.handle(key);
+                    }
+                    TeamReply::Handled
+                }
+            };
+        }
+        let Some(view) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.clone())
+        else {
+            self.coord = None;
+            return TeamReply::Handled;
+        };
+        let row = COORD_ROWS[edit.row];
+        match key.code {
+            KeyCode::Esc => {
+                self.coord = None;
+                TeamReply::Handled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                let next = if key.code == KeyCode::Down {
+                    (edit.row + 1).min(COORD_ROWS.len() - 1)
+                } else {
+                    edit.row.saturating_sub(1)
+                };
+                self.coord = Some(CoordEdit {
+                    row: next,
+                    counted: None,
+                });
+                TeamReply::Handled
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if row == CoordRow::Counted => {
+                let mut input = TextInput::single(COUNTED_TEXT_BYTES_MAX);
+                input.set(&view.settings.counted_tools.join(", "));
+                self.coord = Some(CoordEdit {
+                    row: edit.row,
+                    counted: Some(input),
+                });
+                TeamReply::Handled
+            }
+            KeyCode::Char('r') if row == CoordRow::Counted => {
+                let mut settings = view.settings;
+                settings.counted_tools = COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec();
+                self.coord_change(
+                    TeamAction::CoordSettings {
+                        project_id: self.project.clone(),
+                        settings,
+                    },
+                    "The counted tools are back to the defaults.".to_owned(),
+                )
+            }
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right => {
+                self.coord_step(row, &view, true)
+            }
+            KeyCode::Left => self.coord_step(row, &view, false),
+            _ => TeamReply::Handled,
+        }
+    }
+
+    /// Moves one coordination row to its next or previous choice and sends the change.
+    /// Native is offered only for a harness kind with native teammates.
+    /// Takes the row, the current settings and the direction. Output: the change, or Handled.
+    fn coord_step(&mut self, row: CoordRow, view: &CoordinationView, forward: bool) -> TeamReply {
+        let project_id = self.project.clone();
+        let harness = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
+        let mut settings = view.settings.clone();
+        let (action, done) = match row {
+            CoordRow::Mode(kind) => {
+                let Some(current) = harness(kind) else {
+                    return TeamReply::Handled;
+                };
+                let name = harness_name(kind.as_str(), None);
+                if !current.native {
+                    self.notice = Some(Notice::plain(format!(
+                        "{name} has no native teammates, so its sub-agents are app-spawned."
+                    )));
+                    return TeamReply::Handled;
+                }
+                let mode = match current.mode {
+                    SubagentMode::AppSpawned => SubagentMode::Native,
+                    SubagentMode::Native => SubagentMode::AppSpawned,
+                };
+                (
+                    TeamAction::HarnessMode {
+                        project_id,
+                        harness: kind,
+                        mode,
+                    },
+                    format!("{name} sub-agents are now {}.", mode_words(mode)),
+                )
+            }
+            CoordRow::Delivery(kind) => {
+                let Some(current) = harness(kind) else {
+                    return TeamReply::Handled;
+                };
+                let delivery = cycle(&DELIVERIES, current.delivery, forward);
+                (
+                    TeamAction::HarnessDelivery {
+                        project_id,
+                        harness: kind,
+                        delivery,
+                    },
+                    format!(
+                        "Messages to {} agents: {}.",
+                        harness_name(kind.as_str(), None),
+                        delivery_words(delivery)
+                    ),
+                )
+            }
+            CoordRow::Questions => {
+                settings.questions_to = match settings.questions_to {
+                    QuestionsTo::Lead => QuestionsTo::Me,
+                    QuestionsTo::Me => QuestionsTo::Lead,
+                };
+                let done = match settings.questions_to {
+                    QuestionsTo::Lead => "Sub-agent questions now go to their lead.",
+                    QuestionsTo::Me => "Sub-agent questions now come to you directly.",
+                };
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done.to_owned(),
+                )
+            }
+            CoordRow::Overlaps => {
+                settings.overlaps = cycle(&OVERLAPS, settings.overlaps, forward);
+                let done = format!(
+                    "Overlapping edits: {}.",
+                    overlaps_words(settings.overlaps).to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
+            CoordRow::Nudges => {
+                settings.nudges = !settings.nudges;
+                let done = if settings.nudges {
+                    "Workflow nudges are on."
+                } else {
+                    "Workflow nudges are off."
+                };
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done.to_owned(),
+                )
+            }
+            CoordRow::Counted => return TeamReply::Handled,
+        };
+        self.coord_change(action, done)
+    }
+
+    /// Sends the counted tools typed in the editor: names split on commas or spaces, each kept
+    /// once in order, checked with the engine's own rule first. Output: the change, or Handled
+    /// with the reason the list can't be saved.
+    fn save_counted(&mut self) -> TeamReply {
+        let Some(typed) = self
+            .coord
+            .as_ref()
+            .and_then(|edit| edit.counted.as_ref())
+            .map(|input| input.value().to_owned())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(mut settings) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+            .map(|view| view.settings.clone())
+        else {
+            return TeamReply::Handled;
+        };
+        let mut tools: Vec<String> = Vec::new();
+        for name in typed
+            .split([',', ' ', '\t'])
+            .filter(|name| !name.is_empty())
+        {
+            if !tools.iter().any(|kept| kept == name) {
+                tools.push(name.to_owned());
+            }
+        }
+        settings.counted_tools = tools;
+        if settings.validate().is_err() {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        }
+        self.coord_change(
+            TeamAction::CoordSettings {
+                project_id: self.project.clone(),
+                settings,
+            },
+            "Counted tools saved.".to_owned(),
+        )
+    }
+
+    fn coord_change(&mut self, action: TeamAction, done: String) -> TeamReply {
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        self.changing = Some(done);
+        TeamReply::Change(action)
+    }
+
+    /// Draws the coordination editor: one row per setting with its current choice, and the
+    /// counted tools input while it is open. Takes the edit, the content width and the look.
+    /// Returns the rows and, while typing, the cursor as a row and a column inside them.
+    fn coord_rows(
+        &self,
+        edit: &CoordEdit,
+        content: usize,
+        look: &Look,
+    ) -> (Vec<Row>, Option<(usize, usize)>) {
+        let Some(view) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+        else {
+            return (Vec::new(), None);
+        };
+        let mut rows = vec![spread(
+            content,
+            Row::of("Coordination", look.heading),
+            Row::of("This project", look.muted),
+        )];
+        for (index, row) in COORD_ROWS.into_iter().enumerate() {
+            let found = |kind: HarnessKind| view.harnesses.iter().find(|row| row.harness == kind);
+            let (label, value, note) = match row {
+                CoordRow::Mode(kind) => (
+                    format!("{} sub-agents", harness_name(kind.as_str(), None)),
+                    found(kind)
+                        .map_or("", |row| mode_words(row.mode))
+                        .to_owned(),
+                    if found(kind).is_some_and(|row| !row.native) {
+                        "  no native teammates"
+                    } else {
+                        ""
+                    },
+                ),
+                CoordRow::Delivery(kind) => (
+                    format!("Messages to {} agents", harness_name(kind.as_str(), None)),
+                    found(kind)
+                        .map_or("", |row| delivery_words(row.delivery))
+                        .to_owned(),
+                    "",
+                ),
+                CoordRow::Questions => (
+                    "Sub-agent questions go to".to_owned(),
+                    match view.settings.questions_to {
+                        QuestionsTo::Lead => "Their lead",
+                        QuestionsTo::Me => "Me directly",
+                    }
+                    .to_owned(),
+                    "",
+                ),
+                CoordRow::Overlaps => (
+                    "Overlapping edits".to_owned(),
+                    overlaps_words(view.settings.overlaps).to_owned(),
+                    "",
+                ),
+                CoordRow::Nudges => (
+                    "Workflow nudges".to_owned(),
+                    if view.settings.nudges { "On" } else { "Off" }.to_owned(),
+                    "",
+                ),
+                CoordRow::Counted => (
+                    "Counted tools".to_owned(),
+                    view.settings.counted_tools.join(", "),
+                    "",
+                ),
+            };
+            rows.push(list_row(
+                Row::of(label, look.fg)
+                    .pad(32)
+                    .push(value, look.heading)
+                    .push(note, look.muted),
+                content,
+                edit.row == index,
+                true,
+                look,
+            ));
+        }
+        let Some(input) = &edit.counted else {
+            return (rows, None);
+        };
+        let inner = content.saturating_sub(4).max(2);
+        let (lines, (line, column)) = input.wrap(inner - 1);
+        let text = if input.value().is_empty() {
+            Row::of("No tools counted", look.muted)
+        } else {
+            Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
+        };
+        let cursor = (rows.len(), 2 + column);
+        rows.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(text.pad(inner))
+                .push(" ", Style::new())
+                .push("]", look.accent),
+        );
+        assert!(cursor.0 < rows.len());
+        (rows, Some(cursor))
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -1424,7 +1842,10 @@ impl TeamView {
                 (rows, Some(at))
             }
             (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
-            (None, None, None) => (self.panel(content, accounts, look), None),
+            (None, None, None) => match &self.coord {
+                Some(edit) => self.coord_rows(edit, content, look),
+                None => (self.panel(content, accounts, look), None),
+            },
         };
         let footer = self.footer(look);
         let fixed = lines.len() + 5 + panel.len() + footer.len();
@@ -1891,6 +2312,19 @@ impl TeamView {
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
+        if let Some(edit) = &self.coord {
+            if edit.counted.is_some() {
+                return vec![("Enter", "Save"), ("Esc", "Close")];
+            }
+            let mut help = vec![("\u{2191}\u{2193}", "Move")];
+            if COORD_ROWS[edit.row] == CoordRow::Counted {
+                help.extend([("Enter", "Edit tools"), ("r", "Default tools")]);
+            } else {
+                help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]);
+            }
+            help.push(("Esc", "Close"));
+            return help;
+        }
         if self.wake.is_some() {
             return vec![
                 ("\u{2191}\u{2193}", "Move"),
@@ -1945,6 +2379,7 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("g", "Ask before merge"),
+            ("c", "Coordination"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1998,6 +2433,42 @@ fn budget_words(budget: Option<u64>, used: Option<u64>) -> String {
             crate::team::token_words(used.unwrap_or(0)),
             crate::team::token_words(budget)
         ),
+    }
+}
+
+/// The choice after or before `current` in `all`, wrapping at both ends.
+/// Takes the choices, the current one and the direction. Returns the next choice.
+fn cycle<T: Copy + PartialEq>(all: &[T], current: T, forward: bool) -> T {
+    assert!(!all.is_empty());
+    let at = all.iter().position(|item| *item == current).unwrap_or(0);
+    let next = if forward {
+        (at + 1) % all.len()
+    } else {
+        (at + all.len() - 1) % all.len()
+    };
+    all[next]
+}
+
+fn mode_words(mode: SubagentMode) -> &'static str {
+    match mode {
+        SubagentMode::AppSpawned => "app-spawned",
+        SubagentMode::Native => "native teammates",
+    }
+}
+
+fn delivery_words(delivery: Delivery) -> &'static str {
+    match delivery {
+        Delivery::Auto => "Auto: native, typing as fallback",
+        Delivery::NativeOnly => "Native only",
+        Delivery::TypingOnly => "Typing only",
+    }
+}
+
+fn overlaps_words(overlaps: Overlaps) -> &'static str {
+    match overlaps {
+        Overlaps::Warn => "Warn",
+        Overlaps::Block => "Block",
+        Overlaps::Off => "Off",
     }
 }
 
@@ -2068,6 +2539,13 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_teammate_not_found" => "That teammate has already ended.".into(),
         "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
         "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
+        "coord_native_unsupported" => {
+            "This harness has no native teammates, so its sub-agents are app-spawned.".into()
+        }
+        "coord_settings_invalid" => {
+            "Count at most 32 tools, each named once with letters, digits, _, - or *.".into()
+        }
+        "coord_project_unknown" => "This project was not found.".into(),
         "team_master_branch_invalid" => {
             "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
         }
