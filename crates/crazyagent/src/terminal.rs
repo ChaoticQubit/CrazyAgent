@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +13,8 @@ pub mod tmux;
 pub mod windows;
 
 pub const FOLDER: &str = "terminal";
+pub const HARNESS_SOCKET: &str = "tmux.sock";
+const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
 pub const PROMPT_BYTES_MAX: usize = 4096;
@@ -321,11 +323,27 @@ pub fn platform(engine_root: &Path) -> (bool, Arc<dyn Host>) {
 /// terminal it ends. Takes the engine root and the program, none when tmux is missing.
 /// Returns the host; nothing starts until its first call.
 #[cfg(unix)]
-pub fn tmux_host(engine_root: &Path, program: Option<std::path::PathBuf>) -> Arc<dyn Host> {
+pub fn tmux_host(engine_root: &Path, program: Option<PathBuf>) -> Arc<dyn Host> {
     Arc::new(kept::LastScreenHost::new(tmux::Tmux::open(
         program,
         &engine_root.join(FOLDER),
     )))
+}
+
+/// The socket of a native-mode lead's own tmux server: `tmux.sock` in the lead's short private
+/// temp folder, which only that lead's sandbox may bind or reach, never the engine's server.
+/// The engine reaches it only through a tmux client started inside the lead's own profile,
+/// since a tmux server can make any client run a command; never connect a plain client.
+/// Takes the engine root and the lead. Returns the path, or `terminal_agent_invalid` for a
+/// name that is not a team agent.
+pub fn harness_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let home = crate::team::runtime::agent_home(&engine_root.join("team"), id);
+    let socket = crate::sandbox::toolchains::tmp_path(&home).join(HARNESS_SOCKET);
+    assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
+    Ok(socket)
 }
 
 /// Opens this platform's terminal host for an engine: the ConPTY host on Windows, keeping the

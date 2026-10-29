@@ -1,4 +1,5 @@
 use super::buffer::{Feed, buffer, skipped_marker};
+pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
     TerminalStream, VIEWERS_MAX, end_except, failure,
