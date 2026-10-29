@@ -703,7 +703,7 @@ export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generatio
   return invoke<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
 }
 
-export type TeamRole = "master" | "sub";
+export type TeamRole = "master" | "sub" | "teammate";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
 export type TeamMessageAuthor = "owner" | "master" | "engine";
@@ -745,6 +745,7 @@ export interface TeamAgent {
   parent?: number | null;
   owner_stopped?: boolean;
   teammates?: Teammate[];
+  pane?: string | null;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,

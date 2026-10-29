@@ -673,6 +673,7 @@ impl TeamRuntime {
                     && self.live(&project, AgentRole::Sub, None)
                         < usize::from(stored.team.max_agents.saturating_sub(1))
             }),
+            AgentRole::Teammate => false,
         };
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
@@ -856,6 +857,7 @@ impl TeamRuntime {
                 [at],
             )
             .map_err(error)?;
+        teammates::end_orphans(&self.connection, at)?;
         let harnesses: Vec<(i64, ProjectId)> = self
             .workers
             .iter()
@@ -889,6 +891,15 @@ impl TeamRuntime {
                 .filter(|pane| pane.pid != lead.pid && !pane.dead)
                 .collect();
             self.teammates_seen(&project, agent, &team, at)?;
+            let live: Vec<&str> = team.iter().map(|pane| pane.id.as_str()).collect();
+            teammates::register(
+                &self.connection,
+                &project,
+                agent,
+                &agent_home(&self.state, agent),
+                &live,
+                at,
+            )?;
             let cap = super::teammate_cap(&self.connection, &project)?;
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
@@ -1276,7 +1287,15 @@ impl TeamRuntime {
             return Ok(());
         };
         match (role, wakes, again) {
-            (AgentRole::Sub, false, None) | (AgentRole::Master, _, None) => return Ok(()),
+            (AgentRole::Sub, false, None)
+            | (AgentRole::Master, _, None)
+            | (AgentRole::Teammate, _, None) => return Ok(()),
+            (AgentRole::Teammate, _, Some(_)) => {
+                return self.note(
+                    &project,
+                    "That teammate was not restarted: a teammate starts only from its harness.",
+                );
+            }
             (AgentRole::Sub, false, Some(_)) => {
                 return self.note(
                     &project,
@@ -1303,6 +1322,7 @@ impl TeamRuntime {
                 );
             }
             AgentRole::Master => (stored.team.master.clone(), stored.team.master_tools),
+            AgentRole::Teammate => return Ok(()),
             AgentRole::Sub => match super::slot(&stored.team, &harness) {
                 None => {
                     return self.note(
@@ -3095,6 +3115,7 @@ impl TeamRuntime {
                         Some(limit) => limit,
                         None => continue,
                     },
+                    AgentRole::Teammate => continue,
                 };
                 if worker.idle_since.elapsed() < limit
                     || (worker.role == AgentRole::Sub && warm && live_subs <= floor)
@@ -6318,6 +6339,8 @@ pub fn agents(
         .collect::<Result<_, _>>()
         .map_err(error)
 }
+
+mod teammates;
 
 #[cfg(all(test, unix))]
 #[path = "runtime/tests.rs"]

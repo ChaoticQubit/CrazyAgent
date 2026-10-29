@@ -205,7 +205,7 @@ impl Usage {
         let rows: Vec<(i64, String, String, String, Option<String>)> = {
             let mut statement = match self.db.prepare(
                 "SELECT id,project,role,harness,connection FROM team_agents
-                 WHERE status IN ('starting','idle','working') OR stopped_ms>=?1
+                 WHERE role<>'teammate' AND (status IN ('starting','idle','working') OR stopped_ms>=?1)
                  ORDER BY id DESC LIMIT ?2",
             ) {
                 Ok(statement) => statement,
