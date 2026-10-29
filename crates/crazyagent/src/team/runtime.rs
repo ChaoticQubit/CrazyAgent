@@ -1852,16 +1852,19 @@ impl TeamRuntime {
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
         super::events::forward_to_parents(&self.connection, project, now_ms())?;
+        let asleep = self.asleep(project);
         let reach = crate::coord::delivery::Reach {
             host: self.terminal.as_deref(),
             owner: self.agents.as_deref().map(Agents::typing),
             state: &self.state,
+            asleep: &asleep,
         };
         self.deliveries
             .tick_logged(&self.connection, project, now_ms(), &reach);
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
+        self.wake_for_messages(&stored, access, &asleep)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -1870,6 +1873,95 @@ impl TeamRuntime {
     /// Checks the project's agents for missed workflow habits and sends each reminder due.
     /// A failure leaves the team step running and is logged once by its plain code until
     /// the check succeeds again. Input: the project. Output: unit.
+    /// Lists a project's idle sub-agents that run no process between turns (a signed-in
+    /// account runs one session per turn), so no message can be typed into them; they get
+    /// their messages through the turn `wake_for_messages` starts. Takes the project.
+    /// Returns their ids.
+    fn asleep(&self, project: &ProjectId) -> BTreeSet<i64> {
+        self.workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && worker.role == AgentRole::Sub
+                    && worker.managed
+                    && !worker.live
+                    && worker.busy.is_none()
+                    && !worker.stopping
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// Gives each agent from `asleep` with a waking coordination message a task pinned to it
+    /// with `WAKE_TASK`, which `dispatch` runs on that agent with its messages under
+    /// "Messages for you", marking them Delivered; one pinned task at a time, a worker's
+    /// reporting to its lead. A refusal is logged once; the messages stay Sent for it.
+    /// Takes the setup, live model access and the agents. Returns any SQLite failure.
+    fn wake_for_messages(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        asleep: &BTreeSet<i64>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        for &agent in asleep {
+            if !crate::coord::delivery::waking(&self.connection, agent)? {
+                continue;
+            }
+            let Some(harness) = self.workers.get(&agent).map(|w| w.harness.clone()) else {
+                continue;
+            };
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            let pinned: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                     WHERE p.project=?1 AND p.agent=?2 AND t.status IN ('queued','needs_pool','running'))",
+                    params![project.as_str(), agent],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if pinned {
+                continue;
+            }
+            let admitted = super::admit(
+                &tx,
+                access,
+                stored,
+                Some(&harness),
+                super::master::WAKE_TASK,
+                TaskSource::Master,
+                None,
+                now_ms(),
+            )?;
+            let task = match admitted {
+                Ok(task) => task,
+                Err(code) => {
+                    drop(tx);
+                    if self.deliveries.wake_refused(agent, Some(code)) {
+                        eprintln!("team agent {agent} not woken for its messages: {code}");
+                    }
+                    continue;
+                }
+            };
+            tx.execute(
+                "INSERT OR REPLACE INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+                params![task, project.as_str(), agent],
+            )
+            .map_err(error)?;
+            tx.execute(
+                "UPDATE team_tasks SET parent=(SELECT parent FROM team_agents WHERE id=?2) WHERE id=?1",
+                params![task, agent],
+            )
+            .map_err(error)?;
+            tx.commit().map_err(error)?;
+            self.deliveries.wake_refused(agent, None);
+        }
+        Ok(())
+    }
+
     fn check_adoption(&mut self, project: &ProjectId) {
         let failed = crate::coord::adoption::tick(&self.connection, project, now_ms())
             .err()
@@ -3172,7 +3264,11 @@ impl TeamRuntime {
                 work: None,
                 reply_to: None,
                 body: text,
-                idempotency_key: Some(format!("lead-results-{}", ready[0].0)),
+                idempotency_key: Some(format!(
+                    "{}{}",
+                    crate::coord::delivery::RESULTS_KEY,
+                    ready[0].0
+                )),
             };
             match crate::coord::send(&self.connection, message, now_ms()) {
                 Ok(_) => {}

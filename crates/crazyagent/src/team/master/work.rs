@@ -24,7 +24,7 @@ const CLAIMS_SHOWN_MAX: usize = 300;
 const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
-const WAKE_TASK: &str = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
+pub(crate) const WAKE_TASK: &str = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
 
 const _: () = assert!(MESSAGES_SHOWN_MAX <= coord::PENDING_MAX);
 const _: () = assert!(SENT_SHOWN_MAX <= coord::PENDING_MAX);
