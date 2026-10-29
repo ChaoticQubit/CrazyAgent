@@ -59,6 +59,15 @@ impl OwnerController {
             .await
     }
 
+    /// Reads one project's workflow adoption: whether nudges are on, the counted tools and
+    /// each recent agent's counts, flags and reminders. Input: the project. Output: the view.
+    pub async fn adoption(
+        &self,
+        project: ProjectId,
+    ) -> Result<crate::engine::owner::Adoption, EngineError> {
+        self.process_client()?.adoption(project).await
+    }
+
     /// Reads what one team agent received at its last launch. Inputs: the project and the
     /// agent id, or none for the project's newest master. Output: the read-only view.
     pub async fn agent_instructions(

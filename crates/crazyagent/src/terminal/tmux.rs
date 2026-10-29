@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const SESSION: &str = "crazyagent";
 pub const SOCKET: &str = "tmux.sock";
@@ -1137,6 +1137,23 @@ impl Host for Tmux {
             target(agent)
         ))?;
         Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+    }
+
+    fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
+        let lines = self.live_control()?.ask(&format!(
+            "display-message -p -t {} '#{{window_activity}}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let activity = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| failure("terminal_command_failed"))?
+            .as_secs();
+        Ok(Some(Duration::from_secs(now.saturating_sub(activity))))
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {

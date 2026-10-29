@@ -128,6 +128,66 @@ fn teammates_landed(
     Ok(None)
 }
 
+/// Names the teammate branches and teammate worktrees of a harness's clone whose work is
+/// not in its task branch yet (DEC-104), by the fetch and ancestry test of
+/// `teammates_landed`, listing each one instead of stopping at the first. Inputs: the
+/// store, the owner checkout root, the worktree and its git folder. Output: the names,
+/// none for a linked worktree or a clone without teammates, or the code that kept the
+/// clone from being read.
+pub(super) fn unlanded_teammates(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Result<Vec<String>, &'static str>, EngineError> {
+    let (tip, tips) = match fetch_clone(db, repository, worktree, git_dir)? {
+        None => return Ok(Ok(Vec::new())),
+        Some(Err(code)) => return Ok(Err(code)),
+        Some(Ok(fetched)) => fetched,
+    };
+    let branch = clone_branch(db, worktree)?;
+    let Ok(teammates) = clone::teammates(worktree, &branch) else {
+        return Ok(Err("cleanup_worktree_unreadable"));
+    };
+    if teammates.is_empty() && tips.is_empty() {
+        return Ok(Ok(Vec::new()));
+    }
+    let shared = shared(repository)?;
+    let tip = tip.as_str();
+    let landed = |commit: &str| shared.test(&["merge-base", "--is-ancestor", commit, tip]);
+    let mut unlanded = Vec::new();
+    for (name, teammate_tip) in &tips {
+        if !landed(teammate_tip)? {
+            unlanded.push(name.clone());
+        }
+    }
+    for teammate in &teammates {
+        let commit = match &teammate.head {
+            clone::TeammateHead::Branch(name)
+                if tips.iter().any(|(fetched, _)| fetched == name) =>
+            {
+                continue;
+            }
+            clone::TeammateHead::Branch(_) => None,
+            clone::TeammateHead::Commit(id) => shared.commit_of(id)?,
+        };
+        let held = match commit {
+            Some(commit) => landed(&commit)?,
+            None => false,
+        };
+        if !held {
+            let folder = teammate
+                .folder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            unlanded.push(format!("{}/{folder}", agent_git::TEAMMATES_FOLDER));
+        }
+    }
+    assert!(unlanded.len() <= tips.len() + teammates.len());
+    Ok(Ok(unlanded))
+}
+
 /// Says whether an agent's own clone holds exactly its branch tip, never reading the
 /// clone's git folder: the owner repository's git, with the clone as its work tree and a
 /// private index in the owner's git folder filled from the tip the engine fetched, runs

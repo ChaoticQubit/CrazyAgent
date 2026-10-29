@@ -18,6 +18,8 @@ use bridge::{
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::{AccountUse, AgentView};
 use crazyagent::config::ModelAccessEdit;
+use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
+use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
@@ -29,7 +31,9 @@ use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
-use crazyagent::plugins::{EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView};
+use crazyagent::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
@@ -889,6 +893,53 @@ async fn desktop_team_ask_before_merge(
 }
 
 #[tauri::command]
+async fn desktop_team_coordination(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    settings: CoordSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_coordination(&id, settings, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_harness_mode(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    harness: HarnessKind,
+    mode: SubagentMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_harness_mode(&id, harness, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_harness_delivery(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    harness: HarnessKind,
+    delivery: Delivery,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_harness_delivery(&id, harness, delivery, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_agent_branches(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1120,6 +1171,32 @@ async fn desktop_team_seen(
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state).await?.team_seen(&id, upto, generation).await
+}
+
+#[tauri::command]
+async fn desktop_coord_questions(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::team::questions::Inbox, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.coord_questions(&id).await
+}
+
+#[tauri::command]
+async fn desktop_coord_answer(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    message: i64,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .coord_answer(&id, message, text, generation)
+        .await
 }
 
 #[tauri::command]
@@ -2204,6 +2281,50 @@ async fn desktop_project_plugins(
 }
 
 #[tauri::command]
+async fn desktop_tool_switches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .tool_switches(project_id, server_id)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_tool_switch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+    tool: String,
+    value: Switch,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_tool_switch(project_id, server_id, tool, value)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_restore_tool_switches(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    server_id: Option<String>,
+) -> Result<Vec<ToolView>, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .restore_tool_switches(project_id, server_id)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_agents(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2475,6 +2596,17 @@ async fn desktop_instruction_settings(
 ) -> Result<crazyagent::engine::owner::InstructionSettings, BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.instruction_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_adoption(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::Adoption, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.adoption(project_id)?;
     call.await
 }
 
@@ -2787,6 +2919,9 @@ pub fn run() {
             desktop_team_agent_branches,
             desktop_team_master_branch,
             desktop_team_ask_before_merge,
+            desktop_team_coordination,
+            desktop_team_harness_mode,
+            desktop_team_harness_delivery,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
@@ -2802,6 +2937,8 @@ pub fn run() {
             desktop_team_events,
             desktop_team_wake_rule,
             desktop_team_seen,
+            desktop_coord_questions,
+            desktop_coord_answer,
             desktop_team_attention,
             desktop_terminal_attach,
             desktop_terminal_input,
@@ -2914,6 +3051,9 @@ pub fn run() {
             desktop_remove_mcp_secret,
             desktop_check_mcp_server,
             desktop_project_plugins,
+            desktop_tool_switches,
+            desktop_set_tool_switch,
+            desktop_restore_tool_switches,
             desktop_agents,
             desktop_stop_agent,
             desktop_account_use,
@@ -2934,6 +3074,7 @@ pub fn run() {
             desktop_agent_instructions,
             desktop_instruction_settings,
             desktop_save_instruction_settings,
+            desktop_adoption,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

@@ -229,6 +229,14 @@ pub trait Host: Send + Sync {
         Ok(true)
     }
 
+    /// Reads how long an agent terminal's app has drawn nothing: a working harness redraws
+    /// its spinner every second, so a quiet terminal means its app waits (DEC-104 Q13).
+    /// Takes the name. Returns the time, or none when this host cannot tell, which keeps
+    /// the engine from typing into that terminal.
+    fn quiet(&self, _agent: &AgentId) -> Result<Option<Duration>, HostError> {
+        Ok(None)
+    }
+
     /// Sets an agent terminal's size for its app and every viewer.
     /// Takes the name, columns and rows, each from `SIZE_MIN` to `SIZE_MAX`.
     /// Returns once the host applied it.

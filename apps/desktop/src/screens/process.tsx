@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, importGlobalInstructions, loadInstructionSettings,
-  loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments, textBytes,
-  type InstructionSettings, type SkillEntry,
+  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_CHOICES, PROCESS_TEXT_BYTES_MAX, defaultProcess, flagWords, importGlobalInstructions, loadAdoption,
+  loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings, saveProcess, savedMessage, skillSegments,
+  textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
-import { Button, ConfirmDialog, Dialog, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, Switch, TextArea } from "../ui";
+import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
@@ -168,6 +168,47 @@ export function AgentSettings({ projectId }: { projectId: string }) {
   return <AgentSettingsView settings={settings} busy={busy} failure={failure} onSave={(next) => void store(next)} />;
 }
 
+/** Names one agent of an adoption row the way the team lists it: its id, role and harness.
+ * Input: the row. Output: the label. */
+export function adoptionLabel(agent: Pick<AgentAdoption, "agent" | "role" | "harness">): string {
+  return `#${agent.agent} ${agent.role} ${agent.harness}`.trim();
+}
+
+/** A project's workflow adoption as a pure view: one row per recent agent with its count for
+ * each counted tool and its flags in red, marked once the agent was reminded, and whether
+ * nudges are on. Stopped agents are dimmed. Inputs: the read and the refresh action. */
+export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoption>; onRefresh: () => void }) {
+  if (adoption.kind === "loading") return <Skeleton shape="card" count={1} />;
+  if (adoption.kind === "not_ready") return <NotReady what="Workflow adoption" />;
+  if (adoption.kind === "error") return <LoadError message={processMessage(adoption)} onRetry={onRefresh} />;
+  const { nudges, counted, agents } = adoption.value;
+  return <Panel title="Workflow adoption" padded={false} actions={<Button icon="refresh-cw" onClick={onRefresh}>Refresh</Button>}>
+    <p className="secondary adoption-note">{nudges
+      ? "Nudges are on: each red flag sends that agent one reminder."
+      : "Nudges are off: flags show here, and agents get no reminder."} Nudges and the counted tools are coordination settings.</p>
+    {agents.length === 0
+      ? <EmptyState compact icon="users" title="No agents yet">Counts appear once this project's agents use tools.</EmptyState>
+      : <div className="pj-table-wrap"><table className="pj-table adoption-table">
+        <thead><tr><th scope="col">Agent</th>{counted.map((tool) => <th scope="col" key={tool}>{tool}</th>)}<th scope="col">Flags</th></tr></thead>
+        <tbody>{agents.map((agent) => <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
+          <th scope="row">{adoptionLabel(agent)}</th>
+          {counted.map((tool, index) => <td key={tool}>{agent.counts[index] ?? 0}</td>)}
+          <td><span className="adoption-flags">{agent.flags.length === 0
+            ? <span className="secondary">None</span>
+            : agent.flags.map((flag) => <StatusBadge key={flag} tone="danger"
+              word={agent.reminded.includes(flag) ? `${flagWords(flag)}, reminded` : flagWords(flag)} />)}</span></td>
+        </tr>)}</tbody>
+      </table></div>}
+  </Panel>;
+}
+
+/** A project's workflow adoption: reads it from the engine, again on Refresh. Input: the
+ * project id. */
+export function ProjectAdoption({ projectId }: { projectId: string }) {
+  const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
+  return <AdoptionView adoption={adoption} onRefresh={reload} />;
+}
+
 /** The skill catalog the tags name, from the engine's skill list. Input: the read, whose
  * skills carry the engine's one-line description as `line` where the engine reports it.
  * Output: each skill's id, name and one-line description, empty while unread or failed. */
@@ -229,6 +270,7 @@ export function ProcessEditor({ scope }: { scope: ProcessScope }) {
   if (scope.kind === "app") return editor;
   return <div className="stack">
     <AgentSettings projectId={scope.id} />
+    <ProjectAdoption projectId={scope.id} />
     {editor}
   </div>;
 }

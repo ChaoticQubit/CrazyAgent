@@ -1,9 +1,8 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    ANSWER_TOOL, CALLS_PER_TICK_MAX, CHANGES_TOOL, Call, DROP_FILE, ESCALATE_TOOL,
-    LIVE_SERVER_COMMAND, MAILBOX_FOLDER, MESSAGE_TOOL, SERVER_COMMAND, STATUS_TOOL, TOOL_NAME,
-    WAKE_TOOL, answer_call, take, take_calls,
+    CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, SERVER_COMMAND,
+    TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -94,15 +93,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        [
-            TOOL_NAME,
-            MESSAGE_TOOL,
-            ANSWER_TOOL,
-            WAKE_TOOL,
-            STATUS_TOOL,
-            CHANGES_TOOL,
-            ESCALATE_TOOL
-        ],
+        TEAM_TOOLS,
     );
 
     let mut server = crazyagent::spawn_gate::spawn(
@@ -120,9 +111,9 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             concat!(
                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n",
                 "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"delegate\",\"arguments\":{\"harness\":\"codex\",\"task\":\"Write apple.txt\",\"role\":\"@apple-writer\"}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"message\",\"arguments\":{\"agent\":\"@apple-writer\",\"text\":\"\\u0007\"}}}\n",
-                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"status\",\"arguments\":{}}}\n"
+                "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"spawn\",\"arguments\":{\"harness\":\"codex\",\"task\":\"Write apple.txt\",\"role\":\"@apple-writer\"}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"update_work\",\"arguments\":{\"to\":\"@apple-writer\",\"text\":\"\\u0007\"}}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"inspect_work\",\"arguments\":{}}}\n"
             )
             .as_bytes(),
         )
@@ -130,7 +121,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     drop(input);
     let answered = [
         (
-            Call::Delegate {
+            Call::Spawn {
                 task: "Write apple.txt".into(),
                 harness: Some("codex".into()),
                 role: Some("apple-writer".into()),
@@ -138,7 +129,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             "Task 7 is queued for codex.",
             false,
         ),
-        (Call::Status, "No sub-agent is working.", true),
+        (Call::InspectWork, "No sub-agent is working.", true),
     ];
     for (expected, text, error) in answered {
         let deadline = Instant::now() + Duration::from_secs(20);

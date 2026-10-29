@@ -14,6 +14,7 @@ pub mod graph;
 pub mod history;
 pub mod master;
 pub mod names;
+pub mod questions;
 pub mod runtime;
 pub mod tool;
 
@@ -606,10 +607,77 @@ pub enum TeamAction {
         project_id: ProjectId,
         tokens: Option<u64>,
     },
+    AnswerQuestion {
+        project_id: ProjectId,
+        message: i64,
+        text: String,
+    },
     SpreadAccounts {
         project_id: ProjectId,
         on: bool,
     },
+    CoordSettings {
+        project_id: ProjectId,
+        settings: crate::coord::settings::CoordSettings,
+    },
+    HarnessMode {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        mode: crate::coord::settings::SubagentMode,
+    },
+    HarnessDelivery {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        delivery: crate::coord::settings::Delivery,
+    },
+}
+
+/// One harness kind's coordination choices as the team settings show them: how its sub-agents
+/// start, how messages reach its agents, and whether it has native teammates at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessCoordination {
+    pub harness: crate::coord::settings::HarnessKind,
+    pub mode: crate::coord::settings::SubagentMode,
+    pub delivery: crate::coord::settings::Delivery,
+    pub native: bool,
+}
+
+/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinationView {
+    pub settings: crate::coord::settings::CoordSettings,
+    pub harnesses: Vec<HarnessCoordination>,
+}
+
+/// Reads a project's coordination settings and each harness kind's sub-agent mode and delivery,
+/// with the plan defaults for anything the owner never set.
+/// Takes a connection and the project. Returns the view, one row per harness kind.
+pub fn coordination(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<CoordinationView, EngineError> {
+    use crate::coord::settings;
+    let mut harnesses = Vec::with_capacity(settings::HarnessKind::ALL.len());
+    for harness in settings::HarnessKind::ALL {
+        harnesses.push(HarnessCoordination {
+            harness,
+            mode: settings::mode(connection, project, harness)?,
+            delivery: settings::delivery(connection, project, harness)?,
+            native: settings::native_supported(harness),
+        });
+    }
+    let view = CoordinationView {
+        settings: settings::read(connection, project)?,
+        harnesses,
+    };
+    assert!(
+        view.harnesses
+            .iter()
+            .all(|row| row.native || row.mode != settings::SubagentMode::Native)
+    );
+    Ok(view)
 }
 
 impl TeamAction {
@@ -690,6 +758,12 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::CoordSettings { settings, .. } => settings.validate(),
+            Self::HarnessMode { harness, mode, .. } => (*mode
+                != crate::coord::settings::SubagentMode::Native
+                || crate::coord::settings::native_supported(*harness))
+            .then_some(())
+            .ok_or_else(|| failure("coord_native_unsupported")),
             Self::StopTeammate { agent, pane, .. } => (*agent > 0
                 && crate::terminal::pane_id_valid(pane))
             .then_some(())
@@ -711,6 +785,14 @@ impl TeamAction {
                 .is_none_or(plain_branch_name)
                 .then_some(())
                 .ok_or_else(|| failure("team_master_branch_invalid")),
+            Self::AnswerQuestion { message, text, .. } => {
+                if *message <= 0 {
+                    return Err(failure("coord_question_missing"));
+                }
+                text_valid(text, crate::coord::BODY_BYTES_MAX)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_answer_invalid"))
+            }
             Self::KeepWarm { .. }
             | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
@@ -719,6 +801,7 @@ impl TeamAction {
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
             | Self::LiveMaster { .. }
+            | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
         }
@@ -758,7 +841,11 @@ impl TeamAction {
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
             | Self::TokenBudget { project_id, .. }
-            | Self::SpreadAccounts { project_id, .. } => Some(project_id),
+            | Self::AnswerQuestion { project_id, .. }
+            | Self::SpreadAccounts { project_id, .. }
+            | Self::CoordSettings { project_id, .. }
+            | Self::HarnessMode { project_id, .. }
+            | Self::HarnessDelivery { project_id, .. } => Some(project_id),
         }
     }
 }
@@ -1239,6 +1326,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
+    questions::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1975,6 +2063,25 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::CoordSettings { settings, .. } => {
+            crate::coord::settings::write(tx, project, settings)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessMode { harness, mode, .. } => {
+            if *mode == crate::coord::settings::SubagentMode::Native
+                && !crate::coord::settings::native_supported(*harness)
+            {
+                return Ok(rejected("coord_native_unsupported"));
+            }
+            crate::coord::settings::set_mode(tx, project, *harness, *mode)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessDelivery {
+            harness, delivery, ..
+        } => {
+            crate::coord::settings::set_delivery(tx, project, *harness, *delivery)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2133,6 +2240,9 @@ pub fn execute(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::AnswerQuestion { message, text, .. } => {
+            questions::answer(tx, project, *message, text, now)
+        }
     }
 }
 
@@ -2489,6 +2599,8 @@ pub struct TeamStatus {
     pub master_branch: Option<String>,
     #[serde(default)]
     pub ask_before_merge: bool,
+    #[serde(default)]
+    pub coordination: Option<CoordinationView>,
     #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
@@ -3509,6 +3621,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent_branches: agent_branches(connection, project)?,
         master_branch: master_branch_choice(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
+        coordination: Some(coordination(connection, project)?),
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
