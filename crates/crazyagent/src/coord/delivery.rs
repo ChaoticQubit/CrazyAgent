@@ -347,6 +347,7 @@ fn line(db: &Connection, message: &Message, max: usize) -> Result<String, Engine
         ),
         (MessageKind::Prompt, ..) => "work for you, answer with update_work: ".to_owned(),
         (MessageKind::Reply, _, Some(earlier)) => format!("Reply to msg {earlier}: "),
+        (MessageKind::Note, ..) => "note, it takes no reply: ".to_owned(),
         _ => String::new(),
     };
     let head = format!("[crazyagent msg {}] from {sender}: {what}", message.id);

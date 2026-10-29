@@ -363,7 +363,7 @@ fn deliver(folder: &Mailbox, tag: &str) -> Option<String> {
     }
     taken.sort_by_key(|letter| letter.id);
     let mut text = format!(
-        "CrazyAgent team messages for you ({}). Answer or ask with update_work in the crazyagent-team tools, naming the message id.",
+        "CrazyAgent team messages for you ({}). Answer a question or work for you with update_work kind reply and its id in reply_to. A note takes no reply; to answer one, send kind note with to.",
         taken.len()
     );
     for letter in &taken {

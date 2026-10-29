@@ -449,14 +449,14 @@ fn spec(name: &str) -> Value {
             none,
         ),
         UPDATE_WORK_TOOL => (
-            "Send to another agent of this project. kind message asks the agent in to for something, note tells it something, question asks with for (me for the owner, master, or lead) and severity (high, normal or low) and the engine routes it, reply answers the message in reply_to. A for me question reaches the owner only. Pass a question on up the chain as a question whose reply_to names it, at the same or a higher severity. A message to a finished agent you lead wakes it with your text.",
+            "Send to another agent of this project. kind message asks the agent in to for something, note tells it something, question asks with for (me for the owner, master, or lead) and severity (high, normal or low) and the engine routes it, reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender. A for me question reaches the owner only. Pass a question on up the chain as a question whose reply_to names it, at the same or a higher severity. A message to a finished agent you lead wakes it with your text.",
             json!({"type": "object", "properties": {
                 "text": {"type": "string", "description": "What you send, in plain words, up to 4000 bytes."},
-                "kind": {"type": "string", "enum": ["message", "note", "question", "reply"], "description": "message when left out, question with for, reply with reply_to."},
+                "kind": {"type": "string", "enum": ["message", "note", "question", "reply"], "description": "message when left out, question with for, reply with reply_to to a question or work for you, never to a note."},
                 "to": {"type": "string", "description": "For a message or note: the agent's persona name, @role handle or number, or master, or lead for your own lead."},
                 "for": {"type": "string", "enum": ["me", "master", "lead"], "description": "For a question: me for the owner, master, or lead for your own lead."},
                 "severity": {"type": "string", "enum": ["high", "normal", "low"], "description": "For a question: how urgent it is. It never changes who gets it."},
-                "reply_to": {"type": "integer", "minimum": 1, "description": "The message number this answers or passes on."},
+                "reply_to": {"type": "integer", "minimum": 1, "description": "The question or message (work for you) this answers or passes on, or the message a note or message refers to."},
                 "work": {"type": "integer", "minimum": 1, "description": "The work number this is about."},
                 "key": {"type": "string", "description": "Optional key so a retried send is stored once."},
             }, "required": ["text"], "additionalProperties": false}),
