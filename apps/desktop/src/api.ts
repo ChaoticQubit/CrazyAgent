@@ -1137,6 +1137,14 @@ export function setTokenBudget(id: string, tokens: number | null): Promise<Resul
   return call<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation: nextGeneration() });
 }
 
+/** Turns the project's Spread harnesses across accounts on or off: on, a new or woken agent
+ * prefers a pool account no running agent of the project uses, else the account strategy
+ * picks. Inputs: the project id and the switch. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setSpreadAccounts(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_spread_accounts", { id, on, generation: nextGeneration() });
+}
+
 /** Sets the branch the project's master works on and merges finished harnesses into, or
  * clears it back to the repository's default branch. Inputs: the project id and the branch,
  * null for the default. Output: the engine receipt, not ready, or a plain error. */

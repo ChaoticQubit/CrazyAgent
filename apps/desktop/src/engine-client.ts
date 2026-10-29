@@ -822,6 +822,7 @@ export interface TeamStatus {
   token_budget?: number | null;
   budget_used?: number | null;
   budget_reached?: boolean;
+  spread_accounts?: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
   min_agents: number;

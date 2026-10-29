@@ -432,6 +432,20 @@ impl NativeBridge {
             .await
     }
 
+    /// Turns the project's Spread harnesses across accounts on or off: on, a new or woken
+    /// agent prefers a pool account no running agent of the project uses. Takes the project
+    /// id, the switch and the client generation. Returns the actual commit receipt.
+    pub async fn team_spread_accounts(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::SpreadAccounts { project_id, on }, generation)
+            .await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,
