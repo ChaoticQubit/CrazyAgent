@@ -49,6 +49,7 @@ impl OwnerRuntimeHandle {
             home_dir,
             cwd: prepared.cwd.clone(),
             profile_config_sha256,
+            instructions: None,
         })
     }
 }

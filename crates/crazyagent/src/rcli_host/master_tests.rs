@@ -42,6 +42,7 @@ impl Case {
             home_dir,
             cwd,
             profile_config_sha256: String::new(),
+            instructions: None,
         };
         let mut case = Self {
             _root: root,
