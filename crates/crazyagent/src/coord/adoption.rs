@@ -18,6 +18,9 @@ pub const NUDGES_PER_TICK_MAX: usize = 16;
 pub const UNGROUNDED_MS: i64 = 10 * 60_000;
 /// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
+/// What the clients show in place of receipts and adoption counts for an agent whose
+/// launch fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank.
+pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
 /// The most bytes one adoption view takes once encoded.
 pub const VIEW_BYTES_MAX: usize = AGENTS_SHOWN_MAX * (COUNTED_TOOLS_MAX * 11 + 256)
     + COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 4)
@@ -91,8 +94,8 @@ impl Flag {
 }
 
 /// One agent's row on the Process page: who it is, whether it still runs, its count for
-/// each counted-tools entry in the settings' order, the flags it has now and the flags
-/// it was already reminded of.
+/// each counted-tools entry in the settings' order, the flags it has now, the flags it was
+/// already reminded of and whether its launch fires no hooks, so no counts or flags exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdoption {
@@ -103,6 +106,8 @@ pub struct AgentAdoption {
     pub counts: Vec<u32>,
     pub flags: Vec<Flag>,
     pub reminded: Vec<Flag>,
+    #[serde(default)]
+    pub hookless: bool,
 }
 
 /// A project's adoption view: whether nudges are on, the counted-tools entries that name
@@ -179,8 +184,9 @@ fn runs_graphify(command: &str) -> bool {
 /// The flags one agent's habits raise now (Q18). Edits by an agent that never started or
 /// owned work raise the first. A running agent with tools that worked `UNGROUNDED_MS`
 /// since its start, busy or calling tools, with no graphify and no `ctx_*` call, raises
-/// the second. Takes the database, the agent, its row, its counts by stored tool name and
-/// the time in ms. Returns the flags in `Flag::ALL` order.
+/// the second. An agent whose launch fires no hooks raises none, since none of its calls are
+/// counted (DEC-104 bare-hooks). Takes the database, the agent, its row, its counts by stored
+/// tool name and the time in ms. Returns the flags in `Flag::ALL` order.
 pub(super) fn flags(
     db: &Connection,
     id: AgentId,
@@ -188,17 +194,21 @@ pub(super) fn flags(
     used: &[(String, i64)],
     now: i64,
 ) -> Result<Vec<Flag>, EngineError> {
-    let (tools, declared): (bool, bool) = db
+    let (tools, declared, hookless): (bool, bool, bool) = db
         .query_row(
             "SELECT a.tools,
              EXISTS(SELECT 1 FROM coord_audit WHERE by_kind='agent' AND by_agent=a.id
                     AND action='start')
-             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id)
+             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id),
+             a.hookless
              FROM team_agents a WHERE a.id=?1",
             [id],
-            |found| Ok((found.get(0)?, found.get(1)?)),
+            |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
         )
         .map_err(state)?;
+    if hookless {
+        return Ok(Vec::new());
+    }
     let called = |tool: &dyn Fn(&str) -> bool| {
         used.iter()
             .any(|(name, count)| *count > 0 && tool(super::presence::short(name)))
@@ -279,16 +289,17 @@ fn reminded(db: &Connection, project: &ProjectId, id: AgentId) -> Result<Vec<Fla
 pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, EngineError> {
     let settings = super::settings::read(db, project)?;
     assert!(settings.counted_tools.len() <= COUNTED_TOOLS_MAX);
-    let ids: Vec<(AgentId, String)> = {
+    let ids: Vec<(AgentId, String, bool)> = {
         let mut statement = db
             .prepare(
-                "SELECT id,harness FROM team_agents WHERE project=?1 ORDER BY id DESC LIMIT ?2",
+                "SELECT id,harness,hookless FROM team_agents WHERE project=?1
+                 ORDER BY id DESC LIMIT ?2",
             )
             .map_err(state)?;
         let limit = i64::try_from(AGENTS_SHOWN_MAX).map_err(state)?;
         let rows = statement
             .query_map(params![project.as_str(), limit], |found| {
-                Ok((found.get(0)?, found.get(1)?))
+                Ok((found.get(0)?, found.get(1)?, found.get(2)?))
             })
             .map_err(state)?;
         rows.collect::<Result<_, _>>().map_err(state)?
@@ -302,7 +313,7 @@ pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, 
         }
     };
     let mut agents = Vec::with_capacity(ids.len());
-    for (id, harness) in ids {
+    for (id, harness, hookless) in ids {
         let Some(row) = agent(db, id)? else {
             continue;
         };
@@ -315,6 +326,7 @@ pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, 
             counts: counted(&used, &settings.counted_tools),
             flags: flags(db, id, &row, &used, now)?,
             reminded: reminded(db, project, id)?,
+            hookless,
         });
     }
     assert!(agents.len() <= AGENTS_SHOWN_MAX);

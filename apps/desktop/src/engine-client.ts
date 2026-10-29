@@ -707,6 +707,10 @@ export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generatio
 }
 
 export type TeamRole = "master" | "sub" | "teammate";
+
+/** What the screens show in place of receipts and adoption counts for an agent whose launch
+ * fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank. */
+export const HOOKLESS_WORDS = "unavailable for this account kind";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
 export type TeamMessageAuthor = "owner" | "master" | "engine";
@@ -749,6 +753,7 @@ export interface TeamAgent {
   owner_stopped?: boolean;
   teammates?: Teammate[];
   pane?: string | null;
+  hookless?: boolean;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -1333,7 +1338,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
  * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
- * come from the coordination layer; older engines leave the optional fields out. */
+ * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
+ * it has no receipts. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1352,6 +1358,7 @@ export interface GraphNode {
   waiting?: Waiting | null;
   owner_questions?: number;
   no_worktree?: boolean;
+  hookless?: boolean;
 }
 
 /** Unread messages from one party to another: how many and the newest one's receipt. Each end
