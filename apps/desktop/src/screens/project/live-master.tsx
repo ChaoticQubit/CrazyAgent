@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { loadTeamGraph, setLiveMaster } from "../../api";
+import { loadTeamGraph, setLiveMaster, setTeamStopped } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, openMasterProject, readMaster, receiptState } from "../../api-projects";
 import type { GraphNode, TeamStatus } from "../../engine-client";
@@ -7,6 +7,7 @@ import { Button, Icon } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
 import { TerminalPanel } from "../team";
+import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
 import { readMasterInput } from "../../state";
 import { ConversationTab } from "./conversation";
@@ -37,10 +38,19 @@ export type Live =
   | { kind: "not_ready" }
   | { kind: "refused"; code: string; copy: string }
   | { kind: "stopped"; problem: string | null }
+  | { kind: "paused" }
   | { kind: "running"; node: GraphNode | null };
 
 const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. It starts again when you open this tab or start a new session.";
+const PAUSED = "The team is stopped (Stop all). Start the team to run the master.";
+
+/** Whether the latest good team read of this project says the team is stopped (Stop all),
+ * when the engine runs none of its agents and the live master cannot start. Inputs: the team
+ * status read and the project shown. Output: true only for a good read of this project. */
+export function teamPaused(team: Result<TeamStatus> | undefined, projectId: string): boolean {
+  return team?.kind === "ok" && team.value.project_id === projectId && team.value.paused;
+}
 
 /** The live master switch as the engine last told it. Inputs: the latest team status read
  * and the project shown. Output: undefined until a good read of this project arrives, since
@@ -135,7 +145,9 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     };
   }, [data.id, on === true]);
 
-  const shown: Live = live.kind === "refused" || live.kind === "not_ready" ? live
+  const shown: Live = live.kind === "not_ready" ? live
+    : teamPaused(data.team.result, data.id) ? { kind: "paused" }
+    : live.kind === "refused" ? live
     : on === false ? { kind: "stopped", problem: engine?.problem ?? null }
     : live;
   return <LiveMasterView data={data} harness={harness} live={shown} onStart={start} />;
@@ -179,6 +191,7 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
     case "running": return live.node ? { word: "Live", tone: "ok" } : { word: "Opening", tone: "muted" };
     case "starting": return { word: "Starting", tone: "muted" };
     case "stopped": return live.problem ? { word: "Stopped", tone: "warn" } : { word: "Stopped", tone: "muted" };
+    case "paused": return { word: "Team stopped", tone: "warn" };
     case "refused": return { word: "Couldn't start", tone: "danger" };
     case "not_ready": return { word: "Not in this build", tone: "muted" };
   }
@@ -188,16 +201,27 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * and account, then New session and Sessions, which restart the live terminal on a fresh or
  * resumed conversation and start the live master when it is stopped, above the master's
  * terminal filling the rest, typed into as the owner's Master input setting says, or a line
- * while it starts, can't or is stopped. An engine that says the master has no terminal app
+ * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
+ * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
  * state and the start action. Output: the area. */
 export function LiveMasterView({ data, harness, live, onStart }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void> }) {
   const [input] = useState(readMasterInput);
+  const [resuming, setResuming] = useState(false);
+  const [resumeNote, setResumeNote] = useState("");
   const sessions = useMasterSessions(data.id);
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
+  const startTeam = async () => {
+    setResuming(true);
+    setResumeNote("");
+    const note = changeNote(await setTeamStopped(data.id, false), "starting the team again");
+    setResuming(false);
+    setResumeNote(note);
+    data.reloadTeam();
+  };
   const state = liveWord(live);
   const account = live.kind === "running" ? live.node?.account : null;
   return <div className="pj-master-live pj-console">
@@ -214,6 +238,11 @@ export function LiveMasterView({ data, harness, live, onStart }: { data: Project
     <SwitchDivider team={data.team.result} />
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
+    </div>}
+    {live.kind === "paused" && <div className="pj-note warn" role="status">
+      <p>{PAUSED}</p>
+      {resumeNote && <p role="alert">{displayText(resumeNote)}</p>}
+      <Button size="small" variant="primary" pending={resuming} pendingLabel="Starting..." onClick={() => void startTeam()}>Start all</Button>
     </div>}
     {live.kind === "not_ready" && <NotReady what="the live master terminal isn't in this build." />}
     {live.kind === "refused" && <div className="pj-note warn" role="alert">
