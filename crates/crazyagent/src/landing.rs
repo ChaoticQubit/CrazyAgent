@@ -668,6 +668,44 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
     }
 }
 
+/// Lists one project's change sets as the owner's Changes and the master's brief show
+/// them: as [`list`], without the sets of a lead's workers while the owner's Lands setting
+/// is Lead, since that lead merges them (F3). Inputs: the store and the project. Output:
+/// the change sets.
+pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
+    let sets = list(db, project)?;
+    assert!(sets.len() <= LIST_MAX);
+    #[cfg(unix)]
+    if subagent::leads_merge(db, project)? {
+        let mut kept = Vec::with_capacity(sets.len());
+        for set in sets {
+            if !subagent::is_lead_worker(db, project, &set.agent)? {
+                kept.push(set);
+            }
+        }
+        return Ok(kept);
+    }
+    Ok(sets)
+}
+
+/// Closes the open change sets of a lead's workers whose work the lead's own clone
+/// already holds, also after a merge the lead ran by hand (F3), as the lead's merge
+/// closes them. Inputs: the store, the project and the lead's team agent id. Output: Ok,
+/// or a plain `changes_*` code for a lead whose tip could not be read.
+pub fn settle_sub_agents(
+    db: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return subagent::settle(db, project, lead);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, lead);
+        Err(unavailable())
+    }
+}
+
 /// Lists one project's change sets, open ones first, then newest first, at most
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {

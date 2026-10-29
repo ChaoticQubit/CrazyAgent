@@ -456,7 +456,7 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             if let Err(error) = landing::observe(&db, Some(&project)) {
                 eprintln!("landing_observe_failed cause={}", error.0);
             }
-            let mut change_sets = landing::list(&db, &project)?;
+            let mut change_sets = landing::owner_list(&db, &project)?;
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
         }
