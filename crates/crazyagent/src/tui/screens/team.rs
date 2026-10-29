@@ -54,6 +54,10 @@ const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
 const MASTER_HEAD_ROWS: u16 = 1;
+const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
+const MASTER_PAUSED_START: &str =
+    "S starts every agent of this project again; the master starts with them.";
+const MASTER_TEAM_STOPPED: &str = "Team stopped.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -131,6 +135,7 @@ pub struct Team {
     switch: Option<LiveSwitch>,
     want: Option<bool>,
     refused: Option<String>,
+    paused: bool,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
     offset: usize,
@@ -156,6 +161,7 @@ impl Team {
             switch: None,
             want: None,
             refused: None,
+            paused: false,
             graph: Load::Loading,
             cursor: 0,
             offset: 0,
@@ -276,6 +282,7 @@ impl Team {
                 let Ok(SetupView::Team(status)) = result else {
                     return;
                 };
+                self.paused = status.paused;
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
@@ -309,8 +316,29 @@ impl Team {
                     self.refused = Some(code.clone());
                 }
             },
+            SetupQuery::TeamChange {
+                action: TeamAction::Resume { project_id },
+                ..
+            } if *project_id == self.project => match result {
+                Ok(_) => self.read_switch(ctx),
+                Err(code) => ctx.say(Message::error(plain_problem(code).unwrap_or(code), "")),
+            },
             _ => {}
         }
+    }
+
+    /// Starts every agent of a stopped team again from the master view, the same change as
+    /// Start all on the team page; the live master then starts with the team.
+    /// Input: the context. Output: none; the change and a fresh team read are queued.
+    fn start_team(&mut self, ctx: &mut Ctx) {
+        assert!(self.master && self.paused);
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::Resume {
+                project_id: self.project.clone(),
+            },
+            generation,
+        }));
     }
 
     /// Opens the master's terminal once the team lists it, and the new one
@@ -346,6 +374,7 @@ impl Team {
             .is_some_and(|attached| attached.closed.is_none());
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
+            Key::Char('S') if self.paused => self.start_team(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -801,11 +830,12 @@ impl Team {
             .switch
             .as_ref()
             .and_then(|switch| switch.switched.as_deref());
-        let state = match (self.live_on() == Some(false), switched) {
-            (true, None) => MASTER_OFF.to_owned(),
-            (true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
-            (false, None) => MASTER_ON.to_owned(),
-            (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
+        let state = match (self.paused, self.live_on() == Some(false), switched) {
+            (true, _, _) => MASTER_TEAM_STOPPED.to_owned(),
+            (false, true, None) => MASTER_OFF.to_owned(),
+            (false, true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
+            (false, false, None) => MASTER_ON.to_owned(),
+            (false, false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
         let control = "n New session  l Sessions".to_owned();
         let room = limit.saturating_sub(width(&control));
@@ -868,6 +898,19 @@ impl Team {
             return None;
         }
         let focused = self.focus == Focus::Terminal;
+        if self.master && self.paused && self.attached.is_none() {
+            let mut lines: Vec<Line<'static>> = wrap(MASTER_PAUSED, limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+            lines.extend(
+                wrap(MASTER_PAUSED_START, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
         if let Some(code) = self.refused.as_deref().filter(|_| self.attached.is_none()) {
             let mut lines = vec![Line::raw("The master terminal could not start.")];
             lines.extend(
@@ -959,6 +1002,9 @@ impl Screen for Team {
         }
         if self.master {
             let mut hints = Vec::new();
+            if self.paused {
+                hints.push(hint("S", "Start all"));
+            }
             if self
                 .attached
                 .as_ref()
