@@ -105,6 +105,9 @@ impl NativeOwner {
             SetupQuery::Team { project } => SetupView::Team(Box::new(
                 controller.team_status(project).await.map_err(problem)?,
             )),
+            SetupQuery::CoordQuestions { project } => SetupView::CoordQuestions(Box::new(
+                controller.coord_questions(project).await.map_err(problem)?,
+            )),
             SetupQuery::TeamChange { action, generation } => changed(
                 controller
                     .team_action(action, generation)

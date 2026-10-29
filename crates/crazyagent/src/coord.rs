@@ -26,6 +26,7 @@ macro_rules! named {
     };
 }
 
+pub mod adoption;
 mod claims;
 pub mod hook;
 mod messages;

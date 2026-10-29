@@ -22,6 +22,7 @@ mod accounts;
 mod agents;
 mod changes;
 mod cleanup;
+mod coord_questions;
 mod harnesses;
 pub mod intake;
 pub mod master;
