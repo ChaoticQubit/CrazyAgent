@@ -9,6 +9,7 @@ pub mod assets;
 pub mod client_controller;
 pub mod config;
 pub mod conversation;
+pub mod coord;
 pub mod coordination;
 pub mod credentials;
 pub mod engine;

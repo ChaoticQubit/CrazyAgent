@@ -136,6 +136,29 @@ pub struct PaneRef {
     pub pid: u32,
 }
 
+/// The most panes `Host::panes` lists for one agent terminal: the agent's own pane and the
+/// panes its app split off, such as Claude Code agent team teammates.
+pub const PANES_LISTED_MAX: usize = 32;
+const PANE_ID_DIGITS_MAX: usize = 9;
+
+/// One pane of an agent terminal's own window: the host's pane id, such as `%12`, the pane's
+/// first process id and whether its process already ended while the pane stays open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub id: String,
+    pub pid: u32,
+    pub dead: bool,
+}
+
+/// Tells whether a text is a host pane id: `%` and one to nine digits. Takes the text,
+/// which may come from a client. Returns true for a well formed id.
+pub fn pane_id_valid(id: &str) -> bool {
+    id.strip_prefix('%').is_some_and(|digits| {
+        (1..=PANE_ID_DIGITS_MAX).contains(&digits.len())
+            && digits.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 /// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
 /// `history`, written first, puts the terminal's earlier rows into a fresh view's scrollback
 /// and is empty when the host keeps none; `screen` then redraws the whole current screen in a
@@ -218,6 +241,20 @@ pub trait Host: Send + Sync {
     /// Returns once the terminal is gone.
     fn kill(&self, agent: &AgentId) -> Result<(), HostError>;
 
+    /// Lists the panes of an agent terminal's own window, at most `PANES_LISTED_MAX`, in
+    /// the host's order. Takes the name; an unknown name fails with `terminal_agent_unknown`.
+    /// Returns the panes; a host without split panes fails with `terminal_unavailable`.
+    fn panes(&self, _agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Ends one pane of an agent terminal's own window and the processes in it, never the
+    /// window's last pane. Takes the name and a pane id `panes` listed; a pane of another
+    /// window fails with `terminal_pane_unknown`. Returns once the pane is gone.
+    fn kill_pane(&self, _agent: &AgentId, _pane: &str) -> Result<(), HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
     /// Returns the names in order.
@@ -279,6 +316,7 @@ pub fn plain_reason(code: &str) -> &'static str {
         }
         "terminal_agent_running" => "This agent already has a terminal.",
         "terminal_agent_invalid" => "That is not an agent terminal.",
+        "terminal_pane_unknown" => "That teammate's terminal has already closed.",
         "terminal_project_full" => {
             "This project already runs 15 agents, the most one project may run at once."
         }

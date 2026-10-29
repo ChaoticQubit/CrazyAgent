@@ -1,8 +1,9 @@
 use super::buffer::{Feed, buffer, skipped_marker};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
-    TerminalStream, VIEWERS_MAX, end_except, failure,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, PANES_LISTED_MAX, PaneInfo, PaneRef,
+    SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, end_except, failure,
+    pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
@@ -41,6 +42,7 @@ const REPLY_TIME: Duration = Duration::from_secs(10);
 const FORMAT_END: &str = " end";
 const REPLY_CUT: &str = "terminal_reply_cut";
 const PLACED: &str = "#{pane_id} #{pane_pid}";
+const PANE_FIELDS: &str = "#{pane_id} #{pane_pid} #{pane_dead}";
 const CLOSE_TIME: Duration = Duration::from_secs(2);
 const LINE_BYTES_MAX: usize = 1024 * 1024;
 const REPLY_BYTES_MAX: usize = 32 * 1024 * 1024;
@@ -677,6 +679,30 @@ fn whole(line: &[u8]) -> Option<&[u8]> {
     line.strip_suffix(FORMAT_END.as_bytes())
 }
 
+/// Reads one `PANE_FIELDS` reply line: the pane id, its first process id and whether that
+/// process ended. Takes the line without its end mark. Returns the pane, or none for a line
+/// of another shape.
+fn pane_info(line: &[u8]) -> Option<PaneInfo> {
+    let text = std::str::from_utf8(line).ok()?;
+    let mut fields = text.split(' ');
+    let (Some(id), Some(pid), Some(dead), None) =
+        (fields.next(), fields.next(), fields.next(), fields.next())
+    else {
+        return None;
+    };
+    let pid = pid.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+    let dead = match dead {
+        "0" => false,
+        "1" => true,
+        _ => return None,
+    };
+    pane_id_valid(id).then(|| PaneInfo {
+        id: id.to_owned(),
+        pid,
+        dead,
+    })
+}
+
 /// Reads an attach's pane line: its ids, cursor, size, input modes, history size, and its
 /// screen and mouse modes. A screen or mouse flag that an older tmux leaves empty reads as
 /// off. Takes the reply lines. Returns the pane, or none for a reply of another shape.
@@ -1130,6 +1156,33 @@ impl Host for Tmux {
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         self.live_control()?
             .run(&format!("kill-window -t {}", target(agent)))
+            .map(drop)
+    }
+
+    fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        let lines = self.live_control()?.ask(&format!(
+            "list-panes -t {} -F '{PANE_FIELDS}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let panes: Vec<PaneInfo> = lines
+            .iter()
+            .filter_map(|line| pane_info(line))
+            .take(PANES_LISTED_MAX)
+            .collect();
+        assert!(panes.len() <= PANES_LISTED_MAX);
+        Ok(panes)
+    }
+
+    fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
+        if !pane_id_valid(pane) {
+            return Err(failure("terminal_pane_unknown"));
+        }
+        let panes = self.panes(agent)?;
+        if panes.len() < 2 || !panes.iter().any(|listed| listed.id == pane) {
+            return Err(failure("terminal_pane_unknown"));
+        }
+        self.live_control()?
+            .run(&format!("kill-pane -t {pane}"))
             .map(drop)
     }
 
