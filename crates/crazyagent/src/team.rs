@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod caps;
 pub mod cleanup;
 pub mod direct;
 pub mod events;
@@ -405,13 +406,7 @@ pub const BUDGET_CHOICES: [u64; 7] = [
 pub const TEAMMATES_SHOWN_MAX: usize = 16;
 const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
 
-/// A project's limits on the agents it runs at once: harnesses, the sub-agents the master
-/// starts, and teammates each harness splits off in its own terminal. None is No limit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Caps {
-    pub harnesses: Option<u8>,
-    pub teammates: Option<u8>,
-}
+pub use caps::Caps;
 
 /// A project's token budget: the tokens its agents may use, the tokens they used since the
 /// owner set it or last started the team again, and whether reaching it stopped the team.
@@ -611,6 +606,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         tokens: Option<u64>,
     },
+    SpreadAccounts {
+        project_id: ProjectId,
+        on: bool,
+    },
     CoordSettings {
         project_id: ProjectId,
         settings: crate::coord::settings::CoordSettings,
@@ -781,6 +780,7 @@ impl TeamAction {
                 .then_some(())
                 .ok_or_else(|| failure("team_master_branch_invalid")),
             Self::KeepWarm { .. }
+            | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
@@ -827,6 +827,7 @@ impl TeamAction {
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
             | Self::TokenBudget { project_id, .. }
+            | Self::SpreadAccounts { project_id, .. }
             | Self::CoordSettings { project_id, .. }
             | Self::HarnessMode { project_id, .. }
             | Self::HarnessDelivery { project_id, .. } => Some(project_id),
@@ -1273,6 +1274,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 since_ms INTEGER NOT NULL,
                 baseline INTEGER NOT NULL CHECK(baseline >= 0),
                 reached_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS team_account_spread (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS team_teammates (
                 agent INTEGER NOT NULL,
@@ -2103,16 +2108,12 @@ pub fn execute(
                 )
                 .optional()
                 .map_err(error)?;
-            match role.as_deref().and_then(AgentRole::parse) {
-                Some(AgentRole::Sub) => {}
-                Some(AgentRole::Master) => return Ok(rejected("team_stop_master")),
-                None => return Ok(rejected("team_agent_not_found")),
+            match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
+                (None, _) => return Ok(rejected("team_agent_not_found")),
+                (_, Some(AgentRole::Master)) => return Ok(rejected("team_stop_master")),
+                _ => {}
             }
-            tx.execute(
-                "INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
-                params![agent, project.as_str(), now],
-            )
-            .map_err(error)?;
+            owner_stop(tx, project, *agent, now)?;
             Ok(Outcome::Applied)
         }
         TeamAction::StopTeammate { agent, pane, .. } => {
@@ -2128,6 +2129,21 @@ pub fn execute(
             } else {
                 Outcome::Applied
             })
+        }
+        TeamAction::SpreadAccounts { on, .. } => {
+            if *on {
+                tx.execute(
+                    "INSERT OR IGNORE INTO team_account_spread(project,since_ms) VALUES (?1,?2)",
+                    params![project.as_str(), now],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM team_account_spread WHERE project=?1",
+                    [project.as_str()],
+                )
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
         }
         TeamAction::MaxHarnesses { max, .. } => {
             tx.execute(
@@ -2579,6 +2595,8 @@ pub struct TeamStatus {
     pub budget_used: Option<u64>,
     #[serde(default)]
     pub budget_reached: bool,
+    #[serde(default)]
+    pub spread_accounts: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
     #[serde(default)]
@@ -3033,36 +3051,6 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
         .map_err(error)
 }
 
-/// Reads the project's limits on running agents, No limit for each the owner left unset.
-/// Takes a connection and the project. Returns the limits, or a SQLite failure.
-pub fn caps(connection: &Connection, project: &ProjectId) -> Result<Caps, EngineError> {
-    let row: Option<(Option<i64>, Option<i64>)> = connection
-        .query_row(
-            "SELECT harnesses,teammates FROM team_caps WHERE project=?1",
-            [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some((harnesses, teammates)) = row else {
-        return Ok(Caps::default());
-    };
-    let cap = |value: Option<i64>| -> Result<Option<u8>, EngineError> {
-        value
-            .map(|value| {
-                u8::try_from(value)
-                    .ok()
-                    .filter(|value| (1..=CAP_CHOICES[8]).contains(value))
-                    .ok_or_else(|| error("team_cap_invalid"))
-            })
-            .transpose()
-    };
-    Ok(Caps {
-        harnesses: cap(harnesses)?,
-        teammates: cap(teammates)?,
-    })
-}
-
 /// The owner's Max teammates per harness for the project, for a lead's instructions and the
 /// engine's own check. Takes a connection and the project. Returns the cap, None for No
 /// limit, or a SQLite failure.
@@ -3070,7 +3058,68 @@ pub fn teammate_cap(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Option<u8>, EngineError> {
-    caps(connection, project).map(|caps| caps.teammates)
+    caps::read(connection, project).map(|caps| caps.teammates)
+}
+
+/// Tells whether the owner turned on Spread harnesses across accounts for the project, so a
+/// new or woken agent prefers a pool account no running agent of the project uses. Takes a
+/// connection and the project. Returns the switch, Off when unset, or a SQLite failure.
+pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_account_spread WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
+/// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
+/// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
+pub(crate) fn owner_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
+             )
+             INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms)
+             SELECT id, ?2, ?3 FROM led",
+            params![agent, project.as_str(), now, DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a
+/// woken harness brings its stopped sub-agents back with it: their held tasks wake them.
+/// Takes a connection, the project and the agent. Returns any SQLite failure.
+pub(crate) fn owner_start(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?3
+             )
+             DELETE FROM team_owner_stops WHERE agent IN (SELECT id FROM led)",
+            params![agent, project.as_str(), DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// The start of the usage hour that holds a time, as usage rows record it. Takes ms since
@@ -3538,7 +3587,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
-    let limited = caps(connection, project)?;
+    let limited = caps::read(connection, project)?;
     let spend = budget(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
@@ -3561,6 +3610,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         token_budget: spend.map(|spend| spend.tokens),
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),
+        spread_accounts: spread_accounts(connection, project)?,
         live_master,
         live_problem,
         min_agents: plan.min_agents,

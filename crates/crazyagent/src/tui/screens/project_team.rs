@@ -476,6 +476,7 @@ impl TeamView {
             KeyCode::Char('v') => self.cap(Cap::Harnesses),
             KeyCode::Char('u') => self.cap(Cap::Teammates),
             KeyCode::Char('T') => self.token_budget(),
+            KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
                 self.open_branch_edit();
                 TeamReply::Handled
@@ -517,7 +518,7 @@ impl TeamView {
                 },
             ),
             (Ask::StopAgent(agent), KeyCode::Char('y')) => self.change(
-                "Stopping that harness and its teammates. Wake it from Finished to start it again.",
+                "Stopping that agent and the agents it leads; a lead is told. Wake it from Finished to start it again.",
                 TeamAction::StopAgent {
                     project_id: self.project.clone(),
                     agent,
@@ -593,17 +594,19 @@ impl TeamView {
         TeamReply::Handled
     }
 
-    /// Stop harness: asks before stopping the selected sub-agent with its teammates. The
-    /// master stops only with Stop all. Returns Handled with the question or a notice.
+    /// Stop harness or Stop teammate: asks before stopping the selected harness with every
+    /// agent it leads, or the selected sub-agent of either mode, app-spawned or a native
+    /// teammate, whose lead is then told. The master stops only with Stop all. Returns
+    /// Handled with the question or a notice.
     fn ask_stop_agent(&mut self) -> TeamReply {
         let Some(agent) = self.agents().get(self.agent_cursor).copied() else {
-            self.notice = Some(Notice::plain("Pick a harness in the agents list first."));
+            self.notice = Some(Notice::plain("Pick an agent in the agents list first."));
             return TeamReply::Handled;
         };
         let note = match (agent.role, agent.status.live(), agent.owner_stopped) {
             (AgentRole::Master, ..) => Some("The master stops with Stop all (S)."),
             (_, false, _) | (_, _, true) => {
-                Some("That harness is already stopped. Wake it from Finished to start it again.")
+                Some("That agent is already stopped. Wake it from Finished to start it again.")
             }
             _ => None,
         };
@@ -654,6 +657,28 @@ impl TeamView {
             ),
         };
         self.change(&done, action)
+    }
+
+    /// Turns Spread harnesses across accounts on or off: on, a new or woken agent prefers a
+    /// pool account no running agent of the project uses. Returns the change, or Handled
+    /// while the team loads.
+    fn spread_accounts(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let on = !status.spread_accounts;
+        self.change(
+            if on {
+                "New agents now prefer a pool account no running agent of this project uses."
+            } else {
+                "New agents now take the account your account strategy picks."
+            },
+            TeamAction::SpreadAccounts {
+                project_id: self.project.clone(),
+                on,
+            },
+        )
     }
 
     /// Moves the Token budget to its next choice: Off, then each of `BUDGET_CHOICES`, then
@@ -1927,7 +1952,8 @@ impl TeamView {
 
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Max teammates, Token budget), each whole. A
+    /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
+    /// budget, Master's branch, Ask before merge), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2015,6 +2041,10 @@ impl TeamView {
             ),
             setting("Max harnesses", cap_words(status.max_harnesses)),
             setting("Max teammates", cap_words(status.max_teammates)),
+            setting(
+                "Spread accounts",
+                if status.spread_accounts { "On" } else { "Off" }.to_owned(),
+            ),
             setting(
                 "Token budget",
                 budget_words(status.token_budget, status.budget_used),
@@ -2204,7 +2234,20 @@ impl TeamView {
                 Ask::StopAll => {
                     "Stop the master, every harness and every teammate of this project?".to_owned()
                 }
-                Ask::StopAgent(id) => format!("Stop {} and its teammates?", label(id)),
+                Ask::StopAgent(id) => {
+                    let led = self.status.as_ref().is_some_and(|status| {
+                        status
+                            .agents
+                            .iter()
+                            .find(|agent| agent.id == id)
+                            .is_some_and(|agent| agent.parent.is_some_and(|lead| lead != id))
+                    });
+                    if led {
+                        format!("Stop {}? Its lead is told.", label(id))
+                    } else {
+                        format!("Stop {} and every agent it leads?", label(id))
+                    }
+                }
                 Ask::Teammate(id) => {
                     let count = self.running_teammates(id).len();
                     return vec![
@@ -2323,7 +2366,8 @@ impl TeamView {
             ("v", "Max harnesses"),
             ("u", "Max teammates"),
             ("T", "Token budget"),
-            ("z", "Stop harness"),
+            ("P", "Spread accounts"),
+            ("z", "Stop agent"),
             ("p", "Stop teammate"),
             (
                 "S",
