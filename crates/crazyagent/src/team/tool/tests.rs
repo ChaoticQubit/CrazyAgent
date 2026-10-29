@@ -516,9 +516,9 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 
     let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
     assert_eq!(taken.len(), 3, "{taken:?}");
-    assert_eq!(taken[0], (first.clone(), Some(Call::InspectWork)));
-    assert_eq!(taken[1], (second.clone(), None));
-    assert_eq!(taken[2], ("3".repeat(32), None));
+    assert_eq!(taken[0], (first.clone(), Some(Call::InspectWork), None));
+    assert_eq!(taken[1], (second.clone(), None, None));
+    assert_eq!(taken[2], ("3".repeat(32), None, None));
     assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
     assert!(
         std::fs::symlink_metadata(mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32)))).is_ok()
@@ -607,7 +607,7 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
     std::fs::rename(&inner, &mailbox).unwrap();
     assert_eq!(
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
-        vec![(id.clone(), Some(Call::InspectWork))]
+        vec![(id.clone(), Some(Call::InspectWork), None)]
     );
     assert!(
         !mailbox.join(format!("{stale}{REPLY_SUFFIX}")).exists(),
@@ -634,14 +634,14 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
             let mailbox = mailbox.clone();
             std::thread::spawn(move || {
                 (0..16)
-                    .map(|_| ask(&mailbox, &Call::InspectWork, REPLY_WAIT))
+                    .map(|_| ask(&mailbox, &Call::InspectWork, None, REPLY_WAIT))
                     .collect::<Vec<_>>()
             })
         })
         .collect();
     let mut unread = 0;
     while askers.iter().any(|asker| !asker.is_finished()) {
-        for (id, call) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
+        for (id, call, _) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
             unread += usize::from(call.is_none());
             answer_call(&mailbox, &id, "Taken.", call.is_none()).unwrap();
         }
@@ -666,12 +666,12 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
-    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative"), &[]).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative"), &[], None).is_err());
     let linked = base.join("linked");
     symlink(&base, &linked).unwrap();
-    assert!(serve_live(list.clone(), Vec::new(), &linked, &[]).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), &linked, &[], None).is_err());
     let mut output = Vec::new();
-    serve_live(list, &mut output, &base, &[STOP_TOOL.to_owned()]).unwrap();
+    serve_live(list, &mut output, &base, &[STOP_TOOL.to_owned()], None).unwrap();
     let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
     let names: Vec<&str> = answer["result"]["tools"]
         .as_array()
@@ -707,6 +707,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
         ask(
             &served,
             &Call::InspectWork,
+            None,
             std::time::Duration::from_millis(800),
         )
     });

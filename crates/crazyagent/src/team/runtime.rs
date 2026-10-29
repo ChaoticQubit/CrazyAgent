@@ -2815,6 +2815,8 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect();
+        let runtime = self.state.parent();
+        let host = self.terminal.as_deref();
         for id in subs {
             let label = super::events::label(&self.connection, id)
                 .unwrap_or_else(|_| AgentRole::Sub.agent_label(id));
@@ -2825,8 +2827,11 @@ impl TeamRuntime {
                 (id, &label),
                 &agents,
                 &mailbox,
-                &mut |connection, call| {
-                    super::master::answer_sub(connection, &answering, id, call)
+                &mut |connection, pane| {
+                    team_caller(connection, host, runtime, project, (id, &label), pane)
+                },
+                &mut |connection, caller, call| {
+                    super::master::answer_sub(connection, &answering, caller, call)
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
             );
@@ -6784,6 +6789,60 @@ impl Drop for TeamService {
     fn drop(&mut self) {
         self.halt();
     }
+}
+
+/// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead that runs a native
+/// agent team in its own tmux server shares that mailbox with its teammates, so the pane
+/// the call's server ran in decides: the lead's own pane is the lead, the pane of one of its
+/// live teammate rows is that teammate, and anything else, a missing pane included, is
+/// nobody. Every other mailbox names its own agent. Inputs: the database, the terminal host,
+/// the engine's runtime folder, the project, the mailbox's agent with its label and the
+/// stamped pane. Output: the caller's id and label, or none.
+fn team_caller(
+    connection: &Connection,
+    host: Option<&dyn Host>,
+    runtime: Option<&Path>,
+    project: &ProjectId,
+    (lead, label): (i64, &str),
+    pane: Option<&str>,
+) -> Option<(i64, String)> {
+    let name = AgentId::team(lead).ok()?;
+    let native = runtime
+        .and_then(|runtime| crate::terminal::harness_socket(runtime, &name).ok())
+        .is_some_and(|socket| std::fs::symlink_metadata(socket).is_ok());
+    if !native {
+        return Some((lead, label.to_owned()));
+    }
+    let pane = pane.filter(|pane| crate::terminal::pane_id_valid(pane))?;
+    let teammate: Option<i64> = connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
+             AND status IN ('starting','idle','working') AND pane=?3 ORDER BY id DESC LIMIT 1",
+            params![project.as_str(), lead, pane],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    if let Some(teammate) = teammate {
+        assert_ne!(teammate, lead);
+        let named = super::events::label(connection, teammate).ok()?;
+        return Some((teammate, named));
+    }
+    let record: Option<String> = connection
+        .query_row(
+            "SELECT record FROM team_panes WHERE agent=?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    let own = record.as_deref().and_then(PaneRecord::decode)?;
+    host?
+        .panes(&name)
+        .ok()?
+        .iter()
+        .any(|listed| listed.pid == own.pid && listed.id == pane)
+        .then(|| (lead, label.to_owned()))
 }
 
 /// The private home one team agent's harness runs with as its CLAUDE_CONFIG_DIR or

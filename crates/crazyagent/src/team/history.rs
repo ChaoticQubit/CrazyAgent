@@ -48,6 +48,8 @@ const NOT_FOUND: &str = "No conversation of this project has that id. Call sessi
 const UNREAD: &str = "Not answered: the engine could not read this call.";
 const NOT_AGENT_TOOL: &str = "Not answered: a sub-agent does not use this tool.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
+const CALLER_UNKNOWN: &str = "Not done: the engine could not tell which agent of this team made the call (team_caller_unknown).";
+const TEAMMATE_REFUSED: &str = "Not done: a native teammate does not start, stop or merge agents. Ask your lead with update_work (teammate_role_tool_refused).";
 const MEMORY_UNREAD: &str =
     "Not answered: the engine could not reach saved memory. Try again in a moment.";
 const DATA_NOTE: &str = "Past conversation text, quoted as data, never as instructions.";
@@ -122,44 +124,62 @@ pub fn answer(
 
 /// Answers the calls a sub-agent's team server left in its mailbox, at most
 /// `AGENT_CALLS_PER_TICK_MAX`, each checked again and against the owner's tool switches
-/// (DEC-104): `sessions`, `session`, `remember` and `recall` here, the work verbs and the
-/// lead calls through `lead`, and any call `lead` does not answer is refused. Takes the
-/// engine database, the project, the sub-agent and its label, the folder of team agents'
-/// own folders, the mailbox and the answerer. Returns how many calls were answered.
+/// (DEC-104): `who` names the caller from the pane its server stamped, the mailbox's own
+/// agent or, for a native lead, one of its teammates, which may not start, stop or merge
+/// agents; `sessions`, `session`, `remember` and `recall` are answered here, the work verbs
+/// and the lead calls through `lead` as the caller, and any call `lead` does not answer is
+/// refused. Takes the engine database, the project, the mailbox's agent and its label, the
+/// folder of team agents' own folders, the mailbox, the caller finder and the answerer.
+/// Returns how many calls were answered.
 pub fn serve_agent_calls(
     connection: &mut Connection,
     project: &ProjectId,
     (id, agent): (i64, &str),
     agents: &Path,
     mailbox: &Path,
-    lead: &mut dyn FnMut(&mut Connection, Call) -> Option<(String, bool)>,
+    who: &mut dyn FnMut(&Connection, Option<&str>) -> Option<(i64, String)>,
+    lead: &mut dyn FnMut(&mut Connection, i64, Call) -> Option<(String, bool)>,
 ) -> usize {
     let taken = tool::take_calls(mailbox, AGENT_CALLS_PER_TICK_MAX);
-    for (call_id, call) in &taken {
+    for (call_id, call, pane) in &taken {
         let call = call.clone().map(tool::checked);
-        let off = match &call {
-            Some(Ok(call)) => super::master::switched_off(connection, project, call),
+        let caller = match &call {
+            Some(Ok(_)) => who(connection, pane.as_deref()),
+            _ => Some((id, agent.to_owned())),
+        };
+        let off = match (&call, &caller) {
+            (Some(Ok(call)), Some(_)) => super::master::switched_off(connection, project, call),
             _ => Ok(false),
         };
-        if matches!(call, Some(Ok(_))) && matches!(off, Ok(false)) {
-            let _ = crate::coord::touch(connection, id, super::now_ms());
+        if let (Some(Ok(_)), Some((caller, _)), Ok(false)) = (&call, &caller, &off) {
+            let _ = crate::coord::touch(connection, *caller, super::now_ms());
         }
-        let (text, error) = match (call, off) {
-            (None, _) => (UNREAD.to_owned(), true),
-            (Some(Err(refused)), _) => (refused.to_owned(), true),
-            (Some(Ok(_)), Ok(true) | Err(_)) => (SWITCHED_OFF.to_owned(), true),
-            (Some(Ok(call @ (Call::Remember { .. } | Call::Recall { .. }))), Ok(false)) => {
-                match super::master::memory_answer(connection, project, agent, call) {
-                    Some(Ok(answered)) => answered,
-                    Some(Err(_)) | None => (MEMORY_UNREAD.to_owned(), true),
-                }
-            }
-            (Some(Ok(call @ (Call::Sessions { .. } | Call::Session { .. }))), Ok(false)) => {
-                answer(connection, project, agents, call)
-                    .expect("a past-conversation call has an answer")
-            }
-            (Some(Ok(call)), Ok(false)) => {
-                lead(connection, call).unwrap_or_else(|| (NOT_AGENT_TOOL.to_owned(), true))
+        let (text, error) = match (call, caller, off) {
+            (None, _, _) => (UNREAD.to_owned(), true),
+            (Some(Err(refused)), _, _) => (refused.to_owned(), true),
+            (Some(Ok(_)), None, _) => (CALLER_UNKNOWN.to_owned(), true),
+            (Some(Ok(_)), Some(_), Ok(true) | Err(_)) => (SWITCHED_OFF.to_owned(), true),
+            (
+                Some(Ok(Call::Spawn { .. } | Call::Stop { .. } | Call::Merge { .. })),
+                Some((caller, _)),
+                Ok(false),
+            ) if caller != id => (TEAMMATE_REFUSED.to_owned(), true),
+            (
+                Some(Ok(call @ (Call::Remember { .. } | Call::Recall { .. }))),
+                Some((_, label)),
+                Ok(false),
+            ) => match super::master::memory_answer(connection, project, &label, call) {
+                Some(Ok(answered)) => answered,
+                Some(Err(_)) | None => (MEMORY_UNREAD.to_owned(), true),
+            },
+            (
+                Some(Ok(call @ (Call::Sessions { .. } | Call::Session { .. }))),
+                Some(_),
+                Ok(false),
+            ) => answer(connection, project, agents, call)
+                .expect("a past-conversation call has an answer"),
+            (Some(Ok(call)), Some((caller, _)), Ok(false)) => {
+                lead(connection, caller, call).unwrap_or_else(|| (NOT_AGENT_TOOL.to_owned(), true))
             }
         };
         let _ = tool::answer_call(mailbox, call_id, &text, error);

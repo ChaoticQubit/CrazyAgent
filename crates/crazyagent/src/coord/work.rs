@@ -53,46 +53,6 @@ pub fn start_work(
     Ok((work, overlaps))
 }
 
-/// Starts work handed to an agent (Assigned or Accepted) with its claims, making it
-/// Active, as `start_work` does for new work. Takes the database, the work, the version
-/// the caller read, the agent, the claims and the time in ms. Returns the new version
-/// and the overlaps, `coord_work_stale` when someone moved first, or a plain refusal.
-pub fn start_assigned(
-    db: &Connection,
-    work: WorkId,
-    version: i64,
-    agent: AgentId,
-    claims: Vec<String>,
-    now: i64,
-) -> Result<(i64, Vec<Overlap>), EngineError> {
-    let claims = super::claims::normalize_all(&claims)?;
-    let change = Change::begin(db)?;
-    let tx = change.db();
-    let row = current(tx, work, version)?;
-    if row.owner != Some(agent) {
-        return Err(failure("coord_transfer_refused"));
-    }
-    if !matches!(row.state, WorkState::Assigned | WorkState::Accepted) {
-        return Err(failure("coord_transfer_invalid"));
-    }
-    let next = advance(tx, work, &row, WorkState::Active, row.owner, now)?;
-    audit(
-        tx,
-        &row.project,
-        work,
-        Party::Agent(agent),
-        "start",
-        version,
-        next,
-        now,
-    )?;
-    super::claims::add(tx, &row.project, agent, work, &claims, now)?;
-    let overlaps = super::claims::overlaps_for(tx, &row.project, agent, work, now)?;
-    super::presence::seen(tx, agent, now)?;
-    change.commit()?;
-    Ok((next, overlaps))
-}
-
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:
 /// Assign gives Open, Declined or the owner's own work to a running agent; the owner
 /// Accepts or Declines what was assigned; Release gives it back as Open and Handoff

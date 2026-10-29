@@ -75,6 +75,7 @@ const CALL_SUFFIX: &str = ".call";
 const TAKEN_SUFFIX: &str = ".taken";
 const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
+const PANE_KEY: &str = "pane";
 const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -288,15 +289,18 @@ pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::R
 
 /// Serves a live master's or a sub-agent's team tools, `TEAM_TOOLS` less the ones switched
 /// off, as an MCP server over stdio until its client closes input: each call goes into the
-/// mailbox folder in the agent's private temporary folder and its result is the engine's
-/// answer. Takes the client's input and output, the absolute mailbox folder the engine
-/// made and the tools left out. Returns an input or output failure, or a refusal when the
-/// mailbox is not a plain folder.
+/// mailbox folder in the agent's private temporary folder, stamped with the terminal pane
+/// the server runs in so the engine can tell a native teammate from its lead, and its
+/// result is the engine's answer. Takes the client's input and output, the absolute
+/// mailbox folder the engine made, the tools left out and the pane (`$TMUX_PANE`), kept
+/// only when it is a host pane id. Returns an input or output failure, or a refusal when
+/// the mailbox is not a plain folder.
 pub fn serve_live(
     input: impl BufRead,
     output: impl Write,
     mailbox: &Path,
     off: &[String],
+    pane: Option<&str>,
 ) -> std::io::Result<()> {
     let plain = std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir());
     if !mailbox.is_absolute() || !plain {
@@ -304,7 +308,10 @@ pub fn serve_live(
             "the mailbox must be an absolute plain folder",
         ));
     }
-    rpc(input, output, |request| answer_live(request, mailbox, off))
+    let pane = pane.filter(|pane| crate::terminal::pane_id_valid(pane));
+    rpc(input, output, |request| {
+        answer_live(request, mailbox, off, pane)
+    })
 }
 
 /// Says whether every name is one of the team tools, as the engine subcommands check the
@@ -506,7 +513,12 @@ fn spec(name: &str) -> Value {
     json!({"name": name, "description": description, "inputSchema": schema})
 }
 
-fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value> {
+fn answer_live(
+    request: &Value,
+    mailbox: &Path,
+    off: &[String],
+    pane: Option<&str>,
+) -> Option<Value> {
     let method = request.get("method")?.as_str();
     let id = request.get("id")?.clone();
     let params = request.get("params");
@@ -525,7 +537,7 @@ fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value>
                 }
                 Some(name) => match live_call(name, arguments) {
                     Some(Ok(call)) => {
-                        let (text, error) = ask(mailbox, &call, REPLY_WAIT);
+                        let (text, error) = ask(mailbox, &call, pane, REPLY_WAIT);
                         tool_result(&text, error)
                     }
                     Some(Err(refused)) => tool_result(refused, true),
@@ -893,9 +905,15 @@ fn role_handle(text: &str) -> Result<Option<String>, ()> {
 /// Writes one call into the mailbox under a part name and renames it into place, so the
 /// engine never takes half a call, then waits for the engine's answer. A call still in the
 /// mailbox at the deadline is withdrawn, so the engine never runs it; one the engine has
-/// claimed is reported as taken but unanswered. Takes the mailbox, the call and the wait.
-/// Returns the answer text and whether it is an error.
-fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool) {
+/// claimed is reported as taken but unanswered. Takes the mailbox, the call, the caller's
+/// pane id written beside it and the wait. Returns the answer text and whether it is an
+/// error.
+fn ask(
+    mailbox: &Path,
+    call: &Call,
+    pane: Option<&str>,
+    wait: std::time::Duration,
+) -> (String, bool) {
     let pending = calls(mailbox, CALL_SUFFIX).len();
     if pending >= CALLS_PENDING_MAX {
         return (BUSY.into(), true);
@@ -903,7 +921,17 @@ fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool)
     let Ok(id) = call_id() else {
         return (UNSENT.into(), true);
     };
-    let Ok(mut line) = serde_json::to_vec(call) else {
+    let Ok(mut stamped) = serde_json::to_value(call) else {
+        return (UNSENT.into(), true);
+    };
+    if let Some(pane) = pane {
+        assert!(crate::terminal::pane_id_valid(pane));
+        let Some(fields) = stamped.as_object_mut() else {
+            return (UNSENT.into(), true);
+        };
+        fields.insert(PANE_KEY.to_owned(), Value::String(pane.to_owned()));
+    }
+    let Ok(mut line) = serde_json::to_vec(&stamped) else {
         return (UNSENT.into(), true);
     };
     line.push(b'\n');
@@ -1161,8 +1189,8 @@ fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
 /// claims left for `REPLY_STALE`. Links and other non-files, the mailbox and the master's
 /// temporary folder included, are never followed; a call past `CALL_BYTES_MAX` is removed
 /// unread. Takes the mailbox and how many to take. Returns each call id with its call, or
-/// none when the file did not hold a valid call.
-pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
+/// none when the file did not hold a valid call, and the pane its server stamped, if any.
+pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>, Option<String>)> {
     let Ok(mailbox) = Mailbox::open_for_engine(mailbox) else {
         return Vec::new();
     };
@@ -1193,13 +1221,28 @@ pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
             }
             let mut bytes = Vec::new();
             (&file).take(CALL_BYTES_MAX).read_to_end(&mut bytes).ok()?;
-            serde_json::from_slice::<Call>(bytes.trim_ascii()).ok()
+            read_call(bytes.trim_ascii())
         });
         let _ = mailbox.remove(&claimed);
-        taken.push((id, call));
+        taken.push(match call {
+            Some((call, pane)) => (id, Some(call), pane),
+            None => (id, None, None),
+        });
     }
     assert!(taken.len() <= max);
     taken
+}
+
+/// Reads one call file: the call and the pane its server stamped beside it, which must be a
+/// host pane id when present. Takes the bytes. Returns both, or none for anything else.
+fn read_call(bytes: &[u8]) -> Option<(Call, Option<String>)> {
+    let mut value: Value = serde_json::from_slice(bytes).ok()?;
+    let pane = match value.as_object_mut()?.remove(PANE_KEY) {
+        None => None,
+        Some(Value::String(pane)) if crate::terminal::pane_id_valid(&pane) => Some(pane),
+        Some(_) => return None,
+    };
+    Some((serde_json::from_value::<Call>(value).ok()?, pane))
 }
 
 /// Answers one call in the mailbox: the answer is written beside it under a part name and
