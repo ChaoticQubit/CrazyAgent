@@ -110,6 +110,7 @@ impl Letter {
                 .map(|id| format!(" (reply to msg {id})"))
                 .unwrap_or_default(),
             (MessageKind::Prompt, _) => " (work for you)".to_owned(),
+            (MessageKind::Note, _) => " (note, it takes no reply)".to_owned(),
             _ => String::new(),
         };
         let work = self
