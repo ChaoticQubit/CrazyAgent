@@ -931,12 +931,11 @@ fn is_worker(
         .map_err(state)
 }
 
-/// Starts a worker of a lead (N1) when the owner's Sub-agent depth setting allows the lead
-/// one: the task is admitted as the master's would be, against the same plan and running
-/// agent limits, and records the lead, so its worktree is cut from the lead's commit and
-/// its result goes back to the lead. Takes the database, what the answers need, the lead,
-/// the task, harness and role. Returns the sentence the lead reads and whether it is a
-/// refusal, or a SQLite failure.
+/// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
+/// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
+/// signed-in account, cut from the lead's commit and reporting back to the lead. Takes the
+/// database, what the answers need, the lead, the task, harness and role. Returns the
+/// sentence the lead reads and whether it is a refusal, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -982,6 +981,9 @@ fn lead_delegate(
             ),
             true,
         ));
+    }
+    if let Err(reason) = super::caps::admit_sub_agent(&tx, project, lead) {
+        return Ok((format!("Not started: {reason}"), true));
     }
     let admitted = super::admit(
         &tx,
