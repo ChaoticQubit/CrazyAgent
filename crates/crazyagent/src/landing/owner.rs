@@ -51,7 +51,7 @@ pub(super) fn owner_identity(
     let read = |key: &str| -> Result<String, EngineError> {
         let missing = || failure("changes_owner_identity_missing");
         let output = crate::spawn_gate::output(
-            Command::new("/usr/bin/git")
+            Command::new(crate::research::runner::setup_git())
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
                 .env("LC_ALL", "C")
@@ -415,6 +415,136 @@ fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result
         }
     }
     Ok(())
+}
+
+/// Commits the deletion of files the owner's checkout no longer has, and nothing else, as
+/// one commit on its checked-out branch: the tree comes from the branch tip in a private
+/// index, so nothing else the owner changed goes in; the owner's own index then stages
+/// the same deletions and the branch moves by compare and swap. Refuses an index that
+/// stages any other path. Inputs: the checkout root, the owner's home, the paths and the
+/// message. Output: the commit, the branch and the paths deleted, or
+/// `changes_import_none`, `changes_import_staged`, `changes_git_busy`,
+/// `changes_detached_head`, `changes_branch_moved` or another git code.
+pub(super) fn commit_deletions(
+    repository: &Path,
+    home: &Path,
+    paths: &[&str],
+    message: &str,
+) -> Result<(String, String, Vec<String>), EngineError> {
+    assert!(paths.iter().enumerate().all(|(at, path)| {
+        !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
+    }));
+    let _held = hold(repository);
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(repository, &git_dir, Some(repository))?;
+    let (reference, tip) = owner_branch(&owner, repository)?;
+    let mut arguments = vec![
+        "ls-tree",
+        "-z",
+        "--name-only",
+        "--full-tree",
+        tip.as_str(),
+        "--",
+    ];
+    arguments.extend_from_slice(paths);
+    let listing = owner.capture(&arguments, super::git::LISTING_BYTES_MAX)?;
+    let listed: Vec<&[u8]> = listing
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let deleted: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| {
+            listed.contains(&path.as_bytes())
+                && matches!(
+                    std::fs::symlink_metadata(repository.join(path)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+        })
+        .collect();
+    if deleted.is_empty() {
+        return Err(failure("changes_import_none"));
+    }
+    let staged = owner.exec(
+        &[
+            "diff-index",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            &tip,
+            "--",
+        ],
+        None,
+        &[],
+        super::git::LISTING_BYTES_MAX,
+    )?;
+    if staged.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if staged.overflow
+        || staged
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .any(|entry| !deleted.iter().any(|path| path.as_bytes() == entry))
+    {
+        return Err(failure("changes_import_staged"));
+    }
+    let folder = git_dir.join(format!(
+        "crazyagent-import-{}",
+        &crate::engine::owner::random_id()?[..24]
+    ));
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
+    let tree = Repo::open(repository, &git_dir, Some(repository)).and_then(|repo| {
+        let repo = repo.private_index(&folder.join("index"));
+        repo.run(&["read-tree", &tip])?;
+        let mut arguments = vec!["update-index", "--force-remove", "--"];
+        arguments.extend_from_slice(&deleted);
+        repo.run(&arguments)?;
+        super::git::object_id(&repo.run(&["write-tree"])?)
+    });
+    let _ = std::fs::remove_dir_all(&folder);
+    let tree = tree?;
+    assert_ne!(tree, owner.tree_of(&tip)?);
+    let identity = owner_identity(repository, home)?;
+    let identity = (identity.0.as_str(), identity.1.as_str());
+    let commit = owner.commit_tree(&tree, &[&tip], message, identity)?;
+    let mut arguments = vec!["update-index", "--force-remove", "--"];
+    arguments.extend_from_slice(&deleted);
+    if owner.exec(&arguments, None, &[], 4096)?.code != 0 {
+        return Err(failure("changes_git_busy"));
+    }
+    let env = [
+        ("GIT_COMMITTER_NAME", identity.0),
+        ("GIT_COMMITTER_EMAIL", identity.1),
+    ];
+    let moved = owner.exec(
+        &[
+            "update-ref",
+            "-m",
+            "CrazyAgent: commit the instruction import",
+            &reference,
+            &commit,
+            &tip,
+        ],
+        None,
+        &env,
+        256,
+    )?;
+    if moved.code != 0 {
+        return Err(failure("changes_branch_moved"));
+    }
+    let branch = reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&reference)
+        .to_owned();
+    Ok((
+        commit,
+        branch,
+        deleted.into_iter().map(str::to_owned).collect(),
+    ))
 }
 
 /// Marks a change set landed as `landed`, drops its pending ref and points the agent's

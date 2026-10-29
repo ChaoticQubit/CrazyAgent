@@ -47,13 +47,37 @@ impl OwnerController {
     }
 
     /// Copies the project's own instruction files into its project instructions and moves
-    /// them into `.crazyagent/imported/`. Input: the project. Output: the moved files.
+    /// them into `.crazyagent/imported/`. Input: the project. Output: the moved files, each
+    /// marked `uncommitted` while its move still waits for a commit.
     pub async fn confirm_instruction_import(
         &self,
         project: ProjectId,
     ) -> Result<Vec<crate::engine::owner::ImportFile>, EngineError> {
         self.process_client()?
             .confirm_instruction_import(project)
+            .await
+    }
+
+    /// Lists the moved instruction files whose move the project folder has not committed.
+    /// Input: the project. Output: the paths, empty when no move waits for a commit.
+    pub async fn uncommitted_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        self.process_client()?
+            .uncommitted_instruction_import(project)
+            .await
+    }
+
+    /// Commits the instruction import's move as one local commit holding only the moved
+    /// files, never pushed. Input: the project. Output: the commit, or a refusal such as
+    /// `process_commit_staged`.
+    pub async fn commit_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<crate::engine::owner::ImportCommit, EngineError> {
+        self.process_client()?
+            .commit_instruction_import(project)
             .await
     }
 

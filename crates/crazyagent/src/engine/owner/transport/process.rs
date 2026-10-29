@@ -2,7 +2,7 @@ use super::*;
 use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
 pub use crate::instruction_files::{
-    ImportFile, Mode as InstructionMode, Record as InstructionRecord,
+    ImportCommit, ImportFile, Mode as InstructionMode, Record as InstructionRecord,
     Settings as InstructionSettings,
 };
 use crate::protocol::encode_frame;
@@ -37,6 +37,13 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_adoption_unavailable",
     "process_agent_unknown",
     "process_agent_unsupported",
+    "process_commit_busy",
+    "process_commit_detached",
+    "process_commit_failed",
+    "process_commit_identity",
+    "process_commit_moved",
+    "process_commit_none",
+    "process_commit_staged",
     "process_folder_missing",
     "process_folder_unsafe",
     "process_import_missing",
@@ -72,6 +79,12 @@ enum Action {
         project: ProjectId,
     },
     ConfirmImport {
+        project: ProjectId,
+    },
+    UncommittedImport {
+        project: ProjectId,
+    },
+    CommitImport {
         project: ProjectId,
     },
     ReadFile {
@@ -130,6 +143,12 @@ enum Reply {
     },
     Imports {
         files: Vec<ImportFile>,
+    },
+    Uncommitted {
+        files: Vec<String>,
+    },
+    Committed {
+        commit: ImportCommit,
     },
     Rejected {
         code: String,
@@ -192,6 +211,8 @@ enum Answer {
     Settings(InstructionSettings),
     Adoption(Adoption),
     Imports(Vec<ImportFile>),
+    Uncommitted(Vec<String>),
+    Committed(ImportCommit),
 }
 
 fn unknown() -> EngineError {
@@ -258,7 +279,8 @@ impl OwnerClient {
 
     /// Copies the project's own instruction files into its project instructions and moves
     /// them into `.crazyagent/imported/`, creating `.crazyagent/` when the project has none;
-    /// files that cannot be imported stay. Input: the project. Output: the moved files, or a
+    /// files that cannot be imported stay. Input: the project. Output: the moved files, each
+    /// marked `uncommitted` while its move still waits for `commit_instruction_import`, or a
     /// `PROCESS_CODES` refusal with nothing moved.
     pub async fn confirm_instruction_import(
         &self,
@@ -266,6 +288,50 @@ impl OwnerClient {
     ) -> Result<Vec<ImportFile>, EngineError> {
         self.process_imports_reply(Action::ConfirmImport { project })
             .await
+    }
+
+    /// Lists the project's moved instruction files whose move the owner's checkout has not
+    /// committed, so a merge refusal for uncommitted changes can name them and offer the
+    /// commit. Input: the project. Output: the paths inside the project folder, empty when
+    /// no move waits for a commit.
+    pub async fn uncommitted_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .process_exchange(Action::UncommittedImport { project }, None)
+            .await?
+        {
+            (Reply::Uncommitted { files }, None)
+                if files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(files)
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Commits the instruction import's move as the owner chose: one local commit, never
+    /// pushed, on the project folder's checked-out branch with the repository's own git
+    /// identity, holding only the deletions of the moved files git tracked. Input: the
+    /// project. Output: the commit, or a `PROCESS_CODES` refusal such as
+    /// `process_commit_staged` when other files are staged, with nothing committed.
+    pub async fn commit_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<ImportCommit, EngineError> {
+        match self
+            .process_exchange(Action::CommitImport { project }, None)
+            .await?
+        {
+            (Reply::Committed { commit }, None)
+                if !commit.files.is_empty()
+                    && commit.files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(commit)
+            }
+            _ => Err(unknown()),
+        }
     }
 
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
@@ -548,6 +614,14 @@ pub(super) async fn serve(
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
             (Reply::Imports { files }, None)
         }
+        Ok(Answer::Uncommitted(files)) => {
+            assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
+            (Reply::Uncommitted { files }, None)
+        }
+        Ok(Answer::Committed(commit)) => {
+            assert!(!commit.files.is_empty());
+            (Reply::Committed { commit }, None)
+        }
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -625,6 +699,15 @@ async fn handle(
         }
         Action::ConfirmImport { project } if text.is_none() => {
             crate::instruction_files::import(&project_folder(&root, &project)?).map(Answer::Imports)
+        }
+        Action::UncommittedImport { project } if text.is_none() => {
+            crate::instruction_files::uncommitted(&project_folder(&root, &project)?)
+                .map(Answer::Uncommitted)
+        }
+        Action::CommitImport { project } if text.is_none() => {
+            let home = crate::projects_home::owner_home()?;
+            crate::instruction_files::commit(&project_folder(&root, &project)?, &home)
+                .map(Answer::Committed)
         }
         action => {
             let saved = match (&action, &text) {

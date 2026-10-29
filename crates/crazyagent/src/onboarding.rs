@@ -624,6 +624,6 @@ pub(crate) fn status(
         overview,
         folder_overview,
         finished,
-        imported: crate::instruction_files::moved(tx, project_id)?,
+        imported: crate::instruction_files::moved(tx, project_id, Path::new(&repo))?,
     }))
 }
