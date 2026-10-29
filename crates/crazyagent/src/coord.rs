@@ -27,6 +27,7 @@ macro_rules! named {
 }
 
 mod claims;
+pub mod delivery;
 mod messages;
 mod presence;
 pub mod settings;
