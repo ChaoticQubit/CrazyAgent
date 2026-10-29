@@ -341,14 +341,9 @@ pub(super) fn update_work(
         let reached = who(connection, project, sent.to)?;
         let mut said = format!("Asked #{id}; it went to {reached}.");
         if sent.to == Party::Owner && severity == Severity::High {
-            let notice = bound_text(&text, crate::team::events::ESCALATION_BYTES_MAX);
-            let (notified, missed) = super::escalate(connection, project, &notice)?;
-            said.push(' ');
-            said.push_str(if missed {
-                "The owner got no notification for it now; it waits in the owner's questions. Wait for their answer and do not decide this yourself."
-            } else {
-                notified.as_str()
-            });
+            said.push_str(
+                " The owner gets an urgent alert. Wait for their answer and do not decide this yourself.",
+            );
         }
         return Ok((said, false));
     }

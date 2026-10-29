@@ -31,13 +31,6 @@ const MASTER_LABEL: &str = "Master";
 const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
-const ESCALATIONS_PER_HOUR_MAX: i64 = 10;
-const HOUR_MS: i64 = 3_600_000;
-const ESCALATED: &str =
-    "The owner has been notified. Wait for their answer here and do not decide this yourself.";
-const ESCALATIONS_FULL: &str = "Not sent: the owner already has 10 questions from this project within the hour. Wait for their answers here.";
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX == 10);
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX < super::events::NOTIFICATIONS_PER_PROJECT_MAX);
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
@@ -1570,36 +1563,6 @@ pub(super) fn wake_in(
         Err(code) => format!("{}.", super::runtime::refusal(code)),
     };
     Ok((format!("Not woken: {reason}"), true))
-}
-
-/// Raises an app notification for a decision only the owner makes, at most
-/// `ESCALATIONS_PER_HOUR_MAX` per project within an hour. Takes the database, the master's
-/// project and the question. Returns the sentence the master reads, or a SQLite failure.
-fn escalate(
-    connection: &Connection,
-    project: &ProjectId,
-    text: &str,
-) -> Result<(String, bool), EngineError> {
-    let now = now_ms();
-    let recent: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation' AND created_ms>?2",
-            params![project.as_str(), now - HOUR_MS],
-            |row| row.get(0),
-        )
-        .map_err(state)?;
-    if recent >= ESCALATIONS_PER_HOUR_MAX {
-        return Ok((ESCALATIONS_FULL.to_owned(), true));
-    }
-    Ok(
-        match super::events::escalate(connection, project, text, now)? {
-            Ok(_) => (ESCALATED.to_owned(), false),
-            Err(_) => (
-                "Not sent: give the owner one plain question of up to 2000 bytes.".to_owned(),
-                true,
-            ),
-        },
-    )
 }
 
 fn changes(answering: &Answering<'_>) -> (String, bool) {
