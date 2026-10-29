@@ -3,7 +3,7 @@ import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
-import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -92,6 +92,29 @@ export interface TeamAgentRow {
   rename: { agent: number; handle: string } | null;
   depth: number;
   lead: string | null;
+  stop: { agent: number } | null;
+  stoppedByYou: boolean;
+  teammates: TeammateRow[];
+}
+
+/** One teammate a harness split off in its own terminal window, as the Team panel shows it. */
+export interface TeammateRow {
+  key: string;
+  pane: string;
+  word: string;
+  stop: { agent: number; pane: string } | null;
+}
+
+/** The teammate rows of one harness: running first, then the ones that closed, as the engine
+ * lists them. Inputs: the harness agent and whether it runs now and was not stopped by the
+ * owner. Output: the rows, each with a Stop only while it and its harness run. */
+export function teammateRows(agent: Pick<TeamAgent, "id" | "teammates">, running: boolean): TeammateRow[] {
+  return (agent.teammates ?? []).map((mate) => ({
+    key: `teammate-${agent.id}-${mate.pane}`,
+    pane: mate.pane,
+    word: mate.stopped ? "Stopped by you" : mate.ended ? "Closed" : "Running",
+    stop: running && !mate.ended && !mate.stopped ? { agent: agent.id, pane: mate.pane } : null,
+  }));
 }
 
 /** Orders agents as their lead tree (N2): each lead followed by its own workers, depth first,
@@ -182,6 +205,9 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
       rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
       depth,
       lead: agent.parent != null ? names.get(agent.parent) ?? null : null,
+      stop: agent.role === "sub" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
+      stoppedByYou: agent.owner_stopped === true,
+      teammates: agent.role === "sub" ? teammateRows(agent, agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status)) : [],
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
@@ -237,7 +263,7 @@ export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harne
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (last ? `Last task: ${firstLine(last.prompt)}` : "No task yet"),
       result: last?.result ?? null,
-      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
+      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : agent.owner_stopped === true ? "Stopped by you" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
       tasks: own.length,
       wakeable: agent.wakeable === true,
       wakeNote: agent.wakeable === true ? null : agent.wake_note ?? "This version of the engine can't wake agents.",

@@ -214,24 +214,32 @@ pub enum RuleLevel {
     Agent,
 }
 
-/// Why the owner gets an app notification: the master escalated an owner-only decision, or
-/// auto-wake stopped at its hourly cap.
+/// Why the owner gets an app notification: the master escalated an owner-only decision,
+/// auto-wake stopped at its hourly cap, the event queue filled, or the project's token
+/// budget stopped its team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Escalation,
     WakePaused,
     QueueFull,
+    BudgetStopped,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 3] = [Self::Escalation, Self::WakePaused, Self::QueueFull];
+    const ALL: [Self; 4] = [
+        Self::Escalation,
+        Self::WakePaused,
+        Self::QueueFull,
+        Self::BudgetStopped,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Escalation => "escalation",
             Self::WakePaused => "wake_paused",
             Self::QueueFull => "queue_full",
+            Self::BudgetStopped => "budget_stopped",
         }
     }
 
@@ -563,7 +571,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
+pub(super) fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
     Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)
 }
 
@@ -1061,7 +1069,7 @@ pub fn escalate(
     Ok(Ok(id))
 }
 
-fn notify(
+pub(super) fn notify(
     tx: &Transaction<'_>,
     project: &ProjectId,
     kind: NotificationKind,

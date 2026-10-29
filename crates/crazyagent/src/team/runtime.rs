@@ -384,6 +384,7 @@ pub struct TeamRuntime {
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
+    teammates_next: Option<Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
@@ -528,6 +529,7 @@ impl TeamRuntime {
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
+            teammates_next: None,
             live_starts: BTreeMap::new(),
             resuming: None,
             naming: None,
@@ -827,7 +829,207 @@ impl TeamRuntime {
         self.owner_controls()?;
         self.note_conversations()?;
         self.watch_questions()?;
+        self.watch_teammates()?;
         self.sweep()
+    }
+
+    /// Reads each running harness's terminal for the teammate panes its agent team split off,
+    /// at most once each `events::SCAN_EVERY`: records new ones and the ones that closed,
+    /// ends the ones the owner stopped and those past the owner's Max teammates per harness,
+    /// newest first, and tells the harness why in its terminal. A harness whose own pane is
+    /// not found among its window's panes is skipped, so its own pane is never ended here.
+    /// Returns any SQLite failure; an unreadable terminal is skipped.
+    fn watch_teammates(&mut self) -> Result<(), EngineError> {
+        let Some(host) = self.terminal.clone() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if self.teammates_next.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        self.teammates_next = Some(now + super::events::SCAN_EVERY);
+        let at = now_ms();
+        self.connection
+            .execute(
+                "UPDATE team_teammates SET ended_ms=?1 WHERE ended_ms IS NULL AND agent NOT IN
+                 (SELECT id FROM team_agents WHERE status IN ('starting','idle','working'))",
+                [at],
+            )
+            .map_err(error)?;
+        let harnesses: Vec<(i64, ProjectId)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
+            .map(|(id, worker)| (*id, worker.project.clone()))
+            .collect();
+        for (agent, project) in harnesses {
+            let record: Option<String> = self
+                .connection
+                .query_row(
+                    "SELECT record FROM team_panes WHERE agent=?1",
+                    [agent],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            let Some(lead) = record.as_deref().and_then(PaneRecord::decode) else {
+                continue;
+            };
+            let Ok(name) = AgentId::team(agent) else {
+                continue;
+            };
+            let Ok(panes) = host.panes(&name) else {
+                continue;
+            };
+            if !panes.iter().any(|pane| pane.pid == lead.pid) {
+                continue;
+            }
+            let team: Vec<&crate::terminal::PaneInfo> = panes
+                .iter()
+                .filter(|pane| pane.pid != lead.pid && !pane.dead)
+                .collect();
+            self.teammates_seen(&project, agent, &team, at)?;
+            let cap = super::teammate_cap(&self.connection, &project)?;
+            let ended = self.end_teammates(host.as_ref(), &project, agent, &team, cap, at)?;
+            assert!(team.iter().all(|pane| pane.pid != lead.pid));
+            if let Some(text) = ended {
+                let _ =
+                    super::events::send_to(&self.connection, host.as_ref(), Some(agent), &text)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Records one harness's live teammate panes: a new pane is added, a recorded pane no
+    /// longer live is marked ended, and the oldest ended ones past `TEAMMATE_ROWS_KEPT` go.
+    /// Takes the project, the harness, its live teammate panes and the time. Returns any
+    /// SQLite failure.
+    fn teammates_seen(
+        &self,
+        project: &ProjectId,
+        agent: i64,
+        team: &[&crate::terminal::PaneInfo],
+        at: i64,
+    ) -> Result<(), EngineError> {
+        for pane in team {
+            self.connection
+                .execute(
+                    "INSERT OR IGNORE INTO team_teammates(agent,project,pane,seen_ms) VALUES (?1,?2,?3,?4)",
+                    params![agent, project.as_str(), pane.id, at],
+                )
+                .map_err(error)?;
+        }
+        let open: Vec<String> = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT pane FROM team_teammates WHERE agent=?1 AND ended_ms IS NULL")
+                .map_err(error)?;
+            statement
+                .query_map([agent], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        for pane in open
+            .iter()
+            .filter(|pane| !team.iter().any(|live| &live.id == *pane))
+        {
+            self.connection
+                .execute(
+                    "UPDATE team_teammates SET ended_ms=?3 WHERE agent=?1 AND pane=?2",
+                    params![agent, pane, at],
+                )
+                .map_err(error)?;
+        }
+        self.connection
+            .execute(
+                "DELETE FROM team_teammates WHERE agent=?1 AND ended_ms IS NOT NULL AND pane NOT IN
+                 (SELECT pane FROM team_teammates WHERE agent=?1
+                  ORDER BY ended_ms IS NOT NULL, COALESCE(ended_ms,seen_ms) DESC LIMIT ?2)",
+                params![agent, TEAMMATE_ROWS_KEPT],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Ends the teammate panes of one harness the owner stopped, then the newest past the
+    /// owner's Max teammates per harness, and marks each ended. Takes the terminal host, the
+    /// project, the harness, its live teammate panes, the cap and the time. Returns the line
+    /// to type into the harness about what ended, none when nothing did, or a SQLite failure.
+    fn end_teammates(
+        &self,
+        host: &dyn Host,
+        project: &ProjectId,
+        agent: i64,
+        team: &[&crate::terminal::PaneInfo],
+        cap: Option<u8>,
+        at: i64,
+    ) -> Result<Option<String>, EngineError> {
+        let asked: BTreeSet<String> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT pane FROM team_teammates WHERE agent=?1 AND project=?2
+                     AND ended_ms IS NULL AND stopped_ms IS NOT NULL",
+                )
+                .map_err(error)?;
+            statement
+                .query_map(params![agent, project.as_str()], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let mut kept: Vec<&str> = team
+            .iter()
+            .map(|pane| pane.id.as_str())
+            .filter(|pane| !asked.contains(*pane))
+            .collect();
+        kept.sort_by_key(|pane| pane[1..].parse::<u64>().unwrap_or(u64::MAX));
+        let over: Vec<String> = match cap {
+            Some(cap) if kept.len() > usize::from(cap) => kept[usize::from(cap)..]
+                .iter()
+                .map(|pane| (*pane).to_owned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let name = AgentId::team(agent).map_err(EngineError::from)?;
+        let mut stopped = Vec::new();
+        let mut capped = Vec::new();
+        for pane in asked
+            .iter()
+            .filter(|pane| team.iter().any(|live| &live.id == *pane))
+        {
+            if host.kill_pane(&name, pane).is_ok() {
+                stopped.push(pane.clone());
+            }
+        }
+        for pane in &over {
+            if host.kill_pane(&name, pane).is_ok() {
+                capped.push(pane.clone());
+            }
+        }
+        for pane in stopped.iter().chain(capped.iter()) {
+            self.connection
+                .execute(
+                    "UPDATE team_teammates SET stopped_ms=COALESCE(stopped_ms,?3), ended_ms=?3 WHERE agent=?1 AND pane=?2",
+                    params![agent, pane, at],
+                )
+                .map_err(error)?;
+        }
+        let mut lines = Vec::new();
+        if !stopped.is_empty() {
+            lines.push(format!(
+                "The owner stopped your teammate in pane {}. Do not start it again unless the owner asks.",
+                stopped.join(", ")
+            ));
+        }
+        if let (Some(cap), false) = (cap, capped.is_empty()) {
+            lines.push(format!(
+                "The owner allows at most {cap} teammates per harness, so the engine closed your newest teammate pane {}. Keep at most {cap} teammates.",
+                capped.join(", ")
+            ));
+        }
+        Ok((!lines.is_empty()).then(|| format!("[team] {}", lines.join(" "))))
     }
 
     /// Reads each busy sub-agent's terminal for a question it waits on, at most once each
@@ -937,7 +1139,27 @@ impl TeamRuntime {
     /// switch turned off and the owner's stop of a sub-agent (AW-1), is written before the
     /// agent is touched, so a failed write leaves the stop to the next tick.
     fn owner_controls(&mut self) -> Result<(), EngineError> {
+        let stops: BTreeSet<i64> = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT agent FROM team_owner_stops")
+                .map_err(error)?;
+            statement
+                .query_map([], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let mut stopped = Vec::new();
         for (id, worker) in &mut self.workers {
+            if worker.role == AgentRole::Sub && !worker.stopping && stops.contains(id) {
+                worker.held = true;
+                worker.stopping = true;
+                worker.cancel.store(true, Ordering::SeqCst);
+                let _ = worker.orders.send(Order::Stop);
+                stopped.push((*id, worker.project.clone()));
+                continue;
+            }
             let Some(hosted) = &worker.hosted else {
                 continue;
             };
@@ -957,6 +1179,10 @@ impl TeamRuntime {
                         params![*id, worker.project.as_str(), now_ms()],
                     )
                     .map_err(error)?;
+                if !restart {
+                    worker.held = true;
+                    stopped.push((*id, worker.project.clone()));
+                }
             }
             if restart {
                 worker.held = true;
@@ -965,6 +1191,17 @@ impl TeamRuntime {
             worker.stopping = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
+        }
+        for (id, project) in stopped {
+            super::events::record(
+                &self.connection,
+                &project,
+                id,
+                None,
+                super::events::EventKind::Progress,
+                OWNER_STOPPED_AGENT,
+                now_ms(),
+            )?;
         }
         Ok(())
     }
@@ -1081,6 +1318,17 @@ impl TeamRuntime {
                     return self.note(
                         &project,
                         "The team already runs as many sub-agents as its plan allows, so no other was started.",
+                    );
+                }
+                Some(_)
+                    if self.harnesses_full(
+                        &project,
+                        super::caps(&self.connection, &project)?.harnesses,
+                    ) =>
+                {
+                    return self.note(
+                        &project,
+                        "The project already runs as many harnesses as your Max harnesses setting allows, so no other was started. Stop one or raise the setting.",
                     );
                 }
                 Some(slot) => (slot.harness.clone(), slot.tools),
@@ -1271,6 +1519,12 @@ impl TeamRuntime {
             self.hold(project);
             return Ok(());
         };
+        if super::budget_stop(&self.connection, project, now_ms())? {
+            self.note(
+                project,
+                "The team stopped because its agents used the owner's token budget.",
+            )?;
+        }
         if super::paused(&self.connection, project)? {
             self.hold(project);
             return Ok(());
@@ -1331,7 +1585,7 @@ impl TeamRuntime {
 
     /// Returns a held agent's work to its queue without spending an attempt: a task waits
     /// again (or is cancelled when the owner asked for that) and a message waits again.
-    fn release(&mut self, busy: Busy) -> Result<(), EngineError> {
+    fn release(&mut self, agent: i64, busy: Busy) -> Result<(), EngineError> {
         match busy {
             Busy::Task(task) => {
                 self.connection
@@ -1339,6 +1593,13 @@ impl TeamRuntime {
                         "UPDATE team_tasks SET status='queued', agent=NULL, attempts=MAX(attempts-1,0)
                          WHERE id=?1 AND status='running' AND cancel_requested=0",
                         [task],
+                    )
+                    .map_err(error)?;
+                self.connection
+                    .execute(
+                        "INSERT OR REPLACE INTO team_task_pins(task,project,agent)
+                         SELECT id,project,?2 FROM team_tasks WHERE id=?1 AND status='queued'",
+                        params![task, agent],
                     )
                     .map_err(error)?;
                 self.connection
@@ -1392,6 +1653,13 @@ impl TeamRuntime {
     }
 
     /// Counts a project's agents that may still hold a terminal, stopping ones included.
+    /// Tells whether the project already runs as many harnesses, the sub-agents the master
+    /// starts, as the owner's Max harnesses per project allows, so no other starts. Takes
+    /// the project and the cap, None for No limit. Returns true at the cap.
+    fn harnesses_full(&self, project: &ProjectId, cap: Option<u8>) -> bool {
+        cap.is_some_and(|cap| self.live(project, AgentRole::Sub, None) >= usize::from(cap))
+    }
+
     fn panes(&self, project: &ProjectId) -> usize {
         self.workers
             .values()
@@ -2512,6 +2780,7 @@ impl TeamRuntime {
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
+        let harness_cap = super::caps(&self.connection, project)?.harnesses;
         for (task, harness, prompt, pin, by_master, parent) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -2545,16 +2814,25 @@ impl TeamRuntime {
                 (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
-                (None, Some(pinned))
-                    if by_master && super::owner_stopped(&self.connection, pinned)? =>
-                {
-                    self.fail_task(task, OWNER_STOPPED_TASK)?;
+                (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
+                    let ran: bool = self
+                        .connection
+                        .query_row(
+                            "SELECT started_ms IS NOT NULL FROM team_tasks WHERE id=?1",
+                            [task],
+                            |row| row.get(0),
+                        )
+                        .map_err(error)?;
+                    if by_master && !ran {
+                        self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    }
                     continue;
                 }
                 (None, Some(pinned)) => {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
+                        || self.harnesses_full(project, harness_cap)
                     {
                         continue;
                     }
@@ -2583,6 +2861,7 @@ impl TeamRuntime {
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
                         || self.panes(project) >= PANES_PER_PROJECT_MAX
+                        || self.harnesses_full(project, harness_cap)
                     {
                         continue;
                     }
@@ -2716,11 +2995,13 @@ impl TeamRuntime {
             return Ok(());
         }
         let floor = usize::from(stored.team.min_agents.saturating_sub(1));
+        let harness_cap = super::caps(&self.connection, project)?.harnesses;
         for slot in &stored.team.sub_harnesses {
             while self.live(project, AgentRole::Sub, None) < floor
                 && self.live(project, AgentRole::Sub, Some(&slot.harness))
                     < usize::from(slot.agents)
                 && self.panes(project) < PANES_PER_PROJECT_MAX
+                && !self.harnesses_full(project, harness_cap)
             {
                 let Ok(account) = self.account_for(access, project, &slot.harness, paused) else {
                     break;
@@ -4011,7 +4292,7 @@ impl TeamRuntime {
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
                 match busy {
-                    Some(busy) if held && end != TurnEnd::Success => self.release(busy)?,
+                    Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
                     Some(Busy::Task(task)) => {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
@@ -4125,7 +4406,7 @@ impl TeamRuntime {
                     }
                 }
                 match worker.busy {
-                    Some(busy) if worker.held => self.release(busy)?,
+                    Some(busy) if worker.held => self.release(id, busy)?,
                     Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed, None)?,
                     Some(Busy::Message(message)) => self.finish_message(
                         &worker.project,
@@ -5339,6 +5620,10 @@ const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
+const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
+/// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
+const TEAMMATE_ROWS_KEPT: i64 = 32;
+const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
 
