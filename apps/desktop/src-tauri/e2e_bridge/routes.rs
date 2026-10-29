@@ -4,6 +4,11 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent_desktop::bridge::BridgeError;
     use crazyagent::accounts::AccountDraft;
     use crazyagent::config::ModelAccessEdit;
+    use crazyagent::coord::settings::CoordSettings;
+    use crazyagent::coord::settings::Delivery;
+    use crazyagent::coord::settings::HarnessKind;
+    use crazyagent::coord::settings::SubagentMode;
+    use crazyagent::coord::tool_switches::Switch;
     use crazyagent::engine::owner::ModelAccessCollection;
     use crazyagent::engine::owner::NativeAuthMethod;
     use crazyagent::memory::ReviewDecision;
@@ -700,6 +705,53 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_ask_before_merge(&id, on, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_coordination" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                settings: CoordSettings,
+                generation: u64,
+            }
+            let Args { id, settings, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_coordination(&id, settings, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_harness_mode" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                harness: HarnessKind,
+                mode: SubagentMode,
+                generation: u64,
+            }
+            let Args { id, harness, mode, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_harness_mode(&id, harness, mode, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_harness_delivery" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                harness: HarnessKind,
+                delivery: Delivery,
+                generation: u64,
+            }
+            let Args { id, harness, delivery, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_harness_delivery(&id, harness, delivery, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_agent_branches" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -885,6 +937,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_token_budget(&id, tokens, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_spread_accounts" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                on: bool,
+                generation: u64,
+            }
+            let Args { id, on, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_spread_accounts(&id, on, generation) .await }.await;
             routed(result)
         }
         "desktop_team_wake_agent" => {
@@ -1906,6 +1973,50 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state).await?.project_plugins(project_id).await }.await;
             routed(result)
         }
+        "desktop_tool_switches" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                server_id: Option<String>,
+            }
+            let Args { project_id, server_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .tool_switches(project_id, server_id) .await }.await;
+            routed(result)
+        }
+        "desktop_set_tool_switch" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                server_id: Option<String>,
+                tool: String,
+                value: Switch,
+            }
+            let Args { project_id, server_id, tool, value } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_tool_switch(project_id, server_id, tool, value) .await }.await;
+            routed(result)
+        }
+        "desktop_restore_tool_switches" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: Option<String>,
+                server_id: Option<String>,
+            }
+            let Args { project_id, server_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .restore_tool_switches(project_id, server_id) .await }.await;
+            routed(result)
+        }
         "desktop_agents" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2198,6 +2309,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.instruction_settings(project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_adoption" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                project_id: String,
+            }
+            let Args { project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.adoption(project_id)?; call.await }.await;
             routed(result)
         }
         "desktop_save_instruction_settings" => {

@@ -2,7 +2,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
-use crate::engine::owner::InstructionSettings;
+use crate::engine::owner::{Adoption, InstructionSettings};
 use crate::instruction_files::Choice;
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
@@ -29,6 +29,7 @@ const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
 const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
 const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
+const ADOPTION_ROWS_MAX: usize = 6;
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,6 +191,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
+        "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
@@ -429,6 +431,7 @@ pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
     settings: Option<Result<InstructionSettings, String>>,
+    adoption: Option<Result<Adoption, String>>,
     editor: Editor,
     problem: Option<String>,
     pending: Option<ProcessQuery>,
@@ -445,6 +448,7 @@ impl ProcessPage {
             scope,
             state: State::Loading,
             settings: None,
+            adoption: None,
             editor: Editor::new(""),
             problem: None,
             pending: None,
@@ -472,6 +476,12 @@ impl ProcessPage {
             self.pending = Some(query);
         } else if matches!(query, ProcessQuery::Read { .. }) {
             self.state = State::Failed(READ_REFUSED.into());
+        }
+    }
+
+    fn read_adoption(&mut self, ctx: &mut Ctx) {
+        if let Some(project) = self.project() {
+            self.send(ProcessQuery::Adoption { project }, ctx);
         }
     }
 
@@ -567,10 +577,20 @@ impl ProcessPage {
         match (&event.query, &event.result) {
             (ProcessQuery::Settings { .. }, Ok(ProcessReply::Settings(settings))) => {
                 self.settings = Some(Ok(*settings));
+                self.read_adoption(ctx);
                 return;
             }
             (ProcessQuery::Settings { .. }, Err(code)) => {
                 self.settings = Some(Err(message(code)));
+                self.read_adoption(ctx);
+                return;
+            }
+            (ProcessQuery::Adoption { .. }, Ok(ProcessReply::Adoption(view))) => {
+                self.adoption = Some(Ok((**view).clone()));
+                return;
+            }
+            (ProcessQuery::Adoption { .. }, Err(code)) => {
+                self.adoption = Some(Err(message(code)));
                 return;
             }
             (ProcessQuery::SaveSettings { .. }, Ok(ProcessReply::Settings(settings))) => {
@@ -589,7 +609,12 @@ impl ProcessPage {
         }
         let result = match &event.result {
             Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Saved(_) | ProcessReply::Agent(_) | ProcessReply::Settings(_)) => {
+            Ok(
+                ProcessReply::Saved(_)
+                | ProcessReply::Agent(_)
+                | ProcessReply::Settings(_)
+                | ProcessReply::Adoption(_),
+            ) => {
                 return;
             }
             Err(code) => Err(code),
@@ -615,7 +640,8 @@ impl ProcessPage {
             (
                 ProcessQuery::Agent { .. }
                 | ProcessQuery::Settings { .. }
-                | ProcessQuery::SaveSettings { .. },
+                | ProcessQuery::SaveSettings { .. }
+                | ProcessQuery::Adoption { .. },
                 _,
             ) => {}
         }
@@ -686,6 +712,7 @@ impl ProcessPage {
         }
         if let Scope::Project { .. } = self.scope {
             self.settings_lines(width, &mut lines, ctx);
+            self.adoption_lines(width, &mut lines, ctx);
         }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
@@ -829,6 +856,84 @@ impl ProcessPage {
     }
 }
 
+impl ProcessPage {
+    /// Adds the project's workflow adoption below its settings: whether nudges are on, then
+    /// the newest agents, at most `ADOPTION_ROWS_MAX`, each with its count per counted tool
+    /// and its flags in red, marked when the agent was reminded. Inputs: the width, the
+    /// lines so far and the context. Output: unit.
+    fn adoption_lines(&self, width: usize, lines: &mut Vec<Line<'static>>, ctx: &Ctx) {
+        let theme = &ctx.theme;
+        let adoption = match &self.adoption {
+            None => return,
+            Some(Err(problem)) => {
+                lines.extend(
+                    wrap(problem, width)
+                        .into_iter()
+                        .map(|text| styled(text, Role::Error, theme)),
+                );
+                lines.push(Line::default());
+                return;
+            }
+            Some(Ok(adoption)) => adoption,
+        };
+        let nudges = if adoption.nudges {
+            "Nudges on: each flag sends that agent one reminder."
+        } else {
+            "Nudges off: flags show here, agents get no reminder."
+        };
+        lines.push(row(
+            width,
+            styled("Workflow adoption", Role::Heading, theme),
+            styled(nudges, Role::Muted, theme),
+            ctx.glyphs,
+        ));
+        if adoption.agents.is_empty() {
+            lines.push(styled("No agents yet.", Role::Muted, theme));
+        }
+        for agent in adoption.agents.iter().take(ADOPTION_ROWS_MAX) {
+            let counts: Vec<String> = adoption
+                .counted
+                .iter()
+                .zip(&agent.counts)
+                .map(|(tool, count)| format!("{tool} {count}"))
+                .collect();
+            let name = format!("#{} {} {}", agent.agent, agent.role, agent.harness);
+            let role = if agent.active {
+                Role::Accent
+            } else {
+                Role::Muted
+            };
+            lines.push(styled(name, role, theme));
+            lines.extend(
+                wrap(&counts.join("  "), width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
+            for flag in &agent.flags {
+                let reminded = if agent.reminded.contains(flag) {
+                    ", reminded"
+                } else {
+                    ""
+                };
+                lines.push(styled(
+                    format!("  {}{reminded}", flag.words()),
+                    Role::Error,
+                    theme,
+                ));
+            }
+        }
+        if adoption.agents.len() > ADOPTION_ROWS_MAX {
+            let more = adoption.agents.len() - ADOPTION_ROWS_MAX;
+            lines.push(styled(
+                format!("and {more} older agents, shown in the desktop app"),
+                Role::Muted,
+                theme,
+            ));
+        }
+        lines.push(Line::default());
+    }
+}
+
 impl Screen for ProcessPage {
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
@@ -958,6 +1063,8 @@ impl Screen for ProcessPage {
                 project: self.project(),
             };
             self.send(query, ctx);
+        } else if self.settings.is_some() {
+            self.read_adoption(ctx);
         }
     }
 
