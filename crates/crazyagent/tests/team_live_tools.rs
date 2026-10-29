@@ -9,8 +9,7 @@ use crazyagent::team::events::{self, EventKind};
 use crazyagent::team::master::{Answering, EVENTS, serve_calls};
 use crazyagent::team::names;
 use crazyagent::team::tool::{
-    ANSWER_TOOL, CHANGES_TOOL, ESCALATE_TOOL, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, MESSAGE_TOOL,
-    STATUS_TOOL, TOOL_NAME,
+    INSPECT_WORK_TOOL, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, SPAWN_TOOL, UPDATE_WORK_TOOL,
 };
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host};
@@ -199,31 +198,31 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n".to_owned(),
         tool_call(
             2,
-            TOOL_NAME,
+            SPAWN_TOOL,
             json!({"task": "Write page.md", "harness": "codex", "role": "@docs"}),
         ),
         tool_call(
             3,
-            MESSAGE_TOOL,
-            json!({"agent": "@page-writer", "text": "Use the old header."}),
+            UPDATE_WORK_TOOL,
+            json!({"to": "@page-writer", "text": "Use the old header."}),
         ),
         tool_call(
             4,
-            ANSWER_TOOL,
-            json!({"agent": persona, "text": "Yes, keep going."}),
+            UPDATE_WORK_TOOL,
+            json!({"to": persona, "text": "Yes, keep going."}),
         ),
-        tool_call(5, MESSAGE_TOOL, json!({"agent": "@old-job", "text": "Hi"})),
+        tool_call(5, UPDATE_WORK_TOOL, json!({"to": "@old-job", "text": "Hi"})),
         tool_call(
             6,
-            MESSAGE_TOOL,
-            json!({"agent": format!("codex-{stopped}"), "text": "Hi"}),
+            UPDATE_WORK_TOOL,
+            json!({"to": format!("codex-{stopped}"), "text": "Hi"}),
         ),
-        tool_call(7, STATUS_TOOL, json!({})),
-        tool_call(8, CHANGES_TOOL, json!({})),
+        tool_call(7, INSPECT_WORK_TOOL, json!({})),
+        tool_call(8, INSPECT_WORK_TOOL, json!({})),
         tool_call(
             9,
-            ESCALATE_TOOL,
-            json!({"text": "Ada wants to force-push main. Allow it?"}),
+            UPDATE_WORK_TOOL,
+            json!({"text": "Ada wants to force-push main. Allow it?", "for": "me", "severity": "high"}),
         ),
     ];
     let mut input = server.stdin.take().unwrap();
@@ -248,7 +247,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let deadline = Instant::now() + WAIT;
     while server.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "the server never finished");
-        serve_calls(&mut connection, &answering, &mailbox).unwrap();
+        serve_calls(&mut connection, &answering, master, &mailbox).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
     let output = reader.join().unwrap();

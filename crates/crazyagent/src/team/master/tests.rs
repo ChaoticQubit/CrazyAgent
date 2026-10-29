@@ -399,7 +399,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
     let served = mailbox.to_path_buf();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        tool::serve_live(Cursor::new(input), &mut output, &served).unwrap();
+        tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
         output
     });
     let access = ModelAccess::default();
@@ -416,7 +416,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
     let deadline = Instant::now() + Duration::from_secs(30);
     while !server.is_finished() {
         assert!(Instant::now() < deadline, "the server never finished");
-        serve_calls(&mut fixture.connection, &answering, mailbox).unwrap();
+        serve_calls(&mut fixture.connection, &answering, MASTER, mailbox).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
     server
@@ -451,21 +451,21 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
         vec![
             tool_call(
                 1,
-                tool::TOOL_NAME,
+                tool::SPAWN_TOOL,
                 json!({"task": "Write page.md", "harness": "codex", "role": "@page-writer"}),
             ),
             tool_call(
                 2,
-                tool::TOOL_NAME,
+                tool::SPAWN_TOOL,
                 json!({"task": "Run the tests", "harness": "pi"}),
             ),
             tool_call(
                 3,
-                tool::MESSAGE_TOOL,
-                json!({"agent": "@page-writer", "text": "Use the old header."}),
+                tool::UPDATE_WORK_TOOL,
+                json!({"to": "@page-writer", "text": "Use the old header."}),
             ),
-            tool_call(4, tool::STATUS_TOOL, json!({})),
-            tool_call(5, tool::CHANGES_TOOL, json!({})),
+            tool_call(4, tool::INSPECT_WORK_TOOL, json!({})),
+            tool_call(5, tool::INSPECT_WORK_TOOL, json!({})),
         ],
     );
     assert_eq!(answers.len(), 5, "{answers:#?}");
@@ -500,8 +500,13 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
             true
         )
     );
-    assert_eq!(text(&answers[2]), (NOT_WIRED, true));
-    assert_eq!(text(&answers[3]), (NOT_WIRED, true));
+    assert!(
+        text(&answers[2])
+            .0
+            .starts_with("Not sent: no agent of this project is called @page-writer"),
+        "{answers:#?}"
+    );
+    assert!(!text(&answers[3]).1, "{answers:#?}");
     assert_eq!(
         text(&answers[4]),
         ("No change set is waiting for the owner.", false)
@@ -522,7 +527,7 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
     let planted = "a".repeat(32);
     std::fs::write(
         mailbox.join(format!("{planted}.call")),
-        br#"{"tool":"delegate","task":"Write page.md","harness":"CODEX","role":null}"#,
+        br#"{"tool":"spawn","task":"Write page.md","harness":"CODEX","role":null}"#,
     )
     .unwrap();
     let unreadable = "b".repeat(32);
@@ -539,7 +544,7 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         host: None,
     };
     assert_eq!(
-        serve_calls(&mut fixture.connection, &answering, &mailbox).unwrap(),
+        serve_calls(&mut fixture.connection, &answering, MASTER, &mailbox).unwrap(),
         2
     );
     let reply = |id: &str| -> Value {
@@ -559,52 +564,6 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
         .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
         .unwrap();
     assert_eq!(tasks, 0);
-}
-
-#[test]
-fn a_live_master_s_escalations_stop_at_the_hourly_cap() {
-    let mut fixture = Fixture::new();
-    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
-    std::fs::create_dir(&mailbox).unwrap();
-    let project = fixture.setup.project_id.clone();
-    for n in 1..ESCALATIONS_PER_HOUR_MAX {
-        super::super::events::escalate(
-            &fixture.connection,
-            &project,
-            &format!("Earlier question {n}"),
-            now_ms(),
-        )
-        .unwrap()
-        .unwrap();
-    }
-    let answers = serve_while(
-        &mut fixture,
-        &mailbox,
-        vec![
-            tool_call(
-                1,
-                tool::ESCALATE_TOOL,
-                json!({"text": "May Ada delete the release branch?"}),
-            ),
-            tool_call(
-                2,
-                tool::ESCALATE_TOOL,
-                json!({"text": "May Ada push to main?"}),
-            ),
-        ],
-    );
-    assert_eq!(text(&answers[0]), (ESCALATED, false));
-    assert_eq!(text(&answers[1]), (ESCALATIONS_FULL, true));
-    let escalations: i64 = fixture
-        .connection
-        .query_row(
-            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation'",
-            [PROJECT],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(escalations, ESCALATIONS_PER_HOUR_MAX);
-    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
 
 /// Adds a sub-agent of the fixture's project with a role handle and, for a finished one, a
@@ -680,13 +639,13 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
         vec![
             tool_call(
                 1,
-                tool::WAKE_TOOL,
-                json!({"agent": "@onboarding-fix", "text": "Fix the onboarding copy."}),
+                tool::UPDATE_WORK_TOOL,
+                json!({"to": "@onboarding-fix", "text": "Fix the onboarding copy."}),
             ),
             tool_call(
                 2,
-                tool::WAKE_TOOL,
-                json!({"agent": format!("Sub-agent {live}"), "text": "Stop."}),
+                tool::UPDATE_WORK_TOOL,
+                json!({"to": format!("Sub-agent {live}"), "text": "Stop."}),
             ),
         ],
     );
@@ -759,8 +718,8 @@ fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
     let told = status_text(&fixture.connection, &project).unwrap();
     assert!(
         told.contains(&format!(
-            "Finished sub-agents you can wake with {}(agent, text), newest first:\n- {label}, Sub-agent {agent} (",
-            tool::WAKE_TOOL
+            "Finished sub-agents you can wake with {}(to, text), newest first:\n- {label}, Sub-agent {agent} (",
+            tool::UPDATE_WORK_TOOL
         )),
         "{told}"
     );
@@ -769,8 +728,8 @@ fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
         &mailbox,
         vec![tool_call(
             1,
-            tool::WAKE_TOOL,
-            json!({"agent": format!("Sub-agent {agent}"), "text": "Add the footer."}),
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": format!("Sub-agent {agent}"), "text": "Add the footer."}),
         )],
     );
     assert_eq!(answers.len(), 1, "{answers:#?}");
@@ -804,8 +763,8 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
         &mailbox,
         vec![tool_call(
             1,
-            tool::WAKE_TOOL,
-            json!({"agent": "@page-writer", "text": "You were interrupted, finish it."}),
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": "@page-writer", "text": "You were interrupted, finish it."}),
         )],
     );
     assert_eq!(answers.len(), 1, "{answers:#?}");

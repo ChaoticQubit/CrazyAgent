@@ -228,8 +228,10 @@ pub(super) fn counts(pattern: &str, tool: &str) -> bool {
     matches(tool) || matches(short(tool))
 }
 
-/// The open questions for the owner, highest severity first, then oldest.
-fn owner_questions(db: &Connection, project: &ProjectId) -> Result<Vec<Message>, EngineError> {
+/// The open questions for the owner (Q14b), highest severity first, then oldest, at most
+/// `QUESTIONS_SHOWN_MAX`, which the inbox and the leads and master in the chain read.
+/// Takes the database and the project. Returns the questions.
+pub fn owner_questions(db: &Connection, project: &ProjectId) -> Result<Vec<Message>, EngineError> {
     let mut statement = db
         .prepare(&format!(
             "SELECT {MESSAGE_COLUMNS} FROM coord_messages
