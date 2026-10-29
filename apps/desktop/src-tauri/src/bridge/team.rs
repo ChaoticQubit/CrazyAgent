@@ -232,6 +232,39 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets the branch a project's master works on and merges finished harnesses into
+    /// (DEC-100), or clears the choice back to the repository's default branch. Takes the
+    /// project id, the branch name, None for the default, and the client generation.
+    /// Returns the actual commit receipt; the engine refuses a name git cannot hold.
+    pub async fn team_master_branch(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let branch = branch
+            .map(|branch| branch.trim().to_owned())
+            .filter(|branch| !branch.is_empty());
+        self.team_action(TeamAction::MasterBranch { project_id, branch }, generation)
+            .await
+    }
+
+    /// Turns a project's "Ask me before merging into the master's branch" setting on or
+    /// off: on, the master's merge of a finished harness waits for the owner's Accept.
+    /// Takes the project id, the switch and the client generation. Returns the actual
+    /// commit receipt.
+    pub async fn team_ask_before_merge(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::AskBeforeMerge { project_id, on }, generation)
+            .await
+    }
+
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
     /// app running in a terminal the owner types into. Takes the project id, the switch and
     /// the client generation. Returns the actual commit receipt.

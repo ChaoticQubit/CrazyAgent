@@ -282,11 +282,89 @@ pub fn add_agent_clone_at(
     worktree: &Path,
     base: Option<&str>,
 ) -> Result<(), EngineError> {
+    let branch = crate::agent_git::branch(worktree)
+        .ok_or_else(|| EngineError("changes_workspace_invalid".into()))?;
+    add_agent_clone_on(repository, worktree, base, &branch)
+}
+
+/// Makes an agent's own clone as `add_agent_clone` does, on a named branch, such as a
+/// harness's task branch from [`claim_task_branch`], at a commit the owner repository
+/// holds. Inputs: the owner checkout root, the new worktree, the commit, None for the
+/// owner's HEAD, and the branch. Output: Ok, else as `add_agent_clone`.
+pub fn add_agent_clone_on(
+    repository: &Path,
+    worktree: &Path,
+    base: Option<&str>,
+    branch: &str,
+) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return clone::add(repository, worktree, base);
+    return clone::add(repository, worktree, base, branch);
     #[cfg(not(unix))]
     {
-        let _ = (repository, worktree, base);
+        let _ = (repository, worktree, base, branch);
+        Err(unavailable())
+    }
+}
+
+/// Names and stores the task branch a new harness works on (DEC-100), `crazyagent/<name>`
+/// or its first free `-2` to `-64` form, before its worktree is made: its own clone is then
+/// made on it ([`add_agent_clone_on`]) or its linked worktree put on it
+/// ([`name_agent_branch`]). Inputs: the store, the owner checkout root, the new worktree
+/// and the name, lower-case letters and digits joined by single hyphens. Output: the
+/// branch, or `changes_agent_branch_invalid` or `changes_agent_branch_exists`.
+pub fn claim_task_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    name: &str,
+) -> Result<String, EngineError> {
+    #[cfg(unix)]
+    return flow::claim_branch(db, repository, worktree, name);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, name);
+        Err(unavailable())
+    }
+}
+
+/// The branch an agent worktree commits on: its stored task branch, else the branch its
+/// folder names for its layout, read from the store and paths with no git run. Inputs: the
+/// store, the worktree and its git metadata folder. Output: the branch, None for a folder
+/// that names none.
+pub fn agent_branch(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Option<String>, EngineError> {
+    let layout = if git_dir == crate::agent_git::git_dir(worktree) {
+        crate::agent_git::Layout::Clone
+    } else {
+        crate::agent_git::Layout::Linked
+    };
+    #[cfg(unix)]
+    return flow::agent_branch(db, worktree, layout);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, layout);
+        Err(unavailable())
+    }
+}
+
+/// The branch the master works on and merges finished harnesses into (DEC-100), with its
+/// tip: the owner's "Master's branch" choice, else the repository's default branch (the
+/// local branch `origin`'s HEAD names), else the owner's checked-out branch. Inputs: the
+/// owner checkout root and the owner's choice. Output: the branch and tip, None when no
+/// such branch exists and nothing was chosen, or `changes_target_invalid` for a choice
+/// that is no local branch.
+pub fn master_branch(
+    repository: &Path,
+    chosen: Option<&str>,
+) -> Result<Option<(String, String)>, EngineError> {
+    #[cfg(unix)]
+    return owner::master_branch(repository, chosen);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, chosen);
         Err(unavailable())
     }
 }
@@ -323,9 +401,9 @@ pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
     }
 }
 
-/// Puts a newly added linked agent worktree on its own branch `crazyagent/agent-<id>`,
-/// created at the worktree's HEAD and checked out there, so the agent's turns commit on
-/// it. Call it once, right after the worktree is added and before any agent runs in it.
+/// Puts a newly added linked agent worktree on its own branch, its stored task branch or
+/// else `crazyagent/agent-<id>`, created at the worktree's HEAD and checked out there, so
+/// the agent's turns commit on it. Call it once, right after the worktree is added and before any agent runs in it.
 /// Inputs: the store, the owner's checkout root, the worktree and its git metadata
 /// folder. Output: the branch, or `changes_agent_branch_exists` when a branch of that
 /// name is already there.

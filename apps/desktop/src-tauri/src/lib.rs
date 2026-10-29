@@ -859,6 +859,36 @@ async fn desktop_team_child_landing(
 }
 
 #[tauri::command]
+async fn desktop_team_master_branch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    branch: Option<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_master_branch(&id, branch, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_ask_before_merge(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    on: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_ask_before_merge(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_agent_branches(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2664,6 +2694,8 @@ pub fn run() {
             desktop_team_child_landing,
             desktop_team_finished_agents,
             desktop_team_agent_branches,
+            desktop_team_master_branch,
+            desktop_team_ask_before_merge,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,

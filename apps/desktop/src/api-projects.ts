@@ -209,6 +209,7 @@ const copy: Record<string, string> = {
   team_plan_step_handed: "That step was handed off already.",
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
+  team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
   team_agent_unknown: "That agent is not running anymore.",
   team_agent_running: "That agent is already running.",
   team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",

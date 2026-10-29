@@ -1,6 +1,9 @@
 use super::AgentKind;
 use super::clone;
-use super::flow::{check_places, drop_branch, hold, holds_only, open_agent, shared};
+use super::flow::{
+    check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except, open_agent,
+    shared,
+};
 use super::git::{Repo, failure};
 use super::store;
 use crate::agent_git::{self, Layout};
@@ -15,17 +18,25 @@ fn unavailable(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
 }
 
-/// What the engine's own fetch read from an agent's clone: its branch tip, or the plain
-/// code that keeps the clone. None for a worktree the engine did not record as a clone.
-type Fetched = Option<Result<String, &'static str>>;
+/// What the engine's own fetch read from an agent's clone: its branch tip with each
+/// teammate branch's tip, or the plain code that keeps the clone. None for a worktree the
+/// engine did not record as a clone.
+type Fetched = Option<Result<(String, Vec<(String, String)>), &'static str>>;
 
 /// Reads the branch tip of an agent's own clone through the engine's fetch into the owner
 /// repository (`clone::fetch`, upload-pack `--strict`), so no git ever runs in the clone
 /// under the agent's config, before any hold is taken, so a slow agent-sized fetch never
 /// stalls landing (DEC102-F2). A clone git cannot fetch from keeps only this agent, as
-/// `cleanup_worktree_unreadable`. Inputs: the owner checkout root, the worktree and its
-/// git folder. Output: the tip or the code, or None for a linked worktree.
-fn fetch_clone(repository: &Path, worktree: &Path, git_dir: &Path) -> Result<Fetched, EngineError> {
+/// `cleanup_worktree_unreadable`. A harness's teammate branches are fetched the same way
+/// (`clone::fetch_teammates`), so cleanup can tell whether their work is in the task
+/// branch. Inputs: the store, the owner checkout root, the worktree and its git folder.
+/// Output: the tips or the code, or None for a linked worktree.
+fn fetch_clone(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Fetched, EngineError> {
     if git_dir != agent_git::git_dir(worktree) {
         return Ok(None);
     }
@@ -33,13 +44,14 @@ fn fetch_clone(repository: &Path, worktree: &Path, git_dir: &Path) -> Result<Fet
         return Ok(Some(Err("cleanup_worktree_invalid")));
     }
     let shared = shared(repository)?;
-    match clone::fetch(
-        &shared,
-        repository,
-        worktree,
-        &crate::worktrees::TREE_BOUNDS,
-    ) {
-        Ok(tip) => Ok(Some(Ok(tip))),
+    let branch = clone_branch(db, worktree)?;
+    let bounds = &crate::worktrees::TREE_BOUNDS;
+    let fetched = clone::fetch(&shared, repository, worktree, &branch, bounds).and_then(|tip| {
+        clone::fetch_teammates(&shared, repository, worktree, &branch, bounds)
+            .map(|teammates| (tip, teammates))
+    });
+    match fetched {
+        Ok(tips) => Ok(Some(Ok(tips))),
         Err(refused) if refused.0 == "changes_workspace_invalid" => {
             Ok(Some(Err("cleanup_worktree_invalid")))
         }
@@ -55,13 +67,75 @@ fn fetch_clone(repository: &Path, worktree: &Path, git_dir: &Path) -> Result<Fet
     }
 }
 
+/// Says whether a harness's teammates (DEC-100) left nothing that is not in its task
+/// branch, so removing the clone loses no work: every teammate branch's tip, and every
+/// teammate worktree's commit, is in the task branch tip, and every teammate worktree
+/// holds just its commit with nothing uncommitted (`clone_holds_only`). The teammate
+/// worktrees are read as data (`clone::teammates`) and their commits from what the
+/// engine's fetch carried, so no git runs in the clone. Inputs: the owner checkout root,
+/// the clone, its task branch, its tip and the fetched teammate branch tips. Output: None
+/// when nothing would be lost, else `cleanup_refs_unlanded` for work not in the task
+/// branch, `cleanup_worktree_dirty` for uncommitted work, or `cleanup_worktree_unreadable`.
+fn teammates_landed(
+    repository: &Path,
+    worktree: &Path,
+    branch: &str,
+    tip: &str,
+    tips: &[(String, String)],
+) -> Result<Option<&'static str>, EngineError> {
+    let teammates = match clone::teammates(worktree, branch) {
+        Ok(teammates) => teammates,
+        Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+    };
+    if teammates.is_empty() && tips.is_empty() {
+        return Ok(None);
+    }
+    let shared = shared(repository)?;
+    let landed = |commit: &str| shared.test(&["merge-base", "--is-ancestor", commit, tip]);
+    for (_, teammate_tip) in tips {
+        if !landed(teammate_tip)? {
+            return Ok(Some("cleanup_refs_unlanded"));
+        }
+    }
+    for teammate in &teammates {
+        let commit = match &teammate.head {
+            clone::TeammateHead::Branch(name) => tips
+                .iter()
+                .find(|(fetched, _)| fetched == name)
+                .map(|(_, commit)| commit.clone()),
+            clone::TeammateHead::Commit(id) => shared.commit_of(id)?,
+        };
+        let Some(commit) = commit else {
+            return Ok(Some("cleanup_refs_unlanded"));
+        };
+        if !landed(&commit)? {
+            return Ok(Some("cleanup_refs_unlanded"));
+        }
+        match clone_holds_only(repository, &teammate.folder, &commit) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Some("cleanup_worktree_dirty")),
+            Err(refused)
+                if matches!(
+                    refused.0.as_str(),
+                    "changes_git_failed" | "changes_too_large"
+                ) =>
+            {
+                return Ok(Some("cleanup_worktree_unreadable"));
+            }
+            Err(refused) => return Err(refused),
+        }
+    }
+    Ok(None)
+}
+
 /// Says whether an agent's own clone holds exactly its branch tip, never reading the
 /// clone's git folder: the owner repository's git, with the clone as its work tree and a
 /// private index in the owner's git folder filled from the tip the engine fetched, runs
 /// the same checks as for a linked worktree (`holds_only`) once `sizes_match` found no
-/// file of another size, so the clone's config, hooks and index are never read.
-/// Inputs: the owner checkout root, the clone and the tip. Output: true when it holds
-/// nothing else.
+/// file of another size, so the clone's config, hooks and index are never read. The
+/// teammates' worktree folder is left out of its untracked files; `teammates_landed`
+/// checks it. Inputs: the owner checkout root, the clone and the tip. Output: true when it
+/// holds nothing else.
 fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<bool, EngineError> {
     let metadata = repository.join(".git");
     let folder = metadata.join(format!(
@@ -75,7 +149,11 @@ fn clone_holds_only(repository: &Path, worktree: &Path, tip: &str) -> Result<boo
         }
         let repo = repo.private_index(&folder.join("index"));
         repo.run(&["read-tree", tip])?;
-        holds_only(&repo, tip)
+        holds_only_except(
+            &repo,
+            tip,
+            Some(&format!("/{}/", agent_git::TEAMMATES_FOLDER)),
+        )
     });
     let _ = std::fs::remove_dir_all(&folder);
     held
@@ -143,7 +221,8 @@ fn sizes_match(repo: &Repo, worktree: &Path, tip: &str) -> Result<bool, EngineEr
 /// `cleanup_refs_unlanded`, or `cleanup_worktree_unreadable` for ref data it cannot read,
 /// and its files must hold just that commit (`clone_holds_only`), checked by size first
 /// (`sizes_match`), else `cleanup_worktree_dirty`, or `cleanup_worktree_unreadable` past
-/// `TREE_BOUNDS`. Inputs: the store, the three paths and the time now.
+/// `TREE_BOUNDS`. A harness's teammates (DEC-100) go with it only when their work is in
+/// its branch (`teammates_landed`). Inputs: the store, the three paths and the time now.
 /// Output: None when it can go.
 pub(super) fn blocker(
     db: &Connection,
@@ -152,7 +231,7 @@ pub(super) fn blocker(
     git_dir: &Path,
     now: u64,
 ) -> Result<Option<&'static str>, EngineError> {
-    let fetched = fetch_clone(repository, worktree, git_dir)?;
+    let fetched = fetch_clone(db, repository, worktree, git_dir)?;
     check(db, repository, worktree, git_dir, now, fetched)
 }
 
@@ -189,18 +268,22 @@ fn check(
         Err(_) => return Ok(Some("cleanup_worktree_invalid")),
     };
     if layout == Layout::Clone {
-        let tip = match fetched {
-            Some(Ok(tip)) => tip,
+        let (tip, teammate_tips) = match fetched {
+            Some(Ok(tips)) => tips,
             Some(Err(code)) => return Ok(Some(code)),
             None => return Ok(Some("cleanup_worktree_invalid")),
         };
         if store::base_of(db, text)?.as_deref() != Some(tip.as_str()) {
             return Ok(Some("cleanup_commits_unlanded"));
         }
-        match clone::other_refs(worktree) {
+        let branch = clone_branch(db, worktree)?;
+        match clone::other_refs(worktree, &branch, true) {
             Ok(other) if other.is_empty() => {}
             Ok(_) => return Ok(Some("cleanup_refs_unlanded")),
             Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+        }
+        if let Some(code) = teammates_landed(repository, worktree, &branch, &tip, &teammate_tips)? {
+            return Ok(Some(code));
         }
         return match clone_holds_only(repository, worktree, &tip) {
             Err(refused)
@@ -256,7 +339,7 @@ pub(super) fn remove(
     git_dir: &Path,
     now: u64,
 ) -> Result<Result<(), &'static str>, EngineError> {
-    let fetched = fetch_clone(repository, worktree, git_dir)?;
+    let fetched = fetch_clone(db, repository, worktree, git_dir)?;
     let in_clone = fetched.is_some();
     let _held = hold(repository);
     if let Some(code) = check(db, repository, worktree, git_dir, now, fetched)? {
@@ -269,6 +352,7 @@ pub(super) fn remove(
         let removed = std::fs::remove_dir_all(worktree);
         db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
             .map_err(unavailable)?;
+        store::forget_agent_branch(db, path)?;
         return Ok(removed.map_err(|_| "cleanup_worktree_leftover"));
     }
     let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
@@ -299,6 +383,7 @@ pub(super) fn remove(
     }
     db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
         .map_err(unavailable)?;
+    store::forget_agent_branch(db, path)?;
     if let Some((branch, head)) = named
         && !drop_branch(repository, &branch, &head)?
     {

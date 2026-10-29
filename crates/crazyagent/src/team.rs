@@ -50,6 +50,8 @@ pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
 /// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
 /// stopped while that work still runs, and no owner setting changes it.
 pub const MASTER_IDLE_STOP_SECS: u32 = 900;
+/// The longest Master's branch name the owner may choose, in bytes.
+pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
 pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
 
@@ -535,6 +537,15 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: BranchMode,
     },
+    MasterBranch {
+        project_id: ProjectId,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    AskBeforeMerge {
+        project_id: ProjectId,
+        on: bool,
+    },
     WakeAgent {
         project_id: ProjectId,
         agent: i64,
@@ -623,11 +634,17 @@ impl TeamAction {
                 .contains(depth)
                 .then_some(())
                 .ok_or_else(|| failure("team_depth_invalid")),
+            Self::MasterBranch { branch, .. } => branch
+                .as_deref()
+                .is_none_or(plain_branch_name)
+                .then_some(())
+                .ok_or_else(|| failure("team_master_branch_invalid")),
             Self::KeepWarm { .. }
             | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
+            | Self::AskBeforeMerge { .. }
             | Self::LiveMaster { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
@@ -649,6 +666,8 @@ impl TeamAction {
             | Self::ChildLanding { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
             | Self::AgentBranches { project_id, .. }
+            | Self::MasterBranch { project_id, .. }
+            | Self::AskBeforeMerge { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -664,6 +683,31 @@ impl TeamAction {
             }
         }
     }
+}
+
+/// Tells whether a branch name the owner typed for the Master's branch is one git can hold
+/// as a local branch: printable ASCII without spaces or git's special characters, no `..`,
+/// `@{`, `//` or leading `-`, no part starting with `.` or ending in `.lock`, at most
+/// `MASTER_BRANCH_BYTES_MAX` bytes. Whether that branch exists is checked when it is used.
+/// Input: the name. Output: the answer.
+fn plain_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MASTER_BRANCH_BYTES_MAX
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.contains("//")
+        && name != "@"
+        && name
+            .split('/')
+            .all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
+        && name.bytes().all(|byte| {
+            byte.is_ascii_graphic()
+                && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
 }
 
 fn failure(code: &str) -> EngineError {
@@ -1019,6 +1063,14 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_agent_branches (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('named','detached'))
+            );
+            CREATE TABLE IF NOT EXISTS team_master_branch (
+                project TEXT PRIMARY KEY,
+                branch TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_merge_ask (
+                project TEXT PRIMARY KEY,
+                ask INTEGER NOT NULL CHECK(ask IN (0,1))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -1796,6 +1848,30 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MasterBranch { branch, .. } => {
+            match branch {
+                Some(branch) => tx.execute(
+                    "INSERT INTO team_master_branch(project,branch) VALUES (?1,?2)
+                     ON CONFLICT(project) DO UPDATE SET branch=excluded.branch",
+                    params![project.as_str(), branch],
+                ),
+                None => tx.execute(
+                    "DELETE FROM team_master_branch WHERE project=?1",
+                    [project.as_str()],
+                ),
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::AskBeforeMerge { on, .. } => {
+            tx.execute(
+                "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET ask=excluded.ask",
+                params![project.as_str(), on],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2198,6 +2274,10 @@ pub struct TeamStatus {
     #[serde(default)]
     pub agent_branches: BranchMode,
     #[serde(default)]
+    pub master_branch: Option<String>,
+    #[serde(default)]
+    pub ask_before_merge: bool,
+    #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
@@ -2529,6 +2609,42 @@ pub fn agent_branches(
         None => Ok(BranchMode::default()),
         Some(name) => BranchMode::named(name).ok_or_else(|| error("team_branch_mode_invalid")),
     }
+}
+
+/// The branch the owner chose for the master to work on and merge harnesses into
+/// (DEC-100), None for the repository's default branch. Takes a connection and the
+/// project. Returns the choice.
+pub fn master_branch_choice(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    let branch: Option<String> = connection
+        .query_row(
+            "SELECT branch FROM team_master_branch WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match branch {
+        Some(branch) if !plain_branch_name(&branch) => Err(error("team_master_branch_invalid")),
+        branch => Ok(branch),
+    }
+}
+
+/// Tells whether the owner asked to approve each merge of a finished harness into the
+/// Master's branch, so the master's merge leaves it as a pending Accept instead; off by
+/// default. Takes a connection and the project. Returns the setting.
+pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let ask: Option<bool> = connection
+        .query_row(
+            "SELECT ask FROM team_merge_ask WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(ask.unwrap_or(false))
 }
 
 /// Tells whether the owner chose to show finished agents (idle, stopped and failed
@@ -2951,6 +3067,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         child_landing: nested.lands,
         show_finished: show_finished(connection, project)?,
         agent_branches: agent_branches(connection, project)?,
+        master_branch: master_branch_choice(connection, project)?,
+        ask_before_merge: ask_before_merge(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         live_master,

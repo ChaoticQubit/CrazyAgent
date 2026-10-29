@@ -36,6 +36,9 @@ pub const SESSION_TOOL: &str = "session";
 pub const REMEMBER_TOOL: &str = "remember";
 pub const RECALL_TOOL: &str = "recall";
 pub const ACCEPT_TOOL: &str = "accept";
+/// The live master's tool that merges a finished harness's task branch into the Master's
+/// branch (DEC-100).
+pub const MERGE_TOOL: &str = "merge";
 /// The engine subcommand that serves a sub-agent's team tools, `AGENT_TOOLS`.
 pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
 /// The team tools a sub-agent gets: past conversations and memory, and the lead tools that
@@ -85,6 +88,8 @@ const REMEMBER_INVALID: &str =
     "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
 const ACCEPT_INVALID: &str =
     "Not accepted: give the change set id that changes() lists, 32 letters and digits.";
+const MERGE_INVALID: &str =
+    "Not merged: name the harness by its persona name, its @role handle or its number.";
 const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
@@ -145,6 +150,9 @@ pub enum Call {
     },
     Accept {
         change_set: String,
+    },
+    Merge {
+        agent: String,
     },
 }
 
@@ -451,6 +459,11 @@ fn live_tools() -> Value {
             "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
         },
+        {
+            "name": MERGE_TOOL,
+            "description": "Merge a finished harness's task branch into the project's Master's branch, locally, as one squash commit; it is never pushed. Call it once the harness reported done and its teammates' work is merged into its branch. When the owner's setting asks first, the merge waits for the owner's Accept in Changes instead, and this says so.",
+            "inputSchema": {"type": "object", "properties": {"agent": {"type": "string", "description": "The harness: its persona name, its @role handle or its number."}}, "required": ["agent"], "additionalProperties": false},
+        },
     ]})
 }
 
@@ -600,6 +613,12 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(ACCEPT_INVALID),
         },
+        MERGE_TOOL => match argument("agent") {
+            Some(agent) if agent_name_valid(agent) => Ok(Call::Merge {
+                agent: agent.trim().to_owned(),
+            }),
+            _ => Err(MERGE_INVALID),
+        },
         _ => return None,
     })
 }
@@ -630,6 +649,7 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         ),
         Call::Recall { query } => (RECALL_TOOL, json!({"query": query})),
         Call::Accept { change_set } => (ACCEPT_TOOL, json!({"change_set": change_set})),
+        Call::Merge { agent } => (MERGE_TOOL, json!({"agent": agent})),
     };
     let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
     if again != call {

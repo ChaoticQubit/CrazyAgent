@@ -843,6 +843,7 @@ fn answer(
                 .expect("a memory call has an answer");
         }
         Call::Accept { .. } => (MASTER_ACCEPT.to_owned(), true),
+        Call::Merge { agent } => return merge::merge(connection, answering, &agent),
     })
 }
 
@@ -886,7 +887,8 @@ pub(super) fn answer_lead(
         | Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }
-        | Call::Recall { .. } => return Ok(None),
+        | Call::Recall { .. }
+        | Call::Merge { .. } => return Ok(None),
     }))
 }
 
@@ -1707,3 +1709,5 @@ fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, S
 #[cfg(all(test, unix))]
 #[path = "master/tests.rs"]
 mod tests;
+
+mod merge;

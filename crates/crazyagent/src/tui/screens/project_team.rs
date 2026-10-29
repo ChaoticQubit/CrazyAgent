@@ -8,9 +8,9 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BranchMode, ChildLanding, DelegationPath, SwitchMode,
-    TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus,
-    TeamTask,
+    AgentRole, AgentStatus, BranchMode, ChildLanding, DelegationPath, MASTER_BRANCH_BYTES_MAX,
+    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
+    TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -123,6 +123,7 @@ pub(in crate::tui) struct TeamView {
     pub task_cursor: usize,
     pub confirm: Option<i64>,
     pub draft: Option<Draft>,
+    pub branch_edit: Option<TextInput>,
     pub wake: Option<WakeEdit>,
     pub alerts: bool,
     pub notice: Option<Notice>,
@@ -146,6 +147,7 @@ impl TeamView {
             task_cursor: 0,
             confirm: None,
             draft: None,
+            branch_edit: None,
             wake: None,
             alerts: false,
             notice: None,
@@ -206,6 +208,9 @@ impl TeamView {
                         if matches!(action, TeamAction::Delegate { .. }) {
                             self.draft = None;
                         }
+                        if matches!(action, TeamAction::MasterBranch { .. }) {
+                            self.branch_edit = None;
+                        }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
                     }
@@ -227,17 +232,21 @@ impl TeamView {
         self.changing.is_some()
     }
 
-    /// Says whether the owner is writing a new task, so the host sends pastes
-    /// here, keeps its own letter keys off and shows the cursor.
-    /// Takes the view. Returns true while the task composer is open.
+    /// Says whether the owner is writing a new task or the Master's branch, so the host
+    /// sends pastes here, keeps its own letter keys off and shows the cursor.
+    /// Takes the view. Returns true while the task composer or the branch editor is open.
     pub fn typing(&self) -> bool {
-        self.draft.is_some()
+        self.draft.is_some() || self.branch_edit.is_some()
     }
 
-    /// Adds pasted text to the task being written.
+    /// Adds pasted text to the task or the Master's branch being written.
     /// Takes untrusted pasted text; control characters are dropped.
-    /// Returns true when the composer took it.
+    /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
+        if let Some(input) = &mut self.branch_edit {
+            input.insert_str(text);
+            return true;
+        }
         match &mut self.draft {
             Some(draft) => {
                 draft.input.insert_str(text);
@@ -328,6 +337,9 @@ impl TeamView {
         if self.draft.is_some() {
             return self.draft_key(key);
         }
+        if self.branch_edit.is_some() {
+            return self.branch_key(key);
+        }
         if self.wake.is_some() {
             return self.wake_key(key);
         }
@@ -382,6 +394,11 @@ impl TeamView {
             KeyCode::Char('d') => self.sub_agent_depth(),
             KeyCode::Char('k') => self.child_landing(),
             KeyCode::Char('b') => self.agent_branches(),
+            KeyCode::Char('m') => {
+                self.open_branch_edit();
+                TeamReply::Handled
+            }
+            KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -1034,6 +1051,88 @@ impl TeamView {
         })
     }
 
+    /// Opens the Master's branch editor filled with the current choice, empty for the
+    /// repository default. Output: none; a notice while the team is loading.
+    fn open_branch_edit(&mut self) {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return;
+        };
+        let mut input = TextInput::single(MASTER_BRANCH_BYTES_MAX);
+        input.set(status.master_branch.as_deref().unwrap_or(""));
+        self.branch_edit = Some(input);
+    }
+
+    /// Handles one key while the Master's branch editor is open: Enter saves, Esc closes,
+    /// other keys edit. Takes the key. Output: the change to send, or Handled.
+    fn branch_key(&mut self, key: KeyEvent) -> TeamReply {
+        match key.code {
+            KeyCode::Esc => {
+                self.branch_edit = None;
+                TeamReply::Handled
+            }
+            KeyCode::Enter => self.save_master_branch(),
+            _ => {
+                if let Some(input) = &mut self.branch_edit {
+                    input.handle(key);
+                }
+                TeamReply::Handled
+            }
+        }
+    }
+
+    /// Sends the Master's branch typed in the editor; an empty name goes back to the
+    /// repository default. Output: the change to send, or Handled with a notice while saving.
+    fn save_master_branch(&mut self) -> TeamReply {
+        let Some(input) = &self.branch_edit else {
+            return TeamReply::Handled;
+        };
+        let typed = input.value().trim();
+        let branch = (!typed.is_empty()).then(|| typed.to_owned());
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        self.changing = Some(match &branch {
+            Some(name) => format!("The master now works on {name}."),
+            None => "The master now works on the repository's default branch.".to_owned(),
+        });
+        TeamReply::Change(TeamAction::MasterBranch {
+            project_id: self.project.clone(),
+            branch,
+        })
+    }
+
+    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Output: the change to send, or Handled with a notice while loading or saving.
+    fn ask_before_merge(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let on = !status.ask_before_merge;
+        self.changing = Some(
+            if on {
+                "The master now asks you before merging a harness."
+            } else {
+                "The master now merges a finished harness without asking."
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::AskBeforeMerge {
+            project_id: self.project.clone(),
+            on,
+        })
+    }
+
     /// Draws the Team view for the body of the project's Agents tab.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
@@ -1091,13 +1190,17 @@ impl TeamView {
         let tree = self.agent_tree();
         let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
-        let (panel, caret) = match (&self.draft, self.wake) {
-            (Some(draft), _) => {
+        let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake) {
+            (Some(draft), _, _) => {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            (None, Some(edit)) => (self.wake_rows(edit, content, look), None),
-            (None, None) => (self.panel(content, accounts, look), None),
+            (None, Some(input), _) => {
+                let (rows, at) = branch_rows(input, content, look);
+                (rows, Some(at))
+            }
+            (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
+            (None, None, None) => (self.panel(content, accounts, look), None),
         };
         let footer = self.footer(look);
         let fixed = lines.len() + 5 + panel.len() + footer.len();
@@ -1280,6 +1383,17 @@ impl TeamView {
                 "Agent branches",
                 branch_words(status.agent_branches).to_owned(),
             ),
+            setting(
+                "Master's branch",
+                status
+                    .master_branch
+                    .clone()
+                    .unwrap_or_else(|| "Repository default".to_owned()),
+            ),
+            setting(
+                "Ask before merge",
+                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+            ),
         ];
         let mut rows = Vec::new();
         let mut right = Row::default();
@@ -1452,6 +1566,9 @@ impl TeamView {
                 ("Esc", "Close"),
             ];
         }
+        if self.branch_edit.is_some() {
+            return vec![("Enter", "Save"), ("Esc", "Close")];
+        }
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
@@ -1493,6 +1610,8 @@ impl TeamView {
             ("d", "Sub-agent depth"),
             ("k", "Worker lands"),
             ("b", "Agent branches"),
+            ("m", "Master's branch"),
+            ("g", "Ask before merge"),
             ("e", "Wake rules"),
         ];
         if self
@@ -1573,6 +1692,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
+        "team_master_branch_invalid" => {
+            "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
+        }
         other => plain_problem(other),
     }
 }
@@ -1626,6 +1748,35 @@ fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, 
                 .push("]", look.accent),
         );
     }
+    assert!(cursor.0 < rows.len());
+    (rows, cursor)
+}
+
+/// Draws the Master's branch editor. Takes the input, the content width and the look.
+/// Returns the rows and the cursor as a row and a column inside those rows.
+fn branch_rows(input: &TextInput, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    let mut rows = vec![
+        Row::of("Master's branch", look.heading),
+        Row::of(
+            "The master works there and merges finished harnesses into it. Leave it empty for the repository default.",
+            look.muted,
+        ),
+    ];
+    let inner = content.saturating_sub(4).max(2);
+    let (lines, (line, column)) = input.wrap(inner - 1);
+    let text = if input.value().is_empty() {
+        Row::of("Repository default", look.muted)
+    } else {
+        Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
+    };
+    let cursor = (rows.len(), 2 + column);
+    rows.push(
+        Row::of("[", look.accent)
+            .push(" ", Style::new())
+            .cat(text.pad(inner))
+            .push(" ", Style::new())
+            .push("]", look.accent),
+    );
     assert!(cursor.0 < rows.len());
     (rows, cursor)
 }

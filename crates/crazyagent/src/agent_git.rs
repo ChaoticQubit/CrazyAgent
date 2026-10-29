@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 const BRANCH_PREFIX: &str = "agent/";
 const LINKED_PREFIX: &str = "crazyagent/";
 const FOLDER_BYTES_MAX: usize = 64;
+const TEAMMATE_SEPARATOR: &str = "--";
+const NAME_BYTES_MAX: usize = 48;
+/// The folder inside a harness's own clone that holds its teammates' worktrees, one
+/// `<clone>/.worktrees/<teammate>` each, which landing leaves out of the harness's change
+/// set and cleanup removes with the clone.
+pub const TEAMMATES_FOLDER: &str = ".worktrees";
 
 /// Where an agent keeps its git state, by the project's agent access level (DEC-102).
 /// `Linked`: a worktree the project repository added, whose git folder sits in the
@@ -51,4 +57,67 @@ fn plain_folder(worktree: &Path) -> Option<&str> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
     plain.then_some(folder)
+}
+
+/// The task branch a harness works on, `crazyagent/<name>`, named after the delegate's
+/// handle or task (DEC-100), in its own clone or, for a linked worktree, in the owner
+/// repository. Input: the name, lower-case ASCII letters and digits joined by single
+/// hyphens, at most 48 bytes. Output: the branch, or None for any other name.
+pub fn task_branch(name: &str) -> Option<String> {
+    plain_name(name).then(|| format!("{LINKED_PREFIX}{name}"))
+}
+
+/// Tells whether a stored branch is one the engine names for an agent: `crazyagent/` and a
+/// plain name, as [`task_branch`] and [`linked_branch`] make. Input: the branch. Output:
+/// the answer.
+pub fn is_agent_branch(branch: &str) -> bool {
+    branch
+        .strip_prefix(LINKED_PREFIX)
+        .is_some_and(|name| plain_name(name) || plain_folder(Path::new(name)).is_some())
+}
+
+/// The branch one teammate of a harness works on inside the harness's clone,
+/// `<task branch>--<teammate>`, so it never collides with the task branch git keeps as a
+/// file (`<task branch>/<teammate>` would). Inputs: the task branch and the teammate's
+/// name, any text; it is lower-cased and every run of other characters becomes one hyphen.
+/// Output: the branch, or None when no letter or digit is left.
+pub fn teammate_branch(task: &str, teammate: &str) -> Option<String> {
+    let mut name = String::with_capacity(NAME_BYTES_MAX);
+    for byte in teammate.bytes() {
+        if name.len() >= NAME_BYTES_MAX {
+            break;
+        }
+        if byte.is_ascii_alphanumeric() {
+            name.push(char::from(byte.to_ascii_lowercase()));
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    let name = name.trim_end_matches('-');
+    assert!(name.is_empty() || plain_name(name));
+    (!name.is_empty()).then(|| format!("{task}{TEAMMATE_SEPARATOR}{name}"))
+}
+
+/// Tells whether a branch is one of a task branch's teammate branches,
+/// `<task branch>--<name>` with a non-empty name. Inputs: the task branch and the branch.
+/// Output: the answer.
+pub fn is_teammate_branch(task: &str, branch: &str) -> bool {
+    branch
+        .strip_prefix(task)
+        .and_then(|rest| rest.strip_prefix(TEAMMATE_SEPARATOR))
+        .is_some_and(|name| !name.is_empty())
+}
+
+/// Tells whether a name is lower-case ASCII letters and digits joined by single hyphens,
+/// at most `NAME_BYTES_MAX` bytes, safe in a branch name and never holding the teammate
+/// separator. Input: the name. Output: the answer.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= NAME_BYTES_MAX
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && !name.contains(TEAMMATE_SEPARATOR)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
