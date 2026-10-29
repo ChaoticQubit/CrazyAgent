@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const GIT: &str = "/usr/bin/git";
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
@@ -84,7 +83,7 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         return None;
     }
     let xdg = xdg.filter(|xdg| xdg.is_absolute());
-    let mut command = Command::new(GIT);
+    let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -128,9 +127,10 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
 }
 
 /// A repository the engine runs git on through a git folder and work tree it computed
-/// itself, never a `.git` file in the work tree. Every call runs the host git with a
-/// cleared environment, no system or global config, no system attributes, hooks,
-/// fsmonitor, pager, submodule recursion, protocols or upkeep, and with every filter
+/// itself, never a `.git` file in the work tree. Every call runs the real git, not the
+/// `/usr/bin/git` xcrun shim where xcrun resolves it, with a cleared environment, no
+/// system or global config, no system attributes, hooks, fsmonitor, pager, submodule
+/// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
 /// owner's global ignore file, so what the owner's git ignores the engine never stages.
 pub(super) struct Repo {
@@ -238,7 +238,7 @@ impl Repo {
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(GIT);
+        let mut command = Command::new(crate::research::runner::setup_git());
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

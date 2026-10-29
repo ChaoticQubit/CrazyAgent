@@ -560,6 +560,75 @@ fn indexed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineErr
     Ok(tracked)
 }
 
+/// Tells which of some paths the commit the owner's checkout has checked out holds, with
+/// one engine git repository that runs nothing the repository configures; an unborn
+/// branch holds none. Inputs: the checkout root and the distinct paths inside the
+/// repository, each without pathspec magic. Output: one flag per path in order, or a
+/// plain git code for the repository.
+pub fn committed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineError> {
+    #[cfg(unix)]
+    return head_files(checkout, paths);
+    #[cfg(not(unix))]
+    {
+        let _ = (checkout, paths);
+        Err(unavailable())
+    }
+}
+
+#[cfg(unix)]
+fn head_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineError> {
+    assert!(paths.iter().enumerate().all(|(at, path)| {
+        !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
+    }));
+    let owner = git::Repo::open(checkout, &checkout.join(".git"), None)?;
+    let Some(head) = owner.commit_of("HEAD")? else {
+        return Ok(vec![false; paths.len()]);
+    };
+    let mut arguments = vec![
+        "ls-tree",
+        "-z",
+        "--name-only",
+        "--full-tree",
+        head.as_str(),
+        "--",
+    ];
+    arguments.extend_from_slice(paths);
+    let listing = owner.capture(&arguments, TRACKED_LISTING_BYTES_MAX)?;
+    let listed: Vec<&[u8]> = listing
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let committed: Vec<bool> = paths
+        .iter()
+        .map(|path| listed.contains(&path.as_bytes()))
+        .collect();
+    assert_eq!(committed.len(), paths.len());
+    Ok(committed)
+}
+
+/// Commits the deletion of files the owner's checkout no longer has, and nothing else, as
+/// one commit with the owner's git identity on the owner's checked-out branch, locally
+/// and never pushed, as the instruction import's move needs (DEC-106 addendum). Refuses
+/// when the index stages any other path. Inputs: the checkout root, the owner's home
+/// folder, the distinct paths inside the repository and the commit message. Output: the
+/// commit, the branch and the paths it deleted, or `changes_import_none`,
+/// `changes_import_staged`, `changes_git_busy`, `changes_detached_head`,
+/// `changes_branch_moved`, `changes_owner_identity_missing` or another git code.
+pub fn commit_deletions(
+    repository: &Path,
+    owner_home: &Path,
+    paths: &[&str],
+    message: &str,
+) -> Result<(String, String, Vec<String>), EngineError> {
+    #[cfg(unix)]
+    return owner::commit_deletions(repository, owner_home, paths, message);
+    #[cfg(not(unix))]
+    {
+        let _ = (repository, owner_home, paths, message);
+        Err(unavailable())
+    }
+}
+
 /// Commits every change in an agent worktree as the engine, with hooks, filters and
 /// fsmonitor off, and adds it to that worktree's open change set or opens one above the
 /// commit the worktree started from, or its HEAD when no start is recorded, so commits

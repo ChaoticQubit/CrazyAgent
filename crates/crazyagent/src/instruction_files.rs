@@ -166,8 +166,9 @@ pub struct Record {
 
 /// One of the project's own instruction files an import found or moved: its path inside
 /// the project folder with `/` separators, its size in bytes, whether the checkout's git
-/// index tracks it, so moving it shows as a deletion, and the plain code of why it is not
-/// imported, none when it is.
+/// index tracks it, so moving it shows as a deletion, the plain code of why it is not
+/// imported, none when it is, and, for a moved file, whether its move is still an
+/// uncommitted deletion in the owner's checkout that the commit action can record.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImportFile {
@@ -175,6 +176,18 @@ pub struct ImportFile {
     pub bytes: u64,
     pub tracked: bool,
     pub refused: Option<String>,
+    #[serde(default)]
+    pub uncommitted: bool,
+}
+
+/// The commit that recorded the instruction import's move in the owner's checkout: its
+/// id, the branch it is on and the moved paths whose deletion it holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportCommit {
+    pub commit: String,
+    pub branch: String,
+    pub files: Vec<String>,
 }
 
 /// Tells whether a name is one an instruction files record may hold, so a record read back
@@ -292,10 +305,15 @@ pub fn record_moved(
     Ok(())
 }
 
-/// Reads what an import at a project's onboarding moved, empty when it moved nothing.
-/// Inputs: a connection to `engine.db` and the project. Output: the moved files, or a
-/// plain code for a record the engine never writes.
-pub fn moved(connection: &Connection, project: &ProjectId) -> Result<Vec<ImportFile>, EngineError> {
+/// Reads what an import at a project's onboarding moved, empty when it moved nothing, each
+/// git-tracked file marked by whether its move is still uncommitted in the project folder
+/// now. Inputs: a connection to `engine.db`, the project and its folder. Output: the moved
+/// files, or a plain code for a record the engine never writes.
+pub fn moved(
+    connection: &Connection,
+    project: &ProjectId,
+    folder: &Path,
+) -> Result<Vec<ImportFile>, EngineError> {
     let table: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -317,10 +335,16 @@ pub fn moved(connection: &Connection, project: &ProjectId) -> Result<Vec<ImportF
     let Some(stored) = stored else {
         return Ok(Vec::new());
     };
-    let files: Vec<ImportFile> =
+    let mut files: Vec<ImportFile> =
         serde_json::from_str(&stored).map_err(|_| failure("process_unavailable"))?;
     if files.len() > PROJECT_FILES.len() {
         return Err(failure("process_unavailable"));
+    }
+    if files.iter().any(|file| file.tracked) {
+        let waiting = uncommitted(folder).unwrap_or_default();
+        for file in &mut files {
+            file.uncommitted = file.tracked && waiting.contains(&file.path);
+        }
     }
     Ok(files)
 }
@@ -412,7 +436,90 @@ pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
         moved.push(found.file);
     }
     assert!(moved.len() <= PROJECT_FILES.len());
+    if moved.iter().any(|file| file.tracked) {
+        let waiting = uncommitted(&root).unwrap_or_default();
+        for file in &mut moved {
+            file.uncommitted = file.tracked && waiting.contains(&file.path);
+        }
+    }
     Ok(moved)
+}
+
+/// Lists the moved instruction files whose move the owner's checkout has not committed:
+/// each project instruction path `.crazyagent/imported/` holds a moved copy of, that the
+/// project folder no longer has and that the checked-out commit still holds. Input: the
+/// project folder. Output: the paths in `PROJECT_FILES` order, empty for a folder that is
+/// no git checkout, or `process_project_folder_missing` or `process_commit_failed`.
+pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let imported = root
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join(IMPORTED_DIRECTORY);
+    let moved: Vec<&str> = PROJECT_FILES
+        .into_iter()
+        .filter(|path| {
+            fs::symlink_metadata(imported.join(path)).is_ok()
+                && matches!(
+                    fs::symlink_metadata(root.join(path)),
+                    Err(problem) if problem.kind() == std::io::ErrorKind::NotFound
+                )
+        })
+        .collect();
+    let checkout = fs::symlink_metadata(root.join(".git")).is_ok_and(|metadata| metadata.is_dir());
+    if moved.is_empty() || !checkout {
+        return Ok(Vec::new());
+    }
+    let committed = crate::landing::committed_files(&root, &moved)
+        .map_err(|_| failure("process_commit_failed"))?;
+    assert_eq!(committed.len(), moved.len());
+    Ok(moved
+        .into_iter()
+        .zip(committed)
+        .filter(|(_, held)| *held)
+        .map(|(path, _)| path.to_owned())
+        .collect())
+}
+
+/// Commits the instruction import's move in the owner's checkout, as the owner chose: one
+/// local commit, never pushed, on the checked-out branch with the repository's own git
+/// identity, holding only the deletions of the moved files the branch still holds.
+/// Inputs: the project folder and the owner's home folder. Output: the commit, or
+/// `process_commit_none` when no move waits for one, `process_commit_staged` when the
+/// index stages another path, or another `process_commit_` code with nothing committed.
+pub fn commit(folder: &Path, owner_home: &Path) -> Result<ImportCommit, EngineError> {
+    let _importing = IMPORTING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let waiting = uncommitted(&root)?;
+    if waiting.is_empty() {
+        return Err(failure("process_commit_none"));
+    }
+    let paths: Vec<&str> = waiting.iter().map(String::as_str).collect();
+    let message = format!(
+        "Move {} into .crazyagent/imported/\n\nCrazyAgent imported the text into the project instructions, .crazyagent/instructions.md.\n",
+        paths.join(", ")
+    );
+    let (commit, branch, files) = crate::landing::commit_deletions(
+        &root, owner_home, &paths, &message,
+    )
+    .map_err(|problem| {
+        failure(match problem.0.as_str() {
+            "changes_import_none" => "process_commit_none",
+            "changes_import_staged" => "process_commit_staged",
+            "changes_git_busy" => "process_commit_busy",
+            "changes_detached_head" => "process_commit_detached",
+            "changes_branch_moved" => "process_commit_moved",
+            "changes_owner_identity_missing" => "process_commit_identity",
+            _ => "process_commit_failed",
+        })
+    })?;
+    assert!(!files.is_empty() && files.len() <= paths.len());
+    Ok(ImportCommit {
+        commit,
+        branch,
+        files,
+    })
 }
 
 /// Reads one file the owner picked for the app-wide instructions editor; a link is
@@ -481,6 +588,7 @@ fn find(root: &Path) -> Vec<Found> {
                     bytes,
                     tracked,
                     refused,
+                    uncommitted: false,
                 },
                 read,
             }
