@@ -641,7 +641,6 @@ impl Team {
             return;
         }
         attached.size = (rows, cols);
-        attached.pane.resize(rows, cols);
         if attached.closed.is_none() {
             ctx.request(Request::TerminalResize {
                 agent: attached.agent.clone(),
@@ -932,12 +931,6 @@ impl Team {
             return None;
         }
         boxed(frame, area, &attached.label, focused, Vec::new(), ctx);
-        if inner.width > 0
-            && inner.height > 0
-            && attached.pane.size() != (inner.height, inner.width)
-        {
-            attached.pane.resize(inner.height, inner.width);
-        }
         attached
             .pane
             .draw(frame.buffer_mut(), inner, ctx.depth, focused)

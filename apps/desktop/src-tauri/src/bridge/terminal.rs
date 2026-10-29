@@ -112,6 +112,7 @@ pub fn request_valid(request: &TerminalRequest) -> bool {
         TerminalRequest::Resize { cols, rows } => size.contains(cols) && size.contains(rows),
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::AttachSized { .. }
         | TerminalRequest::Detach => false,
     }
 }
@@ -347,6 +348,7 @@ async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalR
             TerminalRequest::Resize { cols, rows } => control.resize(cols, rows).await,
             TerminalRequest::Attach { .. }
             | TerminalRequest::AttachPane { .. }
+            | TerminalRequest::AttachSized { .. }
             | TerminalRequest::Detach => continue,
         };
         if sent.is_err() {

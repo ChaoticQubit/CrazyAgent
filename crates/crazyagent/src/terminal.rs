@@ -615,18 +615,38 @@ pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
 
 /// What a viewer sends on an owner terminal connection.
 /// The first frame is `Attach`, or `AttachPane` for one pane of an agent's own window, such
-/// as a native teammate's; `Input`, `Prompt`, `Resize` and `Detach` follow on the same
+/// as a native teammate's, or `AttachSized` for either one whose window is first sized to the
+/// viewer, so the screen sent and all output after it fit a viewer that does not reflow;
+/// `Input`, `Prompt`, `Resize` and `Detach` follow on the same
 /// connection and go to that pane. `Input` bytes, at most `INPUT_BYTES_MAX`, are typed as given and never kept.
 /// `Prompt` text, at most `PROMPT_BYTES_MAX`, is the owner's explicit message: it is typed as
 /// one submission, and a sub-agent's master later hears a note of it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TerminalRequest {
-    Attach { agent_id: AgentId },
-    AttachPane { agent_id: AgentId, pane: String },
-    Input { bytes: Vec<u8> },
-    Prompt { text: String },
-    Resize { cols: u16, rows: u16 },
+    Attach {
+        agent_id: AgentId,
+    },
+    AttachPane {
+        agent_id: AgentId,
+        pane: String,
+    },
+    AttachSized {
+        agent_id: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    Input {
+        bytes: Vec<u8>,
+    },
+    Prompt {
+        text: String,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     Detach,
 }
 
