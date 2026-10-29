@@ -1045,43 +1045,6 @@ export function teamPause(id: string, paused: boolean, generation: number): Prom
   return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
 }
 
-/** Stops one harness with its teammates until the owner wakes it. Inputs: the project id, the
- * team agent id and a generation. Output: the commit receipt; the master is rejected. */
-export function teamStopAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
-}
-
-/** Sends the owner's message to one team agent through the coordination layer, which delivers
- * it to the agent's mailbox with a receipt. Inputs: the project id, the team agent id, the
- * text and a generation. Output: the commit receipt; an agent outside the project is rejected. */
-export function coordSend(id: string, agent: number, text: string, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_coord_send", { id, agent, text, generation });
-}
-
-/** Stops one teammate of a harness. Inputs: the project id, the harness agent id, the teammate's
- * pane id and a generation. Output: the commit receipt; an ended teammate is rejected. */
-export function teamStopTeammate(id: string, agent: number, pane: string, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_stop_teammate", { id, agent, pane, generation });
-}
-
-/** Sets Max harnesses per project. Inputs: the project id, the cap or null for No limit and a
- * generation. Output: the commit receipt. */
-export function teamMaxHarnesses(id: string, max: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_max_harnesses", { id, max, generation });
-}
-
-/** Sets Max teammates per harness. Inputs: the project id, the cap or null for No limit and a
- * generation. Output: the commit receipt. */
-export function teamMaxTeammates(id: string, max: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_max_teammates", { id, max, generation });
-}
-
-/** Sets the project's Token budget. Inputs: the project id, the tokens or null for Off and a
- * generation. Output: the commit receipt. */
-export function teamTokenBudget(id: string, tokens: number | null, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation });
-}
-
 export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_hand_off", { id, reply, step, generation });
 }
