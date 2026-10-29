@@ -428,20 +428,43 @@ fn session_name(path: &Path) -> String {
 
 /// Reads what one record gained since its stored progress, at most `READ_BYTES_MAX`.
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
-/// its place. A line longer than the read is skipped. Inputs: the record, its progress, the
-/// time and where to collect the Codex tool calls read, if anywhere. Output: the growth and
-/// the last limits.
+/// its place. A line longer than the read is skipped.
+/// Inputs: the record, its progress and the time. Output: the growth and the last limits.
 fn read_record(
     path: &Path,
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
-    tools: Option<&mut Vec<String>>,
 ) -> (Tokens, Option<Observation>) {
     let Some(opened) = open_record(path) else {
         return (Tokens::default(), None);
     };
-    read_opened(opened, format, progress, now_ms, tools)
+    read_opened(opened, format, progress, now_ms)
+}
+
+/// Reads one record as `read_record` does and also collects the Codex tool calls its new
+/// lines record. Inputs: the record, its progress, the time and the collected tools.
+/// Output: the growth and the last limits.
+fn read_record_with(
+    path: &Path,
+    format: Format,
+    progress: &mut Progress,
+    now_ms: i64,
+    tools: &mut Vec<String>,
+) -> (Tokens, Option<Observation>) {
+    let Some(opened) = open_record(path) else {
+        return (Tokens::default(), None);
+    };
+    read_opened_with(opened, format, progress, now_ms, Some(tools))
+}
+
+fn read_opened(
+    opened: (File, (u64, u64), u64),
+    format: Format,
+    progress: &mut Progress,
+    now_ms: i64,
+) -> (Tokens, Option<Observation>) {
+    read_opened_with(opened, format, progress, now_ms, None)
 }
 
 /// Reads what an open record gained since its stored progress, up to the length it had
@@ -451,7 +474,7 @@ fn read_record(
 /// device, so a reboot never counts a whole record again. Inputs: the open record with its
 /// identity and length, its progress, the time and where to collect the Codex tool calls
 /// read, at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the growth and the last limits.
-fn read_opened(
+fn read_opened_with(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
     progress: &mut Progress,
@@ -582,8 +605,10 @@ fn scan(
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
         let mut tools = Vec::new();
-        let collect = counting.is_some().then_some(&mut tools);
-        let (growth, observed) = read_record(&path, format, &mut progress, now_ms, collect);
+        let (growth, observed) = match counting {
+            Some(_) => read_record_with(&path, format, &mut progress, now_ms, &mut tools),
+            None => read_record(&path, format, &mut progress, now_ms),
+        };
         if progress != before {
             changed.push((
                 key,

@@ -222,9 +222,7 @@ pub(super) fn flags(
 /// database and the agent. Returns the names with their counts, by name.
 pub(super) fn used(db: &Connection, id: AgentId) -> Result<Vec<(String, i64)>, EngineError> {
     let mut statement = db
-        .prepare_cached(
-            "SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool LIMIT ?2",
-        )
+        .prepare("SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool LIMIT ?2")
         .map_err(state)?;
     let limit = i64::try_from(TOOLS_PER_AGENT_MAX).map_err(state)?;
     let rows = statement
@@ -257,7 +255,7 @@ fn counted(used: &[(String, i64)], entries: &[String]) -> Vec<u32> {
 
 fn reminded(db: &Connection, project: &ProjectId, id: AgentId) -> Result<Vec<Flag>, EngineError> {
     let mut statement = db
-        .prepare_cached(
+        .prepare(
             "SELECT idem_key FROM coord_messages WHERE project=?1 AND from_kind='engine'
              AND to_kind='agent' AND to_agent=?2 AND substr(idem_key,1,length(?3))=?3",
         )
@@ -338,7 +336,7 @@ pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Engine
     }
     let ids: Vec<AgentId> = {
         let mut statement = db
-            .prepare_cached(
+            .prepare(
                 "SELECT id FROM team_agents WHERE project=?1 AND tools=1
                  AND status NOT IN ('stopped','failed') ORDER BY id DESC LIMIT ?2",
             )
