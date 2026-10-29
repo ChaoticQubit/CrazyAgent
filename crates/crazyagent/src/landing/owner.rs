@@ -298,6 +298,61 @@ fn landing_target(
     Ok((reference, tip, Target::Agent(agent)))
 }
 
+/// The branch the master works on and merges harnesses into (DEC-100), with its tip: the
+/// owner's choice, else the repository's default branch, the local branch its `origin`
+/// remote's HEAD names, else the branch the owner's checkout has checked out. Inputs: the
+/// owner checkout root and the owner's choice, a branch name without `refs/heads/`.
+/// Output: the branch and tip, None when no such local branch exists and no choice was
+/// made, or `changes_target_invalid` for a choice that is no local branch.
+pub(super) fn master_branch(
+    repository: &Path,
+    chosen: Option<&str>,
+) -> Result<Option<(String, String)>, EngineError> {
+    let owner = Repo::open(repository, &repository.join(".git"), Some(repository))?;
+    let local = |name: &str| -> Result<Option<String>, EngineError> {
+        let reference = format!("refs/heads/{name}");
+        if name.is_empty()
+            || name.len() > BRANCH_BYTES_MAX
+            || name.starts_with('-')
+            || !owner.test(&["check-ref-format", &reference])?
+        {
+            return Ok(None);
+        }
+        owner.commit_of(&reference)
+    };
+    if let Some(name) = chosen {
+        let tip = local(name)?.ok_or_else(|| failure("changes_target_invalid"))?;
+        return Ok(Some((name.to_owned(), tip)));
+    }
+    let remote = owner.exec(
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+        None,
+        &[],
+        1024,
+    )?;
+    let named = std::str::from_utf8(&remote.stdout)
+        .ok()
+        .filter(|_| remote.code == 0)
+        .and_then(|text| {
+            text.trim_end_matches('\n')
+                .strip_prefix("refs/remotes/origin/")
+        })
+        .map(str::to_owned);
+    if let Some(name) = named
+        && let Some(tip) = local(&name)?
+    {
+        return Ok(Some((name, tip)));
+    }
+    let Some(reference) = current_branch(&owner)? else {
+        return Ok(None);
+    };
+    let name = reference
+        .strip_prefix("refs/heads/")
+        .map(str::to_owned)
+        .ok_or_else(|| failure("changes_git_unsupported"))?;
+    Ok(local(&name)?.map(|tip| (name, tip)))
+}
+
 /// Lists the local branches of a change set's repository, in git's order and at most
 /// `BRANCHES_MAX`, with the owner's checked-out one. Inputs: the store and the change
 /// set. Output: the branches.
@@ -571,6 +626,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
             &shared(&repository)?,
             &repository,
             &record.worktree,
+            &flow::clone_branch(db, &record.worktree)?,
             &crate::worktrees::TREE_BOUNDS,
         )?;
         if fetched != record.head {
@@ -744,14 +800,15 @@ static JUDGED: Mutex<VecDeque<(JudgedKey, Shown)>> = Mutex::new(VecDeque::new())
 
 /// Says whether a change set's agent copy is gone, read from the disk with no git run: its
 /// worktree folder or its git folder no longer exists, or an agent's own clone no longer
-/// holds its branch. Input: the change set. Output: the answer.
-fn copy_gone(record: &Record) -> Result<bool, EngineError> {
+/// holds its branch. Inputs: the store and the change set. Output: the answer.
+fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
     let missing = |path: &Path| matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
     if missing(&record.worktree) || missing(&record.git_dir) {
         return Ok(true);
     }
     if flow::in_clone(record) {
-        return Ok(!clone::has_branch(&record.worktree)?);
+        let branch = flow::clone_branch(db, &record.worktree)?;
+        return Ok(!clone::has_branch(&record.worktree, &branch)?);
     }
     Ok(false)
 }
@@ -869,7 +926,7 @@ fn observe_one(
     if !record.is_open() {
         return Ok(None);
     }
-    if copy_gone(&record)? {
+    if copy_gone(db, &record)? {
         close_removed(db, &mut record)?;
         return Ok(None);
     }

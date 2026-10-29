@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setChildLanding, setMaxHarnesses, setMaxTeammates, setOnHarnessSwitch, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setOnHarnessSwitch, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -154,6 +154,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [lands, setLands] = useState<ChildLanding | null>(null);
   const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
   const [stopAsked, setStopAsked] = useState(false);
+  const [masterBranch, setMasterBranchText] = useState<string | null>(null);
+  const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -247,6 +249,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function saveMasterBranch(branch: string | null) {
+    if (busy) return;
+    setBusy(true);
+    const message = changeNote(await setMasterBranch(projectId, branch), "the Master's branch");
+    setBusy(false);
+    setMasterBranchText(null);
+    setNote(message);
+    reload();
+  }
+
   async function cap(which: "harnesses" | "teammates", value: string) {
     const max = chosen(value, CAP_CHOICES);
     if (busy || max === undefined) return;
@@ -265,6 +277,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     setBusy(true);
     const message = changeNote(await setTokenBudget(projectId, tokens), "the token budget");
     setBusy(false);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseAskMerge(choice: "off" | "on") {
+    setAskMerge(choice);
+    setBusy(true);
+    const message = changeNote(await setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting");
+    setBusy(false);
+    setAskMerge(null);
     setNote(message);
     reload();
   }
@@ -338,7 +360,21 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <span aria-hidden="true">Agent branches</span>
       <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
         options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
-      <span className="tg-terminal-note">Named branch gives each new agent its own branch, crazyagent/agent-N. Detached keeps the older detached HEAD.</span>
+      <span className="tg-terminal-note">Named branch gives each new agent its own branch: a harness's is named after its task, crazyagent/&lt;task&gt;. Detached keeps the older detached HEAD.</span>
+    </div>
+    <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? status.master_branch ?? "").trim() || null); }}>
+      <label htmlFor={`tg-master-branch-${projectId}`}>Master's branch</label>
+      <input id={`tg-master-branch-${projectId}`} className="pj-input" value={masterBranch ?? status.master_branch ?? ""} placeholder="Repository default"
+        onChange={(event) => setMasterBranchText(event.target.value)} aria-describedby={`tg-master-branch-help-${projectId}`} />
+      <Button type="submit" size="small" disabled={busy || masterBranch === null} pending={busy && masterBranch !== null} pendingLabel="Saving...">Save</Button>
+      <Button type="button" size="small" disabled={busy || !status.master_branch} onClick={() => void saveMasterBranch(null)}>Use default</Button>
+      <span className="tg-terminal-note" id={`tg-master-branch-help-${projectId}`}>The master works on this branch and merges finished harnesses into it, locally; nothing is pushed. Empty uses the repository's default branch.</span>
+    </form>
+    <div className="pj-row">
+      <span aria-hidden="true">Ask me before merging into the master's branch</span>
+      <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+      <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
     </div>
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>

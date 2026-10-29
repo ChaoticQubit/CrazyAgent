@@ -37,6 +37,8 @@ fn main() {
         "desktop_team_child_landing",
         "desktop_team_finished_agents",
         "desktop_team_agent_branches",
+        "desktop_team_master_branch",
+        "desktop_team_ask_before_merge",
         "desktop_team_live_master",
         "desktop_team_pause",
         "desktop_team_hand_off",

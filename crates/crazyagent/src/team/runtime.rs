@@ -74,6 +74,9 @@ const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with
 /// What a lead's worker is told with each task (N3).
 const WORKER_LINE: &str =
     "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
+/// How many words of a task a harness's task branch name is made from, when the master
+/// gave the task no role.
+const TASK_NAME_WORDS: usize = 6;
 const LEAD_UNREAD: &str = "Not answered: the team state could not be read. Try again in a moment.";
 
 /// Which of the owner's time limits bounds an agent's turn, with the limit as the owner set it.
@@ -384,6 +387,7 @@ pub struct TeamRuntime {
     teammates_next: Option<Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
+    naming: Option<i64>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -528,6 +532,7 @@ impl TeamRuntime {
             teammates_next: None,
             live_starts: BTreeMap::new(),
             resuming: None,
+            naming: None,
         })
     }
 
@@ -2863,14 +2868,17 @@ impl TeamRuntime {
                     let Ok(account) = self.account_for(access, project, &harness, paused) else {
                         continue;
                     };
-                    match self.spawn(
+                    self.naming = Some(task);
+                    let spawned = self.spawn(
                         stored,
                         AgentRole::Sub,
                         &harness,
                         slot.tools,
                         &account,
                         parent,
-                    )? {
+                    );
+                    self.naming = None;
+                    match spawned? {
                         Ok(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
@@ -2943,6 +2951,7 @@ impl TeamRuntime {
                 layout,
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
+            prompt.push_str(&self.branch_line(project, agent));
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -3574,6 +3583,112 @@ impl TeamRuntime {
         }
     }
 
+    /// The commit a new master or harness worktree starts from (DEC-100): the tip of the
+    /// project's Master's branch, so the master works there and each harness's task branch
+    /// is cut from the branch it merges into. Takes the project and its canonical folder.
+    /// Returns the tip, None to start from the owner's HEAD when the project has no such
+    /// branch and none was chosen, or the plain reason a chosen Master's branch is missing.
+    fn master_tip(&self, project: &ProjectId, root: &Path) -> Result<Option<String>, String> {
+        let choice = super::master_branch_choice(&self.connection, project)
+            .map_err(|e| with_code("the Master's branch setting could not be read", Some(&e.0)))?;
+        match crate::landing::master_branch(root, choice.as_deref()) {
+            Ok(found) => Ok(found.map(|(_, tip)| tip)),
+            Err(_) if choice.is_none() => Ok(None),
+            Err(problem) => Err(with_code(
+                "the Master's branch is not a local branch of the project",
+                Some(&problem.0),
+            )),
+        }
+    }
+
+    /// Tells whether a team agent was started by a lead agent rather than by the master,
+    /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
+    fn has_lead(&self, id: i64) -> bool {
+        self.connection
+            .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
+            .optional()
+            .ok()
+            .flatten()
+            .flatten()
+            .is_some()
+    }
+
+    /// The name a new harness's task branch takes (DEC-100): the role handle the master
+    /// gave the task it starts for, else a handle made from the task's first words, else
+    /// `task-<id>`, else `agent-<id>`. Takes the project and the new agent. Returns the
+    /// name, lower-case letters and digits joined by single hyphens.
+    fn task_name(&self, project: &ProjectId, id: i64) -> String {
+        let read: Option<(Option<String>, String)> = self.naming.and_then(|task| {
+            self.connection
+                .query_row(
+                    "SELECT r.role,t.prompt FROM team_tasks t
+                     LEFT JOIN team_task_roles r ON r.task=t.id AND r.project=t.project
+                     WHERE t.id=?1 AND t.project=?2",
+                    params![task, project.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .ok()
+                .flatten()
+        });
+        let words = |prompt: &str| {
+            prompt
+                .split_whitespace()
+                .take(TASK_NAME_WORDS)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let named = read.as_ref().and_then(|(role, prompt)| {
+            role.as_deref()
+                .and_then(names::handle)
+                .or_else(|| names::handle(&words(prompt)))
+        });
+        let name = named
+            .or_else(|| self.naming.map(|task| format!("task-{task}")))
+            .unwrap_or_else(|| format!("agent-{id}"));
+        assert!(crate::agent_git::task_branch(&name).is_some());
+        name
+    }
+
+    /// What a harness reads about its git branch with each task (DEC-100): its task branch
+    /// and, in its own clone, where its agent team's teammates work, each in
+    /// `.worktrees/<name>` on `<task branch>--<name>`, merged into the task branch before it
+    /// reports done. Takes the project and the agent. Returns the line, empty for an agent
+    /// with no task branch of its own.
+    fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
+        let row: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let Some((worktree, git_dir)) = row else {
+            return String::new();
+        };
+        let branch = crate::landing::open(&self.root)
+            .and_then(|db| {
+                crate::landing::agent_branch(&db, Path::new(&worktree), Path::new(&git_dir))
+            })
+            .ok()
+            .flatten();
+        let Some(branch) = branch.filter(|branch| crate::agent_git::is_agent_branch(branch)) else {
+            return String::new();
+        };
+        if recorded_layout(&worktree, &git_dir) == Layout::Linked {
+            return format!("\nYour branch is {branch}; the engine commits your edits there.");
+        }
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            folder = crate::agent_git::TEAMMATES_FOLDER
+        )
+    }
+
     /// The commit a new worker of a lead starts from (N1): the commit the lead's worktree
     /// holds now, read through landing. Takes the project and the new agent. Returns none for
     /// an agent the master started, else the commit or the plain reason it cannot be read.
@@ -3739,10 +3854,29 @@ impl TeamRuntime {
         let worktree = crate::projects_home::state_folder(&root)
             .join("worktrees")
             .join(format!("agent-{id}"));
-        let base = if adopt {
+        let lead = if adopt {
             None
         } else {
             self.lead_tip(&stored.project_id, id)?
+        };
+        let base = match lead {
+            Some(tip) => Some(tip),
+            None if adopt => None,
+            None => self.master_tip(&stored.project_id, &root)?,
+        };
+        let named = layout == Layout::Clone
+            || super::agent_branches(&self.connection, &stored.project_id)
+                .map_err(|e| with_code("the agent branch setting could not be read", Some(&e.0)))?
+                == super::BranchMode::Named;
+        let task_branch = if adopt || role != AgentRole::Sub || !named || self.has_lead(id) {
+            None
+        } else {
+            let name = self.task_name(&stored.project_id, id);
+            let claimed = crate::landing::open(&self.root)
+                .and_then(|db| crate::landing::claim_task_branch(&db, &root, &worktree, &name));
+            Some(claimed.map_err(|e| {
+                with_code("the harness's task branch could not be named", Some(&e.0))
+            })?)
         };
         let mut made = NewClone(None);
         match (adopt, layout) {
@@ -3768,14 +3902,21 @@ impl TeamRuntime {
                         Some(io_code(&e)),
                     )
                 })?;
-                crate::landing::add_agent_clone_at(&root, &worktree, base.as_deref()).map_err(
-                    |e| {
-                        with_code(
-                            "the agent's own copy of the project could not be made",
-                            Some(&e.0),
-                        )
-                    },
-                )?;
+                match &task_branch {
+                    Some(branch) => crate::landing::add_agent_clone_on(
+                        &root,
+                        &worktree,
+                        base.as_deref(),
+                        branch,
+                    ),
+                    None => crate::landing::add_agent_clone_at(&root, &worktree, base.as_deref()),
+                }
+                .map_err(|e| {
+                    with_code(
+                        "the agent's own copy of the project could not be made",
+                        Some(&e.0),
+                    )
+                })?;
                 made = NewClone(Some(worktree.clone()));
             }
         }
@@ -4775,7 +4916,7 @@ fn sub_agent_prompt(
             "Leave your edits as files in that worktree: never create a branch, commit, push or write inside .git, and never retry a refused command outside the sandbox. CrazyAgent turns your edits into a change set the owner accepts in Changes."
         }
         Layout::Clone => {
-            "Commit your work on the branch checked out there with conventional commit messages before you finish: only your commits land. Never create, switch, rename, delete or push a branch, never write inside the project folder's .git, and never retry a refused command outside the sandbox. CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes lands your commits."
+            "Commit your work on the branch checked out there with conventional commit messages before you finish: only commits on that branch land. Never switch, rename, delete or push it, create no other branch but your teammates' branches named below, never write inside the project folder's .git, and never retry a refused command outside the sandbox. CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes or the master's merge lands your commits."
         }
     };
     format!(

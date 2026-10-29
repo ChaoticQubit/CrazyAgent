@@ -1137,6 +1137,21 @@ export function setTokenBudget(id: string, tokens: number | null): Promise<Resul
   return call<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation: nextGeneration() });
 }
 
+/** Sets the branch the project's master works on and merges finished harnesses into, or
+ * clears it back to the repository's default branch. Inputs: the project id and the branch,
+ * null for the default. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterBranch(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_branch", { id, branch, generation: nextGeneration() });
+}
+
+/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+ * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
+ * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
  * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
  * or a plain error. */

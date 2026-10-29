@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
 
 pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invalid");
+const TASK_SUFFIXES_MAX: usize = 64;
 const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
 const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
@@ -617,7 +618,7 @@ pub(super) fn open_agent(
         return Err(invalid());
     }
     let pointer = match kind {
-        AgentKind::Sub => match agent_git::linked_branch(worktree) {
+        AgentKind::Sub => match agent_branch(db, worktree, Layout::Linked)? {
             Some(branch)
                 if bounded_read(&git_dir.join("HEAD"), HEAD_BYTES_MAX)?
                     == format!("ref: refs/heads/{branch}\n").as_bytes() =>
@@ -640,7 +641,8 @@ pub(super) fn open_agent(
     })
 }
 
-/// Puts a newly added linked agent worktree on its own branch, `agent_git::linked_branch`:
+/// Puts a newly added linked agent worktree on its own branch, the task branch stored for
+/// it or else `agent_git::linked_branch`:
 /// creates the branch at the worktree's detached HEAD in the shared repository, only when
 /// no branch of that name exists, then points HEAD at it under git's own `HEAD.lock`.
 /// The engine runs this git; the agent writes no git metadata. A worktree already on the
@@ -653,7 +655,7 @@ pub(super) fn name_branch(
     git_dir: &Path,
 ) -> Result<String, EngineError> {
     let _held = hold(repository);
-    let branch = agent_git::linked_branch(worktree)
+    let branch = agent_branch(db, worktree, Layout::Linked)?
         .ok_or_else(|| failure("changes_agent_branch_invalid"))?;
     let agent = open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?;
     let head = agent.head()?;
@@ -688,6 +690,77 @@ pub(super) fn name_branch(
     assert_eq!(named.branch(), Some(branch.as_str()));
     assert_eq!(named.head()?, head);
     Ok(branch)
+}
+
+/// Names the task branch a new harness works on (DEC-100), `crazyagent/<name>`, or the
+/// first free `-2` to `-64` form when another agent worktree of the repository or an owner
+/// branch already holds that name, and stores it for the worktree, so its clone or linked
+/// worktree commits there. The repository hold keeps two launches from taking one name.
+/// Inputs: the store, the owner checkout root, the new worktree and the name, as
+/// `agent_git::task_branch` takes it. Output: the branch, or `changes_agent_branch_invalid`
+/// for a name no branch can take, or `changes_agent_branch_exists` when every form is
+/// taken.
+pub(super) fn claim_branch(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    name: &str,
+) -> Result<String, EngineError> {
+    store::initialize(db)?;
+    let _held = hold(repository);
+    let shared = shared(repository)?;
+    for suffix in 1..=TASK_SUFFIXES_MAX {
+        let candidate = match suffix {
+            1 => name.to_owned(),
+            _ => format!("{name}-{suffix}"),
+        };
+        let branch = agent_git::task_branch(&candidate)
+            .ok_or_else(|| failure("changes_agent_branch_invalid"))?;
+        let reference = format!("refs/heads/{branch}");
+        let nested = shared.capture(
+            &[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &format!("{reference}/"),
+            ],
+            LINK_BYTES_MAX,
+        )?;
+        if store::agent_branch_taken(db, repository, worktree, &branch)?
+            || shared.commit_of(&reference)?.is_some()
+            || !nested.is_empty()
+        {
+            continue;
+        }
+        store::set_agent_branch(db, repository, worktree, &branch)?;
+        return Ok(branch);
+    }
+    Err(failure("changes_agent_branch_exists"))
+}
+
+/// The branch an agent worktree commits on: the task branch the engine stored for it
+/// (DEC-100), else the one its folder names for its layout, `agent_git::branch` for its
+/// own clone and `agent_git::linked_branch` for a linked worktree. Inputs: the store, the
+/// worktree and its layout. Output: the branch, None for a folder that names none.
+pub(super) fn agent_branch(
+    db: &Connection,
+    worktree: &Path,
+    layout: Layout,
+) -> Result<Option<String>, EngineError> {
+    let path = worktree.to_str().ok_or_else(invalid)?;
+    if let Some(stored) = store::agent_branch(db, path)? {
+        return Ok(Some(stored));
+    }
+    Ok(match layout {
+        Layout::Clone => agent_git::branch(worktree),
+        Layout::Linked => agent_git::linked_branch(worktree),
+    })
+}
+
+/// The branch an agent's own clone commits on, as [`agent_branch`] reads it. Inputs: the
+/// store and the worktree. Output: the branch, or `changes_workspace_invalid`.
+pub(super) fn clone_branch(db: &Connection, worktree: &Path) -> Result<String, EngineError> {
+    agent_branch(db, worktree, Layout::Clone)?.ok_or_else(invalid)
 }
 
 /// Deletes an agent's own branch once its worktree is gone, only while the branch still
@@ -741,6 +814,18 @@ pub(super) fn agent(db: &Connection, record: &Record) -> Result<Agent, EngineErr
 /// config the engine did not write. Inputs: the worktree and the commit. Output: true
 /// when it holds nothing else.
 pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError> {
+    holds_only_except(repo, commit, None)
+}
+
+/// Says whether an agent worktree holds exactly a commit as [`holds_only`] does, leaving
+/// one more pattern out of its untracked files, such as a harness clone's teammates'
+/// worktree folder, which cleanup checks on its own. Inputs: the worktree, the commit and
+/// the pattern, in git's `--exclude` form, or None. Output: the answer.
+pub(super) fn holds_only_except(
+    repo: &Repo,
+    commit: &str,
+    excluded: Option<&str>,
+) -> Result<bool, EngineError> {
     repo.run(&["update-index", "-q", "--refresh"])?;
     if !repo.test(&[
         "diff-index",
@@ -751,12 +836,10 @@ pub(super) fn holds_only(repo: &Repo, commit: &str) -> Result<bool, EngineError>
     ])? {
         return Ok(false);
     }
-    let untracked = repo.exec(
-        &["ls-files", "-z", "--others", "--exclude-standard"],
-        None,
-        &[],
-        1,
-    )?;
+    let exclude = excluded.map(|pattern| format!("--exclude={pattern}"));
+    let mut listing = vec!["ls-files", "-z", "--others", "--exclude-standard"];
+    listing.extend(exclude.as_deref());
+    let untracked = repo.exec(&listing, None, &[], 1)?;
     if untracked.code != 0 {
         return Err(failure("changes_git_failed"));
     }
@@ -1275,6 +1358,7 @@ pub(super) fn start(
             &shared(repository)?,
             repository,
             worktree,
+            &clone_branch(db, worktree)?,
             &crate::worktrees::TREE_BOUNDS,
         )?,
     };
@@ -1299,6 +1383,7 @@ pub(super) fn tip(
             &shared(repository)?,
             repository,
             worktree,
+            &clone_branch(db, worktree)?,
             &crate::worktrees::TREE_BOUNDS,
         ),
     }
@@ -1341,6 +1426,7 @@ pub(super) fn record(
             &shared,
             &workspace.repository,
             &workspace.worktree,
+            &clone_branch(db, &workspace.worktree)?,
             bounds,
         )?),
         Layout::Linked => None,
