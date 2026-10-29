@@ -160,10 +160,16 @@ fn edge_state(status: TaskStatus) -> EdgeState {
     }
 }
 
+/// Tells whether an agent row is a team member the graph places under a lead: a sub-agent or
+/// a native teammate the engine adopted as its own row. Takes the agent. Returns the answer.
+fn team_member(agent: &TeamAgent) -> bool {
+    matches!(agent.role, AgentRole::Sub | AgentRole::Teammate)
+}
+
 fn stopped_shown(agents: &[TeamAgent]) -> Vec<i64> {
     let mut stopped: Vec<i64> = agents
         .iter()
-        .filter(|agent| agent.role == AgentRole::Sub && agent.status == AgentStatus::Stopped)
+        .filter(|agent| team_member(agent) && agent.status == AgentStatus::Stopped)
         .map(|agent| agent.id)
         .collect();
     stopped.sort_unstable_by(|a, b| b.cmp(a));
@@ -195,7 +201,7 @@ pub fn facts(
     })
 }
 
-/// Reads the branch each sub-agent of a status commits on, from its worktree record and the
+/// Reads the branch each team member of a status commits on, from its worktree record and the
 /// landing store, with no git run. A branch the landing store cannot read, as on a platform
 /// without landing, is left out, as the harness branch line does. Takes a connection and the
 /// status. Returns the branches by agent id, or a SQLite failure of the worktree read.
@@ -204,11 +210,7 @@ pub fn branches(
     status: &TeamStatus,
 ) -> Result<BTreeMap<i64, String>, EngineError> {
     let mut found = BTreeMap::new();
-    for agent in status
-        .agents
-        .iter()
-        .filter(|agent| agent.role == AgentRole::Sub)
-    {
+    for agent in status.agents.iter().filter(|agent| team_member(agent)) {
         let row: Option<(String, String)> = connection
             .query_row(
                 "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
@@ -234,17 +236,18 @@ pub fn branches(
 
 /// Builds a project's who-leads-whom graph from its team status and the facts read beside
 /// it. The master is on top; a sub-agent with no lead is a harness lead under it, and one
-/// with a listed lead sits under that lead, as `lead_tree` orders them. Live and failed
-/// sub-agents and the `STOPPED_SHOWN_MAX` newest stopped ones show, except finished ones
-/// while the owner hides them; a hidden lead's agents move up to the master. Each shown
-/// harness's open teammate panes show under it, ended ones too while finished agents show.
-/// Every listed task is an edge from the node leading its agent; unread messages and claim
+/// with a listed lead sits under that lead, as `lead_tree` orders them, a teammate row too.
+/// Live and failed members and the `STOPPED_SHOWN_MAX` newest stopped ones show, except
+/// finished ones while the owner hides them; a hidden lead's agents move up to the master.
+/// Each shown harness's open teammate panes show under it, ended ones too while finished
+/// agents show; a pane the engine adopted as a teammate row shows once, as that row. Every
+/// listed task is an edge from the node leading its agent; unread messages and claim
 /// overlaps between shown agents are edges too. Takes the status and the facts. Returns
 /// the master first, then the tree depth first, and edges in task order.
 pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     let stopped = stopped_shown(&status.agents);
     let shown = |agent: &TeamAgent| {
-        agent.role == AgentRole::Sub
+        team_member(agent)
             && (status.show_finished || !agent.finished)
             && (agent.status != AgentStatus::Stopped || stopped.contains(&agent.id))
     };
@@ -304,6 +307,12 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         no_worktree: false,
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
+    let adopted: BTreeSet<(i64, &str)> = status
+        .agents
+        .iter()
+        .filter(|agent| agent.role == AgentRole::Teammate)
+        .filter_map(|agent| Some((agent.parent?, agent.pane.as_deref()?)))
+        .collect();
     let ids: BTreeSet<i64> = listed.iter().map(|agent| agent.id).collect();
     let mut agents = BTreeSet::new();
     let mut teammates = 0;
@@ -325,7 +334,9 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         agents.insert(id.clone());
         nodes.push(GraphNode {
             id: id.clone(),
-            kind: if agent.parent.is_some_and(|lead| lead != agent.id) {
+            kind: if agent.role == AgentRole::Teammate {
+                NodeKind::Teammate
+            } else if agent.parent.is_some_and(|lead| lead != agent.id) {
                 NodeKind::Sub
             } else {
                 NodeKind::Lead
@@ -347,17 +358,17 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                     .map_or(0, |item| item.count),
             ),
             agent: Some(agent.id),
-            pane: None,
+            pane: agent.pane.clone(),
             presence: state.map(|state| state.presence),
             waiting: state.and_then(|state| state.waiting),
             owner_questions: asked.get(&agent.id).copied().unwrap_or(0),
-            no_worktree: false,
+            no_worktree: agent.role == AgentRole::Teammate
+                && state.is_some_and(|state| !state.has_worktree),
         });
-        for mate in agent
-            .teammates
-            .iter()
-            .filter(|mate| status.show_finished || !mate.ended)
-        {
+        for mate in agent.teammates.iter().filter(|mate| {
+            (status.show_finished || !mate.ended)
+                && !adopted.contains(&(agent.id, mate.pane.as_str()))
+        }) {
             teammates += 1;
             let open = !mate.ended && !mate.stopped;
             nodes.push(GraphNode {

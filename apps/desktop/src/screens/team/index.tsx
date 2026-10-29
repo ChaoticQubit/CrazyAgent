@@ -400,9 +400,11 @@ export function TeamGraphView({ projectId, harness, account }: {
     </Dialog>}
     {acting?.kind === "stop" && <ConfirmDialog open title={`Stop ${displayText(acting.node.label)}?`} confirmLabel="Stop" pending={busy}
       onConfirm={() => void halt()} onCancel={() => setActing(null)}>
-      {acting.stop.kind === "agent"
-        ? "Its harness stops now. Work it has not handed in stays in its worktree, and you can wake it later from Finished agents."
-        : "This teammate's pane closes now, and its lead is told. Its lead keeps running."}
+      {acting.stop.kind === "teammate"
+        ? "This teammate's pane closes now, and its lead is told. Its lead keeps running."
+        : acting.node.kind === "teammate"
+          ? "This teammate's pane closes now. Its lead keeps running."
+          : "Its harness stops now. Work it has not handed in stays in its worktree, and you can wake it later from Finished agents."}
     </ConfirmDialog>}
   </section>;
 }

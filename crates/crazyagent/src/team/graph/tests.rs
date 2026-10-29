@@ -781,3 +781,98 @@ fn coordination_edges_stay_within_their_caps() {
     assert_eq!(graph.messages.len(), MESSAGE_EDGES_MAX);
     assert_eq!(graph.overlaps.len(), OVERLAP_EDGES_MAX);
 }
+
+#[test]
+fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
+    let mut status = tree();
+    status.agents[5].teammates = vec![teammate("%12", false, false)];
+    status.agents.push(TeamAgent {
+        parent: Some(3),
+        pane: Some("%12".into()),
+        persona: Some("Bo".into()),
+        label: "Bo".into(),
+        ..agent(9, AgentRole::Teammate, "claude-code", AgentStatus::Working)
+    });
+    let facts = GraphFacts {
+        branches: BTreeMap::new(),
+        coord: Some(Snapshot {
+            agents: vec![AgentState {
+                has_worktree: false,
+                ..state(9, Presence::Live, None)
+            }],
+            overlaps: Vec::new(),
+            questions_for_owner: Vec::new(),
+            unread_edges: vec![(Party::Owner, Party::Agent(9), 1, Receipt::Sent)],
+        }),
+    };
+    let mates = |graph: &TeamGraph| -> Vec<(String, Option<String>, Option<i64>, Option<String>)> {
+        graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Teammate)
+            .map(|node| {
+                (
+                    node.id.clone(),
+                    node.parent.clone(),
+                    node.agent,
+                    node.pane.clone(),
+                )
+            })
+            .collect()
+    };
+    let shown = graph(&status, &facts);
+    assert_eq!(
+        mates(&shown),
+        [
+            (
+                "team-9".to_owned(),
+                Some("team-3".to_owned()),
+                Some(9),
+                Some("%12".to_owned())
+            ),
+            (
+                "teammate-6-12".to_owned(),
+                Some("team-6".to_owned()),
+                None,
+                Some("%12".to_owned())
+            ),
+        ],
+        "lead 3's pane %12 shows once, as its row; the same pane id under lead 6 is its own"
+    );
+    let row = shown.nodes.iter().find(|node| node.id == "team-9").unwrap();
+    assert_eq!(row.terminal, Some(AgentId::team(9).unwrap()));
+    assert_eq!(row.label, "Bo");
+    assert!(
+        row.no_worktree,
+        "a teammate working with no worktree of its own is amber"
+    );
+    assert_eq!(row.presence, Some(Presence::Live));
+    assert_eq!(
+        shown
+            .messages
+            .iter()
+            .map(|edge| (edge.from.as_str(), edge.to.as_str()))
+            .collect::<Vec<_>>(),
+        [("owner", "team-9")]
+    );
+    let last = status.agents.len() - 1;
+    status.agents[last].status = AgentStatus::Stopped;
+    status.agents[last].finished = true;
+    assert_eq!(
+        mates(&graph(&status, &facts)),
+        [(
+            "teammate-6-12".to_owned(),
+            Some("team-6".to_owned()),
+            None,
+            Some("%12".to_owned())
+        )],
+        "a finished teammate row leaves with its pane while finished agents are hidden"
+    );
+    status.show_finished = true;
+    assert!(
+        mates(&graph(&status, &facts))
+            .iter()
+            .all(|mate| mate.0 != "teammate-3-12"),
+        "a shown finished row still stands for its pane"
+    );
+}
