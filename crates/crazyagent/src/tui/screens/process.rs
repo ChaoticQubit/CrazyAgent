@@ -186,6 +186,13 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
         "process_import_unmovable" => "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.".into(),
         "process_request_invalid" => "Type the file's full path, starting with / or ~/.".into(),
+        "process_commit_staged" => "Other files are staged in this project's checkout, so nothing was committed. Unstage or commit them, then try again.".into(),
+        "process_commit_none" => "No moved instruction file waits for a commit.".into(),
+        "process_commit_busy" => "Git is busy in this project's checkout (a merge, a rebase or a locked index), so nothing was committed. Finish it, then try again.".into(),
+        "process_commit_detached" => "This project's checkout isn't on a branch, so nothing was committed. Check out a branch, then try again.".into(),
+        "process_commit_moved" => "The branch changed while committing, so nothing was committed. Try again.".into(),
+        "process_commit_identity" => "Git has no user.name or user.email for this project, so nothing was committed. Set them, then try again.".into(),
+        "process_commit_failed" => "Git couldn't commit the move. Check the project's checkout, then try again.".into(),
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
@@ -649,7 +656,9 @@ impl ProcessPage {
                 | ProcessReply::Agent(_)
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
-                | ProcessReply::Files(_),
+                | ProcessReply::Files(_)
+                | ProcessReply::Paths(_)
+                | ProcessReply::Committed(_),
             ) => {
                 return;
             }
@@ -679,7 +688,9 @@ impl ProcessPage {
                 | ProcessQuery::SaveSettings { .. }
                 | ProcessQuery::Adoption { .. }
                 | ProcessQuery::PendingImport { .. }
-                | ProcessQuery::ConfirmImport { .. },
+                | ProcessQuery::ConfirmImport { .. }
+                | ProcessQuery::Uncommitted { .. }
+                | ProcessQuery::CommitImport { .. },
                 _,
             ) => {}
         }

@@ -2624,6 +2624,30 @@ async fn desktop_confirm_instruction_import(
 }
 
 #[tauri::command]
+async fn desktop_uncommitted_instruction_import(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .uncommitted_instruction_import(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_commit_instruction_import(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::ImportCommit, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.commit_instruction_import(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_agent_instructions(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3120,6 +3144,8 @@ pub fn run() {
             desktop_import_instructions_file,
             desktop_instruction_import,
             desktop_confirm_instruction_import,
+            desktop_uncommitted_instruction_import,
+            desktop_commit_instruction_import,
             desktop_default_process,
             desktop_agent_instructions,
             desktop_instruction_settings,

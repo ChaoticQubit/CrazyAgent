@@ -203,6 +203,8 @@
     "allow-desktop-import-instructions-file",
     "allow-desktop-instruction-import",
     "allow-desktop-confirm-instruction-import",
+    "allow-desktop-uncommitted-instruction-import",
+    "allow-desktop-commit-instruction-import",
     "allow-desktop-default-process",
     "allow-desktop-agent-instructions",
     "allow-desktop-instruction-settings",

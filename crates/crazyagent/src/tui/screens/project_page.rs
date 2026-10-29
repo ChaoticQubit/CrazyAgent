@@ -24,7 +24,7 @@ use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Link, Load};
-use crate::tui::frame::{Hint, Message, Modal, hint};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
     Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
@@ -45,6 +45,7 @@ const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
+const BANNER_ROWS_MAX: usize = 3;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -202,6 +203,9 @@ pub(in crate::tui) struct ProjectPage {
     import: Option<Vec<ImportFile>>,
     import_asked: bool,
     import_sent: Option<ProcessQuery>,
+    moved: Option<Vec<ImportFile>>,
+    uncommitted: Vec<String>,
+    uncommitted_asked: bool,
 }
 
 /// Says in a few words why the engine leaves one instruction file in place (DEC-106).
@@ -261,6 +265,9 @@ impl ProjectPage {
             import: None,
             import_asked: false,
             import_sent: None,
+            moved: None,
+            uncommitted: Vec::new(),
+            uncommitted_asked: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -310,10 +317,54 @@ impl ProjectPage {
         }
     }
 
-    /// Applies the engine's answer to the pending-import read or the confirmed move.
-    /// Inputs: the process event and the context. Output: none; a list shows the prompt,
-    /// a move closes it and names the moved files, a refusal keeps it open and says why.
+    /// Reads which moved instruction files still wait for a commit, for the banner shown
+    /// while the move stays uncommitted (DEC-106 addendum). Input: the context. Output:
+    /// none; the paths arrive as a process event.
+    fn ask_uncommitted(&mut self, ctx: &mut Ctx) {
+        if self.uncommitted_asked {
+            return;
+        }
+        let query = ProcessQuery::Uncommitted {
+            project: self.screen.project.clone(),
+        };
+        self.uncommitted_asked = ctx.try_request(Request::Process(Box::new(query)));
+    }
+
+    /// Asks the engine to commit the instruction import's move: one local commit on the
+    /// checkout's current branch holding only the moved files, never pushed. Only the owner's
+    /// key calls this. Input: the context. Output: none; the commit arrives as a process event.
+    fn commit_move(&mut self, ctx: &mut Ctx) {
+        if self.import_sent.is_some() {
+            return;
+        }
+        let query = ProcessQuery::CommitImport {
+            project: self.screen.project.clone(),
+        };
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.import_sent = Some(query);
+        } else {
+            ctx.say(Message::error(
+                "The move wasn't committed: too many requests are waiting.",
+                "",
+            ));
+        }
+    }
+
+    /// Applies the engine's answer to the pending-import read, the confirmed move, the
+    /// uncommitted-move read or the commit. Inputs: the process event and the context.
+    /// Output: none; a list shows the prompt, a move with uncommitted files offers Commit the
+    /// move or Leave it, any other move closes it and names the moved files, a commit names
+    /// its branch and files, and a refusal says why.
     fn import_arrived(&mut self, event: &ProcessEvent, ctx: &mut Ctx) {
+        if let (ProcessQuery::Uncommitted { project }, result) = (&event.query, &event.result)
+            && *project == self.screen.project
+        {
+            self.uncommitted_asked = false;
+            if let Ok(ProcessReply::Paths(paths)) = result {
+                self.uncommitted = paths.clone();
+            }
+            return;
+        }
         if self.import_sent.as_ref() != Some(&event.query) {
             return;
         }
@@ -325,17 +376,73 @@ impl ProjectPage {
             (ProcessQuery::PendingImport { .. }, _) => self.import_asked = false,
             (ProcessQuery::ConfirmImport { .. }, Ok(ProcessReply::Files(moved))) => {
                 self.import = None;
-                let names: Vec<String> = moved.iter().map(|file| sanitize(&file.path)).collect();
-                ctx.say(Message::success(
-                    "Moved to .crazyagent/imported/:",
-                    &names.join(", "),
-                ));
+                if moved.iter().any(|file| file.uncommitted) {
+                    self.moved = Some(moved.clone());
+                } else {
+                    let names: Vec<String> =
+                        moved.iter().map(|file| sanitize(&file.path)).collect();
+                    ctx.say(Message::success(
+                        "Moved to .crazyagent/imported/:",
+                        &names.join(", "),
+                    ));
+                }
+                self.ask_uncommitted(ctx);
             }
             (ProcessQuery::ConfirmImport { .. }, Err(code)) => {
                 ctx.say(Message::error(&import_problem(code), ""));
             }
+            (ProcessQuery::CommitImport { .. }, Ok(ProcessReply::Committed(commit))) => {
+                self.moved = None;
+                let files: Vec<String> = commit.files.iter().map(|path| sanitize(path)).collect();
+                ctx.say(Message::success(
+                    &format!("Committed the move on {}:", sanitize(&commit.branch)),
+                    &format!("{}. Nothing was pushed.", files.join(", ")),
+                ));
+                self.ask_uncommitted(ctx);
+            }
+            (ProcessQuery::CommitImport { .. }, Err(code)) => {
+                if code == "process_commit_none" {
+                    self.moved = None;
+                }
+                ctx.say(Message::error(&super::process::message(code), ""));
+                self.ask_uncommitted(ctx);
+            }
             _ => {}
         }
+    }
+
+    /// Handles a key while the moved files still wait for a commit after the confirm: Enter
+    /// or y commits the move, Esc or n leaves it for the project page banner. Inputs: the key
+    /// and the context. Output: handled, so no key reaches the page meanwhile.
+    fn moved_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        match key {
+            Key::Enter | Key::Char('y') => self.commit_move(ctx),
+            Key::Esc | Key::Char('n') if self.import_sent.is_none() => {
+                self.moved = None;
+                self.ask_uncommitted(ctx);
+            }
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// The banner rows shown above the tabs while an instruction import's move stays
+    /// uncommitted: the files, why it matters and the Ctrl-G action. Inputs: the width and
+    /// the context. Output: the rows, none when no move waits.
+    fn banner(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        if self.uncommitted.is_empty() || width < 8 {
+            return Vec::new();
+        }
+        let files: Vec<String> = self.uncommitted.iter().map(|path| sanitize(path)).collect();
+        let text = format!(
+            "Git still shows {} as deleted after the instruction import, so merges into this branch are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
+            files.join(", ")
+        );
+        wrap(&text, width - 2)
+            .into_iter()
+            .take(BANNER_ROWS_MAX)
+            .map(|line| styled(format!(" {line}"), Role::Warning, &ctx.theme))
+            .collect()
     }
 
     /// Handles a key while the pending-import prompt shows: Enter or y copies the files into
@@ -364,6 +471,53 @@ impl ProjectPage {
             _ => {}
         }
         Flow::Handled
+    }
+
+    /// The step after a confirmed import whose moved files git still shows as deleted: the
+    /// moved files, which of them wait for a commit, and Commit the move or Leave it.
+    /// Inputs: the moved files and the context. Output: the modal and its keys.
+    fn moved_modal(&self, moved: &[ImportFile], ctx: &Ctx) -> (Modal, Vec<Hint>) {
+        let theme = &ctx.theme;
+        let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
+        let mut body: Vec<Line<'static>> = wrap(
+            "Their text is in this project's .crazyagent/instructions.md. Moved:",
+            room,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+        for file in moved.iter().take(IMPORT_ROWS_MAX) {
+            let path = sanitize(&file.path);
+            let text = if file.uncommitted {
+                format!("- {path} (git shows it as deleted)")
+            } else {
+                format!("- {path}")
+            };
+            body.extend(wrap(&text, room).into_iter().map(Line::raw));
+        }
+        body.push(Line::default());
+        body.extend(
+            wrap(
+                "Merges into this branch are refused until the move is committed. Commit the move makes one local commit on your current branch holding only that move; it is never pushed. Leave it keeps a banner on the project page.",
+                room,
+            )
+            .into_iter()
+            .map(|text| styled(text, Role::Warning, theme)),
+        );
+        let hints = if self.import_sent.is_none() {
+            vec![hint("Enter", "Commit the move"), hint("Esc", "Leave it")]
+        } else {
+            Vec::new()
+        };
+        (
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: "Moved to .crazyagent/imported/".into(),
+                body,
+                top: None,
+            },
+            hints,
+        )
     }
 
     fn ask_team(&mut self, ctx: &mut Ctx) {
@@ -1152,11 +1306,16 @@ impl Screen for ProjectPage {
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
-        hints_of(&self.view)
+        let mut hints = hints_of(&self.view);
+        if !self.uncommitted.is_empty() {
+            hints.insert(0, hint("Ctrl-G", "Commit the move"));
+        }
+        hints
     }
 
     fn typing(&self) -> bool {
         self.import.is_some()
+            || self.moved.is_some()
             || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
@@ -1167,8 +1326,15 @@ impl Screen for ProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.moved.is_some() {
+            return self.moved_key(key, ctx);
+        }
         if self.import.is_some() {
             return self.import_key(key, ctx);
+        }
+        if !self.uncommitted.is_empty() && *key == Key::Ctrl('g') {
+            self.commit_move(ctx);
+            return Flow::Handled;
         }
         self.screen.width = ctx.width;
         if self.changes_have_keys()
@@ -1256,11 +1422,13 @@ impl Screen for ProjectPage {
                 self.select_master(ctx);
                 self.master.access();
                 self.ask_import(ctx);
+                self.ask_uncommitted(ctx);
             }
             Arrival::Disconnected(_) => {
                 if let Some(ProcessQuery::PendingImport { .. }) = self.import_sent.take() {
                     self.import_asked = false;
                 }
+                self.uncommitted_asked = false;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;
@@ -1313,6 +1481,7 @@ impl Screen for ProjectPage {
         }
         self.ask_team(ctx);
         self.ask_import(ctx);
+        self.ask_uncommitted(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
@@ -1321,6 +1490,26 @@ impl Screen for ProjectPage {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
+        let banner = self.banner(usize::from(area.width), ctx);
+        let rows = u16::try_from(banner.len())
+            .unwrap_or(u16::MAX)
+            .min(area.height / 2);
+        if rows > 0 {
+            draw_lines(
+                frame.buffer_mut(),
+                Rect {
+                    height: rows,
+                    ..area
+                },
+                &banner,
+            );
+        }
+        let area = Rect {
+            y: area.y + rows,
+            height: area.height - rows,
+            ..area
+        };
+        assert!(rows == 0 || !self.uncommitted.is_empty());
         self.screen.width = area.width;
         self.screen.now_ms = now_ms();
         self.view = project_screen(
@@ -1333,6 +1522,9 @@ impl Screen for ProjectPage {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let Some(moved) = &self.moved {
+            return Some(self.moved_modal(moved, ctx));
+        }
         let files = self.import.as_ref()?;
         let theme = &ctx.theme;
         let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
