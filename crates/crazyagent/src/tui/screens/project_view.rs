@@ -1201,6 +1201,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 ("/", "Commands"),
                 ("@", "Tag"),
                 ("PgUp", "Scroll"),
+                ("Ctrl-T", "Team"),
                 TABS,
                 ("Esc", esc),
             ]
