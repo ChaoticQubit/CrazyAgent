@@ -800,6 +800,8 @@ export interface TeamStatus {
   child_landing?: ChildLanding;
   show_finished?: boolean;
   agent_branches?: BranchMode;
+  master_branch?: string | null;
+  ask_before_merge?: boolean;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;

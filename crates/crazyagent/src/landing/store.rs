@@ -42,7 +42,14 @@ CREATE INDEX IF NOT EXISTS landing_change_sets_project
 CREATE TABLE IF NOT EXISTS landing_bases (
     worktree TEXT PRIMARY KEY,
     base TEXT NOT NULL
-);";
+);
+CREATE TABLE IF NOT EXISTS landing_agent_branches (
+    worktree TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS landing_agent_branches_repository
+    ON landing_agent_branches(repository, branch);";
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
@@ -387,6 +394,74 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
         Some(base) if !super::git::is_object_id(&base) => Err(failure("changes_unavailable")),
         base => Ok(base),
     }
+}
+
+/// Stores the task branch the engine named for an agent worktree, which its clone or
+/// linked worktree then commits on in place of the branch its folder names. Inputs: the
+/// store, the owner checkout root, the worktree and the branch, one
+/// `agent_git::is_agent_branch` accepts. Output: Ok once stored.
+pub(super) fn set_agent_branch(
+    db: &Connection,
+    repository: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+) -> Result<(), EngineError> {
+    assert!(crate::agent_git::is_agent_branch(branch));
+    db.execute(
+        "INSERT OR REPLACE INTO landing_agent_branches(worktree,repository,branch) VALUES (?1,?2,?3)",
+        params![path_text(worktree)?, path_text(repository)?, branch],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Reads the task branch stored for an agent worktree. Inputs: the store and the worktree
+/// path. Output: the branch, None when none is stored, or `changes_unavailable` for a
+/// stored value that is not a branch the engine names.
+pub(super) fn agent_branch(db: &Connection, worktree: &str) -> Result<Option<String>, EngineError> {
+    let branch: Option<String> = db
+        .query_row(
+            "SELECT branch FROM landing_agent_branches WHERE worktree=?1",
+            [worktree],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match branch {
+        Some(branch) if !crate::agent_git::is_agent_branch(&branch) => {
+            Err(failure("changes_unavailable"))
+        }
+        branch => Ok(branch),
+    }
+}
+
+/// Says whether another agent worktree of the same owner repository already holds a task
+/// branch name; a row left for the asking worktree itself does not count. Inputs: the
+/// store, the owner checkout root, the asking worktree and the branch. Output: the answer.
+pub(super) fn agent_branch_taken(
+    db: &Connection,
+    repository: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT COUNT(*) FROM landing_agent_branches WHERE repository=?1 AND branch=?2 AND worktree<>?3",
+        params![path_text(repository)?, branch, path_text(worktree)?],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(storage)
+}
+
+/// Forgets the task branch of an agent worktree that is gone. Inputs: the store and the
+/// worktree path. Output: Ok.
+pub(super) fn forget_agent_branch(db: &Connection, worktree: &str) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM landing_agent_branches WHERE worktree=?1",
+        [worktree],
+    )
+    .map_err(storage)?;
+    Ok(())
 }
 
 /// Reads one change set. Inputs: the store and the id. Output: the record, or
