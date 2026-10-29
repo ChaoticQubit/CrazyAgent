@@ -743,6 +743,18 @@ export interface TeamAgent {
   wakeable?: boolean;
   wake_note?: string | null;
   parent?: number | null;
+  owner_stopped?: boolean;
+  teammates?: Teammate[];
+}
+
+/** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
+ * whether its pane closed, whether the owner or the teammate cap stopped it, and when the
+ * engine first saw it. */
+export interface Teammate {
+  pane: string;
+  ended: boolean;
+  stopped: boolean;
+  seen_ms: number;
 }
 
 export interface TeamTask {
@@ -803,6 +815,11 @@ export interface TeamStatus {
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
+  max_harnesses?: number | null;
+  max_teammates?: number | null;
+  token_budget?: number | null;
+  budget_used?: number | null;
+  budget_reached?: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
   min_agents: number;
@@ -848,7 +865,7 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused" | "queue_full";
+  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped";
   text: string;
   created_ms: number;
   seen_ms: number | null;
@@ -946,6 +963,36 @@ export function teamLiveMaster(id: string, on: boolean, generation: number): Pro
 
 export function teamPause(id: string, paused: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_pause", { id, paused, generation });
+}
+
+/** Stops one harness with its teammates until the owner wakes it. Inputs: the project id, the
+ * team agent id and a generation. Output: the commit receipt; the master is rejected. */
+export function teamStopAgent(id: string, agent: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
+}
+
+/** Stops one teammate of a harness. Inputs: the project id, the harness agent id, the teammate's
+ * pane id and a generation. Output: the commit receipt; an ended teammate is rejected. */
+export function teamStopTeammate(id: string, agent: number, pane: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_stop_teammate", { id, agent, pane, generation });
+}
+
+/** Sets Max harnesses per project. Inputs: the project id, the cap or null for No limit and a
+ * generation. Output: the commit receipt. */
+export function teamMaxHarnesses(id: string, max: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_max_harnesses", { id, max, generation });
+}
+
+/** Sets Max teammates per harness. Inputs: the project id, the cap or null for No limit and a
+ * generation. Output: the commit receipt. */
+export function teamMaxTeammates(id: string, max: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_max_teammates", { id, max, generation });
+}
+
+/** Sets the project's Token budget. Inputs: the project id, the tokens or null for Off and a
+ * generation. Output: the commit receipt. */
+export function teamTokenBudget(id: string, tokens: number | null, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation });
 }
 
 export function teamHandOff(id: string, reply: number, step: number, generation: number): Promise<IntentReceipt> {

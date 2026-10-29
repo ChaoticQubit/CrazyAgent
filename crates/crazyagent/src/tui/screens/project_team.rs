@@ -112,6 +112,18 @@ pub(in crate::tui) struct WakeEdit {
 
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
 
+/// A stop the owner pressed that waits on one more key: Stop all asks y or n, Stop harness
+/// asks y or n for that agent, and Stop teammate asks which running teammate of that agent
+/// by its number, 1 to 9.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum Ask {
+    StopAll,
+    StopAgent(i64),
+    Teammate(i64),
+}
+
+const TEAMMATE_KEYS_MAX: usize = 9;
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -122,6 +134,7 @@ pub(in crate::tui) struct TeamView {
     pub agent_cursor: usize,
     pub task_cursor: usize,
     pub confirm: Option<i64>,
+    pub ask: Option<Ask>,
     pub draft: Option<Draft>,
     pub wake: Option<WakeEdit>,
     pub alerts: bool,
@@ -145,6 +158,7 @@ impl TeamView {
             agent_cursor: 0,
             task_cursor: 0,
             confirm: None,
+            ask: None,
             draft: None,
             wake: None,
             alerts: false,
@@ -341,6 +355,9 @@ impl TeamView {
                 _ => TeamReply::Ignored,
             };
         }
+        if let Some(ask) = self.ask {
+            return self.ask_key(ask, key);
+        }
         if let Some(task) = self.confirm {
             return match key.code {
                 KeyCode::Char('y') => {
@@ -382,6 +399,12 @@ impl TeamView {
             KeyCode::Char('d') => self.sub_agent_depth(),
             KeyCode::Char('k') => self.child_landing(),
             KeyCode::Char('b') => self.agent_branches(),
+            KeyCode::Char('S') => self.stop_all(),
+            KeyCode::Char('z') => self.ask_stop_agent(),
+            KeyCode::Char('m') => self.ask_teammate(),
+            KeyCode::Char('v') => self.cap(Cap::Harnesses),
+            KeyCode::Char('u') => self.cap(Cap::Teammates),
+            KeyCode::Char('g') => self.token_budget(),
             KeyCode::Char('n') => {
                 self.open_draft();
                 TeamReply::Handled
@@ -399,6 +422,182 @@ impl TeamView {
         };
         self.clamp();
         reply
+    }
+
+    /// Answers the stop that waits on a key: y sends Stop all or Stop harness, a number
+    /// stops that running teammate, and n or Esc keeps everything running. Takes the stop
+    /// and the key. Returns the change to send, or Handled.
+    fn ask_key(&mut self, ask: Ask, key: KeyEvent) -> TeamReply {
+        let reply = match (ask, key.code) {
+            (_, KeyCode::Char('n') | KeyCode::Esc) => TeamReply::Handled,
+            (Ask::StopAll, KeyCode::Char('y')) => self.change(
+                "Stopping every agent of the project. Press S to start them again.",
+                TeamAction::Pause {
+                    project_id: self.project.clone(),
+                },
+            ),
+            (Ask::StopAgent(agent), KeyCode::Char('y')) => self.change(
+                "Stopping that harness and its teammates. Wake it from Finished to start it again.",
+                TeamAction::StopAgent {
+                    project_id: self.project.clone(),
+                    agent,
+                },
+            ),
+            (Ask::Teammate(agent), KeyCode::Char(digit @ '1'..='9')) => {
+                let at = usize::from(digit as u8 - b'1');
+                match self.running_teammates(agent).get(at) {
+                    Some(pane) => {
+                        let pane = pane.clone();
+                        self.change(
+                            "Stopping that teammate. Its harness is told.",
+                            TeamAction::StopTeammate {
+                                project_id: self.project.clone(),
+                                agent,
+                                pane,
+                            },
+                        )
+                    }
+                    None => return TeamReply::Handled,
+                }
+            }
+            _ => return TeamReply::Handled,
+        };
+        self.ask = None;
+        reply
+    }
+
+    /// Sends one team change with the line shown once it applied, unless the last change is
+    /// still saving. Takes the line and the change. Returns the change, or Handled.
+    fn change(&mut self, done: &str, action: TeamAction) -> TeamReply {
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        self.changing = Some(done.to_owned());
+        TeamReply::Change(action)
+    }
+
+    /// The pane ids of one harness's running teammates, oldest first, at most
+    /// `TEAMMATE_KEYS_MAX`, numbered 1 up in the panel. Takes the agent. Returns the ids.
+    fn running_teammates(&self, agent: i64) -> Vec<String> {
+        self.status
+            .iter()
+            .flat_map(|status| status.agents.iter())
+            .filter(|item| item.id == agent)
+            .flat_map(|item| item.teammates.iter())
+            .filter(|teammate| !teammate.ended && !teammate.stopped)
+            .map(|teammate| teammate.pane.clone())
+            .take(TEAMMATE_KEYS_MAX)
+            .collect()
+    }
+
+    /// Stop all: asks before stopping every agent of the project, and starts them again
+    /// at once when the team is stopped. Returns the change, or Handled with a question or
+    /// a notice.
+    fn stop_all(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if status.paused {
+            return self.change(
+                "Starting the team again.",
+                TeamAction::Resume {
+                    project_id: self.project.clone(),
+                },
+            );
+        }
+        self.ask = Some(Ask::StopAll);
+        TeamReply::Handled
+    }
+
+    /// Stop harness: asks before stopping the selected sub-agent with its teammates. The
+    /// master stops only with Stop all. Returns Handled with the question or a notice.
+    fn ask_stop_agent(&mut self) -> TeamReply {
+        let Some(agent) = self.agents().get(self.agent_cursor).copied() else {
+            self.notice = Some(Notice::plain("Pick a harness in the agents list first."));
+            return TeamReply::Handled;
+        };
+        let note = match (agent.role, agent.status.live(), agent.owner_stopped) {
+            (AgentRole::Master, ..) => Some("The master stops with Stop all (S)."),
+            (_, false, _) | (_, _, true) => {
+                Some("That harness is already stopped. Wake it from Finished to start it again.")
+            }
+            _ => None,
+        };
+        match note {
+            Some(note) => self.notice = Some(Notice::plain(note)),
+            None => self.ask = Some(Ask::StopAgent(agent.id)),
+        }
+        TeamReply::Handled
+    }
+
+    /// Stop teammate: asks which running teammate of the selected harness to stop.
+    /// Returns Handled with the question or a notice.
+    fn ask_teammate(&mut self) -> TeamReply {
+        let Some(agent) = self.agents().get(self.agent_cursor).map(|agent| agent.id) else {
+            self.notice = Some(Notice::plain("Pick a harness in the agents list first."));
+            return TeamReply::Handled;
+        };
+        if self.running_teammates(agent).is_empty() {
+            self.notice = Some(Notice::plain("That harness has no running teammates."));
+        } else {
+            self.ask = Some(Ask::Teammate(agent));
+        }
+        TeamReply::Handled
+    }
+
+    /// Moves Max harnesses per project or Max teammates per harness to its next choice:
+    /// No limit, then each of `CAP_CHOICES`, then No limit again. Takes which cap. Returns
+    /// the change, or Handled while the team loads or saves.
+    fn cap(&mut self, which: Cap) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let current = match which {
+            Cap::Harnesses => status.max_harnesses,
+            Cap::Teammates => status.max_teammates,
+        };
+        let max = next_choice(&crate::team::CAP_CHOICES, current);
+        let project_id = self.project.clone();
+        let (done, action) = match which {
+            Cap::Harnesses => (
+                format!("Max harnesses is now {}.", cap_words(max)),
+                TeamAction::MaxHarnesses { project_id, max },
+            ),
+            Cap::Teammates => (
+                format!("Max teammates per harness is now {}.", cap_words(max)),
+                TeamAction::MaxTeammates { project_id, max },
+            ),
+        };
+        self.change(&done, action)
+    }
+
+    /// Moves the Token budget to its next choice: Off, then each of `BUDGET_CHOICES`, then
+    /// Off again. Returns the change, or Handled while the team loads or saves.
+    fn token_budget(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let tokens = next_choice(&crate::team::BUDGET_CHOICES, status.token_budget);
+        let done = match tokens {
+            Some(tokens) => format!(
+                "The team now stops after {} from now.",
+                crate::team::token_words(tokens)
+            ),
+            None => "The token budget is off.".to_owned(),
+        };
+        self.change(
+            &done,
+            TeamAction::TokenBudget {
+                project_id: self.project.clone(),
+                tokens,
+            },
+        )
     }
 
     fn step(&mut self, down: bool) {
@@ -1202,9 +1401,9 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    /// The Team rows: the agent counts and alerts, then every team setting in order (Keep
-    /// warm, Task, Session, Idle stop, On harness switch, Sub-agent depth, Worker lands, Agent
-    /// branches), each whole. A
+    /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
+    /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
+    /// Worker lands, Agent branches, Max harnesses, Max teammates, Token budget), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -1246,6 +1445,16 @@ impl TeamView {
                 .push("  ", Style::new())
                 .push(format!("{asking} waiting for an answer"), look.warning);
         }
+        if status.paused {
+            left = left.push("  ", Style::new()).push(
+                if status.budget_reached {
+                    "stopped: token budget used"
+                } else {
+                    "stopped by you"
+                },
+                look.error,
+            );
+        }
         if status.events.paused {
             left = left
                 .push("  ", Style::new())
@@ -1279,6 +1488,12 @@ impl TeamView {
             setting(
                 "Agent branches",
                 branch_words(status.agent_branches).to_owned(),
+            ),
+            setting("Max harnesses", cap_words(status.max_harnesses)),
+            setting("Max teammates", cap_words(status.max_teammates)),
+            setting(
+                "Token budget",
+                budget_words(status.token_budget, status.budget_used),
             ),
         ];
         let mut rows = Vec::new();
@@ -1334,6 +1549,27 @@ impl TeamView {
                     account_name(agent.account.as_deref(), accounts),
                 ));
                 rows.push(entry("Tools", tools_word(agent.tools).into()));
+                if agent.owner_stopped {
+                    rows.push(Row::of(
+                        "Stopped by you. Wake it from Finished to start it again.",
+                        look.warning,
+                    ));
+                }
+                let running = self.running_teammates(agent.id);
+                for teammate in &agent.teammates {
+                    let state = match (teammate.ended, teammate.stopped) {
+                        (_, true) => "stopped".to_owned(),
+                        (true, false) => "finished".to_owned(),
+                        (false, false) => running
+                            .iter()
+                            .position(|pane| pane == &teammate.pane)
+                            .map_or_else(
+                                || "running".to_owned(),
+                                |at| format!("running, m then {}", at + 1),
+                            ),
+                    };
+                    rows.push(entry("Teammate", format!("{}  {state}", teammate.pane)));
+                }
                 if let Some(waiting) = self
                     .status
                     .iter()
@@ -1422,6 +1658,40 @@ impl TeamView {
     }
 
     fn footer(&self, look: &Look) -> Vec<Row> {
+        if let Some(ask) = self.ask {
+            let label = |id: i64| {
+                self.agents()
+                    .into_iter()
+                    .find(|agent| agent.id == id)
+                    .map_or_else(|| "that harness".to_owned(), |agent| agent.label.clone())
+            };
+            let question = match ask {
+                Ask::StopAll => {
+                    "Stop the master, every harness and every teammate of this project?".to_owned()
+                }
+                Ask::StopAgent(id) => format!("Stop {} and its teammates?", label(id)),
+                Ask::Teammate(id) => {
+                    let count = self.running_teammates(id).len();
+                    return vec![
+                        Row::of(
+                            format!("Stop which teammate of {}?", label(id)),
+                            look.warning,
+                        )
+                        .push(format!("   1-{count}"), look.heading)
+                        .push(" Teammate   ", look.fg)
+                        .push("Esc", look.heading)
+                        .push(" Keep them", look.fg),
+                    ];
+                }
+            };
+            return vec![
+                Row::of(question, look.warning)
+                    .push("   y", look.heading)
+                    .push(" Stop   ", look.fg)
+                    .push("n", look.heading)
+                    .push(" Keep running", look.fg),
+            ];
+        }
         if let Some(task) = self.confirm.and_then(|id| self.task(id)) {
             return vec![
                 Row::of(format!("Cancel \"{}\"?", title(&task.prompt)), look.warning)
@@ -1451,6 +1721,12 @@ impl TeamView {
                 ("Tab", "Sub-agent"),
                 ("Esc", "Close"),
             ];
+        }
+        if let Some(ask) = self.ask {
+            return match ask {
+                Ask::Teammate(_) => vec![("1-9", "Stop teammate"), ("Esc", "Keep")],
+                Ask::StopAll | Ask::StopAgent(_) => vec![("y", "Stop"), ("n", "Keep running")],
+            };
         }
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
@@ -1493,6 +1769,19 @@ impl TeamView {
             ("d", "Sub-agent depth"),
             ("k", "Worker lands"),
             ("b", "Agent branches"),
+            ("v", "Max harnesses"),
+            ("u", "Max teammates"),
+            ("g", "Token budget"),
+            ("z", "Stop harness"),
+            ("m", "Stop teammate"),
+            (
+                "S",
+                if self.status.as_ref().is_some_and(|status| status.paused) {
+                    "Start all"
+                } else {
+                    "Stop all"
+                },
+            ),
             ("e", "Wake rules"),
         ];
         if self
@@ -1507,6 +1796,45 @@ impl TeamView {
         }
         help.extend([TABS, ("Esc", "Home")]);
         help
+    }
+}
+
+/// Which cap on running agents a key moves.
+#[derive(Clone, Copy)]
+enum Cap {
+    Harnesses,
+    Teammates,
+}
+
+/// The choice after `current`: none, then each of `choices`, then none again; a stored value
+/// outside the choices goes to none. Inputs: the choices, ascending, and the value now.
+/// Output: the next.
+fn next_choice<T: Copy + PartialEq>(choices: &[T], current: Option<T>) -> Option<T> {
+    match current {
+        None => choices.first().copied(),
+        Some(value) => choices
+            .iter()
+            .position(|choice| *choice == value)
+            .and_then(|at| choices.get(at + 1))
+            .copied(),
+    }
+}
+
+/// Words a cap on running agents. Takes the cap, None for No limit. Returns the words.
+fn cap_words(cap: Option<u8>) -> String {
+    cap.map_or_else(|| "No limit".to_owned(), |cap| cap.to_string())
+}
+
+/// Words the Token budget and what the agents used of it. Takes the budget, None for Off,
+/// and the tokens used. Returns the words, such as `12.5M tokens of 50M tokens`.
+fn budget_words(budget: Option<u64>, used: Option<u64>) -> String {
+    match budget {
+        None => "Off".to_owned(),
+        Some(budget) => format!(
+            "{} of {}",
+            crate::team::token_words(used.unwrap_or(0)),
+            crate::team::token_words(budget)
+        ),
     }
 }
 
@@ -1573,6 +1901,10 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         }
         "team_agent_not_found" => "That agent is no longer part of this team.".into(),
         "team_notification_missing" => "There is no such notification to mark as seen.".into(),
+        "team_stop_master" => "The master stops with Stop all.".into(),
+        "team_teammate_not_found" => "That teammate has already ended.".into(),
+        "team_cap_invalid" => "Pick a listed limit, or No limit.".into(),
+        "team_budget_invalid" => "Pick a listed token budget, or Off.".into(),
         other => plain_problem(other),
     }
 }
@@ -1777,10 +2109,30 @@ fn agent_status(
         AgentStatus::Stopped => ("\u{2298}", look.muted),
         AgentStatus::Failed => ("\u{2717}", look.error),
     };
-    let row = Row::of(
-        format!("{} {}", look.glyph(glyph), agent.status.label()),
-        style,
-    );
+    let label = if agent.owner_stopped {
+        "Stopped by you"
+    } else {
+        agent.status.label()
+    };
+    let mut row = Row::of(format!("{} {label}", look.glyph(glyph)), style);
+    let running = agent
+        .teammates
+        .iter()
+        .filter(|teammate| !teammate.ended && !teammate.stopped)
+        .count();
+    if running > 0 {
+        row = row.push(
+            format!(
+                "  +{running} {}",
+                if running == 1 {
+                    "teammate"
+                } else {
+                    "teammates"
+                }
+            ),
+            look.muted,
+        );
+    }
     match (task.filter(|_| agent.status == AgentStatus::Working), last) {
         (Some(task), _) => row.push(format!("  {}", title(&task.prompt)), look.fg),
         (None, Some(last)) => row.push(format!("  Last task: {}", title(&last.prompt)), look.muted),

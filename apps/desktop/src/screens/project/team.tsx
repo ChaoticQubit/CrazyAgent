@@ -2,14 +2,14 @@ import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, wakeTeamAgent } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, stopTeamAgent, stopTeammate, wakeTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
 import { finishedLabel, finishedRows, teamPanel } from "./research";
-import type { FinishedRow, TeamFilter, TeamTaskRow } from "./research";
+import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
@@ -49,6 +49,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   const [shown, setShown] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [renaming, setRenaming] = useState<{ agent: number; text: string } | null>(null);
+  const [halting, setHalting] = useState<TeamAgentRow | null>(null);
   const openLink = useLinkOpener(data.notify);
 
   async function rename() {
@@ -70,6 +71,29 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
     setBusy(false);
     setStopping(null);
     if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping team work isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
+    reload();
+  }
+
+  async function haltHarness(row: TeamAgentRow) {
+    if (!row.stop) return;
+    setBusy(true);
+    const result = await stopTeamAgent(data.id, row.stop.agent, nextGeneration());
+    setBusy(false);
+    setHalting(null);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping a harness isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
+    reload();
+  }
+
+  async function haltTeammate(row: TeammateRow) {
+    if (!row.stop) return;
+    setBusy(true);
+    const result = await stopTeammate(data.id, row.stop.agent, row.stop.pane, nextGeneration());
+    setBusy(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping a teammate isn't in this build." : failureCopy(result));
     const state = receiptState(result.value);
     setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
     reload();
@@ -105,10 +129,19 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
               onClick={() => { const target = row.rename; if (target) setRenaming({ agent: target.agent, text: target.handle }); }}>Rename</button>}</span>}
           {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
           {row.lead && <span className="pj-small pj-muted pj-block">Worker of {displayText(row.lead)}</span>}
-          {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}</th>
+          {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}
+          {row.teammates.length > 0 && <ul className="pj-rows" aria-label={`Teammates of ${displayText(row.name)}`}>{row.teammates.map((mate) => <li key={mate.key} className="pj-row">
+            <span className="pj-small pj-secondary">Teammate in pane {displayText(mate.pane)}</span>
+            <StatusBadge word={mate.word} />
+            {mate.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={`Stop the teammate in pane ${displayText(mate.pane)}`}
+              onClick={() => void haltTeammate(mate)}>Stop</button>}
+          </li>)}</ul>}</th>
         <td>{displayText(row.harness)}</td>
         <td>{displayText(row.account)}</td>
-        <td><StatusBadge word={row.word} /></td>
+        <td><StatusBadge word={row.word} />
+          {row.stoppedByYou && <span className="pj-small pj-muted pj-block">Stopped by you. Its task waits until you wake it.</span>}
+          {row.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={`Stop ${displayText(row.name)} and its teammates`}
+            onClick={() => setHalting(row)}>Stop</button>}</td>
         <td className="pj-secondary">{displayText(row.task)}</td>
       </tr>)}</tbody>
     </table></div> : <p className="pj-muted">{filter === "running" ? "No team agents are working. The master starts them when you ask it to build something." : "No team agents yet."}</p>}
@@ -132,6 +165,10 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       confirmLabel={stopping?.stop?.label === "Cancel" ? "Cancel task" : "Stop task"} cancelLabel="Keep it" pending={busy}
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       {displayText(stopping?.prompt ?? "")}
+    </ConfirmDialog>
+    <ConfirmDialog open={halting !== null} title={`Stop ${displayText(halting?.name ?? "")}?`} confirmLabel="Stop harness" cancelLabel="Keep it running" pending={busy}
+      onCancel={() => setHalting(null)} onConfirm={() => { if (halting) void haltHarness(halting); }}>
+      This harness and every teammate in its terminal stop now, and stay stopped across app and engine restarts. Its task waits for it, in its own worktree, until you wake it.
     </ConfirmDialog>
   </section>;
 }

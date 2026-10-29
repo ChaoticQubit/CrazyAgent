@@ -321,6 +321,84 @@ impl NativeBridge {
             .await
     }
 
+    /// Stops one harness, a sub-agent the master started, with the teammates in its
+    /// terminal; it stays stopped across restarts until the owner wakes it. Takes the project
+    /// id, the team agent id and the client generation. Returns the actual commit receipt; the
+    /// master is a plain rejection, it stops with the whole team.
+    pub async fn team_stop_agent(
+        &mut self,
+        id: &str,
+        agent: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::StopAgent { project_id, agent }, generation)
+            .await
+    }
+
+    /// Stops one teammate a harness split off in its terminal, and tells the harness. Takes
+    /// the project id, the harness agent id, the teammate's pane id and the client generation.
+    /// Returns the actual commit receipt; a teammate that already ended is a plain rejection.
+    pub async fn team_stop_teammate(
+        &mut self,
+        id: &str,
+        agent: i64,
+        pane: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::StopTeammate {
+                project_id,
+                agent,
+                pane,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets Max harnesses per project: how many sub-agents the master's work runs at once,
+    /// None for No limit. Takes the project id, the cap and the client generation. Returns the
+    /// actual commit receipt.
+    pub async fn team_max_harnesses(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MaxHarnesses { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Max teammates per harness, None for No limit. Takes the project id, the cap and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_max_teammates(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MaxTeammates { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets the project's Token budget: once its agents use that many tokens from now, the
+    /// engine stops the whole team and notifies the owner. None turns it off. Takes the
+    /// project id, the budget and the client generation. Returns the actual commit receipt.
+    pub async fn team_token_budget(
+        &mut self,
+        id: &str,
+        tokens: Option<u64>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::TokenBudget { project_id, tokens }, generation)
+            .await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,

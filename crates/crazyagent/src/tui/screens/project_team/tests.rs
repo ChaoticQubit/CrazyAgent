@@ -76,6 +76,8 @@ fn agent(
         wakeable: false,
         wake_note: None,
         parent: None,
+        owner_stopped: false,
+        teammates: Vec::new(),
     }
 }
 
@@ -136,6 +138,11 @@ fn team() -> TeamStatus {
         on_harness_switch: crate::team::SwitchMode::Carry,
         sub_agent_depth: crate::team::DEPTH_DEFAULT,
         child_landing: crate::team::ChildLanding::Lead,
+        max_harnesses: None,
+        max_teammates: None,
+        token_budget: None,
+        budget_used: None,
+        budget_reached: false,
         show_finished: false,
         agent_branches: crate::team::BranchMode::Named,
         live_switch: None,

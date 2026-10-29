@@ -213,6 +213,10 @@ const copy: Record<string, string> = {
   team_agent_running: "That agent is already running.",
   team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",
   team_agents_unavailable: "Team agents can't run on this system in this version.",
+  team_stop_master: "The master stops with Stop all.",
+  team_teammate_not_found: "That teammate has already ended.",
+  team_cap_invalid: "Pick a listed limit, or No limit.",
+  team_budget_invalid: "Pick a listed token budget, or Off.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -405,6 +409,18 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
  * Output: the engine receipt. */
 export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes
+ * it. Inputs: the project id, the team agent id and a generation. Output: the engine receipt. */
+export function stopTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
+}
+
+/** Stops one teammate a harness split off, and tells the harness. Inputs: the project id, the
+ * harness agent id, the teammate's pane id and a generation. Output: the engine receipt. */
+export function stopTeammate(id: string, agent: number, pane: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_teammate", { id, agent, pane, generation });
 }
 
 export const RESEARCH_LOG_LINES_MAX = 200;

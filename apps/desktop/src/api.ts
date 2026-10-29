@@ -1111,6 +1111,32 @@ export function setAgentBranches(id: string, mode: BranchMode): Promise<Result<I
   return call<IntentReceipt>("desktop_team_agent_branches", { id, mode, generation: nextGeneration() });
 }
 
+/** Stops every agent of the project, the master, each harness and each teammate, until the
+ * owner starts the team again, or starts it again. Inputs: the project id and true to stop.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setTeamStopped(id: string, stopped: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_pause", { id, paused: stopped, generation: nextGeneration() });
+}
+
+/** Sets Max harnesses per project: how many harnesses run at once, null for No limit. Inputs:
+ * the project id and the cap. Output: the engine receipt, not ready, or a plain error. */
+export function setMaxHarnesses(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_harnesses", { id, max, generation: nextGeneration() });
+}
+
+/** Sets Max teammates per harness, null for No limit. Inputs: the project id and the cap.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setMaxTeammates(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_teammates", { id, max, generation: nextGeneration() });
+}
+
+/** Sets the project's Token budget, null for Off: once its agents use that many tokens from now,
+ * the engine stops the whole team. Inputs: the project id and the tokens. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function setTokenBudget(id: string, tokens: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation: nextGeneration() });
+}
+
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
  * in a terminal. Inputs: the project id and the switch. Output: the engine receipt, not ready,
  * or a plain error. */

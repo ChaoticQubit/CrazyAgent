@@ -975,6 +975,82 @@ async fn desktop_team_rename(
 }
 
 #[tauri::command]
+async fn desktop_team_stop_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_stop_agent(&id, agent, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_stop_teammate(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    pane: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_stop_teammate(&id, agent, pane, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_max_harnesses(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    max: Option<u8>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_max_harnesses(&id, max, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_max_teammates(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    max: Option<u8>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_max_teammates(&id, max, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_token_budget(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    tokens: Option<u64>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_token_budget(&id, tokens, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_wake_agent(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2669,6 +2745,11 @@ pub fn run() {
             desktop_team_hand_off,
             desktop_team_rename,
             desktop_team_wake_agent,
+            desktop_team_stop_agent,
+            desktop_team_stop_teammate,
+            desktop_team_max_harnesses,
+            desktop_team_max_teammates,
+            desktop_team_token_budget,
             desktop_team_graph,
             desktop_team_events,
             desktop_team_wake_rule,
