@@ -545,7 +545,12 @@ impl Team {
         };
         open.read = match &event.result {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
-            Ok(ProcessReply::Text(_) | ProcessReply::Saved(_) | ProcessReply::Settings(_)) => {
+            Ok(
+                ProcessReply::Text(_)
+                | ProcessReply::Saved(_)
+                | ProcessReply::Settings(_)
+                | ProcessReply::Adoption(_),
+            ) => {
                 return;
             }
             Err(code) if code == NOT_READY => Load::NotReady,

@@ -40,6 +40,7 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
   instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
   instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
+  process_adoption_unavailable: "Workflow adoption couldn't be read. Try again.",
 };
 
 /** The refusal codes of the process protocol that have their own sentence. */
@@ -259,4 +260,43 @@ export function agentOf(node: Pick<GraphNode, "id" | "kind">): number | null | u
  * agent id, or null for the project's master. Output: the read-only view. */
 export function loadAgentInstructions(projectId: string, agent: number | null): Promise<Result<AgentInstructions>> {
   return call<AgentInstructions>("desktop_agent_instructions", { projectId, agent });
+}
+
+/** A workflow habit an agent missed: editing files with no declared work, or working ten
+ * minutes with no code-graph query and no context-mode call. */
+export type AdoptionFlag = "edits_without_start_work" | "no_graphify_or_context_mode";
+
+const FLAG_WORDS: Record<AdoptionFlag, string> = {
+  edits_without_start_work: "Edits without start_work",
+  no_graphify_or_context_mode: "10+ min without graphify or context-mode",
+};
+
+/** A flag in the owner's words. Input: the flag. Output: the words. */
+export function flagWords(flag: AdoptionFlag): string {
+  return FLAG_WORDS[flag];
+}
+
+/** One agent's adoption row: who it is, whether it still runs, its count for each counted
+ * tool in the settings' order, its flags now and the flags it was already reminded of. */
+export interface AgentAdoption {
+  agent: number;
+  role: string;
+  harness: string;
+  active: boolean;
+  counts: number[];
+  flags: AdoptionFlag[];
+  reminded: AdoptionFlag[];
+}
+
+/** A project's workflow adoption: whether nudges are on, the counted tools that name the
+ * count columns, and its newest agents. */
+export interface Adoption {
+  nudges: boolean;
+  counted: string[];
+  agents: AgentAdoption[];
+}
+
+/** Reads one project's workflow adoption. Input: the project id. Output: the view. */
+export function loadAdoption(projectId: string): Promise<Result<Adoption>> {
+  return call<Adoption>("desktop_adoption", { projectId });
 }

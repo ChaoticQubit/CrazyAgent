@@ -17,6 +17,7 @@ import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
+import { ToolSwitches, ToolsSection } from "./tools";
 
 const ARGS_MAX = 32;
 const SECRETS_MAX = 16;
@@ -393,6 +394,7 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
   onRemove: (server: McpServerView) => void;
   onRetry: () => void;
 }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (servers.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (servers.kind === "not_ready") return <NotReady what="MCP servers" compact />;
   if (servers.kind === "error") return <LoadError message="Couldn't load MCP servers." onRetry={onRetry} />;
@@ -421,7 +423,10 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
                 <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>
                 {command && <Button size="small" icon="refresh-cw" pending={busy === server.id} pendingLabel="Checking..." onClick={() => onCheck(server)}>Check again</Button>}
               </span>}
-              {server.tools.length > 0 && <span className="secondary">Tools: {server.tools.join(", ")}</span>}
+              {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={expanded === server.id ? "chevron-down" : "chevron-right"}
+                aria-expanded={expanded === server.id} onClick={() => setExpanded(expanded === server.id ? null : server.id)}>
+                {server.tools.length} {server.tools.length === 1 ? "tool" : "tools"}
+              </Button></span>}
             </div>
             <span className="row">
               <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
@@ -429,6 +434,7 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
               {menu.length > 0 && <Menu label={`More for ${server.name}`} items={menu} />}
             </span>
           </div>
+          {expanded === server.id && <div className="review"><ToolSwitches projectId={projectId} serverId={server.id} /></div>}
           {server.status === "waiting_for_approval" && <div className="review">
             {command ? <span>Runs: <span className="mono">{server.runs}</span></span>
               : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>}
@@ -701,7 +707,7 @@ type Removing = { kind: "skill"; skill: SkillView } | { kind: "server"; server: 
 export function PluginsAndSkills({ projectId, skill }: { projectId?: string; skill?: string } = {}) {
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
-  const [section, setSection] = useState<"skills" | "servers" | "hooks">("skills");
+  const [section, setSection] = useState<"skills" | "servers" | "hooks" | "tools">("skills");
   const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
   const [hooks, reloadHooks] = useLoad(() => listHooks(projectId), [projectId], "hooks");
@@ -767,9 +773,10 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   return <div className="stack">
     <Segmented label="Plugins and skills" value={section} onValue={(next) => { setFailure(""); setSection(next); }}
-      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }, { value: "hooks", label: "Hooks", icon: "zap" }]} />
+      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }, { value: "hooks", label: "Hooks", icon: "zap" }, { value: "tools", label: "Tools", icon: "wrench" }]} />
+    {section === "tools" && <ToolsSection projectId={projectId} onAddTool={() => setAdding({ kind: "server" })} />}
     {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
-    {section === "hooks" ? null : section === "skills"
+    {section === "hooks" || section === "tools" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}

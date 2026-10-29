@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
+pub use crate::coord::adoption::Adoption;
 pub use crate::instruction_files::{Record as InstructionRecord, Settings as InstructionSettings};
 use crate::protocol::encode_frame;
 use rusqlite::OptionalExtension;
@@ -30,6 +31,7 @@ pub const PROCESS_CODES: &[&str] = &[
     "owner_socket_replaced",
     "owner_socket_unsafe",
     "peer_owner_mismatch",
+    "process_adoption_unavailable",
     "process_agent_unknown",
     "process_agent_unsupported",
     "process_folder_missing",
@@ -72,6 +74,9 @@ enum Action {
         project: ProjectId,
         settings: InstructionSettings,
     },
+    Adoption {
+        project: ProjectId,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -104,6 +109,9 @@ enum Reply {
     },
     Settings {
         settings: InstructionSettings,
+    },
+    Adoption {
+        adoption: Adoption,
     },
     Rejected {
         code: String,
@@ -164,6 +172,7 @@ enum Answer {
     Saved(ProcessSaved),
     Agent(AgentInstructions),
     Settings(InstructionSettings),
+    Adoption(Adoption),
 }
 
 fn unknown() -> EngineError {
@@ -277,6 +286,24 @@ impl OwnerClient {
     ) -> Result<InstructionSettings, EngineError> {
         self.process_settings_reply(Action::SaveSettings { project, settings })
             .await
+    }
+
+    /// Reads one project's workflow adoption: whether nudges are on, the counted tools and
+    /// each recent agent's counts, flags and reminders. Input: the project. Output: the
+    /// view, or a `PROCESS_CODES` refusal such as `process_adoption_unavailable`.
+    pub async fn adoption(&self, project: ProjectId) -> Result<Adoption, EngineError> {
+        match self
+            .process_exchange(Action::Adoption { project }, None)
+            .await?
+        {
+            (Reply::Adoption { adoption }, None)
+                if adoption.agents.len() <= crate::coord::adoption::AGENTS_SHOWN_MAX
+                    && adoption.counted.len() <= crate::coord::settings::COUNTED_TOOLS_MAX =>
+            {
+                Ok(adoption)
+            }
+            _ => Err(unknown()),
+        }
     }
 
     async fn process_settings_reply(
@@ -452,6 +479,7 @@ pub(super) async fn serve(
             (reply, Some(view.text))
         }
         Ok(Answer::Settings(settings)) => (Reply::Settings { settings }, None),
+        Ok(Answer::Adoption(adoption)) => (Reply::Adoption { adoption }, None),
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -520,6 +548,9 @@ async fn handle(
         }
         Action::SaveSettings { project, settings } if text.is_none() => {
             instruction_settings(&root, &project, Some(settings)).map(Answer::Settings)
+        }
+        Action::Adoption { project } if text.is_none() => {
+            adoption(&root, &project).map(Answer::Adoption)
         }
         action => {
             let saved = match (&action, &text) {
@@ -763,6 +794,27 @@ fn instruction_settings(
     assert!(save.is_none_or(|saved| saved == stored));
     tx.commit().map_err(unavailable)?;
     Ok(stored)
+}
+
+/// Reads one set-up project's workflow adoption from the engine store, read-only.
+/// Inputs: the engine root and the project. Output: the view, `process_project_unknown`
+/// for a project with no setup, or `process_adoption_unavailable`.
+fn adoption(root: &Path, project: &ProjectId) -> Result<Adoption, EngineError> {
+    let unavailable = |_| failure("process_adoption_unavailable");
+    let connection = read_only(root)?;
+    let tx = connection.unchecked_transaction().map_err(unavailable)?;
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_setups WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !known {
+        return Err(failure("process_project_unknown"));
+    }
+    crate::coord::adoption::view(&tx, project, crate::team::now_ms())
+        .map_err(|_| failure("process_adoption_unavailable"))
 }
 
 fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {

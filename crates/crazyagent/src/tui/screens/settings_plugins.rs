@@ -901,6 +901,7 @@ impl Screen for Plugins {
             hint("Space", "On or off"),
             hint("Enter", "Details"),
             hint("i", "Import"),
+            hint("l", "Tools"),
             hint("d", "Remove"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
@@ -917,6 +918,18 @@ impl Screen for Plugins {
             Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
             Key::Char('m') => return Flow::Replace(Box::new(AddPlugin::server())),
             Key::Char('h') => return Flow::Replace(Box::new(AddPlugin::hooks())),
+            Key::Char('l') => {
+                let at = match self.picked() {
+                    Some(Picked::Server(index)) => index + 1,
+                    _ => 0,
+                };
+                let servers = self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect();
+                return Flow::Replace(Box::new(ToolsPage::new(servers, at)));
+            }
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
             Key::Enter if self.changing.is_none() => match self.picked() {
@@ -2039,8 +2052,10 @@ impl Screen for EditServer {
 
 mod import_page;
 mod skill_detail;
+mod tool_page;
 pub use import_page::ImportSkillsPage;
 pub use skill_detail::SkillDetailPage;
+pub use tool_page::ToolsPage;
 
 #[cfg(test)]
 mod tests;

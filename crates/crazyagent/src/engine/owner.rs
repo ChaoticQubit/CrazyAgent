@@ -24,7 +24,8 @@ pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES, ProcessSaved,
+    Adoption, AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES,
+    ProcessSaved,
 };
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
