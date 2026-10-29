@@ -34,11 +34,11 @@ mod store;
 pub mod tool_switches;
 mod work;
 
-pub use claims::{breadth, overlapping, release_claims};
-pub use messages::{mark, pending, reply, requeue_dead, send};
-pub use presence::{record_tool, set_waiting, snapshot, touch};
-pub use store::{ensure, forget_project};
-pub use work::{finish, start_assigned, start_work, transfer};
+pub use claims::{breadth, covers, overlapping, overlaps_of, path_scopes, release_claims};
+pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
+pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
+pub use store::{ensure, forget_project, master_of, message};
+pub use work::{finish, start_assigned, start_work, transfer, work, works};
 
 /// A team agent's id, the `team_agents` row id.
 pub type AgentId = i64;
@@ -61,6 +61,8 @@ pub const TITLE_BYTES_MAX: usize = 200;
 pub const KEY_BYTES_MAX: usize = 128;
 /// The longest tool name the engine counts, in bytes.
 pub const TOOL_BYTES_MAX: usize = 128;
+/// The most units of work one `works` read returns.
+pub const WORKS_LISTED_MAX: usize = 256;
 
 const _: () = assert!(BODY_BYTES_MAX == 4000 && PATTERN_BYTES_MAX == 512);
 const _: () = assert!(CLAIMS_PER_WORK_MAX == 32 && PENDING_MAX == 64);
@@ -312,6 +314,18 @@ pub struct AgentState {
     pub unread: u32,
     pub tool_counts: Vec<(String, u32)>,
     pub flags: Vec<String>,
+}
+
+/// One unit of work as an agent reads it: its title, owner, state, the version a
+/// transition must name, and its claims that still hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Work {
+    pub id: WorkId,
+    pub title: String,
+    pub owner: Option<AgentId>,
+    pub state: WorkState,
+    pub version: i64,
+    pub claims: Vec<String>,
 }
 
 /// The coordination state of one project at one moment.
