@@ -200,10 +200,19 @@ pub(super) fn merge(
             ),
             true,
         ),
-        Err(problem) => (
-            format!("Not merged into {target}: {}", refusal(&problem.0)),
-            true,
-        ),
+        Err(problem) => {
+            let moved = match problem.0.as_str() {
+                "changes_owner_dirty" => {
+                    crate::instruction_files::uncommitted(&answering.stored.project_folder())
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            (
+                format!("Not merged into {target}: {}", refusal(&problem.0, &moved)),
+                true,
+            )
+        }
     })
 }
 
@@ -221,10 +230,15 @@ pub(super) fn waiting(sets: Vec<ChangeSetView>, agent: i64) -> Option<ChangeSetV
     })
 }
 
-/// The plain sentence for an Accept refusal the merge met. Takes the code. Returns the
-/// sentence.
-fn refusal(code: &str) -> String {
+/// The plain sentence for an Accept refusal the merge met, naming for a dirty checkout
+/// the instruction files whose import move is not committed and the owner's commit for
+/// it. Takes the code and those files. Returns the sentence.
+fn refusal(code: &str, moved: &[String]) -> String {
     match code {
+        "changes_owner_dirty" if !moved.is_empty() => format!(
+            "the owner's checkout of that branch has uncommitted changes, among them the instruction import's move of {} into .crazyagent/imported/, which is not committed yet. Ask the owner to choose Commit the move for the instruction import, which commits only those files, and to commit or stash any other change, then merge again.",
+            bound_text(&moved.join(", "), FILES_SHOWN_MAX)
+        ),
         "changes_owner_dirty" => "the owner's checkout of that branch has uncommitted changes. Ask the owner to commit or stash them, then merge again.".to_owned(),
         "changes_git_busy" => "a git operation is in progress in the project folder. Merge again once it ends.".to_owned(),
         "changes_detached_head" => "the project folder's checkout is detached.".to_owned(),
