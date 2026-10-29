@@ -205,7 +205,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
       rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
       depth,
       lead: agent.parent != null ? names.get(agent.parent) ?? null : null,
-      stop: agent.role === "sub" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
+      stop: agent.role !== "master" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
       stoppedByYou: agent.owner_stopped === true,
       teammates: agent.role === "sub" ? teammateRows(agent, agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status)) : [],
     };

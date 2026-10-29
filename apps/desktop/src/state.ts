@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import type { OwnerProfile, Result } from "./api";
 import type { EngineState } from "./ui/shell";
+import type { Route } from "./ui/router";
 import {
   approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
@@ -1044,6 +1045,7 @@ export interface Session {
   projects: Loaded<ProjectRow[]>;
   projectsMore: boolean;
   toast: string;
+  toastOpen: Route | null;
   revision: number;
   retry: () => void;
   checkUnconfirmed: () => Promise<void>;
@@ -1053,7 +1055,7 @@ export interface Session {
   dropUnconfirmed: () => Promise<void>;
   refreshProfile: () => Promise<void>;
   refreshProjects: () => Promise<void>;
-  showToast: (message: string) => void;
+  showToast: (message: string, open?: Route) => void;
   noteResult: <T>(result: Result<T>) => Result<T>;
 }
 
@@ -1072,6 +1074,7 @@ export function useSession(): Session {
   const [projects, setProjects] = useState<Loaded<ProjectRow[]>>({ kind: "loading" });
   const [projectsMore, setProjectsMore] = useState(false);
   const [toast, setToast] = useState("");
+  const [toastOpen, setToastOpen] = useState<Route | null>(null);
   const [revision, setRevision] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -1086,10 +1089,14 @@ export function useSession(): Session {
     setStuckSignIn(native.kind === "ok" && native.value.stuck_sign_in !== null ? { busy: false } : null);
   }
 
-  function showToast(message: string) {
+  function showToast(message: string, open?: Route) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setToast(message);
-    toastTimer.current = setTimeout(() => setToast(""), 4000);
+    setToastOpen(open ?? null);
+    toastTimer.current = setTimeout(() => {
+      setToast("");
+      setToastOpen(null);
+    }, open ? 10_000 : 4000);
   }
 
   async function loadUnconfirmed(outcome?: ActionReceipt["outcome"] | null): Promise<PendingIntent | null> {
@@ -1187,7 +1194,7 @@ export function useSession(): Session {
   }, []);
 
   return {
-    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, revision,
+    engine, unconfirmed, profileCheck, stuckSignIn, profile, projects, projectsMore, toast, toastOpen, revision,
     retry: () => { void start(); },
     checkUnconfirmed: async () => { await settle(api.checkUnconfirmed); },
     checkProfile: async () => { await checkProfile(); },

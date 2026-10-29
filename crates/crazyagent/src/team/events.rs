@@ -216,7 +216,8 @@ pub enum RuleLevel {
 
 /// Why the owner gets an app notification: the master escalated an owner-only decision,
 /// auto-wake stopped at its hourly cap, the event queue filled, or the project's token
-/// budget stopped its team.
+/// budget stopped its team; or an agent asked the owner an urgent (High) or a Normal
+/// question, or waits on the owner in its own terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
@@ -224,14 +225,20 @@ pub enum NotificationKind {
     WakePaused,
     QueueFull,
     BudgetStopped,
+    UrgentQuestion,
+    Question,
+    WaitingOnYou,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 7] = [
         Self::Escalation,
         Self::WakePaused,
         Self::QueueFull,
         Self::BudgetStopped,
+        Self::UrgentQuestion,
+        Self::Question,
+        Self::WaitingOnYou,
     ];
 
     fn name(self) -> &'static str {
@@ -240,6 +247,9 @@ impl NotificationKind {
             Self::WakePaused => "wake_paused",
             Self::QueueFull => "queue_full",
             Self::BudgetStopped => "budget_stopped",
+            Self::UrgentQuestion => "urgent_question",
+            Self::Question => "question",
+            Self::WaitingOnYou => "waiting_on_you",
         }
     }
 
