@@ -1098,7 +1098,11 @@ pub fn forward_to_parents(
                 work: None,
                 reply_to: None,
                 body: text,
-                idempotency_key: Some(format!("events-{}", carried[0])),
+                idempotency_key: Some(format!(
+                    "{}{}",
+                    crate::coord::delivery::EVENTS_KEY,
+                    carried[0]
+                )),
             },
             now,
         );
