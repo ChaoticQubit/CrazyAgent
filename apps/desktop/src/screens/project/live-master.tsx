@@ -44,6 +44,7 @@ export type Live =
 const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. It starts again when you open this tab or start a new session.";
 const PAUSED = "The team is stopped (Stop all). Start the team to run the master.";
+const WAITING = "Waiting for the master's terminal. It opens once the master signs in and starts.";
 
 /** Whether the latest good team read of this project says the team is stopped (Stop all),
  * when the engine runs none of its agents and the live master cannot start. Inputs: the team
@@ -250,7 +251,7 @@ export function LiveMasterView({ data, harness, live, onStart }: { data: Project
       <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
-    {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Waiting for the master's terminal. It opens once the master signs in and starts.</p>}
+    {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(liveSwitch(data.team.result, data.id)?.problem ?? WAITING)}</p>}
     {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded input={input} follow />}
   </div>;
 }

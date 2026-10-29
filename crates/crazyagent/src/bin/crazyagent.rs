@@ -752,6 +752,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         std::env::current_exe().ok().as_deref(),
                         agents,
                         agent_terminal(&service),
+                        service.owner_runtime().map(|handle| handle.reproving()),
                     ) {
                         Ok(team) => Ok((research, onboarding, Some(team))),
                         Err(error) => {
