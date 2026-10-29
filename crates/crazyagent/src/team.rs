@@ -74,6 +74,7 @@ pub struct DirectInput {
 pub enum AgentRole {
     Master,
     Sub,
+    Teammate,
 }
 
 impl AgentRole {
@@ -81,6 +82,7 @@ impl AgentRole {
         match self {
             Self::Master => "master",
             Self::Sub => "sub",
+            Self::Teammate => "teammate",
         }
     }
 
@@ -88,6 +90,7 @@ impl AgentRole {
         match value {
             "master" => Some(Self::Master),
             "sub" => Some(Self::Sub),
+            "teammate" => Some(Self::Teammate),
             _ => None,
         }
     }
@@ -99,6 +102,7 @@ impl AgentRole {
         match self {
             Self::Master => "Master".into(),
             Self::Sub => format!("Sub-agent {id}"),
+            Self::Teammate => format!("Teammate {id}"),
         }
     }
 }
@@ -1158,7 +1162,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 heartbeat_ms INTEGER NOT NULL,
                 stopped_ms INTEGER,
                 session TEXT,
-                parent INTEGER
+                parent INTEGER,
+                pane TEXT
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -1323,6 +1328,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
+    add_pane_column(connection)?;
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
@@ -1616,7 +1622,7 @@ pub fn admit_resolve(
             )
             .map(|sent| sent.map(|_| ()));
         }
-        None => return Ok(Err("team_agent_not_found")),
+        Some(AgentRole::Teammate) | None => return Ok(Err("team_agent_not_found")),
     }
     let queued: Option<i64> = tx
         .query_row(
@@ -2448,6 +2454,8 @@ pub struct TeamAgent {
     pub owner_stopped: bool,
     #[serde(default)]
     pub teammates: Vec<Teammate>,
+    #[serde(default)]
+    pub pane: Option<String>,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2463,13 +2471,13 @@ pub struct Teammate {
 
 impl TeamAgent {
     /// Tells whether this agent belongs in the Finished fold-out rather than the agents
-    /// list and team graph (DEC-102): a stopped or failed sub-agent, or an idle one that ran
+    /// list and team graph (DEC-102): a stopped or failed sub-agent or teammate, or an idle one that ran
     /// a turn since it last started, holding no task and with no question waiting for the
     /// master. The master, every starting or working agent and an idle agent still waiting
     /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
     /// questions the agent has waiting. Returns true for a finished agent.
     pub fn finished_with(&self, questions: u16) -> bool {
-        self.role == AgentRole::Sub
+        matches!(self.role, AgentRole::Sub | AgentRole::Teammate)
             && questions == 0
             && self.task.is_none()
             && match self.status {
@@ -2677,10 +2685,11 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         parent: row.get(16)?,
         owner_stopped: false,
         teammates: Vec::new(),
+        pane: row.get(17)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -2899,6 +2908,26 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// each task and agent records the lead that started it, NULL for the master's own. A
 /// table the engine has not opened yet gets the column from `initialize`. Takes the
 /// upgrade transaction. Returns any SQLite failure.
+/// Gives a `team_agents` table made before native teammates its `pane` column: the tmux
+/// pane id of a teammate row, the same id `team_teammates` keeps, NULL for every other
+/// agent. Runs on every open and adds the column once. Takes the engine connection.
+/// Returns any SQLite failure.
+fn add_pane_column(connection: &Connection) -> Result<(), EngineError> {
+    let present: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_agents') WHERE name='pane')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !present {
+        connection
+            .execute_batch("ALTER TABLE team_agents ADD COLUMN pane TEXT")
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

@@ -550,7 +550,7 @@ fn asker(connection: &Connection, project: &ProjectId, agent: i64) -> Result<Ask
     let live = AgentStatus::parse(&status).is_some_and(AgentStatus::live);
     let label = match role {
         AgentRole::Master => role.agent_label(agent),
-        AgentRole::Sub => events::label(connection, agent)?,
+        AgentRole::Sub | AgentRole::Teammate => events::label(connection, agent)?,
     };
     Ok(Asker {
         label,

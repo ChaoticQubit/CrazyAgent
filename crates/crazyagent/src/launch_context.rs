@@ -72,6 +72,12 @@ const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
+const CONTEXT_MODE_SERVER: &str = "context-mode";
+const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
+const TEAMMATE_COMMAND: &str = "teammate";
+const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
+/// The most switched-off tools one launch passes to its harness, across every server.
+pub const DENIED_TOOLS_MAX: usize = 256;
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
@@ -105,15 +111,20 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 }
 
 /// What every agent the engine launches for one project receives: the approved skills and
-/// MCP servers with their secret values, one bounded startup instruction holding the
-/// project brief, an index of its context files and the owner-approved memories, and
-/// whether a headless Claude run keeps its transcript.
+/// MCP servers with their secret values, the tools the owner switched off on each server,
+/// one bounded startup instruction holding the project brief, an index of its context files
+/// and the owner-approved memories, whether a headless Claude run keeps its transcript,
+/// whether a Claude Code lead runs its own agent team, and the engine executable and mailbox
+/// of a team agent's message relay.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
     process: Option<Box<Process>>,
     transcripts: bool,
+    off_tools: Vec<(String, Vec<String>)>,
+    native_team: Option<(PathBuf, PathBuf)>,
+    relay: Option<(PathBuf, PathBuf)>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -125,16 +136,29 @@ struct Process {
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
-/// transcript, whether its generated plugin holds hooks, and the lock that keeps a second
-/// launch out of that home. Dropping it deletes every file holding a secret and the copied
-/// skills and hooks, unless `keep` left them to a pane that still runs.
+/// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
+/// owner switched off, whether the lead runs its own agent team, and the lock that keeps a
+/// second launch out of that home. Dropping it deletes every file holding a secret and the
+/// copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
     files: Option<InstalledFiles>,
     transcripts: bool,
     hooks: bool,
+    relay: bool,
+    denied: Vec<String>,
+    native: Option<NativeTeam>,
     _lock: File,
+}
+
+/// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
+/// Claude Code splits their panes with, which is on the lead's PATH, and the instruction
+/// file each teammate starts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTeam {
+    pub tmux: PathBuf,
+    pub instructions: PathBuf,
 }
 
 /// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
@@ -172,8 +196,9 @@ pub fn for_project(
         .transcripts;
     let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
+    let off_tools = off_tools(&tx, project, &plugins)?;
     drop(tx);
-    crate::agent_home::text(&home_project, None).map_err(|problem| LaunchError(problem.0))?;
+    crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
@@ -182,7 +207,76 @@ pub fn for_project(
             hooks,
         })),
         transcripts,
+        off_tools,
+        native_team: None,
+        relay: None,
     })
+}
+
+/// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
+/// server and on the engine's own server, by the server's stored name. Input: the read
+/// transaction, the project and its approved plugins. Output: each server with switched-off
+/// tools and their names, or `launch_context_tool_switch_invalid` for a stored name that is
+/// not a plain tool name or more than `DENIED_TOOLS_MAX` names in all.
+fn off_tools(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    plugins: &LaunchPlugins,
+) -> Result<Vec<(String, Vec<String>)>, LaunchError> {
+    let invalid = || failure("launch_context_tool_switch_invalid");
+    let mut found = Vec::new();
+    let mut total = 0;
+    let names = plugins
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .chain([crate::coord::tool_switches::CRAZYAGENT_SERVER]);
+    for server in names {
+        let off = crate::coord::tool_switches::off_tools(tx, project, server)
+            .map_err(|problem| LaunchError(problem.0))?;
+        if off.is_empty() || found.iter().any(|(seen, _): &(String, _)| seen == server) {
+            continue;
+        }
+        if off.iter().any(|tool| !tool_name_plain(tool)) {
+            return Err(invalid());
+        }
+        total += off.len();
+        if total > DENIED_TOOLS_MAX {
+            return Err(invalid());
+        }
+        found.push((server.to_owned(), off));
+    }
+    assert!(found.iter().map(|(_, off)| off.len()).sum::<usize>() <= DENIED_TOOLS_MAX);
+    Ok(found)
+}
+
+fn tool_name_plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= crate::coord::tool_switches::NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+/// The part only a native lead's teammates read after the lead's own instructions: they work
+/// in the lead's agent team, and graphify finds the project graph through the lead's
+/// worktree, since its read-only graph links exist only there. Input: the lead's worktree.
+/// Output: the section, or `launch_path_invalid` for a path with a control character.
+fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
+    let folder = worktree
+        .to_str()
+        .filter(|text| !text.chars().any(|c| c.is_control() || c == '`'))
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    Ok(format!(
+        "\n## You are a teammate\n\nYou are a teammate in the Claude Code agent team of a CrazyAgent lead, which works in `{folder}`. Your own worktree has no project graph: run graphify with `--graph {folder}/graphify-out/graph.json`.\n"
+    ))
+}
+
+/// Where a native-team lead's launch writes the command Claude Code runs for each teammate
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`), inside the launch's own files so it goes when they do.
+/// Input: the agent home. Output: the path.
+pub(crate) fn teammate_command(home: &Path) -> PathBuf {
+    home.join(STATE).join(TEAMMATE_COMMAND)
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
@@ -375,6 +469,26 @@ impl AgentContext {
         self
     }
 
+    /// Lets a Claude Code lead with tools on run its own agent team (DEC-104 Q10, native mode):
+    /// its launch keeps Agent and TeamCreate, starts teammates in tmux panes of its own
+    /// terminal and gives each the lead's instructions and where the project graph is.
+    /// Other harnesses and tools-off launches ignore it. Input: the tmux program the lead's
+    /// own server runs and the lead's worktree. Output: the context.
+    pub fn with_native_team(mut self, tmux: &Path, worktree: &Path) -> Self {
+        assert!(tmux.is_absolute() && worktree.is_absolute());
+        self.native_team = Some((tmux.to_path_buf(), worktree.to_path_buf()));
+        self
+    }
+
+    /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
+    /// delivers its team messages and reports its activity through its mailbox, and which its
+    /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
+    /// executable the relay runs and the agent's absolute mailbox. Output: the context.
+    pub fn with_relay(mut self, engine: &Path, mailbox: &Path) -> Self {
+        self.relay = Some((engine.to_path_buf(), mailbox.to_path_buf()));
+        self
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
@@ -546,16 +660,18 @@ impl AgentContext {
             }),
             transcripts: self.transcripts,
             hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
             _lock: lock,
         };
         remove(&state);
         directory(&state, true)?;
-        let context = tools.then(|| home.join(crate::agent_home::CONTEXT_FOLDER));
         let given = match &self.process {
             Some(process) => {
                 let harness = crate::agent_home::Harness::from_id(id)
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let given = crate::agent_home::text(&process.project, context.as_deref())
+                let given = crate::agent_home::text(&process.project)
                     .map_err(|problem| LaunchError(problem.0))?;
                 crate::agent_home::prepare(home, harness, &process.project, &given)
                     .map_err(|problem| LaunchError(problem.0))?;
@@ -591,8 +707,12 @@ impl AgentContext {
                 self.copy_skills(&copies)?;
             }
             remove(&config);
-            write_secret(&config, codex_config(&self.instructions, servers)?)?;
+            write_secret(
+                &config,
+                codex_config(&self.instructions, servers, &self.off_tools)?,
+            )?;
         } else {
+            installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
             write_secret(&mcp, claude_config(servers)?)?;
             installed
@@ -620,6 +740,14 @@ impl AgentContext {
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
             }
+            if let Some((engine, mailbox)) = &self.relay {
+                let relay = crate::coord::relay::install(home, mailbox, engine)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                installed.relay = true;
+                installed
+                    .arguments
+                    .extend([OsString::from("--plugin-dir"), relay.into_os_string()]);
+            }
             assert!(
                 text.len()
                     <= MASTER_INSTRUCTIONS_BYTES_MAX
@@ -631,6 +759,16 @@ impl AgentContext {
             );
             let instructions = state.join("instructions.md");
             write_private(&instructions, text.as_bytes())?;
+            if let Some((tmux, worktree)) = self.native_team.as_ref().filter(|_| tools) {
+                let mut mate = text.clone();
+                mate.push_str(&teammate_section(worktree)?);
+                let file = state.join(TEAMMATE_INSTRUCTIONS);
+                write_private(&file, mate.as_bytes())?;
+                installed.native = Some(NativeTeam {
+                    tmux: tmux.clone(),
+                    instructions: file,
+                });
+            }
             installed.arguments.extend([
                 OsString::from("--append-system-prompt-file"),
                 instructions.into_os_string(),
@@ -639,8 +777,12 @@ impl AgentContext {
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
-        assert!(installed.arguments.len() <= 6);
+        assert!(installed.arguments.len() <= 8);
         assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
+        assert!(!installed.relay || id == "claude-code");
+        assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
+        assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
+        assert!(installed.native.is_none() || (id == "claude-code" && tools));
         Ok(installed)
     }
 
@@ -679,10 +821,27 @@ impl Installed {
         self.transcripts
     }
 
-    /// Tells whether this launch's generated plugin holds the hooks the owner turned on, so
-    /// Claude Code must run with hooks allowed.
+    /// Tells whether this launch's plugins hold hooks, the ones the owner turned on or the
+    /// message relay's, so Claude Code must run with hooks allowed.
     pub fn runs_hooks(&self) -> bool {
-        self.hooks
+        self.hooks || self.relay
+    }
+
+    /// Names the MCP tools the owner switched off for this Claude Code launch, as Claude Code
+    /// names them (`mcp__<declared server>__<tool>`), for its deny list. Codex gets them in
+    /// `config.toml` instead, so its list is empty.
+    pub fn denied_tools(&self) -> &[String] {
+        &self.denied
+    }
+
+    /// Tells whether this Claude Code launch is a lead that runs its own agent team.
+    pub fn native_team(&self) -> bool {
+        self.native.is_some()
+    }
+
+    /// Names what this native-team lead's teammates get, none for any other launch.
+    pub fn native(&self) -> Option<&NativeTeam> {
+        self.native.as_ref()
     }
 
     /// Names where this launch wrote its files, for the record of a pane that may outlive
@@ -703,6 +862,9 @@ impl Installed {
             files: Some(files.clone()),
             transcripts: false,
             hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
             _lock: lock,
         })
     }
@@ -909,6 +1071,17 @@ fn team_index(plugins: &EffectivePlugins) -> String {
     index
 }
 
+/// Names an approved MCP server the way an agent's harness declares it. The context-mode
+/// server takes the name its own Claude Code plugin gives it, so the tool names its hooks
+/// and the owner's instructions use, such as `mcp__plugin_context-mode_context-mode__ctx_search`,
+/// exist for every agent and teammate. Input: the stored server name. Output: the declared name.
+pub(crate) fn declared_server_name(name: &str) -> &str {
+    match name {
+        CONTEXT_MODE_SERVER => CONTEXT_MODE_DECLARED,
+        other => other,
+    }
+}
+
 fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
     std::str::from_utf8(secret.value.expose())
         .ok()
@@ -916,7 +1089,32 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
         .ok_or_else(|| failure("launch_context_secret_invalid"))
 }
 
-fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// Names the switched-off tools of the servers one Claude Code launch declares, the way
+/// Claude Code names them: `mcp__<declared server>__<tool>`. Input: the declared servers and
+/// the switched-off tools by stored server name. Output: the names, in server order.
+fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -> Vec<String> {
+    let denied: Vec<String> = servers
+        .iter()
+        .filter_map(|server| {
+            off_tools
+                .iter()
+                .find(|(name, _)| *name == server.name)
+                .map(|(_, off)| (declared_server_name(&server.name), off))
+        })
+        .flat_map(|(declared, off)| {
+            off.iter()
+                .map(move |tool| format!("mcp__{declared}__{tool}"))
+        })
+        .collect();
+    assert!(denied.iter().all(|name| !name.starts_with('-')));
+    denied
+}
+
+fn codex_config(
+    instructions: &str,
+    servers: &[LaunchServer],
+    off_tools: &[(String, Vec<String>)],
+) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
@@ -948,7 +1146,15 @@ fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, 
                     }
                 }
             }
-            table.insert(&server.name, toml_edit::Item::Table(entry));
+            if let Some((_, off)) = off_tools.iter().find(|(name, _)| *name == server.name) {
+                entry["disabled_tools"] =
+                    toml_edit::value(off.iter().map(String::as_str).collect::<toml_edit::Array>());
+            }
+            let name = declared_server_name(&server.name);
+            if table.contains_key(name) {
+                return Err(failure("launch_context_server_name_taken"));
+            }
+            table.insert(name, toml_edit::Item::Table(entry));
         }
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
@@ -970,7 +1176,11 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
                 "type": "http", "url": url, "headers": values
             }),
         };
-        declared.insert(server.name.clone(), entry);
+        let name = declared_server_name(&server.name);
+        if declared.contains_key(name) {
+            return Err(failure("launch_context_server_name_taken"));
+        }
+        declared.insert(name.to_owned(), entry);
     }
     serde_json::to_string(&serde_json::json!({ "mcpServers": declared }))
         .map_err(|_| failure("launch_context_unavailable"))

@@ -116,7 +116,7 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
     let tx = connection.unchecked_transaction().unwrap();
     let launch = crate::launch_context::agent_project(&tx, &project).unwrap();
-    let given = crate::agent_home::text(&launch, None).unwrap();
+    let given = crate::agent_home::text(&launch).unwrap();
     drop(tx);
     assert_eq!(
         both.bytes as usize,
@@ -240,7 +240,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
     let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
     let tx = connection.unchecked_transaction().unwrap();
     let launch = crate::launch_context::agent_project(&tx, &project).unwrap();
-    let given = crate::agent_home::text(&launch, None).unwrap();
+    let given = crate::agent_home::text(&launch).unwrap();
     let app = given
         .text
         .find("APP-RULE-51")
