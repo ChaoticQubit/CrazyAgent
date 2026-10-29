@@ -108,8 +108,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// What every agent the engine launches for one project receives: the approved skills and
 /// MCP servers with their secret values, the tools the owner switched off on each server,
 /// one bounded startup instruction holding the project brief, an index of its context files
-/// and the owner-approved memories, whether a headless Claude run keeps its transcript and
-/// whether a Claude Code lead runs its own agent team.
+/// and the owner-approved memories, whether a headless Claude run keeps its transcript,
+/// whether a Claude Code lead runs its own agent team, and the engine executable and mailbox
+/// of a team agent's message relay.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -118,6 +119,7 @@ pub struct AgentContext {
     transcripts: bool,
     off_tools: Vec<(String, Vec<String>)>,
     native_team: bool,
+    relay: Option<(PathBuf, PathBuf)>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -139,6 +141,7 @@ pub struct Installed {
     files: Option<InstalledFiles>,
     transcripts: bool,
     hooks: bool,
+    relay: bool,
     denied: Vec<String>,
     native_team: bool,
     _lock: File,
@@ -192,6 +195,7 @@ pub fn for_project(
         transcripts,
         off_tools,
         native_team: false,
+        relay: None,
     })
 }
 
@@ -427,6 +431,15 @@ impl AgentContext {
         self
     }
 
+    /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
+    /// delivers its team messages and reports its activity through its mailbox, and which its
+    /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
+    /// executable the relay runs and the agent's absolute mailbox. Output: the context.
+    pub fn with_relay(mut self, engine: &Path, mailbox: &Path) -> Self {
+        self.relay = Some((engine.to_path_buf(), mailbox.to_path_buf()));
+        self
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
@@ -580,6 +593,7 @@ impl AgentContext {
             }),
             transcripts: self.transcripts,
             hooks: false,
+            relay: false,
             denied: Vec::new(),
             native_team: self.native_team && tools && id == "claude-code",
             _lock: lock,
@@ -659,6 +673,14 @@ impl AgentContext {
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
             }
+            if let Some((engine, mailbox)) = &self.relay {
+                let relay = crate::coord::relay::install(home, mailbox, engine)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                installed.relay = true;
+                installed
+                    .arguments
+                    .extend([OsString::from("--plugin-dir"), relay.into_os_string()]);
+            }
             assert!(
                 text.len()
                     <= MASTER_INSTRUCTIONS_BYTES_MAX
@@ -678,8 +700,9 @@ impl AgentContext {
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
-        assert!(installed.arguments.len() <= 6);
+        assert!(installed.arguments.len() <= 8);
         assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
+        assert!(!installed.relay || id == "claude-code");
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         Ok(installed)
@@ -720,10 +743,10 @@ impl Installed {
         self.transcripts
     }
 
-    /// Tells whether this launch's generated plugin holds the hooks the owner turned on, so
-    /// Claude Code must run with hooks allowed.
+    /// Tells whether this launch's plugins hold hooks, the ones the owner turned on or the
+    /// message relay's, so Claude Code must run with hooks allowed.
     pub fn runs_hooks(&self) -> bool {
-        self.hooks
+        self.hooks || self.relay
     }
 
     /// Names the MCP tools the owner switched off for this Claude Code launch, as Claude Code
@@ -756,6 +779,7 @@ impl Installed {
             files: Some(files.clone()),
             transcripts: false,
             hooks: false,
+            relay: false,
             denied: Vec::new(),
             native_team: false,
             _lock: lock,

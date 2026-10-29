@@ -4462,6 +4462,15 @@ impl TeamRuntime {
             }
             _ => Ok(context),
         }?;
+        let context = match &self.delegation_tool {
+            Some(engine) => context.with_relay(
+                engine
+                    .verified_path()
+                    .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                &self.mailbox(id),
+            ),
+            None => context,
+        };
         Ok(if self.native_lead(project, id, role, tools)? {
             context.with_native_team()
         } else {
