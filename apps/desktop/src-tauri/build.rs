@@ -193,6 +193,8 @@ fn main() {
         "desktop_import_instructions_file",
         "desktop_instruction_import",
         "desktop_confirm_instruction_import",
+        "desktop_uncommitted_instruction_import",
+        "desktop_commit_instruction_import",
         "desktop_default_process",
         "desktop_agent_instructions",
         "desktop_instruction_settings",

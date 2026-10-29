@@ -1,7 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode, ImportFile } from "./engine-client";
+import type { GraphNode, ImportCommit, ImportFile } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -33,6 +33,13 @@ const REFUSALS: Record<string, string> = {
   process_import_outside: "That file links outside the project folder, so it stays where it is.",
   process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
   process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
+  process_commit_staged: "Other files are staged in this project's checkout, so nothing was committed. Unstage or commit them, then try again.",
+  process_commit_none: "No moved instruction file waits for a commit.",
+  process_commit_busy: "Git is busy in this project's checkout (a merge, a rebase or a locked index), so nothing was committed. Finish it, then try again.",
+  process_commit_detached: "This project's checkout isn't on a branch, so nothing was committed. Check out a branch, then try again.",
+  process_commit_moved: "The branch changed while committing, so nothing was committed. Try again.",
+  process_commit_identity: "Git has no user.name or user.email for this project, so nothing was committed. Set them, then try again.",
+  process_commit_failed: "Git couldn't commit the move. Check the project's checkout, then try again.",
   process_folder_missing: "CrazyAgent's data folder is missing. Restart the engine, then try again.",
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
@@ -115,6 +122,25 @@ export function loadInstructionImport(projectId: string): Promise<Result<ImportF
  * moved files. */
 export function confirmInstructionImport(projectId: string): Promise<Result<ImportFile[]>> {
   return call<ImportFile[]>("desktop_confirm_instruction_import", { projectId });
+}
+
+/** Lists the moved instruction files whose move the project's checkout has not committed.
+ * Input: the project id. Output: the paths, empty when no move waits for a commit. */
+export function loadUncommittedImport(projectId: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_uncommitted_instruction_import", { projectId });
+}
+
+/** Commits the instruction import's move as one local commit on the checkout's current branch
+ * holding only the moved files, never pushed, on the owner's click only. Input: the project id.
+ * Output: the commit, its branch and its files. */
+export function commitInstructionImport(projectId: string): Promise<Result<ImportCommit>> {
+  return call<ImportCommit>("desktop_commit_instruction_import", { projectId });
+}
+
+/** The toast after a committed move, naming the branch and files. Input: the commit.
+ * Output: the sentence. */
+export function committedMessage(commit: ImportCommit): string {
+  return `Committed the move on ${commit.branch}: ${commit.files.join(", ")}. Nothing was pushed.`;
 }
 
 /** Why one found instruction file stays in place, in plain words. Input: its refusal code.

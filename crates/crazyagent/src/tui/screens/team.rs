@@ -624,7 +624,9 @@ impl Team {
                 | ProcessReply::Saved(_)
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
-                | ProcessReply::Files(_),
+                | ProcessReply::Files(_)
+                | ProcessReply::Paths(_)
+                | ProcessReply::Committed(_),
             ) => {
                 return;
             }

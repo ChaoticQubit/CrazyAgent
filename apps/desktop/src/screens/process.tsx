@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import { HOOKLESS_WORDS, type ImportFile } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, confirmInstructionImport, defaultProcess, flagWords, importInstructionsFile,
-  importRefusal, loadAdoption, loadInstructionImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
+  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
+  importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
   saveProcess, savedMessage, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
 } from "../api-process";
 import { useAppSession, useLoad, type Loaded } from "../state";
@@ -354,27 +354,103 @@ export function InstructionImportView({ name, files, busy, failure, onConfirm, o
   </Dialog>;
 }
 
+/** The choice offered while moved git-tracked instruction files still show as deleted, as a
+ * pure view: names the files, says what the commit holds and offers Commit the move and, when
+ * given, Leave it. Inputs: the paths, whether the commit runs, the last failure and the
+ * actions. */
+export function ImportMoveView({ files, busy, failure, onCommit, onLeave }: {
+  files: readonly string[];
+  busy: boolean;
+  failure: string;
+  onCommit: () => void;
+  onLeave?: () => void;
+}) {
+  const one = files.length === 1;
+  return <Notice tone="warn">
+    <span className="import-move">
+      <span>Git still shows {files.join(", ")} as deleted, and merges into this branch are refused until the move is committed. Commit the move makes one local commit on your current branch holding only {one ? "this deletion" : "these deletions"}; it is never pushed.</span>
+      {failure && <span className="import-move-failure" role="alert">{failure}</span>}
+      <span className="import-move-actions">
+        {onLeave && <Button disabled={busy} onClick={onLeave}>Leave it</Button>}
+        <Button variant="primary" icon="check" pending={busy} pendingLabel="Committing..." onClick={onCommit}>Commit the move</Button>
+      </span>
+    </span>
+  </Notice>;
+}
+
+/** Commits an instruction import's move on the owner's click and shows the result: a toast
+ * naming the branch and files, or the refusal in place. Inputs: the project id, the paths,
+ * what to do after a commit and, when the owner may decline, Leave it. */
+export function ImportMoveCommit({ projectId, files, onCommitted, onLeave }: {
+  projectId: string;
+  files: readonly string[];
+  onCommitted: () => void;
+  onLeave?: () => void;
+}) {
+  const session = useAppSession();
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const commit = async () => {
+    setFailure("");
+    setBusy(true);
+    const result = session.noteResult(await commitInstructionImport(projectId));
+    setBusy(false);
+    if (result.kind !== "ok") {
+      setFailure(processMessage(result));
+      if (result.kind === "error" && result.code === "process_commit_none") onCommitted();
+      return;
+    }
+    session.showToast(committedMessage(result.value));
+    onCommitted();
+  };
+  return <ImportMoveView files={files} busy={busy} failure={failure} onCommit={() => void commit()} onLeave={onLeave} />;
+}
+
+/** The project page banner shown while an instruction import's move stays uncommitted: it
+ * names the files and offers Commit the move. Inputs: the project id and a version that a
+ * finished import bumps so the list is read again. */
+export function ImportMoveBanner({ projectId, version }: { projectId: string; version: number }) {
+  const [paths, reload] = useLoad(() => loadUncommittedImport(projectId), [projectId, version]);
+  if (paths.kind !== "ok" || paths.value.length === 0) return null;
+  return <ImportMoveCommit projectId={projectId} files={paths.value} onCommitted={reload} />;
+}
+
 /** Asks once per opening of a project to import its found instruction files: reads the
- * pending list, shows it when not empty, copies and moves on confirm and lists the moved
- * files in a toast. Not now closes it until the project is opened again. Inputs: the project
- * id and name. */
-export function InstructionImportPrompt({ projectId, name }: { projectId: string; name: string }) {
+ * pending list, shows it when not empty and copies and moves on confirm. When a moved file
+ * is git-tracked and its move is uncommitted, it then offers Commit the move or Leave it;
+ * otherwise it lists the moved files in a toast. Not now closes it until the project is
+ * opened again. Inputs: the project id and name, and what to do once the import finished. */
+export function InstructionImportPrompt({ projectId, name, onMoved }: { projectId: string; name: string; onMoved?: () => void }) {
   const session = useAppSession();
   const [pending] = useLoad(() => loadInstructionImport(projectId), [projectId]);
   const [closed, setClosed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
-  useEffect(() => { setClosed(false); setFailure(""); }, [projectId]);
-  if (closed || pending.kind !== "ok" || pending.value.length === 0) return null;
+  const [moved, setMoved] = useState<readonly ImportFile[] | null>(null);
+  useEffect(() => { setClosed(false); setFailure(""); setMoved(null); }, [projectId]);
+  const finish = () => { setClosed(true); setMoved(null); onMoved?.(); };
+  if (closed) return null;
+  if (moved !== null) {
+    const waiting = moved.filter((file) => file.uncommitted === true).map((file) => file.path);
+    return <Dialog open title="Moved to .crazyagent/imported/" onClose={finish}>
+      <div className="stack-small">
+        <p className="secondary">Their text is in this project's .crazyagent/instructions.md.</p>
+        <ul className="instruction-import">{moved.map((file) => <li key={file.path}><strong>{file.path}</strong></li>)}</ul>
+        <ImportMoveCommit projectId={projectId} files={waiting} onCommitted={finish} onLeave={finish} />
+      </div>
+    </Dialog>;
+  }
+  if (pending.kind !== "ok" || pending.value.length === 0) return null;
   const confirm = async () => {
     setFailure("");
     setBusy(true);
     const result = session.noteResult(await confirmInstructionImport(projectId));
     setBusy(false);
     if (result.kind !== "ok") { setFailure(processMessage(result)); return; }
-    setClosed(true);
-    const moved = result.value.map((file) => file.path).join(", ");
-    session.showToast(moved ? `Moved to .crazyagent/imported/: ${moved}. Their text is in the project's instructions.` : "Nothing was moved.");
+    if (result.value.some((file) => file.uncommitted === true)) { setMoved(result.value); return; }
+    finish();
+    const names = result.value.map((file) => file.path).join(", ");
+    session.showToast(names ? `Moved to .crazyagent/imported/: ${names}. Their text is in the project's instructions.` : "Nothing was moved.");
   };
   return <InstructionImportView name={name} files={pending.value} busy={busy} failure={failure}
     onConfirm={() => void confirm()} onLater={() => setClosed(true)} />;
