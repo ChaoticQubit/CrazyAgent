@@ -70,6 +70,9 @@ const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
+const TEAMMATE_COMMAND: &str = "teammate";
+/// The most switched-off tools one launch passes to its harness, across every server.
+pub const DENIED_TOOLS_MAX: usize = 256;
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
@@ -103,15 +106,18 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 }
 
 /// What every agent the engine launches for one project receives: the approved skills and
-/// MCP servers with their secret values, one bounded startup instruction holding the
-/// project brief, an index of its context files and the owner-approved memories, and
-/// whether a headless Claude run keeps its transcript.
+/// MCP servers with their secret values, the tools the owner switched off on each server,
+/// one bounded startup instruction holding the project brief, an index of its context files
+/// and the owner-approved memories, whether a headless Claude run keeps its transcript and
+/// whether a Claude Code lead runs its own agent team.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
     process: Option<Box<Process>>,
     transcripts: bool,
+    off_tools: Vec<(String, Vec<String>)>,
+    native_team: bool,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -123,15 +129,18 @@ struct Process {
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
-/// transcript, whether its generated plugin holds hooks, and the lock that keeps a second
-/// launch out of that home. Dropping it deletes every file holding a secret and the copied
-/// skills and hooks, unless `keep` left them to a pane that still runs.
+/// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
+/// owner switched off, whether the lead runs its own agent team, and the lock that keeps a
+/// second launch out of that home. Dropping it deletes every file holding a secret and the
+/// copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
     files: Option<InstalledFiles>,
     transcripts: bool,
     hooks: bool,
+    denied: Vec<String>,
+    native_team: bool,
     _lock: File,
 }
 
@@ -170,6 +179,7 @@ pub fn for_project(
         .transcripts;
     let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
+    let off_tools = off_tools(&tx, project, &plugins)?;
     drop(tx);
     crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
@@ -180,7 +190,61 @@ pub fn for_project(
             hooks,
         })),
         transcripts,
+        off_tools,
+        native_team: false,
     })
+}
+
+/// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
+/// server and on the engine's own server, by the server's stored name. Input: the read
+/// transaction, the project and its approved plugins. Output: each server with switched-off
+/// tools and their names, or `launch_context_tool_switch_invalid` for a stored name that is
+/// not a plain tool name or more than `DENIED_TOOLS_MAX` names in all.
+fn off_tools(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    plugins: &LaunchPlugins,
+) -> Result<Vec<(String, Vec<String>)>, LaunchError> {
+    let invalid = || failure("launch_context_tool_switch_invalid");
+    let mut found = Vec::new();
+    let mut total = 0;
+    let names = plugins
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .chain([crate::coord::tool_switches::CRAZYAGENT_SERVER]);
+    for server in names {
+        let off = crate::coord::tool_switches::off_tools(tx, project, server)
+            .map_err(|problem| LaunchError(problem.0))?;
+        if off.is_empty() || found.iter().any(|(seen, _): &(String, _)| seen == server) {
+            continue;
+        }
+        if off.iter().any(|tool| !tool_name_plain(tool)) {
+            return Err(invalid());
+        }
+        total += off.len();
+        if total > DENIED_TOOLS_MAX {
+            return Err(invalid());
+        }
+        found.push((server.to_owned(), off));
+    }
+    assert!(found.iter().map(|(_, off)| off.len()).sum::<usize>() <= DENIED_TOOLS_MAX);
+    Ok(found)
+}
+
+fn tool_name_plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= crate::coord::tool_switches::NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+/// Where a native-team lead's launch writes the command Claude Code runs for each teammate
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`), inside the launch's own files so it goes when they do.
+/// Input: the agent home. Output: the path.
+pub(crate) fn teammate_command(home: &Path) -> PathBuf {
+    home.join(STATE).join(TEAMMATE_COMMAND)
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
@@ -354,6 +418,15 @@ impl AgentContext {
         self
     }
 
+    /// Lets a Claude Code lead with tools on run its own agent team (DEC-104 Q10, native mode):
+    /// its launch keeps Agent and TeamCreate, starts teammates in tmux panes of its own
+    /// terminal and gives each the lead's instructions. Other harnesses and tools-off launches
+    /// ignore it. Output: the context.
+    pub fn with_native_team(mut self) -> Self {
+        self.native_team = true;
+        self
+    }
+
     /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
     /// Input: the absolute canonical engine executable that serves it and the absolute drop file
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
@@ -507,6 +580,8 @@ impl AgentContext {
             }),
             transcripts: self.transcripts,
             hooks: false,
+            denied: Vec::new(),
+            native_team: self.native_team && tools && id == "claude-code",
             _lock: lock,
         };
         remove(&state);
@@ -551,8 +626,12 @@ impl AgentContext {
                 self.copy_skills(&copies)?;
             }
             remove(&config);
-            write_secret(&config, codex_config(&self.instructions, servers)?)?;
+            write_secret(
+                &config,
+                codex_config(&self.instructions, servers, &self.off_tools)?,
+            )?;
         } else {
+            installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
             write_secret(&mcp, claude_config(servers)?)?;
             installed
@@ -601,6 +680,8 @@ impl AgentContext {
         }));
         assert!(installed.arguments.len() <= 6);
         assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
+        assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
+        assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         Ok(installed)
     }
 
@@ -645,6 +726,18 @@ impl Installed {
         self.hooks
     }
 
+    /// Names the MCP tools the owner switched off for this Claude Code launch, as Claude Code
+    /// names them (`mcp__<declared server>__<tool>`), for its deny list. Codex gets them in
+    /// `config.toml` instead, so its list is empty.
+    pub fn denied_tools(&self) -> &[String] {
+        &self.denied
+    }
+
+    /// Tells whether this Claude Code launch is a lead that runs its own agent team.
+    pub fn native_team(&self) -> bool {
+        self.native_team
+    }
+
     /// Names where this launch wrote its files, for the record of a pane that may outlive
     /// the engine. Output: the files, none once `keep` left them to the pane.
     pub fn files(&self) -> Option<&InstalledFiles> {
@@ -663,6 +756,8 @@ impl Installed {
             files: Some(files.clone()),
             transcripts: false,
             hooks: false,
+            denied: Vec::new(),
+            native_team: false,
             _lock: lock,
         })
     }
@@ -887,7 +982,32 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
         .ok_or_else(|| failure("launch_context_secret_invalid"))
 }
 
-fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// Names the switched-off tools of the servers one Claude Code launch declares, the way
+/// Claude Code names them: `mcp__<declared server>__<tool>`. Input: the declared servers and
+/// the switched-off tools by stored server name. Output: the names, in server order.
+fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -> Vec<String> {
+    let denied: Vec<String> = servers
+        .iter()
+        .filter_map(|server| {
+            off_tools
+                .iter()
+                .find(|(name, _)| *name == server.name)
+                .map(|(_, off)| (declared_server_name(&server.name), off))
+        })
+        .flat_map(|(declared, off)| {
+            off.iter()
+                .map(move |tool| format!("mcp__{declared}__{tool}"))
+        })
+        .collect();
+    assert!(denied.iter().all(|name| !name.starts_with('-')));
+    denied
+}
+
+fn codex_config(
+    instructions: &str,
+    servers: &[LaunchServer],
+    off_tools: &[(String, Vec<String>)],
+) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
@@ -918,6 +1038,10 @@ fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, 
                         entry["http_headers"] = toml_edit::value(values);
                     }
                 }
+            }
+            if let Some((_, off)) = off_tools.iter().find(|(name, _)| *name == server.name) {
+                entry["disabled_tools"] =
+                    toml_edit::value(off.iter().map(String::as_str).collect::<toml_edit::Array>());
             }
             let name = declared_server_name(&server.name);
             if table.contains_key(name) {

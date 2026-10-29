@@ -1,7 +1,8 @@
 use super::launch::{
-    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY,
-    LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_NATIVE_TEAM_TOOLS, CLAUDE_NO_MCP,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, claude_denied, codex_configuration, failure, harness_id, key_file_text,
+    validate,
 };
 use crate::launch_context::Installed;
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -26,6 +27,12 @@ const CLAUDE_TOOLS_ON: [&str; 4] = [
     "bypassPermissions",
 ];
 const CLAUDE_TOOLS_OFF: [&str; 3] = ["--tools", "", "--disable-slash-commands"];
+const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
+const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
+const CLAUDE_BARE: &str = "--bare";
+const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
 
 /// What the terminal host runs for one interactive agent: the full argument list, starting
 /// with the project sandbox wrapper, the working folder and the environment, plus where the
@@ -270,7 +277,15 @@ pub fn command(
         "claude-code" => {
             argv.push(executable);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
-            env.extend(claude_environment(request, &home));
+            let teammates = installed
+                .filter(|installed| installed.native_team())
+                .map(|_| {
+                    text(&crate::launch_context::teammate_command(
+                        request.account.home(),
+                    ))
+                })
+                .transpose()?;
+            env.extend(claude_environment(request, &home, teammates.as_deref()));
             let folder = claude_project_folder(&cwd)
                 .ok_or_else(|| failure("launch_working_dir_too_long"))?;
             Transcript::ClaudeSession {
@@ -414,20 +429,37 @@ fn claude(
     if let Some(model) = &request.model {
         arguments.extend(["--model".to_owned(), model.clone()]);
     }
+    let native = installed.is_some_and(Installed::native_team);
+    if native && !request.tools {
+        return Err(failure("launch_native_team_needs_tools"));
+    }
     if request.tools {
         arguments.extend(CLAUDE_TOOLS_ON.map(str::to_owned));
-        arguments.push(CLAUDE_DENY_FLAG.to_owned());
-        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(str::to_owned));
     } else {
         arguments.extend(CLAUDE_TOOLS_OFF.map(str::to_owned));
     }
+    let denied = claude_denied(request.tools, native, installed);
+    if !denied.is_empty() {
+        arguments.push(CLAUDE_DENY_FLAG.to_owned());
+        arguments.extend(denied);
+    }
+    if native {
+        arguments.extend(CLAUDE_TEAMMATE_MODE.map(str::to_owned));
+    }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
-        arguments.push("--bare".to_owned());
+        arguments.push(CLAUDE_BARE.to_owned());
     }
     Ok(arguments)
 }
 
-fn claude_environment(request: &LaunchRequest, home: &str) -> Vec<(String, String)> {
+/// Builds Claude Code's own variables for one launch. A native-team lead also gets agent
+/// teams turned on and the command its teammates run. Inputs: the request, the agent home
+/// and, for a native-team lead, the teammate command path. Output: the variables.
+fn claude_environment(
+    request: &LaunchRequest,
+    home: &str,
+    teammates: Option<&str>,
+) -> Vec<(String, String)> {
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
         (
@@ -443,6 +475,14 @@ fn claude_environment(request: &LaunchRequest, home: &str) -> Vec<(String, Strin
     ];
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));
+    }
+    if let Some(command) = teammates {
+        assert!(request.tools);
+        environment.push((
+            CLAUDE_AGENT_TEAMS.0.to_owned(),
+            CLAUDE_AGENT_TEAMS.1.to_owned(),
+        ));
+        environment.push((CLAUDE_TEAMMATE_COMMAND.to_owned(), command.to_owned()));
     }
     if matches!(request.account, AccountBinding::Subscription { .. }) {
         return environment;
@@ -580,6 +620,97 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(metadata.len(), key.reveal().len() as u64);
     Ok(path)
+}
+
+/// Writes the command a native-team lead's Claude Code runs for each teammate
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's own executable with the lead's variables, its
+/// instruction file and its `--bare`, which Claude Code does not pass on, and Agent and
+/// TeamCreate denied, before the arguments Claude Code adds. It runs in a pane of the lead's
+/// own terminal, inside the lead's sandbox, so it starts no sandbox of its own. Inputs: the
+/// agent home, the lead's built command and its request. Output: Ok, or a plain code.
+#[cfg(unix)]
+pub fn write_teammate_command(
+    home: &Path,
+    built: &InteractiveCommand,
+    request: &LaunchRequest,
+) -> Result<(), LaunchError> {
+    let refused = || failure("launch_teammate_command_invalid");
+    let start = if built.argv.first().map(String::as_str) == Some(SANDBOX_EXEC) {
+        3
+    } else {
+        0
+    };
+    let executable = built.argv.get(start).ok_or_else(refused)?;
+    let instructions = built
+        .argv
+        .iter()
+        .position(|argument| argument == CLAUDE_INSTRUCTIONS_FLAG)
+        .and_then(|index| built.argv.get(index + 1))
+        .ok_or_else(refused)?;
+    let mut words = vec!["/usr/bin/env".to_owned()];
+    words.extend(
+        built
+            .env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    words.extend([
+        executable.clone(),
+        CLAUDE_INSTRUCTIONS_FLAG.to_owned(),
+        instructions.clone(),
+    ]);
+    if built.argv[start..]
+        .iter()
+        .any(|argument| argument == CLAUDE_BARE)
+    {
+        words.push(CLAUDE_BARE.to_owned());
+    }
+    words.push(CLAUDE_DENY_FLAG.to_owned());
+    words.extend(CLAUDE_NATIVE_TEAM_TOOLS.map(str::to_owned));
+    let mut script = String::from("#!/bin/sh\nexec");
+    for word in &words {
+        if word.is_empty() || word.chars().any(char::is_control) {
+            return Err(refused());
+        }
+        script.push_str(" '");
+        script.push_str(&word.replace('\'', "'\\''"));
+        script.push('\'');
+    }
+    script.push_str(" \"$@\"\n");
+    if script.len() > TEAMMATE_SCRIPT_BYTES_MAX {
+        return Err(refused());
+    }
+    if let Some(key) = request.account.key() {
+        assert!(!script.contains(key.reveal()));
+    }
+    let path = crate::launch_context::teammate_command(home);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(&path)
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    file.write_all(script.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    assert_eq!(metadata.len(), script.len() as u64);
+    Ok(())
+}
+
+/// Refuses a native-team lead where no tmux teammate panes exist. Takes the agent home,
+/// command and request, all unused. Returns `launch_teammate_command_unavailable`.
+#[cfg(not(unix))]
+pub fn write_teammate_command(
+    _home: &Path,
+    _built: &InteractiveCommand,
+    _request: &LaunchRequest,
+) -> Result<(), LaunchError> {
+    Err(failure("launch_teammate_command_unavailable"))
 }
 
 /// Refuses to write an account key file where no owner-only 0600 file can be made.

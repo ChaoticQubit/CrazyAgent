@@ -4064,7 +4064,7 @@ impl TeamRuntime {
                 .ok()
                 .and_then(|harness| launch_harness(&harness))
                 .is_some_and(|harness| self.live_master(project, role, harness));
-        match &self.delegation_tool {
+        let context = match &self.delegation_tool {
             Some(engine) if master && tools && live => {
                 let engine = engine
                     .verified_path()
@@ -4093,7 +4093,46 @@ impl TeamRuntime {
                     .map_err(unread)
             }
             _ => Ok(context),
+        }?;
+        Ok(if self.native_lead(project, id, role, tools)? {
+            context.with_native_team()
+        } else {
+            context
+        })
+    }
+
+    /// Tells whether a team agent launches as a native-team lead (DEC-104 Q10): a lead the
+    /// master started, Claude Code with tools on, with a terminal host for its panes, in a
+    /// project whose owner chose Native sub-agents for Claude Code. Takes the project, the
+    /// agent, its role and tools switch. Returns the answer, or the line shown when the
+    /// agent record or the setting cannot be read.
+    fn native_lead(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        tools: bool,
+    ) -> Result<bool, String> {
+        if role != AgentRole::Sub || !tools || self.terminal.is_none() || self.has_lead(id) {
+            return Ok(false);
         }
+        let harness: Option<String> = self
+            .connection
+            .query_row("SELECT harness FROM team_agents WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|_| with_code("the agent record could not be read", None))?;
+        let Some(kind) = harness
+            .as_deref()
+            .and_then(crate::coord::settings::HarnessKind::from_harness)
+            .filter(|kind| crate::coord::settings::native_supported(*kind))
+        else {
+            return Ok(false);
+        };
+        let mode = crate::coord::settings::mode(&self.connection, project, kind)
+            .map_err(|e| with_code("the project's sub-agent mode could not be read", Some(&e.0)))?;
+        Ok(mode == crate::coord::settings::SubagentMode::Native)
     }
 
     /// Records one team agent in the engine's agent register, continuing the register
