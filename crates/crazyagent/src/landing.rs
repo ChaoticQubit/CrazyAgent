@@ -14,6 +14,8 @@ mod flow;
 #[cfg(unix)]
 mod git;
 #[cfg(unix)]
+mod merges;
+#[cfg(unix)]
 mod owner;
 #[cfg(unix)]
 mod retire;

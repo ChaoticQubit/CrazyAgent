@@ -1567,6 +1567,7 @@ pub(super) fn record(
     if above != head {
         check_change(repo, &workspace.repository, above, &head, fresh, bounds)?;
     }
+    super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
     let line = subject(&turn.prompt_line, &roots);
     let message = format!(

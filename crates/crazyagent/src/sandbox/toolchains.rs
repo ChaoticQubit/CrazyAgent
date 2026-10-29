@@ -28,7 +28,117 @@ const GIT_PROGRAM: &str = "git";
 const GIT_SHIM: &str = "/usr/bin/git";
 /// The most bytes of an agent's `git` script read to tell whether it is current.
 #[cfg(unix)]
-const GIT_SCRIPT_BYTES_MAX: u64 = 4096;
+const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
+/// The script an agent's own `git` holds, with `@GIT@` for the real git and `@LEAD@` for 1
+/// in a lead's copy and 0 in any other agent's. It refuses merge, pull, rebase and
+/// cherry-pick, and aliases for them, with a plain reason (DEC-107 rule 2); a lead may
+/// still merge its own workers' `BRANCH--NAME` branches. Every other command runs as is.
+#[cfg(unix)]
+const GIT_SCRIPT: &str = r##"#!/bin/sh
+git='@GIT@'
+lead=@LEAD@
+worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). If you need work from another branch, stop and tell your lead what you need; the master tells the owner.'
+lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
+refuse() {
+  printf 'crazyagent: git %s is refused. %s\n' "$1" "$2" >&2
+  exit 1
+}
+reason() {
+  if [ "$lead" = 1 ]; then
+    printf '%s' "$lead_reason"
+  else
+    printf '%s' "$worker_reason"
+  fi
+}
+aliased() {
+  case "$1" in
+    [Aa][Ll][Ii][Aa][Ss].*) refuse "$2" "Aliases set on the command line are refused. $(reason)" ;;
+  esac
+}
+sub=
+at=0
+skip=
+moved=0
+for word do
+  at=$((at + 1))
+  if [ -n "$skip" ]; then
+    if [ "$skip" = c ]; then
+      aliased "$word" "-c $word"
+    fi
+    skip=
+    continue
+  fi
+  case "$word" in
+    -c|--config-env) skip=c ;;
+    --config-env=*) aliased "${word#--config-env=}" "$word" ;;
+    -C|--git-dir|--work-tree)
+      skip=v
+      moved=1
+      ;;
+    --namespace|--super-prefix) skip=v ;;
+    --git-dir=*|--work-tree=*) moved=1 ;;
+    -*) ;;
+    *)
+      sub=$word
+      break
+      ;;
+  esac
+done
+own_workers() {
+  [ "$moved" = 0 ] || return 1
+  branch=$("$git" symbolic-ref --short -q HEAD) || return 1
+  [ -n "$branch" ] || return 1
+  named=0
+  value=0
+  for word do
+    if [ "$value" = 1 ]; then
+      value=0
+      continue
+    fi
+    case "$word" in
+      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
+      -*) ;;
+      *)
+        word=${word#refs/heads/}
+        case "$word" in
+          "$branch"--*) ;;
+          *) return 1 ;;
+        esac
+        name=${word#"$branch"--}
+        case "$name" in
+          ''|*/*|*--*|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+        esac
+        named=1
+        ;;
+    esac
+  done
+  [ "$named" = 1 ]
+}
+gate() {
+  shift "$1"
+  shift
+  if [ "$#" = 1 ]; then
+    case "$1" in
+      --abort|--quit|--continue|--skip) return 0 ;;
+    esac
+  fi
+  [ "$lead" = 1 ] && [ "$sub" = merge ] && own_workers "$@"
+}
+case "$sub" in
+  '') ;;
+  merge|pull|rebase|cherry-pick)
+    gate "$at" "$@" || refuse "$sub" "$(reason)"
+    ;;
+  add|am|apply|archive|bisect|blame|branch|bundle|cat-file|checkout|cherry|clean|clone|commit|config|describe|diff|diff-files|diff-index|diff-tree|difftool|fetch|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-remote|ls-tree|merge-base|merge-file|merge-tree|mergetool|mv|name-rev|notes|push|range-diff|reflog|remote|reset|restore|rev-list|rev-parse|revert|rm|shortlog|show|show-ref|sparse-checkout|stash|status|submodule|switch|symbolic-ref|tag|update-index|update-ref|version|worktree) ;;
+  *)
+    expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
+    case "$expanded" in
+      merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
+    esac
+    ;;
+esac
+exec "$git" "$@"
+"##;
 
 /// The variables that keep every agent's toolchains from installing themselves: rustup
 /// never fetches a missing toolchain, uv never downloads a Python, Corepack never fetches a
@@ -335,7 +445,7 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
-    if let Some(script) = git_script(crate::research::runner::setup_git())
+    if let Some(script) = git_script(crate::research::runner::setup_git(), false)
         && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
@@ -346,19 +456,37 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
 /// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
 /// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
 /// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
-/// a link to it would lose. Input: the real git. Output: the script, or none when git is
-/// the shim or its path is not plain.
+/// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real git
+/// and whether the agent leads workers. Output: the script, or none when git is the shim or
+/// its path is not plain.
 #[cfg(unix)]
-fn git_script(git: &Path) -> Option<String> {
+fn git_script(git: &Path, lead: bool) -> Option<String> {
     let text = git.to_str()?;
     let plain = git.is_absolute()
         && git != Path::new(GIT_SHIM)
         && text
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
-    let script = plain.then(|| format!("#!/bin/sh\nexec '{text}' \"$@\"\n"))?;
+    let script = plain.then(|| {
+        GIT_SCRIPT
+            .replace("@GIT@", text)
+            .replace("@LEAD@", if lead { "1" } else { "0" })
+    })?;
+    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
     assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
     Some(script)
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
+/// lead merge its own workers' branches (DEC-107 rule 2), after [`make_tmp`] wrote the
+/// copy every agent gets. Input: the folder `make_tmp` returned. Output: Ok, also when git
+/// is the shim and no copy is written, or the write failure.
+#[cfg(unix)]
+pub fn lead_git(tmp: &Path) -> io::Result<()> {
+    match git_script(crate::research::runner::setup_git(), true) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
 }
 
 /// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
@@ -561,6 +689,12 @@ pub fn existing_tmp(_home: &Path) -> Option<PathBuf> {
 /// unused. Returns `Unsupported`.
 #[cfg(not(unix))]
 pub fn make_tmp(_home: &Path) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn lead_git(_tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
