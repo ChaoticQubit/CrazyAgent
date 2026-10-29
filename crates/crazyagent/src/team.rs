@@ -2123,7 +2123,18 @@ pub fn execute(
             Ok(Outcome::Applied)
         }
         TeamAction::StopTeammate { agent, pane, .. } => {
-            stop_teammate(tx, project, *agent, pane, now)
+            let changed = tx
+                .execute(
+                    "UPDATE team_teammates SET stopped_ms=COALESCE(stopped_ms,?4)
+                     WHERE agent=?1 AND project=?2 AND pane=?3 AND ended_ms IS NULL",
+                    params![agent, project.as_str(), pane, now],
+                )
+                .map_err(error)?;
+            Ok(if changed == 0 {
+                rejected("team_teammate_not_found")
+            } else {
+                Outcome::Applied
+            })
         }
         TeamAction::SpreadAccounts { on, .. } => {
             if *on {
@@ -2437,31 +2448,6 @@ pub struct Teammate {
     pub ended: bool,
     pub stopped: bool,
     pub seen_ms: i64,
-}
-
-/// Asks the engine to end one live teammate pane of a harness: its `team_teammates` row is
-/// marked stopped, and the teammate watch ends the pane on its next pass. Takes the
-/// transaction, project, harness, pane id and time. Returns the outcome, rejected when the
-/// pane is not a live teammate of that harness, or a SQLite failure.
-fn stop_teammate(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    lead: i64,
-    pane: &str,
-    now: i64,
-) -> Result<Outcome, EngineError> {
-    let changed = tx
-        .execute(
-            "UPDATE team_teammates SET stopped_ms=COALESCE(stopped_ms,?4)
-             WHERE agent=?1 AND project=?2 AND pane=?3 AND ended_ms IS NULL",
-            params![lead, project.as_str(), pane, now],
-        )
-        .map_err(error)?;
-    Ok(if changed == 0 {
-        rejected("team_teammate_not_found")
-    } else {
-        Outcome::Applied
-    })
 }
 
 impl TeamAgent {
