@@ -619,6 +619,9 @@ pub enum OwnerRead {
         limit: u16,
     },
     TeamEvents,
+    CoordQuestions {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -723,6 +726,7 @@ impl OwnerRead {
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
             | Self::TeamEvents
+            | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -1094,6 +1098,9 @@ pub enum OwnerData {
     },
     TeamEvents {
         events: Box<crate::team::events::AppEvents>,
+    },
+    CoordQuestions {
+        inbox: Box<crate::team::questions::Inbox>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

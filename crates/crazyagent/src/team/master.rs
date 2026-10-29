@@ -465,8 +465,7 @@ pub(crate) fn master_input_at(
         }
         _ => (typed_ms, draft),
     };
-    let since_typed = typed_ms.map_or(i64::MAX, |at| now - at);
-    if since_typed < OWNER_QUIET_MS || (draft && since_typed < DRAFT_ABANDONED_MS) {
+    if owner_holds(typed_ms, draft, now) {
         return Err(InputRefused::OwnerTyping);
     }
     let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
@@ -608,6 +607,24 @@ impl OwnerTyping {
     fn get(&self, agent: i64) -> Option<Typed> {
         self.shared.state().agents.get(&agent).copied()
     }
+
+    /// Says whether the owner's keys hold the engine's typing into one team agent's
+    /// terminal back, by the rule live master input uses (DEC-104 Q13). Takes the team
+    /// agent id and the time in milliseconds. Returns true for a key under
+    /// `OWNER_QUIET_MS` ago or an unsent line under `DRAFT_ABANDONED_MS` old.
+    pub fn holds(&self, agent: i64, now_ms: i64) -> bool {
+        self.get(agent).is_some_and(|typed| {
+            owner_holds(Some(typed.at_ms), typed.draft.unwrap_or(false), now_ms)
+        })
+    }
+}
+
+/// The owner typing rule: engine input waits `OWNER_QUIET_MS` after the owner's last key,
+/// and `DRAFT_ABANDONED_MS` while that key left an unsent line. Takes the last key time,
+/// whether it left a line and the time, all in milliseconds. Returns whether input waits.
+fn owner_holds(typed_ms: Option<i64>, draft: bool, now_ms: i64) -> bool {
+    let since_typed = typed_ms.map_or(i64::MAX, |at| now_ms.saturating_sub(at));
+    since_typed < OWNER_QUIET_MS || (draft && since_typed < DRAFT_ABANDONED_MS)
 }
 
 impl Drop for OwnerTyping {

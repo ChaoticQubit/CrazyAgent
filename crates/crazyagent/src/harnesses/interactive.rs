@@ -20,6 +20,24 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
+/// Runs a Codex agent as an app-server and a TUI attached to it with `--remote`, so the
+/// engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
+/// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
+/// TUI runs alone as before. Arguments: the Codex program, the conversation to resume or
+/// an empty word, then the `-c` settings both take. The app-server ends with the TUI.
+const CODEX_BRIDGE_SCRIPT: &str = r#"e=$1; r=$2; shift 2
+s=$CODEX_HOME/app-server-control/app-server-control.sock
+/bin/rm -f "$s"
+"$e" app-server --listen unix:// "$@" </dev/null >/dev/null 2>&1 &
+a=$!
+i=0
+while [ ! -S "$s" ] && kill -0 "$a" 2>/dev/null && [ "$i" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
+if [ -S "$s" ]; then set -- --remote unix:// "$@"; else kill "$a" 2>/dev/null; fi
+if [ -n "$r" ]; then "$e" "$@" resume "$r"; else "$e" "$@"; fi
+c=$?
+kill "$a" 2>/dev/null
+exit "$c"
+"#;
 const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--tools",
     "default",
@@ -253,19 +271,25 @@ pub fn command(
     let executable = text(&request.executable)?;
     let transcript = match harness_id(request) {
         "codex" => {
-            argv.push(executable);
+            let resume = if run.resume {
+                session_id_checked(run.session_id)?.to_owned()
+            } else {
+                String::new()
+            };
+            argv.extend([
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                CODEX_BRIDGE_SCRIPT.to_owned(),
+                "codex-bridge".to_owned(),
+                executable,
+                resume,
+            ]);
             argv.extend(codex(
                 request,
                 installed.is_some(),
                 &cwd,
                 key_file.as_deref(),
             )?);
-            if run.resume {
-                argv.extend([
-                    "resume".to_owned(),
-                    session_id_checked(run.session_id)?.to_owned(),
-                ]);
-            }
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
                 ("TMPDIR".to_owned(), home),

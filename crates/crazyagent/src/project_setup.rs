@@ -654,6 +654,9 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    CoordQuestions {
+        project: ProjectId,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -670,6 +673,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    CoordQuestions(Box<crate::team::questions::Inbox>),
     Library(crate::memory::library::LibraryView),
 }
 

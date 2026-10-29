@@ -907,10 +907,48 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped";
+  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped" | "urgent_question" | "question" | "waiting_on_you";
   text: string;
   created_ms: number;
   seen_ms: number | null;
+}
+
+/** How urgent a question to the owner is (Q14b): high pauses the asker, normal makes it wait
+ * for the answer and low lets it carry on with the assumption it stated. */
+export type QuestionSeverity = "high" | "normal" | "low";
+
+/** One open question an agent put to the owner: who asked, how urgent it is, whom the asker
+ * meant it for, the question, what the asker assumes until answered, when it was asked and
+ * the asker's terminal while it runs. */
+export interface OwnerQuestion {
+  id: number;
+  agent: number;
+  label: string;
+  severity: QuestionSeverity;
+  asked_for: "me" | "master" | "lead";
+  text: string;
+  assumption: string | null;
+  created_ms: number;
+  terminal: string | null;
+}
+
+/** One running agent that waits on the owner in its own terminal (Q14): a permission prompt
+ * or a question asked there, which only that terminal can answer. */
+export interface WaitingAgent {
+  agent: number;
+  label: string;
+  waiting: "question" | "permission";
+  since_ms: number;
+  terminal: string | null;
+}
+
+/** One project's Questions inbox: open questions to the owner, most urgent and then oldest
+ * first, how many more are open than it lists, and the agents waiting in their terminal. */
+export interface QuestionsInbox {
+  project_id: string;
+  questions: OwnerQuestion[];
+  more: number;
+  waiting: WaitingAgent[];
 }
 
 export interface TeamEventsView {
