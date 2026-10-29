@@ -382,6 +382,46 @@ impl SwitchMode {
     }
 }
 
+/// The owner's Max harnesses per project and Max teammates per harness choices besides No
+/// limit, the default. The largest is the most agents one project runs at once.
+pub const CAP_CHOICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 15];
+const _: () = assert!(CAP_CHOICES[8] as usize == crate::terminal::PANES_PER_PROJECT_MAX);
+
+/// The owner's Token budget choices besides Off, the default: how many tokens a project's
+/// agents may use, every kind the Usage page counts, cache reads included, from when the
+/// owner set it or last started the team again, before the engine stops the whole team.
+pub const BUDGET_CHOICES: [u64; 7] = [
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    100_000_000,
+    250_000_000,
+    500_000_000,
+    1_000_000_000,
+];
+
+/// The most teammates of one harness its status lists: running ones first, then the newest
+/// that ended.
+pub const TEAMMATES_SHOWN_MAX: usize = 16;
+const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
+
+/// A project's limits on the agents it runs at once: harnesses, the sub-agents the master
+/// starts, and teammates each harness splits off in its own terminal. None is No limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Caps {
+    pub harnesses: Option<u8>,
+    pub teammates: Option<u8>,
+}
+
+/// A project's token budget: the tokens its agents may use, the tokens they used since the
+/// owner set it or last started the team again, and whether reaching it stopped the team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub tokens: u64,
+    pub used: u64,
+    pub reached: bool,
+}
+
 /// The owner's Sub-agent depth choices: 1 lets only the master start sub-agents, 2 lets
 /// the master's sub-agents lead workers of their own, 3 lets those workers lead too.
 pub const DEPTH_CHOICES: [u8; 3] = [1, 2, 3];
@@ -550,6 +590,27 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
     },
+    StopAgent {
+        project_id: ProjectId,
+        agent: i64,
+    },
+    StopTeammate {
+        project_id: ProjectId,
+        agent: i64,
+        pane: String,
+    },
+    MaxHarnesses {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    MaxTeammates {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    TokenBudget {
+        project_id: ProjectId,
+        tokens: Option<u64>,
+    },
     CoordSettings {
         project_id: ProjectId,
         settings: crate::coord::settings::CoordSettings,
@@ -683,7 +744,7 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_time_limits_invalid"))
             }
-            Self::WakeAgent { agent, .. } => {
+            Self::WakeAgent { agent, .. } | Self::StopAgent { agent, .. } => {
                 if *agent <= 0 {
                     return Err(failure("team_agent_not_found"));
                 }
@@ -695,6 +756,18 @@ impl TeamAction {
                 || crate::coord::settings::native_supported(*harness))
             .then_some(())
             .ok_or_else(|| failure("coord_native_unsupported")),
+            Self::StopTeammate { agent, pane, .. } => (*agent > 0
+                && crate::terminal::pane_id_valid(pane))
+            .then_some(())
+            .ok_or_else(|| failure("team_teammate_not_found")),
+            Self::MaxHarnesses { max, .. } | Self::MaxTeammates { max, .. } => max
+                .is_none_or(|max| CAP_CHOICES.contains(&max))
+                .then_some(())
+                .ok_or_else(|| failure("team_cap_invalid")),
+            Self::TokenBudget { tokens, .. } => tokens
+                .is_none_or(|tokens| BUDGET_CHOICES.contains(&tokens))
+                .then_some(())
+                .ok_or_else(|| failure("team_budget_invalid")),
             Self::SubAgentDepth { depth, .. } => DEPTH_CHOICES
                 .contains(depth)
                 .then_some(())
@@ -746,6 +819,11 @@ impl TeamAction {
             },
             Self::Rename { project_id, .. }
             | Self::WakeAgent { project_id, .. }
+            | Self::StopAgent { project_id, .. }
+            | Self::StopTeammate { project_id, .. }
+            | Self::MaxHarnesses { project_id, .. }
+            | Self::MaxTeammates { project_id, .. }
+            | Self::TokenBudget { project_id, .. }
             | Self::CoordSettings { project_id, .. }
             | Self::HarnessMode { project_id, .. }
             | Self::HarnessDelivery { project_id, .. } => Some(project_id),
@@ -1180,6 +1258,27 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 stopped_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_caps (
+                project TEXT PRIMARY KEY,
+                harnesses INTEGER CHECK(harnesses IS NULL OR harnesses BETWEEN 1 AND 15),
+                teammates INTEGER CHECK(teammates IS NULL OR teammates BETWEEN 1 AND 15)
+            );
+            CREATE TABLE IF NOT EXISTS team_token_budgets (
+                project TEXT PRIMARY KEY,
+                tokens INTEGER NOT NULL CHECK(tokens > 0),
+                since_ms INTEGER NOT NULL,
+                baseline INTEGER NOT NULL CHECK(baseline >= 0),
+                reached_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS team_teammates (
+                agent INTEGER NOT NULL,
+                project TEXT NOT NULL,
+                pane TEXT NOT NULL,
+                seen_ms INTEGER NOT NULL,
+                ended_ms INTEGER,
+                stopped_ms INTEGER,
+                PRIMARY KEY(agent, pane)
             );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
@@ -1984,6 +2083,89 @@ pub fn execute(
                 [project.as_str()],
             )
             .map_err(error)?;
+            let baseline = usage_from(tx, project, hour_of(now))?;
+            tx.execute(
+                "UPDATE team_token_budgets SET since_ms=?2, baseline=?3, reached_ms=NULL WHERE project=?1",
+                params![project.as_str(), now, baseline],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::StopAgent { agent, .. } => {
+            let role: Option<String> = tx
+                .query_row(
+                    "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
+                    params![agent, project.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            match role.as_deref().and_then(AgentRole::parse) {
+                Some(AgentRole::Sub) => {}
+                Some(AgentRole::Master) => return Ok(rejected("team_stop_master")),
+                None => return Ok(rejected("team_agent_not_found")),
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
+                params![agent, project.as_str(), now],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::StopTeammate { agent, pane, .. } => {
+            let changed = tx
+                .execute(
+                    "UPDATE team_teammates SET stopped_ms=COALESCE(stopped_ms,?4)
+                     WHERE agent=?1 AND project=?2 AND pane=?3 AND ended_ms IS NULL",
+                    params![agent, project.as_str(), pane, now],
+                )
+                .map_err(error)?;
+            Ok(if changed == 0 {
+                rejected("team_teammate_not_found")
+            } else {
+                Outcome::Applied
+            })
+        }
+        TeamAction::MaxHarnesses { max, .. } => {
+            tx.execute(
+                "INSERT INTO team_caps(project,harnesses) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET harnesses=excluded.harnesses",
+                params![project.as_str(), max],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MaxTeammates { max, .. } => {
+            tx.execute(
+                "INSERT INTO team_caps(project,teammates) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET teammates=excluded.teammates",
+                params![project.as_str(), max],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::TokenBudget { tokens, .. } => {
+            match tokens {
+                None => {
+                    tx.execute(
+                        "DELETE FROM team_token_budgets WHERE project=?1",
+                        [project.as_str()],
+                    )
+                    .map_err(error)?;
+                }
+                Some(tokens) => {
+                    let tokens =
+                        i64::try_from(*tokens).map_err(|_| failure("team_budget_invalid"))?;
+                    let baseline = usage_from(tx, project, hour_of(now))?;
+                    tx.execute(
+                        "INSERT INTO team_token_budgets(project,tokens,since_ms,baseline,reached_ms) VALUES (?1,?2,?3,?4,NULL)
+                         ON CONFLICT(project) DO UPDATE SET tokens=excluded.tokens, since_ms=excluded.since_ms,
+                         baseline=excluded.baseline, reached_ms=NULL",
+                        params![project.as_str(), tokens, now, baseline],
+                    )
+                    .map_err(error)?;
+                }
+            }
             Ok(Outcome::Applied)
         }
         TeamAction::HandOff { reply, step, .. } => {
@@ -2224,6 +2406,21 @@ pub struct TeamAgent {
     pub wake_note: Option<String>,
     #[serde(default)]
     pub parent: Option<i64>,
+    #[serde(default)]
+    pub owner_stopped: bool,
+    #[serde(default)]
+    pub teammates: Vec<Teammate>,
+}
+
+/// One teammate a harness split off in its own pane of the harness's terminal, such as a
+/// Claude Code agent team member: its pane id, whether its pane closed, whether the owner or
+/// the teammate cap stopped it, and when the engine first saw it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Teammate {
+    pub pane: String,
+    pub ended: bool,
+    pub stopped: bool,
+    pub seen_ms: i64,
 }
 
 impl TeamAgent {
@@ -2370,6 +2567,16 @@ pub struct TeamStatus {
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
+    pub max_harnesses: Option<u8>,
+    #[serde(default)]
+    pub max_teammates: Option<u8>,
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    #[serde(default)]
+    pub budget_used: Option<u64>,
+    #[serde(default)]
+    pub budget_reached: bool,
+    #[serde(default)]
     pub live_master: Option<bool>,
     #[serde(default)]
     pub live_problem: Option<String>,
@@ -2428,6 +2635,8 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         wakeable: false,
         wake_note: None,
         parent: row.get(16)?,
+        owner_stopped: false,
+        teammates: Vec::new(),
     })
 }
 
@@ -2821,6 +3030,173 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
         .map_err(error)
 }
 
+/// Reads the project's limits on running agents, No limit for each the owner left unset.
+/// Takes a connection and the project. Returns the limits, or a SQLite failure.
+pub fn caps(connection: &Connection, project: &ProjectId) -> Result<Caps, EngineError> {
+    let row: Option<(Option<i64>, Option<i64>)> = connection
+        .query_row(
+            "SELECT harnesses,teammates FROM team_caps WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((harnesses, teammates)) = row else {
+        return Ok(Caps::default());
+    };
+    let cap = |value: Option<i64>| -> Result<Option<u8>, EngineError> {
+        value
+            .map(|value| {
+                u8::try_from(value)
+                    .ok()
+                    .filter(|value| (1..=CAP_CHOICES[8]).contains(value))
+                    .ok_or_else(|| error("team_cap_invalid"))
+            })
+            .transpose()
+    };
+    Ok(Caps {
+        harnesses: cap(harnesses)?,
+        teammates: cap(teammates)?,
+    })
+}
+
+/// The owner's Max teammates per harness for the project, for a lead's instructions and the
+/// engine's own check. Takes a connection and the project. Returns the cap, None for No
+/// limit, or a SQLite failure.
+pub fn teammate_cap(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<u8>, EngineError> {
+    caps(connection, project).map(|caps| caps.teammates)
+}
+
+/// The start of the usage hour that holds a time, as usage rows record it. Takes ms since
+/// the epoch. Returns the hour's start in the same unit.
+fn hour_of(ms: i64) -> i64 {
+    ms - ms.rem_euclid(events::HOUR_MS)
+}
+
+/// Adds up every token the project's agents used in usage hours from `hour_ms` on, each kind
+/// the Usage page counts. Takes a connection, the project and the hour start. Returns the
+/// total, 0 before any usage was recorded, or a SQLite failure.
+fn usage_from(
+    connection: &Connection,
+    project: &ProjectId,
+    hour_ms: i64,
+) -> Result<i64, EngineError> {
+    let counted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='usage_tokens')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !counted {
+        return Ok(0);
+    }
+    let total: f64 = connection
+        .query_row(
+            "SELECT TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) FROM usage_tokens
+             WHERE project=?1 AND hour_ms>=?2",
+            params![project.as_str(), hour_ms],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(total.clamp(0.0, i64::MAX as f64) as i64)
+}
+
+/// Reads the project's token budget and what its agents used against it: the tokens of the
+/// usage hours since the budget's start, less what that first hour held at its start, so
+/// the hour's earlier use never counts. Takes a connection and the project. Returns the
+/// budget, None while it is Off, or a SQLite failure.
+pub fn budget(connection: &Connection, project: &ProjectId) -> Result<Option<Budget>, EngineError> {
+    let row: Option<(i64, i64, i64, Option<i64>)> = connection
+        .query_row(
+            "SELECT tokens,since_ms,baseline,reached_ms FROM team_token_budgets WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((tokens, since, baseline, reached)) = row else {
+        return Ok(None);
+    };
+    let tokens = u64::try_from(tokens)
+        .ok()
+        .filter(|tokens| *tokens > 0)
+        .ok_or_else(|| error("team_budget_invalid"))?;
+    let used = usage_from(connection, project, hour_of(since))?
+        .saturating_sub(baseline)
+        .max(0);
+    Ok(Some(Budget {
+        tokens,
+        used: u64::try_from(used).expect("used is never below zero"),
+        reached: reached.is_some(),
+    }))
+}
+
+/// Stops the project's whole team once its agents used the owner's token budget: the team
+/// pauses as the owner's Stop all does, the budget records when, and the owner gets an app
+/// notification. A budget that already stopped the team waits for the owner to start it
+/// again. Takes a connection, the project and the time. Returns true when it stopped the
+/// team now, or a SQLite failure.
+pub(crate) fn budget_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let Some(budget) = budget(connection, project)? else {
+        return Ok(false);
+    };
+    if budget.reached || budget.used < budget.tokens {
+        return Ok(false);
+    }
+    let tx = events::immediate(connection)?;
+    let changed = tx
+        .execute(
+            "UPDATE team_token_budgets SET reached_ms=?2 WHERE project=?1 AND reached_ms IS NULL",
+            params![project.as_str(), now],
+        )
+        .map_err(error)?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
+         ON CONFLICT(project) DO NOTHING",
+        params![project.as_str(), now],
+    )
+    .map_err(error)?;
+    let text = format!(
+        "The team stopped: its agents used {} of the {} token budget. Raise the budget or start the team again to continue.",
+        token_words(budget.used),
+        token_words(budget.tokens)
+    );
+    events::notify(
+        &tx,
+        project,
+        events::NotificationKind::BudgetStopped,
+        &text,
+        now,
+    )?;
+    tx.commit().map_err(error)?;
+    Ok(true)
+}
+
+/// Words a token count for the owner: millions with one decimal at most, else the number.
+/// Takes the count. Returns the words, such as `12.5M tokens`.
+pub fn token_words(tokens: u64) -> String {
+    if tokens < 1_000_000 {
+        return format!("{tokens} tokens");
+    }
+    let tenths = tokens / 100_000;
+    if tenths % 10 == 0 {
+        format!("{}M tokens", tenths / 10)
+    } else {
+        format!("{}.{}M tokens", tenths / 10, tenths % 10)
+    }
+}
+
 /// Pauses a pool account that hit a rate or usage limit for as long as a team agent's
 /// account pauses, in the pause every master, team and research turn honours. Takes a
 /// connection and the account's connection. Returns when the pause ends, in ms since the
@@ -3142,9 +3518,25 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             refusal.map(wake_note)
         };
     }
+    let stopped: BTreeSet<i64> = {
+        let mut statement = connection
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1")
+            .map_err(error)?;
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for agent in &mut agents {
+        agent.owner_stopped = stopped.contains(&agent.id);
+        agent.teammates = teammates(connection, project, agent.id)?;
+    }
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
+    let limited = caps(connection, project)?;
+    let spend = budget(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -3161,6 +3553,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         coordination: Some(coordination(connection, project)?),
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
+        max_harnesses: limited.harnesses,
+        max_teammates: limited.teammates,
+        token_budget: spend.map(|spend| spend.tokens),
+        budget_used: spend.map(|spend| spend.used),
+        budget_reached: spend.is_some_and(|spend| spend.reached),
         live_master,
         live_problem,
         min_agents: plan.min_agents,
@@ -3173,6 +3570,39 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         events,
         partial: false,
     })
+}
+
+/// Lists one harness's teammates as the status shows them: running ones first, then the
+/// newest that ended, at most `TEAMMATES_SHOWN_MAX`. Takes a connection, the project and the
+/// harness agent. Returns the teammates, or a SQLite failure.
+fn teammates(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Vec<Teammate>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT pane,ended_ms IS NOT NULL,stopped_ms IS NOT NULL,seen_ms FROM team_teammates
+             WHERE agent=?1 AND project=?2 ORDER BY ended_ms IS NOT NULL, COALESCE(ended_ms,seen_ms) DESC LIMIT ?3",
+        )
+        .map_err(error)?;
+    let listed = statement
+        .query_map(
+            params![agent, project.as_str(), TEAMMATES_SHOWN_MAX as i64],
+            |row| {
+                Ok(Teammate {
+                    pane: row.get(0)?,
+                    ended: row.get(1)?,
+                    stopped: row.get(2)?,
+                    seen_ms: row.get(3)?,
+                })
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(listed.len() <= TEAMMATES_SHOWN_MAX);
+    Ok(listed)
 }
 
 #[cfg(all(test, unix))]

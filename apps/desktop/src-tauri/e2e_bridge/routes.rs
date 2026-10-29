@@ -863,6 +863,82 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_rename(&id, agent, handle, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_stop_agent" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                agent: i64,
+                generation: u64,
+            }
+            let Args { id, agent, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_stop_agent(&id, agent, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_stop_teammate" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                agent: i64,
+                pane: String,
+                generation: u64,
+            }
+            let Args { id, agent, pane, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_stop_teammate(&id, agent, pane, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_max_harnesses" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                max: Option<u8>,
+                generation: u64,
+            }
+            let Args { id, max, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_max_harnesses(&id, max, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_max_teammates" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                max: Option<u8>,
+                generation: u64,
+            }
+            let Args { id, max, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_max_teammates(&id, max, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_token_budget" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                tokens: Option<u64>,
+                generation: u64,
+            }
+            let Args { id, tokens, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_token_budget(&id, tokens, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_wake_agent" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
