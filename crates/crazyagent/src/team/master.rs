@@ -987,28 +987,71 @@ fn lead_delegate(
         params![id, lead],
     )
     .map_err(state)?;
-    let (chosen, status): (String, String) = tx
-        .query_row(
-            "SELECT harness,status FROM team_tasks WHERE id=?1",
-            [id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+    let chosen: String = tx
+        .query_row("SELECT harness FROM team_tasks WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
         .map_err(state)?;
+    let ready = super::launch_harness(&chosen)
+        .map(|launch| signed_in_account(&tx, answering.access, project, launch))
+        .transpose()?
+        .unwrap_or(false);
+    if !ready {
+        return Ok((
+            format!(
+                "Not started: no account in this project's pool that runs {} is signed in. Pick a harness kind with a signed-in account, or tell the master to ask the owner to sign one in.",
+                super::bound_text(&chosen, AGENT_SHOWN_MAX)
+            ),
+            true,
+        ));
+    }
     if let Some(role) = role {
         super::names::set_task_role(&tx, project, id, role)?;
     }
     tx.commit().map_err(state)?;
-    let waiting = if status == "needs_pool" {
-        " It waits until the pool has a ready account for that harness."
-    } else {
-        ""
-    };
     Ok((
         format!(
-            "Task {id} is queued for a {chosen} worker of yours, in its own worktree and branch cut from your current commit.{waiting} The engine tells you when it ends."
+            "Task {id} is queued for a {chosen} worker of yours, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
         ),
         false,
     ))
+}
+
+/// Tells whether a project's pool holds an account a harness kind can run on now
+/// (DEC-104 K5b), so a lead starts sub-agents only of kinds with one: a keyless endpoint,
+/// or a native managed profile whose latest sign-in observed an account. Takes the
+/// database, the live access, the project and the launch harness. Returns the answer, or
+/// a SQLite failure.
+fn signed_in_account(
+    connection: &Connection,
+    access: &ModelAccess,
+    project: &ProjectId,
+    launch: &str,
+) -> Result<bool, EngineError> {
+    let super::Accounts::Usable(accounts) = super::eligible_accounts(access, project, launch)
+    else {
+        return Ok(false);
+    };
+    for account in &accounts {
+        let profile = match &account.reach {
+            super::TeamReach::Endpoint { .. } => return Ok(true),
+            super::TeamReach::Managed { profile_ref, .. } => profile_ref,
+        };
+        let key = crate::memory::hash(profile.as_str().as_bytes());
+        let phase: Option<String> = connection
+            .query_row(
+                "SELECT phase FROM native_auth_operations WHERE profile_key=?1
+                 ORDER BY generation DESC LIMIT 1",
+                [&key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(state)?;
+        if phase.as_deref() == Some("authenticated_observed") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Describes a lead's own workers as `status` does the team for the master: the running

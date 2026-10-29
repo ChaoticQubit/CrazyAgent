@@ -2016,6 +2016,80 @@ fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     git
 }
 
+/// What one git command run under an agent's profile ended with: its exit code, None when
+/// it was stopped at the setup time limit or by a signal, its output up to the caller's
+/// bound and whether it printed more.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct AgentGit {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) overflow: bool,
+}
+
+/// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
+/// K5b): under its installed profile, as the worktree setup steps run, with the
+/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
+/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// agent's sandbox, its installed profile, the folder, the arguments, the variables and
+/// the most output bytes kept. Returns how it ended, or the spawn failure.
+#[cfg(unix)]
+pub(crate) fn agent_git(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    arguments: &[&str],
+    variables: &[(&str, &str)],
+    limit: usize,
+) -> Result<AgentGit, RunError> {
+    let mut command = worktree_git(sandbox, profile);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .envs(variables.iter().copied())
+        .arg("-C")
+        .arg(folder)
+        .args(arguments)
+        .stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(&mut command)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunError::Invalid("git gave no output pipe".into()))?;
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut stdout = stdout;
+        let read = stdout
+            .by_ref()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut kept);
+        let _ = io::copy(&mut stdout, &mut io::sink());
+        read.map(|_| kept)
+    });
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if started.elapsed() >= SETUP_TIMEOUT {
+            stop_timed_out(&mut child);
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = reader
+        .join()
+        .map_err(|_| RunError::Invalid("git output could not be read".into()))??;
+    let overflow = stdout.len() > limit;
+    stdout.truncate(limit);
+    assert!(stdout.len() <= limit);
+    Ok(AgentGit {
+        code,
+        stdout,
+        overflow,
+    })
+}
+
 #[cfg(unix)]
 static SETUP_DEBUG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 

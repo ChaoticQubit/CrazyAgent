@@ -68,12 +68,17 @@ pub fn task_branch(name: &str) -> Option<String> {
 }
 
 /// Tells whether a stored branch is one the engine names for an agent: `crazyagent/` and a
-/// plain name, as [`task_branch`] and [`linked_branch`] make. Input: the branch. Output:
-/// the answer.
+/// plain name, as [`task_branch`] and [`linked_branch`] make, or a sub-agent's
+/// `crazyagent/<task>--<name>` with both parts plain, as [`teammate_branch`] makes from a
+/// task branch. Input: the branch. Output: the answer.
 pub fn is_agent_branch(branch: &str) -> bool {
-    branch
-        .strip_prefix(LINKED_PREFIX)
-        .is_some_and(|name| plain_name(name) || plain_folder(Path::new(name)).is_some())
+    branch.strip_prefix(LINKED_PREFIX).is_some_and(|name| {
+        plain_name(name)
+            || plain_folder(Path::new(name)).is_some()
+            || name
+                .split_once(TEAMMATE_SEPARATOR)
+                .is_some_and(|(task, teammate)| plain_name(task) && plain_name(teammate))
+    })
 }
 
 /// The branch one teammate of a harness works on inside the harness's clone,
