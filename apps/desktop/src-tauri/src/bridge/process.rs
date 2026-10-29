@@ -69,13 +69,16 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads the owner's `~/.claude/CLAUDE.md` for a preview, run without the bridge lock.
-    /// Only the owner's Import click calls this. Output: the text.
+    /// Reads the owner's `~/.claude/CLAUDE.md` for a preview through the engine's picked
+    /// file read, run without the bridge lock. Only the owner's Import click calls this.
+    /// Output: the text.
     pub fn import_global_instructions(&self) -> Result<Unlocked<String>, BridgeError> {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
+            let home = crazyagent::projects_home::owner_home()
+                .map_err(|_| process_error(EngineError("process_import_missing".into())))?;
             client
-                .import_global_instructions()
+                .read_instruction_file(home.join(".claude").join("CLAUDE.md"))
                 .await
                 .map_err(process_error)
         }))

@@ -1,7 +1,10 @@
 use super::*;
 use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
-pub use crate::instruction_files::{Record as InstructionRecord, Settings as InstructionSettings};
+pub use crate::instruction_files::{
+    ImportFile, Mode as InstructionMode, Record as InstructionRecord,
+    Settings as InstructionSettings,
+};
 use crate::protocol::encode_frame;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,10 @@ pub const PROCESS_CODES: &[&str] = &[
     "process_folder_missing",
     "process_folder_unsafe",
     "process_import_missing",
+    "process_import_outside",
+    "process_import_unmovable",
+    "process_import_unreadable",
+    "process_import_unsafe",
     "process_outcome_unknown",
     "process_owner_unavailable",
     "process_project_folder_missing",
@@ -61,7 +68,15 @@ enum Action {
     Save {
         project: Option<ProjectId>,
     },
-    ImportGlobal,
+    PendingImport {
+        project: ProjectId,
+    },
+    ConfirmImport {
+        project: ProjectId,
+    },
+    ReadFile {
+        path: PathBuf,
+    },
     Default,
     Agent {
         project: ProjectId,
@@ -112,6 +127,9 @@ enum Reply {
     },
     Adoption {
         adoption: Adoption,
+    },
+    Imports {
+        files: Vec<ImportFile>,
     },
     Rejected {
         code: String,
@@ -173,6 +191,7 @@ enum Answer {
     Agent(AgentInstructions),
     Settings(InstructionSettings),
     Adoption(Adoption),
+    Imports(Vec<ImportFile>),
 }
 
 fn unknown() -> EngineError {
@@ -214,11 +233,39 @@ impl OwnerClient {
         }
     }
 
-    /// Reads the owner's own global Claude Code instructions, `~/.claude/CLAUDE.md`, for a
-    /// preview the owner may then save. Only this explicit request reads that file.
-    /// Output: the text, or `process_import_missing` when there is none.
-    pub async fn import_global_instructions(&self) -> Result<String, EngineError> {
-        self.process_text_reply(Action::ImportGlobal).await
+    /// Reads one file the owner picked, for the app-wide instructions editor the owner may
+    /// then save; a link is followed only to a regular file the owner owns. Input: the
+    /// absolute path. Output: the text, at most `agent_home::TEXT_BYTES_MAX` bytes, or a
+    /// `PROCESS_CODES` refusal such as `process_import_unsafe`.
+    pub async fn read_instruction_file(&self, path: PathBuf) -> Result<String, EngineError> {
+        if !path.is_absolute() {
+            return Err(failure("process_request_invalid"));
+        }
+        self.process_text_reply(Action::ReadFile { path }).await
+    }
+
+    /// Lists the project's own instruction files (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md,
+    /// CLAUDE.local.md) an import would copy into its project instructions and move into
+    /// `.crazyagent/imported/`, without changing anything. Input: the project. Output: each
+    /// file with its size, whether git tracks it and why it would stay, empty when none.
+    pub async fn instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<ImportFile>, EngineError> {
+        self.process_imports_reply(Action::PendingImport { project })
+            .await
+    }
+
+    /// Copies the project's own instruction files into its project instructions and moves
+    /// them into `.crazyagent/imported/`, creating `.crazyagent/` when the project has none;
+    /// files that cannot be imported stay. Input: the project. Output: the moved files, or a
+    /// `PROCESS_CODES` refusal with nothing moved.
+    pub async fn confirm_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<ImportFile>, EngineError> {
+        self.process_imports_reply(Action::ConfirmImport { project })
+            .await
     }
 
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
@@ -266,9 +313,9 @@ impl OwnerClient {
         }
     }
 
-    /// Reads one project's agent instruction settings: which instruction files its agents
-    /// get and whether headless Claude runs keep their transcript. Input: the project.
-    /// Output: the settings, the defaults when the owner never changed them.
+    /// Reads one project's agent instruction settings: which of the owner's instruction
+    /// texts its agents get and whether headless Claude runs keep their transcript. Input:
+    /// the project. Output: the settings, the defaults when the owner never changed them.
     pub async fn instruction_settings(
         &self,
         project: ProjectId,
@@ -318,6 +365,17 @@ impl OwnerClient {
     ) -> Result<InstructionSettings, EngineError> {
         match self.process_exchange(action, None).await? {
             (Reply::Settings { settings }, None) => Ok(settings),
+            _ => Err(unknown()),
+        }
+    }
+
+    async fn process_imports_reply(&self, action: Action) -> Result<Vec<ImportFile>, EngineError> {
+        match self.process_exchange(action, None).await? {
+            (Reply::Imports { files }, None)
+                if files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(files)
+            }
             _ => Err(unknown()),
         }
     }
@@ -486,6 +544,10 @@ pub(super) async fn serve(
         }
         Ok(Answer::Settings(settings)) => (Reply::Settings { settings }, None),
         Ok(Answer::Adoption(adoption)) => (Reply::Adoption { adoption }, None),
+        Ok(Answer::Imports(files)) => {
+            assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
+            (Reply::Imports { files }, None)
+        }
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -544,7 +606,6 @@ async fn handle(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("process_unavailable"))?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     tokio::task::spawn_blocking(move || match action {
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
@@ -558,12 +619,19 @@ async fn handle(
         Action::Adoption { project } if text.is_none() => {
             adoption(&root, &project).map(Answer::Adoption)
         }
+        Action::PendingImport { project } if text.is_none() => {
+            crate::instruction_files::pending(&project_folder(&root, &project)?)
+                .map(Answer::Imports)
+        }
+        Action::ConfirmImport { project } if text.is_none() => {
+            crate::instruction_files::import(&project_folder(&root, &project)?).map(Answer::Imports)
+        }
         action => {
             let saved = match (&action, &text) {
                 (Action::Save { project }, Some(text)) => Some((project.clone(), text.clone())),
                 _ => None,
             };
-            match (saved, run(&root, home.as_deref(), action, text)?) {
+            match (saved, run(&root, action, text)?) {
                 (Some((project, text)), None) => {
                     Ok(Answer::Saved(sized(&root, project.as_ref(), &text)))
                 }
@@ -577,14 +645,9 @@ async fn handle(
 }
 
 /// Runs one Process request against the engine root. Inputs: the root holding
-/// `engine.db`, the owner's home for an import, the action and a save's text.
-/// Output: the text read, none for a save, or a plain code.
-fn run(
-    root: &Path,
-    home: Option<&Path>,
-    action: Action,
-    text: Option<String>,
-) -> Result<Option<String>, EngineError> {
+/// `engine.db`, the action and a save's text. Output: the text read, none for a save, or a
+/// plain code.
+fn run(root: &Path, action: Action, text: Option<String>) -> Result<Option<String>, EngineError> {
     let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
     Ok(match (action, text) {
         (Action::Read { project: None }, None) => {
@@ -610,10 +673,7 @@ fn run(
                 .map_err(code)?;
             None
         }
-        (Action::ImportGlobal, None) => {
-            let home = home.ok_or_else(|| failure("process_import_missing"))?;
-            Some(crate::agent_home::import_global(home).map_err(code)?)
-        }
+        (Action::ReadFile { path }, None) => Some(crate::instruction_files::read_picked(&path)?),
         (Action::Default, None) => Some(crate::agent_home::DEFAULT_PROCESS.to_owned()),
         _ => return Err(failure("process_request_invalid")),
     })

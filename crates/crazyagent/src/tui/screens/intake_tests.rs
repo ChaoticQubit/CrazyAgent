@@ -935,6 +935,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         overview: None,
         folder_overview: None,
         finished: false,
+        imported: Vec::new(),
     };
     let mut draft = draft;
     change(&mut draft);

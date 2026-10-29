@@ -436,7 +436,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let mut shell = opened(scope, "");
     let shown = screen(&mut shell);
     assert!(
-        shown.contains("Agent instruction files: Project files"),
+        shown.contains("Agent instructions: Both (app, then project appended)"),
         "{shown}"
     );
     assert!(
@@ -444,15 +444,18 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
-    assert!(shown.contains("committed in your checkout"), "{shown}");
+    assert!(shown.contains("instructions.md appended"), "{shown}");
     let mut stored = InstructionSettings::default();
-    for (files, words) in [
-        (Choice::ProjectAndUser, "Project and user files"),
-        (Choice::None, "Agent instruction files: None"),
-        (Choice::Project, "Agent instruction files: Project files"),
+    for (mode, words) in [
+        (Mode::ProjectOnly, "Agent instructions: Project only"),
+        (Mode::AppOnly, "Agent instructions: App only"),
+        (
+            Mode::Both,
+            "Agent instructions: Both (app, then project appended)",
+        ),
     ] {
         shell.key(Key::Ctrl('f'));
-        stored.files = files;
+        stored.mode = mode;
         let save = ProcessQuery::SaveSettings {
             project: project.clone(),
             settings: stored,
@@ -484,7 +487,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let refused = ProcessQuery::SaveSettings {
         project: project.clone(),
         settings: InstructionSettings {
-            files: Choice::Project,
+            mode: Mode::Both,
             transcripts: false,
         },
     };
@@ -526,7 +529,7 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
         vec![ProcessQuery::SaveSettings {
             project,
             settings: InstructionSettings {
-                files: Choice::ProjectAndUser,
+                mode: Mode::ProjectOnly,
                 transcripts: true,
             },
         }]
@@ -537,7 +540,7 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
 fn the_app_page_has_no_agent_settings() {
     let mut shell = opened(Scope::App, "");
     let shown = screen(&mut shell);
-    assert!(!shown.contains("Agent instruction files"), "{shown}");
+    assert!(!shown.contains("Agent instructions:"), "{shown}");
     shell.key(Key::Ctrl('f'));
     shell.key(Key::Ctrl('t'));
     assert_eq!(requests(&mut shell), vec![]);

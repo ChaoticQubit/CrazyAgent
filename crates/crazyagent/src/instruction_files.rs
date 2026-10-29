@@ -1,12 +1,17 @@
+use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub const FILE_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
-pub const FILES_MAX: usize = SOURCES.len();
+pub const FILES_MAX: usize = NAMES.len();
 const NAME_BYTES_MAX: usize = 32;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
@@ -14,84 +19,102 @@ pub const SECTION_BYTES_MAX: usize =
     HEADING.len() + FILES_MAX * (FILE_HEADING.len() + NAME_BYTES_MAX + 1) + FILES_BYTES_MAX;
 const TABLE: &str = "agent_instruction_settings";
 
-/// Where one instruction file comes from: committed in the owner's checkout at its HEAD,
-/// the owner's checkout folder itself for a file git does not track, or the owner's home.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
-    Committed(&'static str),
-    Checkout(&'static str),
-    Home(&'static str),
-}
-
-const SOURCES: [(&str, Source); 6] = [
-    ("CLAUDE.md", Source::Committed("CLAUDE.md")),
-    (".claude/CLAUDE.md", Source::Committed(".claude/CLAUDE.md")),
-    ("AGENTS.md", Source::Committed("AGENTS.md")),
-    ("CLAUDE.local.md", Source::Checkout("CLAUDE.local.md")),
-    ("~/.claude/CLAUDE.md", Source::Home(".claude/CLAUDE.md")),
-    ("~/.codex/AGENTS.md", Source::Home(".codex/AGENTS.md")),
+/// The names an agent's instruction files record may hold: launches before DEC-106 read
+/// these files and recorded them; a launch now records none.
+const NAMES: [&str; 6] = [
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    "CLAUDE.local.md",
+    "~/.claude/CLAUDE.md",
+    "~/.codex/AGENTS.md",
 ];
+
+/// The project's own instruction files an import copies into the project instructions and
+/// then moves aside, by their path inside the project folder.
+pub const PROJECT_FILES: [&str; 4] = [
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    "CLAUDE.local.md",
+];
+const IMPORTED_DIRECTORY: &str = "imported";
+const MOVED_COPIES_MAX: u32 = 99;
+const IMPORTS_TABLE: &str = "instruction_imports";
 
 const _: () = {
     let mut at = 0;
-    while at < SOURCES.len() {
-        assert!(SOURCES[at].0.len() <= NAME_BYTES_MAX);
+    while at < NAMES.len() {
+        assert!(NAMES[at].len() <= NAME_BYTES_MAX);
         at += 1;
     }
     assert!(FILE_BYTES_MAX <= FILES_BYTES_MAX);
+    assert!(PROJECT_FILES.len() <= NAMES.len());
 };
 
-/// Which instruction files the engine hands a project's agents: the project's own files
-/// (the default), those and the owner's own files, or none.
+static IMPORTING: Mutex<()> = Mutex::new(());
+
+/// Which of the owner's two instruction texts a project's agents get: the project's own,
+/// the app-wide one, or both with the project's appended after the app's (the default).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Choice {
+pub enum Mode {
+    ProjectOnly,
+    AppOnly,
     #[default]
-    Project,
-    ProjectAndUser,
-    None,
+    Both,
 }
 
-impl Choice {
-    /// Returns the stored and wire name of this choice.
+impl Mode {
+    /// Returns the stored and wire name of this mode.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Project => "project",
-            Self::ProjectAndUser => "project_and_user",
-            Self::None => "none",
+            Self::ProjectOnly => "project_only",
+            Self::AppOnly => "app_only",
+            Self::Both => "both",
         }
     }
 
-    /// Reads a stored or wire name back. Input: the name. Output: the choice, or none.
+    /// Reads a stored or wire name back. Input: the name. Output: the mode, or none.
     pub fn parse(name: &str) -> Option<Self> {
-        [Self::Project, Self::ProjectAndUser, Self::None]
+        [Self::ProjectOnly, Self::AppOnly, Self::Both]
             .into_iter()
-            .find(|choice| choice.as_str() == name)
+            .find(|mode| mode.as_str() == name)
+    }
+
+    /// Tells whether agents in this mode get the app-wide instructions.
+    pub fn app(self) -> bool {
+        self != Self::ProjectOnly
+    }
+
+    /// Tells whether agents in this mode get the project instructions.
+    pub fn project(self) -> bool {
+        self != Self::AppOnly
     }
 }
 
-/// One project's agent instruction settings: which instruction files its agents get and
+/// One project's agent instruction settings: which instruction texts its agents get and
 /// whether headless Claude runs keep their transcript. A project the owner never changed
-/// gets the project's files and keeps transcripts.
+/// gets both texts and keeps transcripts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
-    pub files: Choice,
+    pub mode: Mode,
     pub transcripts: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            files: Choice::Project,
+            mode: Mode::Both,
             transcripts: true,
         }
     }
 }
 
-/// What became of one instruction file at a launch: given, left out because its text is
-/// the same as a file given before it, over its bound, a link or other unsafe entry, not
-/// plain text, or unreadable.
+/// What became of one instruction file at a launch before DEC-106: given, left out because
+/// its text was the same as a file given before it, over its bound, a link or other unsafe
+/// entry, not plain text, or unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -141,29 +164,54 @@ pub struct Record {
     pub state: State,
 }
 
-/// The instruction files one launch hands its agent: the prompt section holding every
-/// given file, empty when none was given, and the record of each file found.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Delivery {
-    pub text: String,
-    pub records: Vec<Record>,
+/// One of the project's own instruction files an import found or moved: its path inside
+/// the project folder with `/` separators, its size in bytes, whether the checkout's git
+/// index tracks it, so moving it shows as a deletion, and the plain code of why it is not
+/// imported, none when it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportFile {
+    pub path: String,
+    pub bytes: u64,
+    pub tracked: bool,
+    pub refused: Option<String>,
 }
 
-/// Tells whether a name is one this module records, so a record read back from an agent
-/// home names only these files. Input: the name. Output: true for a known name.
+/// Tells whether a name is one an instruction files record may hold, so a record read back
+/// from an agent home names only these files. Input: the name. Output: true for a known name.
 pub fn known_name(name: &str) -> bool {
-    SOURCES.iter().any(|(known, _)| *known == name)
+    NAMES.contains(&name)
 }
 
-/// Creates the settings table. Input: a connection to `engine.db`. Output: unit.
+/// Creates the settings and import tables, and turns a settings table from before DEC-106,
+/// whose `files` column held the removed instruction files choice, into the mode column
+/// with every stored choice read as the default mode. Input: a connection to `engine.db`.
+/// Output: unit.
 pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_instruction_settings (
             project TEXT PRIMARY KEY,
-            files TEXT NOT NULL,
+            mode TEXT NOT NULL,
             transcripts INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS instruction_imports (
+            project TEXT PRIMARY KEY,
+            moved TEXT NOT NULL
         );",
-    )
+    )?;
+    let old: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name='files')",
+        [],
+        |row| row.get(0),
+    )?;
+    if old {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings RENAME COLUMN files TO mode;
+             UPDATE agent_instruction_settings SET mode='both'
+              WHERE mode IN ('project', 'project_and_user', 'none');",
+        )?;
+    }
+    Ok(())
 }
 
 /// Reads one project's settings; a project, or a database, that never stored any gets the
@@ -184,22 +232,22 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
     }
     let stored: Option<(String, i64)> = connection
         .query_row(
-            "SELECT files, transcripts FROM agent_instruction_settings WHERE project=?1",
+            "SELECT mode, transcripts FROM agent_instruction_settings WHERE project=?1",
             [project.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((files, transcripts)) = stored else {
+    let Some((mode, transcripts)) = stored else {
         return Ok(Settings::default());
     };
-    let files = Choice::parse(&files).ok_or("instruction_settings_invalid")?;
+    let mode = Mode::parse(&mode).ok_or("instruction_settings_invalid")?;
     let transcripts = match transcripts {
         0 => false,
         1 => true,
         _ => return Err("instruction_settings_invalid"),
     };
-    Ok(Settings { files, transcripts })
+    Ok(Settings { mode, transcripts })
 }
 
 /// Stores one project's settings whole, creating the table first when it is missing.
@@ -212,11 +260,11 @@ pub fn save(
 ) -> rusqlite::Result<()> {
     initialize(connection)?;
     let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, files, transcripts) VALUES (?1, ?2, ?3)
-         ON CONFLICT(project) DO UPDATE SET files=excluded.files, transcripts=excluded.transcripts",
+        "INSERT INTO agent_instruction_settings(project, mode, transcripts) VALUES (?1, ?2, ?3)
+         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts",
         params![
             project.as_str(),
-            settings.files.as_str(),
+            settings.mode.as_str(),
             i64::from(settings.transcripts)
         ],
     )?;
@@ -224,210 +272,306 @@ pub fn save(
     Ok(())
 }
 
-#[cfg(test)]
-thread_local! {
-    /// The owner home a test stands in for the process's HOME, so a launch in that test
-    /// reads that home's own instruction files. None keeps the process's HOME.
-    pub(crate) static OWNER_HOME: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
+/// Keeps what an import at a project's onboarding moved, so the onboarding view can name
+/// the moved files to the owner. Inputs: the owner transaction, the project and the moved
+/// files. Output: unit, or a plain code.
+pub fn record_moved(
+    connection: &Connection,
+    project: &ProjectId,
+    moved: &[ImportFile],
+) -> Result<(), EngineError> {
+    assert!(moved.len() <= PROJECT_FILES.len());
+    let text = serde_json::to_string(moved).map_err(|_| failure("process_unavailable"))?;
+    connection
+        .execute(
+            "INSERT INTO instruction_imports(project, moved) VALUES (?1, ?2)
+             ON CONFLICT(project) DO UPDATE SET moved=excluded.moved",
+            params![project.as_str(), text],
+        )
+        .map_err(|_| failure("process_unavailable"))?;
+    Ok(())
 }
 
-/// Finds the owner's home whose own instruction files "Project and user files" reads.
-/// Takes nothing. Returns the home, or none when it is unknown.
-pub(crate) fn owner_home() -> Option<PathBuf> {
-    #[cfg(test)]
-    if let Some(home) = OWNER_HOME.with(|home| home.borrow().clone()) {
-        return Some(home);
+/// Reads what an import at a project's onboarding moved, empty when it moved nothing.
+/// Inputs: a connection to `engine.db` and the project. Output: the moved files, or a
+/// plain code for a record the engine never writes.
+pub fn moved(connection: &Connection, project: &ProjectId) -> Result<Vec<ImportFile>, EngineError> {
+    let table: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [IMPORTS_TABLE],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure("process_unavailable"))?;
+    if !table {
+        return Ok(Vec::new());
     }
-    crate::projects_home::owner_home().ok()
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT moved FROM instruction_imports WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| failure("process_unavailable"))?;
+    let Some(stored) = stored else {
+        return Ok(Vec::new());
+    };
+    let files: Vec<ImportFile> =
+        serde_json::from_str(&stored).map_err(|_| failure("process_unavailable"))?;
+    if files.len() > PROJECT_FILES.len() {
+        return Err(failure("process_unavailable"));
+    }
+    Ok(files)
 }
 
-/// Reads the instruction files one launch hands its agent, never from the agent's own
-/// worktree: the project's `CLAUDE.md`, `.claude/CLAUDE.md` and `AGENTS.md` as committed at
-/// the owner's checkout's HEAD, its untracked `CLAUDE.local.md` from the checkout folder,
-/// and for "Project and user files" the owner's `~/.claude/CLAUDE.md` and
-/// `~/.codex/AGENTS.md`. Each file is at most `FILE_BYTES_MAX` bytes and all given files at
-/// most `FILES_BYTES_MAX`; hidden characters are shown as visible escapes; a file that
-/// cannot be given is recorded with the reason and never stops the launch. A file whose text
-/// is already given elsewhere, such as the app instructions, is recorded as the same and
-/// given once.
-/// Inputs: the owner's checkout folder, the owner's home, the choice and the texts already
-/// given. Output: the section and the records.
-pub fn read(
-    checkout: Option<&Path>,
-    home: Option<&Path>,
-    choice: Choice,
-    already: &[&str],
-) -> Delivery {
-    let mut delivery = Delivery::default();
-    let mut given: Vec<(&str, String)> = Vec::new();
-    let mut total = 0;
-    let mut committed_found = match (choice, checkout) {
-        (Choice::None, _) | (_, None) => Vec::new(),
-        (_, Some(checkout)) => committed(checkout),
-    }
-    .into_iter();
-    for (name, source) in SOURCES {
-        let found = match (source, choice, checkout, home) {
-            (_, Choice::None, _, _) => continue,
-            (Source::Committed(_), _, Some(_), _) => committed_found
-                .next()
-                .expect("one committed read per committed source"),
-            (Source::Checkout(path), _, Some(checkout), _) => {
-                plain(&checkout.join(path), crate::platform::open_plain)
-            }
-            (Source::Home(path), Choice::ProjectAndUser, _, Some(home)) => {
-                plain(&home.join(path), open_following)
-            }
-            _ => continue,
-        };
-        let (bytes, state) = match found {
-            Found::Missing => continue,
-            Found::Refused(bytes, state) => (bytes, state),
-            Found::Text(bytes, text) => {
-                let text = crate::memory::visible_text(text.trim_end());
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let state = if given.iter().any(|(_, earlier)| *earlier == text)
-                    || already
-                        .iter()
-                        .any(|earlier| !earlier.trim().is_empty() && earlier.trim() == text.trim())
-                {
-                    State::Same
-                } else if text.len() > FILE_BYTES_MAX || total + text.len() > FILES_BYTES_MAX {
-                    State::TooLarge
-                } else {
-                    total += text.len();
-                    given.push((name, text));
-                    State::Given
-                };
-                (bytes, state)
-            }
-        };
-        delivery.records.push(Record {
-            name: name.to_owned(),
-            bytes,
-            state,
-        });
-    }
-    if !given.is_empty() {
-        delivery.text.push_str(HEADING);
-        for (name, text) in &given {
-            delivery.text.push_str("\n### ");
-            delivery.text.push_str(name);
-            delivery.text.push_str("\n\n");
-            delivery.text.push_str(text);
-            delivery.text.push('\n');
-        }
-    }
-    assert!(committed_found.next().is_none());
-    assert!(total <= FILES_BYTES_MAX);
-    assert!(delivery.text.len() <= SECTION_BYTES_MAX);
-    assert!(delivery.records.len() <= FILES_MAX);
-    delivery
+fn failure(code: &str) -> EngineError {
+    EngineError(code.into())
 }
 
-/// What reading one instruction file found: nothing there, a refusal with the file's size
-/// and the reason, or its text with its size.
-enum Found {
-    Missing,
-    Refused(u64, State),
-    Text(u64, String),
+/// One project instruction file found for an import: what the owner is shown and, when
+/// it can be imported, the file it resolves to and its text.
+struct Found {
+    file: ImportFile,
+    read: Option<(PathBuf, String)>,
 }
 
-/// Turns a file's bytes into its text when it is plain UTF-8 with no NUL and within its
-/// bound. Inputs: the bytes, at most one past the bound, and whether git cut the blob.
-/// Output: what was found.
-fn text_of(bytes: Vec<u8>, size: u64, cut: bool) -> Found {
-    if cut || bytes.len() > FILE_BYTES_MAX {
-        return Found::Refused(size, State::TooLarge);
-    }
-    match String::from_utf8(bytes) {
-        Ok(text) if !text.contains('\0') => Found::Text(size, text),
-        _ => Found::Refused(size, State::Invalid),
-    }
+/// Lists the project's own instruction files an import would copy and move, without
+/// changing anything: each with its size, whether git tracks it and why it would be left
+/// in place, if so. Input: the project folder. Output: the files, empty when there are
+/// none, or a plain code for a missing folder.
+pub fn pending(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let found = find(&root);
+    assert!(found.len() <= PROJECT_FILES.len());
+    Ok(found.into_iter().map(|found| found.file).collect())
 }
 
-/// Reads every committed source as committed at the owner's checkout's HEAD with one engine
-/// git repository, which runs nothing the repository configures; a folder that is not a git
-/// checkout has none of them. Input: the checkout folder. Output: what was found for each
-/// committed source, in the order of `SOURCES`.
-fn committed(checkout: &Path) -> Vec<Found> {
-    let paths: Vec<&str> = SOURCES
-        .iter()
-        .filter_map(|(_, source)| match source {
-            Source::Committed(path) => Some(*path),
-            _ => None,
-        })
+/// Copies the project's own instruction files into its project instructions, each text
+/// once under a heading naming every file that held it, after the text already there and
+/// never twice, then moves each copied file into `.crazyagent/imported/` at its same path.
+/// A file that cannot be imported stays where it is. A project without `.crazyagent/`
+/// gets it first. Input: the project folder. Output: the moved files, or a plain code
+/// with nothing moved, such as `process_text_too_large` when the result would not fit.
+pub fn import(folder: &Path) -> Result<Vec<ImportFile>, EngineError> {
+    let _importing = IMPORTING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let state = crate::projects_home::prepare_layout(&root)
+        .map_err(|_| failure("process_folder_unsafe"))?;
+    let found: Vec<Found> = find(&root)
+        .into_iter()
+        .filter(|found| found.read.is_some())
         .collect();
-    let refused = |error: &crate::engine::EngineError| match error.0.as_str() {
-        "instruction_file_unsafe" => Found::Refused(0, State::Unsafe),
-        _ => Found::Refused(0, State::Unreadable),
-    };
-    let not_git = matches!(
-        std::fs::symlink_metadata(checkout.join(".git")),
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound
-    );
-    let found: Vec<Found> = match not_git {
-        true => paths.iter().map(|_| Found::Missing).collect(),
-        false => match crate::landing::head_files(checkout, &paths, FILE_BYTES_MAX) {
-            Err(error) => paths.iter().map(|_| refused(&error)).collect(),
-            Ok(entries) => entries
-                .into_iter()
-                .map(|entry| match entry {
-                    Ok(None) => Found::Missing,
-                    Ok(Some(blob)) => text_of(blob.bytes, blob.size, blob.cut),
-                    Err(error) => refused(&error),
-                })
-                .collect(),
-        },
-    };
-    assert_eq!(found.len(), paths.len());
-    found
-}
-
-/// Opens a file of the owner's own home: a link is followed, as the owner's own files often
-/// are links into a dotfiles folder, and a FIFO is never waited on. Input: the path.
-/// Output: the open file or the I/O error.
-fn open_following(path: &Path) -> std::io::Result<std::fs::File> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    if found.is_empty() {
+        return Ok(Vec::new());
     }
-    options.open(path)
+    let code = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+    let existing = crate::agent_home::read_project(&root).map_err(code)?;
+    let mut sections: Vec<(Vec<&str>, &Path, &str)> = Vec::new();
+    for found in &found {
+        let Some((target, text)) = &found.read else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        match sections
+            .iter_mut()
+            .find(|(_, held, same)| *held == target.as_path() || *same == text)
+        {
+            Some((names, _, _)) => names.push(&found.file.path),
+            None => sections.push((vec![found.file.path.as_str()], target, text)),
+        }
+    }
+    let mut text = existing.clone();
+    for (names, _, part) in &sections {
+        if existing.contains(part) {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
+        }
+        text.push_str("## Imported from ");
+        text.push_str(&names.join(", "));
+        text.push_str("\n\n");
+        text.push_str(part);
+        text.push('\n');
+    }
+    if text.len() > crate::agent_home::TEXT_BYTES_MAX {
+        return Err(failure("process_text_too_large"));
+    }
+    if text != existing {
+        crate::agent_home::save_project(&root, &text).map_err(code)?;
+    }
+    let mut moved = Vec::new();
+    for found in found {
+        move_aside(&root, &state, &found.file.path)?;
+        moved.push(found.file);
+    }
+    assert!(moved.len() <= PROJECT_FILES.len());
+    Ok(moved)
 }
 
-/// Reads one file of the owner's checkout folder or home through the given open, which
-/// must not wait on a FIFO, and only when the opened entry is a regular file. Inputs: the
-/// path and the open. Output: what was found.
-fn plain(path: &Path, open: fn(&Path) -> std::io::Result<std::fs::File>) -> Found {
-    let file = match open(path) {
-        Ok(file) => file,
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Found::Missing,
-        Err(_) if std::fs::symlink_metadata(path).is_ok() => {
-            return Found::Refused(0, State::Unsafe);
+/// Reads one file the owner picked for the app-wide instructions editor; a link is
+/// followed to the file it names. Input: the absolute path. Output: the text, or
+/// `process_import_missing`, `process_import_unsafe` for anything but a regular file the
+/// owner owns, or another plain code.
+pub fn read_picked(path: &Path) -> Result<String, EngineError> {
+    if !path.is_absolute() {
+        return Err(failure("process_request_invalid"));
+    }
+    let target = match fs::canonicalize(path) {
+        Ok(target) => target,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            return Err(failure("process_import_missing"));
         }
-        Err(_) => return Found::Refused(0, State::Unreadable),
+        Err(_) => return Err(failure("process_import_unreadable")),
     };
-    let Ok(held) = file.metadata() else {
-        return Found::Refused(0, State::Unreadable);
+    owned_text(&target).map_err(failure)
+}
+
+/// Finds the project's own instruction files and checks each: a file is imported only
+/// when it, or the file a link names, is a regular file the owner owns inside the project
+/// folder, outside `.crazyagent/`. Input: the canonical project folder. Output: what was
+/// found, in the order of `PROJECT_FILES`.
+fn find(root: &Path) -> Vec<Found> {
+    let present: Vec<&str> = PROJECT_FILES
+        .into_iter()
+        .filter(|path| fs::symlink_metadata(root.join(path)).is_ok())
+        .collect();
+    if present.is_empty() {
+        return Vec::new();
+    }
+    let tracked = match fs::symlink_metadata(root.join(".git")) {
+        Ok(metadata) if metadata.is_dir() => crate::landing::tracked_files(root, &present)
+            .unwrap_or_else(|_| vec![false; present.len()]),
+        _ => vec![false; present.len()],
     };
-    if !held.is_file() {
-        return Found::Refused(0, State::Unsafe);
+    assert_eq!(tracked.len(), present.len());
+    present
+        .into_iter()
+        .zip(tracked)
+        .map(|(path, tracked)| {
+            let named = root.join(path);
+            let read = fs::canonicalize(&named)
+                .map_err(|_| "process_import_unreadable")
+                .and_then(|target| {
+                    let inside = target.starts_with(root)
+                        && !target
+                            .starts_with(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY));
+                    match inside {
+                        true => owned_text(&target).map(|text| (target, text)),
+                        false => Err("process_import_outside"),
+                    }
+                });
+            let bytes = match &read {
+                Ok((_, text)) => text.len() as u64,
+                Err(_) => fs::symlink_metadata(&named).map_or(0, |metadata| metadata.len()),
+            };
+            let (read, refused) = match read {
+                Ok(read) => (Some(read), None),
+                Err(code) => (None, Some(code.to_owned())),
+            };
+            Found {
+                file: ImportFile {
+                    path: path.to_owned(),
+                    bytes,
+                    tracked,
+                    refused,
+                },
+                read,
+            }
+        })
+        .collect()
+}
+
+/// Reads a file at a path with no link in it as owner text: a regular file the owner owns,
+/// at most `agent_home::TEXT_BYTES_MAX` bytes of UTF-8 with no NUL, opened without
+/// following a link or waiting on a FIFO. Input: the canonical path. Output: the text, or
+/// a plain code.
+fn owned_text(target: &Path) -> Result<String, &'static str> {
+    let file = crate::platform::open_plain(target).map_err(|_| "process_import_unreadable")?;
+    let held = file.metadata().map_err(|_| "process_import_unreadable")?;
+    if !held.is_file() || !owned(&held) {
+        return Err("process_import_unsafe");
+    }
+    if held.len() > crate::agent_home::TEXT_BYTES_MAX as u64 {
+        return Err("process_text_too_large");
     }
     let mut bytes = Vec::new();
-    if file
-        .take(FILE_BYTES_MAX as u64 + 1)
+    file.take(crate::agent_home::TEXT_BYTES_MAX as u64 + 1)
         .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return Found::Refused(held.len(), State::Unreadable);
+        .map_err(|_| "process_import_unreadable")?;
+    if bytes.len() > crate::agent_home::TEXT_BYTES_MAX {
+        return Err("process_text_too_large");
     }
-    text_of(bytes, held.len(), false)
+    let text = String::from_utf8(bytes).map_err(|_| "process_text_invalid")?;
+    if text.contains('\0') {
+        return Err("process_text_invalid");
+    }
+    assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
+    Ok(text)
+}
+
+#[cfg(unix)]
+fn owned(metadata: &fs::Metadata) -> bool {
+    metadata.uid() == rustix::process::geteuid().as_raw()
+}
+
+#[cfg(not(unix))]
+fn owned(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+/// Moves one project instruction file, or the link at its path, to the same path under
+/// `.crazyagent/imported/`, beside an earlier move as `<path>.2` and so on rather than over
+/// it. Inputs: the canonical project folder, its `.crazyagent/` folder and the file's path
+/// inside the project. Output: unit, or `process_import_unmovable`.
+fn move_aside(root: &Path, state: &Path, path: &str) -> Result<(), EngineError> {
+    assert!(PROJECT_FILES.contains(&path));
+    let unmovable = || failure("process_import_unmovable");
+    let mut folder = state.join(IMPORTED_DIRECTORY);
+    real_folder(&folder).map_err(|_| unmovable())?;
+    let relative = Path::new(path);
+    if let Some(parent) = relative
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        folder = folder.join(parent);
+        real_folder(&folder).map_err(|_| unmovable())?;
+    }
+    let name = relative
+        .file_name()
+        .ok_or_else(unmovable)?
+        .to_string_lossy()
+        .into_owned();
+    let destination = (1..=MOVED_COPIES_MAX)
+        .map(|copy| match copy {
+            1 => folder.join(&name),
+            _ => folder.join(format!("{name}.{copy}")),
+        })
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .ok_or_else(unmovable)?;
+    fs::rename(root.join(path), &destination).map_err(|_| unmovable())?;
+    assert!(fs::symlink_metadata(root.join(path)).is_err());
+    Ok(())
+}
+
+/// Makes a folder that is a real folder, not a link, creating it when it is missing.
+/// Input: the path. Output: unit, or an error for anything else at the path.
+fn real_folder(folder: &Path) -> std::io::Result<()> {
+    match fs::create_dir(folder) {
+        Err(problem) if problem.kind() != std::io::ErrorKind::AlreadyExists => return Err(problem),
+        _ => {}
+    }
+    let metadata = fs::symlink_metadata(folder)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
 }
 
 #[cfg(all(test, unix))]

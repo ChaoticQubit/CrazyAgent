@@ -127,21 +127,19 @@ impl Harness {
 /// The project one agent launch serves: the engine data folder holding `engine.db` and
 /// the app-wide instructions, the project id, the project folder whose
 /// `.crazyagent/instructions.md` holds the project instructions, none when the project
-/// has no recorded folder, which instruction files the owner chose for its agents and the
-/// owner's home those files may be read from.
+/// has no recorded folder, and which of the two texts the owner chose for its agents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
     pub data: PathBuf,
     pub id: ProjectId,
     pub folder: Option<PathBuf>,
-    pub files: crate::instruction_files::Choice,
-    pub owner_home: Option<PathBuf>,
+    pub mode: crate::instruction_files::Mode,
 }
 
 /// What every agent of one project receives at a launch: the owner's app and project
-/// instructions with the instruction files the engine read after them, the engine's record
-/// of each instruction file it found, and how many bytes at the end of the text are the
-/// instruction files section.
+/// instructions the project's mode gives, the record of instruction files found, empty
+/// since the engine reads no instruction file outside the app (DEC-106), and how many
+/// bytes at the end of the text are an instruction files section, zero.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Given {
     pub text: String,
@@ -203,57 +201,37 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
     write_whole(&state, PROJECT_FILE, text.as_bytes())
 }
 
-/// Builds what every agent of the project receives: the app-wide instructions, then the
-/// project instructions, each under its heading, then the instruction files the owner
-/// chose, read by the engine from the owner's checkout and home, each identical text once;
-/// empty when all are blank. Everything is given inline, never moved to a file the agent
-/// must open. Input: the project. Output: at most `GIVEN_BYTES_MAX` bytes of markdown with
-/// the record of each instruction file, or a code; past the limit the code names the
-/// largest part, such as `agent_instructions_too_large_home_claude_claude_md`.
+/// Builds what every agent of the project receives from the owner's two instruction texts
+/// by the project's mode: the app-wide instructions, the project instructions, or the app
+/// text with the project text appended, each under its heading; empty when the given texts
+/// are blank. No instruction file outside the app is read. Everything is given inline,
+/// never moved to a file the agent must open. Input: the project. Output: at most
+/// `GIVEN_BYTES_MAX` bytes of markdown, or a code; past the limit it names the larger
+/// part, such as `agent_instructions_too_large_project`.
 pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
-    let app = read_app(&project.data)?;
-    let own = match &project.folder {
-        Some(folder) => read_project(folder)?,
-        None => String::new(),
+    let app = match project.mode.app() {
+        true => read_app(&project.data)?,
+        false => String::new(),
     };
-    let delivery = crate::instruction_files::read(
-        project.folder.as_deref(),
-        project.owner_home.as_deref(),
-        project.files,
-        &[app.as_str(), own.as_str()],
-    );
-    if let Some(record) = delivery
-        .records
-        .iter()
-        .find(|record| record.state == crate::instruction_files::State::TooLarge)
-    {
-        return Err(too_large(&record.name));
-    }
-    let mut text = render(&app, &own);
-    text.push_str(&delivery.text);
+    let own = match (&project.folder, project.mode.project()) {
+        (Some(folder), true) => read_project(folder)?,
+        _ => String::new(),
+    };
+    let text = render(&app, &own);
     if text.len() > GIVEN_BYTES_MAX {
-        let largest = [
-            ("app", app.trim().len() as u64),
-            ("project", own.trim().len() as u64),
-        ]
-        .into_iter()
-        .chain(
-            delivery
-                .records
-                .iter()
-                .filter(|record| record.state == crate::instruction_files::State::Given)
-                .map(|record| (record.name.as_str(), record.bytes)),
-        )
-        .max_by_key(|(_, bytes)| *bytes)
-        .map(|(name, _)| name)
-        .unwrap_or("app");
+        let largest = match app.trim().len() >= own.trim().len() {
+            true => "app",
+            false => "project",
+        };
         return Err(too_large(largest));
     }
     assert!(text.len() <= GIVEN_BYTES_MAX && GIVEN_BYTES_MAX <= PROCESS_BYTES_MAX);
+    assert!(project.mode.app() || app.is_empty());
+    assert!(project.mode.project() || own.is_empty());
     Ok(Given {
         text,
-        files: delivery.records,
-        section_bytes: delivery.text.len(),
+        files: Vec::new(),
+        section_bytes: 0,
     })
 }
 
@@ -450,25 +428,6 @@ fn parse_files(record: &str) -> Result<Vec<crate::instruction_files::Record>, Ag
         return Err(failure("agent_instructions_too_large"));
     }
     Ok(files)
-}
-
-/// Reads the owner's own global Claude Code instructions, `<home>/.claude/CLAUDE.md`, for
-/// a preview on the owner's explicit request; a link is followed because the owner's own
-/// file often is one. Input: the owner's home. Output: the text, `process_import_missing`
-/// when there is no file, or a plain code when it is not plain text or too large.
-pub fn import_global(home: &Path) -> Result<String, AgentHomeError> {
-    let path = home.join(".claude").join("CLAUDE.md");
-    match fs::metadata(&path) {
-        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
-            Err(failure("process_import_missing"))
-        }
-        Err(_) => Err(failure("process_text_unreadable")),
-        Ok(metadata) if !metadata.is_file() => Err(failure("process_text_unsafe")),
-        Ok(_) => {
-            let file = File::open(&path).map_err(|_| failure("process_text_unreadable"))?;
-            read_text(file)
-        }
-    }
 }
 
 /// What one agent was given at its last launch, read back from its private home: the

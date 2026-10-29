@@ -523,108 +523,41 @@ pub fn record_worktree_start(
     }
 }
 
-/// One file as committed in the owner's checkout: its bytes up to the reader's bound, its
-/// size and whether the bound cut it.
-#[derive(Debug)]
-pub struct HeadBlob {
-    pub bytes: Vec<u8>,
-    pub size: u64,
-    pub cut: bool,
-}
+const TRACKED_LISTING_BYTES_MAX: usize = 4096;
 
-/// What reading one committed file found: its blob, none when nothing is at the path, or
-/// `instruction_file_unsafe` for a link, folder or submodule there.
-pub type HeadEntry = Result<Option<HeadBlob>, EngineError>;
-
-const HEAD_ENTRY_BYTES_MAX: usize = 4096;
-
-/// Reads regular files as committed at the commit the owner's checkout's HEAD names, with
-/// one engine git repository that runs nothing the repository configures, never from a
-/// work tree. Inputs: the checkout root, the distinct paths inside the repository, each
-/// without pathspec magic, and the most bytes to keep of each. Output: one entry per path
-/// in order, every one none when HEAD names no commit, or a plain git code for the
-/// repository.
-pub fn head_files(
-    checkout: &Path,
-    paths: &[&str],
-    limit: usize,
-) -> Result<Vec<HeadEntry>, EngineError> {
+/// Tells which of some paths the owner's checkout's git index tracks, with one engine git
+/// repository that runs nothing the repository configures. Inputs: the checkout root and
+/// the distinct paths inside the repository, each without pathspec magic. Output: one flag
+/// per path in order, or a plain git code for the repository.
+pub fn tracked_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineError> {
     #[cfg(unix)]
-    return committed_files(checkout, paths, limit);
+    return indexed_files(checkout, paths);
     #[cfg(not(unix))]
     {
-        let _ = (checkout, paths, limit);
+        let _ = (checkout, paths);
         Err(unavailable())
     }
 }
 
 #[cfg(unix)]
-fn committed_files(
-    checkout: &Path,
-    paths: &[&str],
-    limit: usize,
-) -> Result<Vec<HeadEntry>, EngineError> {
+fn indexed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineError> {
     assert!(paths.iter().enumerate().all(|(at, path)| {
         !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
     }));
-    let git_failed = || git::failure("changes_git_failed");
-    let owner = git::Repo::open(checkout, &checkout.join(".git"), None)?;
-    let Some(head) = owner.commit_of("HEAD")? else {
-        return Ok(paths.iter().map(|_| Ok(None)).collect());
-    };
-    let mut arguments = vec![
-        "ls-tree",
-        "-z",
-        "--full-tree",
-        "--format=%(objectmode) %(objecttype) %(objectname) %(objectsize)%x09%(path)",
-        head.as_str(),
-        "--",
-    ];
+    let owner = git::Repo::open(checkout, &checkout.join(".git"), Some(checkout))?;
+    let mut arguments = vec!["ls-files", "-z", "--cached", "--full-name", "--"];
     arguments.extend_from_slice(paths);
-    let listing = owner.capture(&arguments, HEAD_ENTRY_BYTES_MAX * paths.len())?;
-    let mut entries: Vec<(&str, &str, &str, &str, &str)> = Vec::new();
-    for entry in listing.split(|byte| *byte == 0) {
-        if entry.is_empty() {
-            continue;
-        }
-        let entry = std::str::from_utf8(entry).map_err(|_| git_failed())?;
-        let (fields, named) = entry.split_once('\t').ok_or_else(git_failed)?;
-        let fields: Vec<&str> = fields.split(' ').collect();
-        let [mode, kind, object, size] = fields.as_slice() else {
-            return Err(git_failed());
-        };
-        entries.push((named, mode, kind, object, size));
-    }
-    if !listing.is_empty() && !listing.ends_with(b"\0") {
-        return Err(git_failed());
-    }
-    let read = |path: &str| -> HeadEntry {
-        let Some(&(_, mode, kind, object, size)) =
-            entries.iter().find(|(named, ..)| *named == path)
-        else {
-            return Ok(None);
-        };
-        if kind != "blob" || !matches!(mode, "100644" | "100755") {
-            return Err(EngineError("instruction_file_unsafe".into()));
-        }
-        if !git::is_object_id(object) {
-            return Err(git_failed());
-        }
-        let size: u64 = size.parse().map_err(|_| git_failed())?;
-        let output = owner.exec(&["cat-file", "blob", object], None, &[], limit)?;
-        if output.code != 0 {
-            return Err(git_failed());
-        }
-        assert!(output.stdout.len() <= limit);
-        Ok(Some(HeadBlob {
-            bytes: output.stdout,
-            size,
-            cut: output.overflow,
-        }))
-    };
-    let found: Vec<HeadEntry> = paths.iter().map(|path| read(path)).collect();
-    assert_eq!(found.len(), paths.len());
-    Ok(found)
+    let listing = owner.capture(&arguments, TRACKED_LISTING_BYTES_MAX)?;
+    let listed: Vec<&[u8]> = listing
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let tracked: Vec<bool> = paths
+        .iter()
+        .map(|path| listed.contains(&path.as_bytes()))
+        .collect();
+    assert_eq!(tracked.len(), paths.len());
+    Ok(tracked)
 }
 
 /// Commits every change in an agent worktree as the engine, with hooks, filters and

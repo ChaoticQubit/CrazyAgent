@@ -46,7 +46,7 @@ fn with_project(root: &Path, folder: &Path) -> ProjectId {
 }
 
 fn read(root: &Path, project: Option<ProjectId>) -> Result<Option<String>, EngineError> {
-    run(root, None, Action::Read { project }, None)
+    run(root, Action::Read { project }, None)
 }
 
 fn save(
@@ -54,7 +54,7 @@ fn save(
     project: Option<ProjectId>,
     text: &str,
 ) -> Result<Option<String>, EngineError> {
-    run(root, None, Action::Save { project }, Some(text.into()))
+    run(root, Action::Save { project }, Some(text.into()))
 }
 
 #[test]
@@ -99,12 +99,13 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
     fs::write(home.join(".claude/CLAUDE.md"), "OWNER-GLOBAL-RULE\n").unwrap();
 
     for action in [Action::Read { project: None }, Action::Default] {
-        let text = run(&root, Some(&home), action, None).unwrap().unwrap();
+        let text = run(&root, action, None).unwrap().unwrap();
         assert!(!text.contains("OWNER-GLOBAL-RULE"));
     }
     assert_eq!(crate::agent_home::read_app(&root).unwrap(), "");
 
-    let imported = run(&root, Some(&home), Action::ImportGlobal, None).unwrap();
+    let path = home.join(".claude/CLAUDE.md");
+    let imported = run(&root, Action::ReadFile { path }, None).unwrap();
     assert_eq!(imported.as_deref(), Some("OWNER-GLOBAL-RULE\n"));
     assert_eq!(
         crate::agent_home::read_app(&root).unwrap(),
@@ -114,15 +115,15 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
 
     let empty = root.join("empty");
     fs::create_dir_all(&empty).unwrap();
+    let path = empty.join(".claude/CLAUDE.md");
     assert_eq!(
-        run(&root, Some(&empty), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_import_missing"
     );
+    let path = PathBuf::from("relative/CLAUDE.md");
     assert_eq!(
-        run(&root, None, Action::ImportGlobal, None).unwrap_err().0,
-        "process_import_missing"
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
+        "process_request_invalid"
     );
 }
 
@@ -136,17 +137,16 @@ fn an_import_follows_the_owners_linked_global_file() {
     fs::create_dir_all(&dotfiles).unwrap();
     fs::write(dotfiles.join("AGENTS.md"), "LINKED-RULE\n").unwrap();
     std::os::unix::fs::symlink(dotfiles.join("AGENTS.md"), home.join(".claude/CLAUDE.md")).unwrap();
+    let path = home.join(".claude/CLAUDE.md");
     assert_eq!(
-        run(&root, Some(&home), Action::ImportGlobal, None)
+        run(&root, Action::ReadFile { path: path.clone() }, None)
             .unwrap()
             .as_deref(),
         Some("LINKED-RULE\n")
     );
     fs::write(dotfiles.join("AGENTS.md"), "a".repeat(TEXT_BYTES_MAX + 1)).unwrap();
     assert_eq!(
-        run(&root, Some(&home), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_text_too_large"
     );
 }
@@ -154,7 +154,7 @@ fn an_import_follows_the_owners_linked_global_file() {
 #[test]
 fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
     let (_directory, root) = root();
-    let text = run(&root, None, Action::Default, None).unwrap().unwrap();
+    let text = run(&root, Action::Default, None).unwrap().unwrap();
     assert_eq!(text, crate::agent_home::DEFAULT_PROCESS);
     crate::agent_home::validate(&text).unwrap();
     assert!(!text.contains('\u{2014}'), "no em dash");
@@ -196,15 +196,13 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
 fn a_mismatched_or_oversized_request_is_refused() {
     let (_directory, root) = root();
     assert_eq!(
-        run(&root, None, Action::Save { project: None }, None)
+        run(&root, Action::Save { project: None }, None)
             .unwrap_err()
             .0,
         "process_request_invalid"
     );
     assert_eq!(
-        run(&root, None, Action::Default, Some("x".into()))
-            .unwrap_err()
-            .0,
+        run(&root, Action::Default, Some("x".into())).unwrap_err().0,
         "process_request_invalid"
     );
     assert_eq!(
@@ -240,16 +238,14 @@ fn a_mismatched_or_oversized_request_is_refused() {
 
 #[test]
 fn saves_at_once_each_read_back_the_settings_they_stored() {
-    use crate::instruction_files::Choice;
+    use crate::instruction_files::Mode;
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
     let project = with_project(&root, &folder);
-    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+    let options: Vec<InstructionSettings> = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
-        .flat_map(|files| {
-            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
-        })
+        .flat_map(|mode| [true, false].map(|transcripts| InstructionSettings { mode, transcripts }))
         .collect();
     assert_eq!(options.len(), 6);
     let start = std::sync::Barrier::new(options.len());
@@ -341,8 +337,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
@@ -449,7 +444,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
 #[test]
 fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
     use crate::agent_home::{AgentProject, Given, Harness, prepare};
-    use crate::instruction_files::{Choice, Record, State};
+    use crate::instruction_files::{Mode, Record, State};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
@@ -477,8 +472,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: Choice::Project,
-        owner_home: None,
+        mode: Mode::Both,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(
@@ -521,8 +515,7 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let given = Given {
         text: "# Rules\n".into(),
