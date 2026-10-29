@@ -1403,8 +1403,9 @@ export interface OverlapEdge {
 }
 
 /** One assignment edge from the node leading an agent to the agent running the task, or from
- * the master to the master while no agent took it. `reply` is the result or the plain problem
- * once the task ended. */
+ * the master to the master while no agent took it. `to` stays the agent's own node id while
+ * that agent is not drawn, so its task counts for no other card; `agent_label` names it.
+ * `reply` is the result or the plain problem once the task ended. */
 export interface GraphEdge {
   from: string;
   to: string;
@@ -1414,6 +1415,7 @@ export interface GraphEdge {
   state: GraphEdgeState;
   reply: string | null;
   lead?: string | null;
+  agent_label?: string | null;
 }
 
 /** One project's team as a tree of who leads whom, its assignment edges, and the unread

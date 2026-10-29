@@ -3,7 +3,9 @@ use crate::config::plain_problem;
 use crate::engine::owner::AgentInstructions;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
+use crate::team::{
+    AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph,
+};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
@@ -763,7 +765,7 @@ impl Team {
                 "{} {} {}",
                 label(graph, &edge.from),
                 glyphs.right,
-                label(graph, &edge.to)
+                ran_by(graph, edge)
             )),
             styled(
                 format!("{} {word}", glyphs.status(kind)),
@@ -1436,7 +1438,7 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             let (kind, _) = edge_status(edge.state);
             Line::from(vec![
                 Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                Span::raw(format!(" {}  ", label(graph, &edge.to))),
+                Span::raw(format!(" {}  ", ran_by(graph, edge))),
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
@@ -1524,6 +1526,15 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .iter()
         .find(|node| node.id == id)
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
+}
+
+/// Names the agent a task went to: the sub-agent or teammate that ran it, drawn or not, so a
+/// stopped agent's task keeps its name, else the node it waits on. Takes the graph and the
+/// edge. Returns the name.
+fn ran_by(graph: &TeamGraph, edge: &GraphEdge) -> String {
+    edge.agent_label
+        .as_deref()
+        .map_or_else(|| label(graph, &edge.to), ToOwned::to_owned)
 }
 
 /// The lines of an agent's Instructions box: what its harness reported loading and

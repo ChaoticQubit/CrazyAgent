@@ -86,10 +86,11 @@ fn config_bytes(path: &Path) -> Option<Vec<u8>> {
 
 /// Keeps one team agent row per live native teammate of a lead: role `teammate`, parent the
 /// lead, and the pane id `team_teammates` records for the same pane. A member whose pane is
-/// live gets a row. A row stopped in this run of the lead is marked working again only when
-/// the engine closed or the pane went missing; one the owner stopped, the cap ended or that
-/// ended with its lead stays stopped while its pane is ended. A teammate row whose pane is no
-/// longer live is stopped. Only panes the terminal host lists as the lead's live teammate
+/// live gets a row, Working until the relay reads it resting; an Idle row stays Idle, so
+/// only the teammate's own hook moves it (`relay::serve`). A row stopped in this run of the
+/// lead is marked working again only when the engine closed or the pane went missing; one
+/// the owner stopped, the cap ended or that ended with its lead stays stopped while its pane
+/// is ended. A teammate row whose pane is no longer live is stopped. Only panes the terminal host lists as the lead's live teammate
 /// panes count, never a pane a config file alone names. Inputs: the connection, project,
 /// lead, its home, its live teammate pane ids, when this run of the lead started and the
 /// time. Output: any SQLite failure.
@@ -144,8 +145,8 @@ pub(super) fn register(
             Some((id, true)) => {
                 connection
                     .execute(
-                        "UPDATE team_agents SET status='working', error=NULL, stopped_ms=NULL,
-                         heartbeat_ms=?2 WHERE id=?1",
+                        "UPDATE team_agents SET status=CASE status WHEN 'idle' THEN 'idle' ELSE 'working' END,
+                         error=NULL, stopped_ms=NULL, heartbeat_ms=?2 WHERE id=?1",
                         params![id, at],
                     )
                     .map_err(error)?;

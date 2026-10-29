@@ -95,11 +95,13 @@ pub enum EdgeState {
 }
 
 /// One assignment edge: a task from the node that leads its agent to the agent running it.
-/// A task whose agent is not drawn goes to the drawn lead that handed it out, else from the
-/// master to the master, as one no agent took yet does. `text` is the task, `reply`
-/// the result or the plain problem once it ended, and `source` tells a task the master
-/// handed out from one the owner handed off. `lead` is the drawn node of the lead that
-/// handed it out, none for a task of the master or the owner.
+/// `to` is that agent's own node id even while the agent is not drawn, so its task never
+/// counts for another node; such a task comes from the drawn lead that handed it out, else
+/// from the master, and one no agent took yet goes from the master to the master. `text` is
+/// the task, `reply` the result or the plain problem once it ended, and `source` tells a task
+/// the master handed out from one the owner handed off. `lead` is the drawn node of the lead
+/// that handed it out, none for a task of the master or the owner. `agent_label` is the name
+/// of the sub-agent or teammate that ran it, drawn or not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub from: String,
@@ -111,6 +113,8 @@ pub struct GraphEdge {
     pub reply: Option<String>,
     #[serde(default)]
     pub lead: Option<String>,
+    #[serde(default)]
+    pub agent_label: Option<String>,
 }
 
 /// Unread messages from one party to another: how many, and the newest one's receipt for
@@ -248,9 +252,9 @@ pub fn branches(
 /// finished ones while the owner hides them; a hidden lead's agents move up to the master.
 /// Each shown harness's open teammate panes show under it, ended ones too while finished
 /// agents show; a pane the engine adopted as a teammate row shows once, as that row. Every
-/// listed task is an edge from the node leading its agent; a task whose agent is not drawn
-/// goes to the lead that handed it out when that lead is drawn, else to the master. Unread
-/// messages and claim overlaps between shown agents are edges too. Takes the status and the
+/// listed task is an edge from the node leading its agent to that agent, named by it; a task
+/// whose agent is not drawn still goes to that agent, from the lead that handed it out when
+/// that lead is drawn, else from the master. Unread messages and claim overlaps between shown agents are edges too. Takes the status and the
 /// facts. Returns the master first, then the tree depth first, and edges in task order.
 pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     let stopped = stopped_shown(&status.agents);
@@ -414,6 +418,12 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         .iter()
         .filter_map(|node| Some((node.id.as_str(), node.parent.as_deref()?)))
         .collect();
+    let masters: BTreeSet<i64> = masters().map(|agent| agent.id).collect();
+    let labels: BTreeMap<i64, &str> = status
+        .agents
+        .iter()
+        .map(|agent| (agent.id, agent.label.as_str()))
+        .collect();
     let edges: Vec<GraphEdge> = status
         .tasks
         .iter()
@@ -424,15 +434,19 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                     .map(|agent| agent.to_string())
                     .filter(|agent| agents.contains(agent))
             };
-            let to = task
-                .agent
-                .and_then(drawn)
-                .or_else(|| task.parent.and_then(drawn))
-                .unwrap_or_else(|| MASTER_NODE.into());
+            let ran = task.agent.filter(|agent| !masters.contains(agent));
+            let to = ran
+                .and_then(|agent| AgentId::team(agent).ok())
+                .map_or_else(|| MASTER_NODE.to_owned(), |agent| agent.to_string());
+            let lead = task.parent.and_then(drawn);
+            let from = lead_of
+                .get(to.as_str())
+                .map(|node| (*node).to_owned())
+                .or_else(|| lead.clone())
+                .unwrap_or_else(|| MASTER_NODE.to_owned());
+            assert!(from == MASTER_NODE || agents.contains(&from));
             GraphEdge {
-                from: lead_of
-                    .get(to.as_str())
-                    .map_or_else(|| MASTER_NODE.to_owned(), |lead| (*lead).to_owned()),
+                from,
                 to,
                 task_id: task.id,
                 source: task.source,
@@ -443,11 +457,13 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                     TaskStatus::Failed | TaskStatus::Cancelled => task.problem.clone(),
                     _ => None,
                 },
-                lead: task.parent.and_then(drawn),
+                lead,
+                agent_label: ran
+                    .and_then(|agent| labels.get(&agent))
+                    .map(|label| (*label).to_owned()),
             }
         })
         .collect();
-    let masters: BTreeSet<i64> = masters().map(|agent| agent.id).collect();
     let end = |party: Party| -> Option<String> {
         match party {
             Party::Owner => Some(OWNER_PARTY.into()),

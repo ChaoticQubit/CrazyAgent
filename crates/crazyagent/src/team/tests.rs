@@ -3400,3 +3400,87 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
         ]
     );
 }
+
+#[test]
+fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_works_again() {
+    let (directory, connection) = database();
+    let project = crate::protocol::ProjectId::new("tidepool").unwrap();
+    let add = |role: &str, parent: Option<i64>, pane: Option<&str>| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES (?1,?2,'claude-code',1,'acct','working',1,1,?3,?4)",
+                rusqlite::params![project.as_str(), role, parent, pane],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let lead = add("sub", None, None);
+    let mate = add("teammate", Some(lead), Some("%7"));
+    let other = add("teammate", Some(lead), Some("%8"));
+    let mailbox = directory.path().join("agent").join("tmp").join("mailbox");
+    std::fs::create_dir_all(&mailbox).unwrap();
+    std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let rests = mailbox.join("00000000000000000000000000000008.idle");
+    let status = |id: i64| -> String {
+        connection
+            .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let tick = |now: i64| {
+        crate::coord::relay::serve(
+            &connection,
+            &project,
+            lead,
+            directory.path(),
+            &mailbox,
+            false,
+            now,
+        )
+        .unwrap();
+    };
+
+    std::fs::write(&rests, b"").unwrap();
+    tick(10);
+    assert_eq!(
+        status(mate),
+        "idle",
+        "a teammate whose session rests reads Idle"
+    );
+    assert_eq!(status(other), "working", "the other teammate still works");
+    assert_eq!(
+        status(lead),
+        "working",
+        "the lead's own status stays the engine's"
+    );
+    tick(11);
+    assert_eq!(
+        status(mate),
+        "idle",
+        "the mark stays until its own hook clears it"
+    );
+
+    std::fs::remove_file(&rests).unwrap();
+    tick(12);
+    assert_eq!(
+        status(mate),
+        "working",
+        "it works again once the mark is gone"
+    );
+
+    connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [other],
+        )
+        .unwrap();
+    std::fs::write(mailbox.join("00000000000000000000000000000009.idle"), b"").unwrap();
+    tick(13);
+    assert_eq!(
+        status(other),
+        "stopped",
+        "a stopped teammate never comes back as Idle"
+    );
+}

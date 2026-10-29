@@ -427,32 +427,54 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
         status.tasks.len(),
         "every task keeps its edge"
     );
-    assert!(
-        hidden
+    let ran = |graph: &TeamGraph, id: i64| {
+        graph
             .edges
             .iter()
-            .all(|edge| edge.to != "team-4" && edge.to != "team-5"),
-        "{:#?}",
-        hidden.edges
+            .find(|edge| edge.task_id == id)
+            .map(|edge| (edge.from.clone(), edge.to.clone(), edge.agent_label.clone()))
+    };
+    let own = |from: &str, to: &str, label: Option<&str>| {
+        Some((from.to_owned(), to.to_owned(), label.map(str::to_owned)))
+    };
+    assert_eq!(
+        ran(&hidden, 10),
+        own("master", "team-4", Some("Sub-agent 4")),
+        "a hidden finished agent's task keeps its agent and name, not the master's"
+    );
+    assert_eq!(
+        ran(&hidden, 13),
+        own("master", "team-5", Some("Sub-agent 5"))
+    );
+    assert_eq!(
+        ran(&hidden, 11),
+        own("master", "team-3", Some("Ada (@charts)"))
+    );
+    assert_eq!(
+        ran(&hidden, 12),
+        own("master", "master", None),
+        "a task no agent took yet waits on the master"
     );
     status.tasks[0].parent = Some(3);
     status.tasks[3].parent = Some(99);
+    status
+        .tasks
+        .push(task(17, "codex", TaskStatus::Done, Some(2)));
     let led = graph(&status, &none());
-    let edge = |id: i64| {
-        led.edges
-            .iter()
-            .find(|edge| edge.task_id == id)
-            .map(|edge| (edge.from.as_str(), edge.to.as_str()))
-    };
     assert_eq!(
-        edge(10),
-        Some(("master", "team-3")),
-        "a hidden agent's task goes to the drawn lead that handed it out"
+        ran(&led, 10),
+        own("team-3", "team-4", Some("Sub-agent 4")),
+        "a hidden agent's task comes from the drawn lead that handed it out and stays its own"
     );
     assert_eq!(
-        edge(13),
-        Some(("master", "master")),
-        "with no drawn lead it waits on the master"
+        ran(&led, 13),
+        own("master", "team-5", Some("Sub-agent 5")),
+        "with no drawn lead it comes from the master and stays its own"
+    );
+    assert_eq!(
+        ran(&led, 17),
+        own("master", "master", None),
+        "the master's own task stays on the master"
     );
     status.show_finished = true;
     assert_eq!(
@@ -578,12 +600,21 @@ fn stopped_sub_agents_of_the_latest_round_stay_in_the_graph_with_their_tasks() {
     assert_eq!(
         targets,
         [
-            (1, "master".to_owned()),
+            (1, "team-1".to_owned()),
             (2, "team-3".to_owned()),
             (3, format!("team-{}", kept + 2)),
             (4, "team-3".to_owned()),
         ],
-        "a listed stopped agent's tasks point at it, an unlisted one's wait on the master"
+        "every stopped agent's tasks point at it, an unlisted one's too, so none waits on the master"
+    );
+    assert!(
+        graph.nodes.iter().all(|node| node.id != "team-1"),
+        "the oldest stopped agent is not drawn"
+    );
+    assert_eq!(
+        graph.edges[0].agent_label.as_deref(),
+        Some("Sub-agent 1"),
+        "its task keeps its name"
     );
 }
 
