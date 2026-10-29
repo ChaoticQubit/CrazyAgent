@@ -20,6 +20,15 @@ const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/r
 const TMP_PARENT: &str = "/private/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
+/// The folder of an agent's short temp folder that holds its own `git`, and that program.
+const GIT_FOLDER: &str = "bin";
+const GIT_PROGRAM: &str = "git";
+/// The xcrun shim at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
+#[cfg(unix)]
+const GIT_SHIM: &str = "/usr/bin/git";
+/// The most bytes of an agent's `git` script read to tell whether it is current.
+#[cfg(unix)]
+const GIT_SCRIPT_BYTES_MAX: u64 = 4096;
 
 /// The variables that keep every agent's toolchains from installing themselves: rustup
 /// never fetches a missing toolchain, uv never downloads a Python, Corepack never fetches a
@@ -307,8 +316,10 @@ pub fn tmp_path(home: &Path) -> PathBuf {
 }
 
 /// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
-/// owns there and makes it private again. Input: the agent home. Output: the folder, or a
-/// refusal when the path is a link, a file or another user's folder.
+/// owns there and makes it private again, and writes the agent's own `git` into it (see
+/// [`with_agent_git`]); a `git` that cannot be written is logged and the agent keeps the
+/// system one. Input: the agent home. Output: the folder, or a refusal when the path is a
+/// link, a file or another user's folder.
 #[cfg(unix)]
 pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     let path = tmp_path(home);
@@ -324,7 +335,117 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
+    if let Some(script) = git_script(crate::research::runner::setup_git())
+        && let Err(error) = write_git(&path, &script)
+    {
+        eprintln!("agent_git_not_written kind={:?}", error.kind());
+    }
     Ok(path)
+}
+
+/// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
+/// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
+/// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
+/// a link to it would lose. Input: the real git. Output: the script, or none when git is
+/// the shim or its path is not plain.
+#[cfg(unix)]
+fn git_script(git: &Path) -> Option<String> {
+    let text = git.to_str()?;
+    let plain = git.is_absolute()
+        && git != Path::new(GIT_SHIM)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
+    let script = plain.then(|| format!("#!/bin/sh\nexec '{text}' \"$@\"\n"))?;
+    assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
+    Some(script)
+}
+
+/// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
+/// user, replacing a copy that differs, through descriptors that never follow a link the
+/// agent left there. Inputs: the temp folder and the script. Output: done, or the refusal.
+#[cfg(unix)]
+fn write_git(tmp: &Path, script: &str) -> io::Result<()> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAGED: AtomicU64 = AtomicU64::new(0);
+    let folder_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let tmp = rustix::fs::openat(CWD, tmp, folder_flags, Mode::empty())?;
+    match rustix::fs::mkdirat(&tmp, GIT_FOLDER, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let folder = rustix::fs::openat(&tmp, GIT_FOLDER, folder_flags, Mode::empty())?;
+    if rustix::fs::fstat(&folder)?.st_uid != nix::unistd::getuid().as_raw() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent git folder is not this user's",
+        ));
+    }
+    rustix::fs::fchmod(&folder, Mode::from_raw_mode(0o700))?;
+    let current = rustix::fs::openat(
+        &folder,
+        GIT_PROGRAM,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()
+    .map(fs::File::from)
+    .and_then(|file| {
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.mode() & 0o7777 != 0o700 {
+            return None;
+        }
+        let mut text = String::new();
+        file.take(GIT_SCRIPT_BYTES_MAX + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        Some(text)
+    });
+    if current.as_deref() == Some(script) {
+        return Ok(());
+    }
+    let staged = format!(
+        ".{GIT_PROGRAM}-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = rustix::fs::openat(
+        &folder,
+        staged.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o700),
+    )?;
+    let mut file = fs::File::from(file);
+    let placed = file
+        .write_all(script.as_bytes())
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o700)))
+        .and_then(|()| {
+            rustix::fs::renameat(&folder, staged.as_str(), &folder, GIT_PROGRAM)
+                .map_err(io::Error::from)
+        });
+    if placed.is_err() {
+        let _ = rustix::fs::unlinkat(&folder, staged.as_str(), AtFlags::empty());
+    }
+    placed
+}
+
+/// Puts the agent's own `git` (see [`make_tmp`]) at the front of a harness's search path,
+/// so the agent's git calls under Seatbelt run the real git, not the `/usr/bin/git` shim.
+/// Only a harness's own path gets it, never a command the engine runs under the profile,
+/// since the agent can change that folder. Inputs: the agent home and the path. Output:
+/// the path, unchanged when the agent has no such `git`.
+pub fn with_agent_git(home: &Path, path: String) -> String {
+    let Some(folder) = existing_tmp(home).map(|tmp| tmp.join(GIT_FOLDER)) else {
+        return path;
+    };
+    let present =
+        fs::symlink_metadata(folder.join(GIT_PROGRAM)).is_ok_and(|metadata| metadata.is_file());
+    match folder.to_str() {
+        Some(text) if present && !text.contains(':') => format!("{text}:{path}"),
+        _ => path,
+    }
 }
 
 /// The agent's short temp folder when it exists as this user's private folder. Input: the
