@@ -298,7 +298,7 @@ impl OwnerClient {
         {
             (Reply::Adoption { adoption }, None)
                 if adoption.agents.len() <= crate::coord::adoption::AGENTS_SHOWN_MAX
-                    && adoption.counted.len() <= crate::coord::adoption::COUNTED_MAX =>
+                    && adoption.counted.len() <= crate::coord::settings::COUNTED_TOOLS_MAX =>
             {
                 Ok(adoption)
             }

@@ -1,22 +1,31 @@
-use super::{MessageKind, NewMessage, Party};
+use super::settings::{COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_MAX};
+use super::store::{AgentRow, agent, state};
+use super::{AgentId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub const TOOL_BYTES_MAX: usize = 64;
-pub const COUNTED_MAX: usize = 32;
+/// The most agents the Process page lists, newest first.
 pub const AGENTS_SHOWN_MAX: usize = 48;
+/// The most running agents one adoption check reads.
 pub const AGENTS_CHECKED_MAX: usize = 64;
+/// The most reminders one adoption check sends.
 pub const NUDGES_PER_TICK_MAX: usize = 16;
-pub const TOOLS_PER_AGENT_MAX: usize = 256;
-pub const WORK_WITHOUT_GRAPH_MS: i64 = 10 * 60 * 1000;
+/// How long an agent works with no graphify and no context-mode call before it is
+/// flagged (Q18), in ms.
+pub const UNGROUNDED_MS: i64 = 10 * 60_000;
+/// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
-pub const VIEW_BYTES_MAX: usize =
-    AGENTS_SHOWN_MAX * (COUNTED_MAX * 11 + 256) + COUNTED_MAX * (TOOL_BYTES_MAX + 4) + 64;
-const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"];
-const SHELL_TOOLS: &[&str] = &[
+/// The most bytes one adoption view takes once encoded.
+pub const VIEW_BYTES_MAX: usize = AGENTS_SHOWN_MAX * (COUNTED_TOOLS_MAX * 11 + 256)
+    + COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 4)
+    + 64;
+const TOOLS_PER_AGENT_MAX: usize = 256;
+const LABEL_BYTES_MAX: usize = 64;
+const EDIT_TOOLS: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"];
+const SHELL_TOOLS: [&str; 6] = [
     "Bash",
     "shell",
     "shell_command",
@@ -26,78 +35,68 @@ const SHELL_TOOLS: &[&str] = &[
 ];
 const GRAPH_TOOL: &str = "graphify";
 const CONTEXT_PREFIX: &str = "ctx_";
-const START_WORK: &str = "start_work";
-const ACTIVE: &str = "status IN ('starting','idle','working')";
-const LABEL_BYTES_MAX: usize = 64;
+const NUDGE_KEY: &str = "adoption-";
 
 const _: () = assert!(VIEW_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX / 2);
+const _: () = assert!(COUNTED_TOOL_BYTES_MAX <= TOOL_BYTES_MAX);
+const _: () = assert!(NUDGES_PER_TICK_MAX <= AGENTS_CHECKED_MAX);
 
-pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS coord_nudges (
-    project TEXT NOT NULL,
-    agent INTEGER NOT NULL,
-    flag TEXT NOT NULL,
-    message INTEGER,
-    at INTEGER NOT NULL,
-    PRIMARY KEY (agent, flag)
-);
-CREATE INDEX IF NOT EXISTS coord_nudges_project ON coord_nudges(project);";
-
-/// A workflow habit an agent missed, shown red on the Process page: editing files with no
-/// declared work, or working ten minutes with no code-graph query and no context-mode call.
-/// Each one earns that agent a single reminder while the project's nudges are on.
+/// A workflow habit an agent missed (Q18), shown red on the Process page and the graph:
+/// editing files with no declared work, or working ten minutes with no code-graph query
+/// and no context-mode call. Each earns that agent one reminder while nudges are on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Flag {
     #[serde(rename = "edits_without_start_work")]
     EditsWithoutWork,
-    #[serde(rename = "no_graphify_or_ctx")]
-    NoGraphOrContext,
+    #[serde(rename = "no_graphify_or_context_mode")]
+    Ungrounded,
 }
 
 impl Flag {
-    pub const ALL: [Flag; 2] = [Flag::EditsWithoutWork, Flag::NoGraphOrContext];
+    pub const ALL: [Flag; 2] = [Flag::EditsWithoutWork, Flag::Ungrounded];
 
-    /// The flag's stored name, the same as its wire name. Input: the flag. Output: the name.
+    /// The flag's stored name, the same as its wire name. Takes the flag. Returns the name.
     pub fn name(self) -> &'static str {
         match self {
             Flag::EditsWithoutWork => "edits_without_start_work",
-            Flag::NoGraphOrContext => "no_graphify_or_ctx",
+            Flag::Ungrounded => "no_graphify_or_context_mode",
+        }
+    }
+
+    /// The flag in the owner's words, as the Process page shows it. Takes the flag.
+    /// Returns the words.
+    pub fn words(self) -> &'static str {
+        match self {
+            Flag::EditsWithoutWork => "Edits without start_work",
+            Flag::Ungrounded => "10+ min without graphify or context-mode",
         }
     }
 
     /// The one reminder the engine sends an agent for this flag, as an Engine note.
-    /// Input: the flag. Output: the note's text.
+    /// Takes the flag. Returns the note's text.
     pub fn reminder(self) -> &'static str {
         match self {
             Flag::EditsWithoutWork => {
                 "CrazyAgent reminder: you are editing files without declared work. Call start_work with a title and the files or folders you will change, so other agents see your claim and overlapping edits are caught."
             }
-            Flag::NoGraphOrContext => {
+            Flag::Ungrounded => {
                 "CrazyAgent reminder: you have worked 10 minutes without a code-graph query or a context-mode call. Query the graph first (graphify query \"<question>\") and run large reads and command output through ctx_execute or ctx_batch_execute."
             }
         }
     }
 
-    /// The flag in the owner's words, as the Process page shows it. Input: the flag.
-    /// Output: the words.
-    pub fn words(self) -> &'static str {
-        match self {
-            Flag::EditsWithoutWork => "Edits without start_work",
-            Flag::NoGraphOrContext => "10+ min without graphify or ctx",
-        }
-    }
-
-    fn parse(name: &str) -> Option<Flag> {
-        Flag::ALL.into_iter().find(|flag| flag.name() == name)
+    fn key(self, agent: AgentId) -> String {
+        format!("{NUDGE_KEY}{}-{agent}", self.name())
     }
 }
 
 /// One agent's row on the Process page: who it is, whether it still runs, its count for
-/// each counted-tool entry in the settings' order, the flags it has now and the flags it
-/// was already reminded of.
+/// each counted-tools entry in the settings' order, the flags it has now and the flags
+/// it was already reminded of.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdoption {
-    pub agent: i64,
+    pub agent: AgentId,
     pub role: String,
     pub harness: String,
     pub active: bool,
@@ -106,8 +105,8 @@ pub struct AgentAdoption {
     pub reminded: Vec<Flag>,
 }
 
-/// A project's adoption view: whether nudges are on, the counted-tool entries that name the
-/// count columns, and the newest agents, at most `AGENTS_SHOWN_MAX`.
+/// A project's adoption view: whether nudges are on, the counted-tools entries that name
+/// the count columns, and its newest agents, at most `AGENTS_SHOWN_MAX`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adoption {
@@ -116,11 +115,11 @@ pub struct Adoption {
     pub agents: Vec<AgentAdoption>,
 }
 
-/// Names the tool call an agent made the way adoption counts it: an MCP tool by its own
-/// name without the server, a shell command that runs graphify as `graphify`, one that
-/// reads a `SKILL.md` as `Skill`, any other call by its name. Inputs: the harness's tool
-/// name and its input, the parsed arguments. Output: the name, none when it is not short
-/// plain text.
+/// Names a tool call the way adoption counts it: an MCP tool by its own name without the
+/// server, a shell command that runs graphify as `graphify`, one that reads a `SKILL.md`
+/// as `Skill`, any other call by its name. Takes the harness's tool name and its input
+/// (the parsed arguments). Returns the name for `record_tool`, none when it is not 1 to
+/// `TOOL_BYTES_MAX` bytes of letters, digits, `_`, `-`, `.` or `:`.
 pub fn tool_key(name: &str, input: &Value) -> Option<String> {
     let key = match name.strip_prefix("mcp__").unwrap_or(name).rsplit_once("__") {
         Some((server, _)) if server.contains(GRAPH_TOOL) => GRAPH_TOOL,
@@ -131,18 +130,18 @@ pub fn tool_key(name: &str, input: &Value) -> Option<String> {
             _ => name,
         },
     };
-    let shown = !key.is_empty()
+    let plain = !key.is_empty()
         && key.len() <= TOOL_BYTES_MAX
         && key
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:".contains(&byte));
-    shown.then(|| key.to_owned())
+    plain.then(|| key.to_owned())
 }
 
 /// The command text of a shell tool call, at most `COMMAND_BYTES_MAX` bytes: Claude's
 /// `Bash` and Codex's `shell_command` give it as `command`, `exec_command` as `cmd`, and
-/// `shell` and `local_shell_call` as an argument list. Inputs: the tool name and input.
-/// Output: the text, none for another tool.
+/// `shell` and `local_shell_call` as an argument list. Takes the tool name and input.
+/// Returns the text, none for another tool.
 fn shell_command(name: &str, input: &Value) -> Option<String> {
     if !SHELL_TOOLS.contains(&name) {
         return None;
@@ -177,252 +176,209 @@ fn runs_graphify(command: &str) -> bool {
         .any(|word| word.rsplit('/').next() == Some(GRAPH_TOOL))
 }
 
-/// Sums an agent's calls for each counted-tool entry: an entry ending in `*` counts every
-/// tool whose name starts with the rest, any other entry the tool of that exact name.
-/// Inputs: the agent's counts by tool and the entries. Output: one count per entry.
-pub fn counted(counts: &[(String, u32)], entries: &[String]) -> Vec<u32> {
+/// The flags one agent's habits raise now (Q18). Edits by an agent that never started or
+/// owned work raise the first. A running agent with tools that worked `UNGROUNDED_MS`
+/// since its start, busy or calling tools, with no graphify and no `ctx_*` call, raises
+/// the second. Takes the database, the agent, its row, its counts by stored tool name and
+/// the time in ms. Returns the flags in `Flag::ALL` order.
+pub(super) fn flags(
+    db: &Connection,
+    id: AgentId,
+    row: &AgentRow,
+    used: &[(String, i64)],
+    now: i64,
+) -> Result<Vec<Flag>, EngineError> {
+    let (tools, declared): (bool, bool) = db
+        .query_row(
+            "SELECT a.tools,
+             EXISTS(SELECT 1 FROM coord_audit WHERE by_kind='agent' AND by_agent=a.id
+                    AND action='start')
+             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id)
+             FROM team_agents a WHERE a.id=?1",
+            [id],
+            |found| Ok((found.get(0)?, found.get(1)?)),
+        )
+        .map_err(state)?;
+    let called = |tool: &dyn Fn(&str) -> bool| {
+        used.iter()
+            .any(|(name, count)| *count > 0 && tool(super::presence::short(name)))
+    };
+    let edited = called(&|name| EDIT_TOOLS.contains(&name));
+    let grounded = called(&|name| name == GRAPH_TOOL || name.starts_with(CONTEXT_PREFIX));
+    let busy = row.status == "working" || called(&|_| true);
+    let worked = now.saturating_sub(row.created) >= UNGROUNDED_MS;
+    let mut raised = Vec::new();
+    if edited && !declared {
+        raised.push(Flag::EditsWithoutWork);
+    }
+    if row.live() && tools && busy && worked && !grounded {
+        raised.push(Flag::Ungrounded);
+    }
+    assert!(raised.len() <= Flag::ALL.len());
+    Ok(raised)
+}
+
+/// An agent's counts by stored tool name, at most `TOOLS_PER_AGENT_MAX` names. Takes the
+/// database and the agent. Returns the names with their counts, by name.
+pub(super) fn used(db: &Connection, id: AgentId) -> Result<Vec<(String, i64)>, EngineError> {
+    let mut statement = db
+        .prepare_cached(
+            "SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool LIMIT ?2",
+        )
+        .map_err(state)?;
+    let limit = i64::try_from(TOOLS_PER_AGENT_MAX).map_err(state)?;
+    let rows = statement
+        .query_map(params![id, limit], |found| {
+            Ok((found.get(0)?, found.get(1)?))
+        })
+        .map_err(state)?;
+    let used: Vec<(String, i64)> = rows.collect::<Result<_, _>>().map_err(state)?;
+    assert!(used.len() <= TOOLS_PER_AGENT_MAX);
+    Ok(used)
+}
+
+/// Sums an agent's calls for each counted-tools entry, matched as the snapshot matches
+/// them. Takes its counts by stored tool name and the entries. Returns one count per entry.
+fn counted(used: &[(String, i64)], entries: &[String]) -> Vec<u32> {
     let sums: Vec<u32> = entries
         .iter()
         .map(|entry| {
-            counts
+            let total = used
                 .iter()
-                .filter(|(tool, _)| match entry.strip_suffix('*') {
-                    Some(prefix) => tool.starts_with(prefix),
-                    None => tool == entry,
-                })
-                .fold(0u32, |sum, (_, count)| sum.saturating_add(*count))
+                .filter(|(tool, _)| super::presence::counts(entry, tool))
+                .map(|(_, count)| (*count).max(0))
+                .fold(0i64, i64::saturating_add);
+            u32::try_from(total).unwrap_or(u32::MAX)
         })
         .collect();
     assert_eq!(sums.len(), entries.len());
     sums
 }
 
-/// The flags an agent's habits raise: edits with no work it declared or owns, and, once it
-/// has worked `WORK_WITHOUT_GRAPH_MS`, no graphify and no `ctx_*` call. Inputs: its counts
-/// by tool, whether it owns any work and how long it has worked, none when it does not run
-/// or has no tools. Output: the flags in `Flag::ALL` order.
-pub fn flags(counts: &[(String, u32)], has_work: bool, worked_ms: Option<i64>) -> Vec<Flag> {
-    let calls = |tool: &dyn Fn(&str) -> bool| {
-        counts
-            .iter()
-            .filter(|(name, _)| tool(name))
-            .fold(0u32, |sum, (_, count)| sum.saturating_add(*count))
-    };
-    let edits = calls(&|name| EDIT_TOOLS.contains(&name));
-    let started = calls(&|name| name == START_WORK);
-    let graph = calls(&|name| name == GRAPH_TOOL || name.starts_with(CONTEXT_PREFIX));
-    let mut raised = Vec::new();
-    if edits > 0 && started == 0 && !has_work {
-        raised.push(Flag::EditsWithoutWork);
-    }
-    if worked_ms.is_some_and(|worked| worked >= WORK_WITHOUT_GRAPH_MS) && graph == 0 {
-        raised.push(Flag::NoGraphOrContext);
-    }
-    assert!(raised.len() <= Flag::ALL.len());
-    raised
+fn reminded(db: &Connection, project: &ProjectId, id: AgentId) -> Result<Vec<Flag>, EngineError> {
+    let mut statement = db
+        .prepare_cached(
+            "SELECT idem_key FROM coord_messages WHERE project=?1 AND from_kind='engine'
+             AND to_kind='agent' AND to_agent=?2 AND substr(idem_key,1,length(?3))=?3",
+        )
+        .map_err(state)?;
+    let rows = statement
+        .query_map(params![project.as_str(), id, NUDGE_KEY], |found| {
+            found.get::<_, String>(0)
+        })
+        .map_err(state)?;
+    let keys: Vec<String> = rows.collect::<Result<_, _>>().map_err(state)?;
+    Ok(Flag::ALL
+        .into_iter()
+        .filter(|flag| keys.contains(&flag.key(id)))
+        .collect())
 }
 
-struct Checked {
-    agent: i64,
-    role: String,
-    harness: String,
-    active: bool,
-    counts: Vec<(String, u32)>,
-    flags: Vec<Flag>,
-}
-
-/// Reads the newest `limit` agents of a project with their counts and flags: only running
-/// agents with tools when `active_only`, else every agent the project had. Inputs: the
-/// store, the project, the limit, whether only running agents count and the time.
-/// Output: the agents, newest first.
-fn checked(
-    db: &Connection,
-    project: &ProjectId,
-    limit: usize,
-    active_only: bool,
-    now: i64,
-) -> Result<Vec<Checked>, EngineError> {
-    let unavailable = |_| EngineError("coord_adoption_unavailable".into());
-    let filter = if active_only {
-        format!("AND {ACTIVE} AND tools=1")
-    } else {
-        String::new()
-    };
-    type Row = (i64, String, String, bool, bool, bool, i64);
-    let rows: Vec<Row> = {
+/// Reads a project's adoption view for the Process page: the counted-tools entries from
+/// its settings and its newest agents with their counts, flags and reminders. Reads
+/// only. Takes the database, the project and the time in ms. Returns the view, at most
+/// `VIEW_BYTES_MAX` once encoded.
+pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, EngineError> {
+    let settings = super::settings::read(db, project)?;
+    assert!(settings.counted_tools.len() <= COUNTED_TOOLS_MAX);
+    let ids: Vec<(AgentId, String)> = {
         let mut statement = db
-            .prepare(&format!(
-                "SELECT id,role,harness,{ACTIVE},status='working',tools,created_ms
-                 FROM team_agents WHERE project=?1 {filter} ORDER BY id DESC LIMIT ?2"
-            ))
-            .map_err(unavailable)?;
-        statement
-            .query_map(params![project.as_str(), limit as i64], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
+            .prepare(
+                "SELECT id,harness FROM team_agents WHERE project=?1 ORDER BY id DESC LIMIT ?2",
+            )
+            .map_err(state)?;
+        let limit = i64::try_from(AGENTS_SHOWN_MAX).map_err(state)?;
+        let rows = statement
+            .query_map(params![project.as_str(), limit], |found| {
+                Ok((found.get(0)?, found.get(1)?))
             })
-            .map_err(unavailable)?
-            .collect::<Result<_, _>>()
-            .map_err(unavailable)?
+            .map_err(state)?;
+        rows.collect::<Result<_, _>>().map_err(state)?
     };
-    assert!(rows.len() <= limit);
-    let label = |text: String| {
-        if text.len() <= LABEL_BYTES_MAX && !text.chars().any(char::is_control) {
-            text
+    let label = |text: &str| {
+        let plain = text.len() <= LABEL_BYTES_MAX && !text.chars().any(char::is_control);
+        if plain {
+            text.to_owned()
         } else {
             String::new()
         }
     };
-    let mut agents = Vec::with_capacity(rows.len());
-    for (agent, role, harness, active, working, tools, created) in rows {
-        let counts: Vec<(String, u32)> = {
-            let mut statement = db
-                .prepare_cached(
-                    "SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool LIMIT ?2",
-                )
-                .map_err(unavailable)?;
-            statement
-                .query_map(params![agent, TOOLS_PER_AGENT_MAX as i64], |row| {
-                    let count: i64 = row.get(1)?;
-                    Ok((row.get(0)?, u32::try_from(count.max(0)).unwrap_or(u32::MAX)))
-                })
-                .map_err(unavailable)?
-                .collect::<Result<_, _>>()
-                .map_err(unavailable)?
+    let mut agents = Vec::with_capacity(ids.len());
+    for (id, harness) in ids {
+        let Some(row) = agent(db, id)? else {
+            continue;
         };
-        let has_work: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=?1)",
-                [agent],
-                |row| row.get(0),
-            )
-            .map_err(unavailable)?;
-        let busy = working || counts.iter().any(|(_, count)| *count > 0);
-        let worked = (active && tools && busy).then(|| now.saturating_sub(created));
-        agents.push(Checked {
-            flags: flags(&counts, has_work, worked),
-            agent,
-            role: label(role),
-            harness: label(harness),
-            active,
-            counts,
-        });
-    }
-    Ok(agents)
-}
-
-fn reminded(db: &Connection, agent: i64) -> Result<Vec<Flag>, EngineError> {
-    let mut statement = db
-        .prepare_cached("SELECT flag FROM coord_nudges WHERE agent=?1 AND message IS NOT NULL")
-        .map_err(|_| EngineError("coord_adoption_unavailable".into()))?;
-    let names: Vec<String> = statement
-        .query_map([agent], |row| row.get(0))
-        .map_err(|_| EngineError("coord_adoption_unavailable".into()))?
-        .collect::<Result<_, _>>()
-        .map_err(|_| EngineError("coord_adoption_unavailable".into()))?;
-    Ok(Flag::ALL
-        .into_iter()
-        .filter(|flag| names.iter().any(|name| Flag::parse(name) == Some(*flag)))
-        .collect())
-}
-
-/// Reads a project's adoption view for the Process page: the counted-tool entries from its
-/// settings and its newest agents with their counts, flags and reminders. Reads only.
-/// Inputs: the store, the project and the time. Output: the view, at most
-/// `VIEW_BYTES_MAX` once encoded, or a plain code.
-pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, EngineError> {
-    let settings = super::settings::read(db, project)?;
-    let entries: Vec<String> = settings
-        .counted_tools
-        .iter()
-        .filter(|entry| !entry.is_empty() && entry.len() <= TOOL_BYTES_MAX)
-        .take(COUNTED_MAX)
-        .cloned()
-        .collect();
-    let mut agents = Vec::new();
-    for agent in checked(db, project, AGENTS_SHOWN_MAX, false, now)? {
+        let used = used(db, id)?;
         agents.push(AgentAdoption {
-            counts: counted(&agent.counts, &entries),
-            reminded: reminded(db, agent.agent)?,
-            agent: agent.agent,
-            role: agent.role,
-            harness: agent.harness,
-            active: agent.active,
-            flags: agent.flags,
+            agent: id,
+            role: label(&row.role),
+            harness: label(&harness),
+            active: row.live(),
+            counts: counted(&used, &settings.counted_tools),
+            flags: flags(db, id, &row, &used, now)?,
+            reminded: reminded(db, project, id)?,
         });
     }
-    assert!(agents.len() <= AGENTS_SHOWN_MAX && entries.len() <= COUNTED_MAX);
+    assert!(agents.len() <= AGENTS_SHOWN_MAX);
     Ok(Adoption {
         nudges: settings.nudges,
-        counted: entries,
+        counted: settings.counted_tools,
         agents,
     })
 }
 
-/// Sends each running agent of a project one reminder per flag it raised and was never
-/// reminded of, at most `NUDGES_PER_TICK_MAX` a call, and only while the project's nudges
-/// are on. A reminder is claimed before it is sent and the claim is dropped when the send
-/// fails, so no agent gets the same reminder twice. Inputs: the store, the project and the
-/// time. Output: done, or a plain code.
+/// Sends each running agent of a project one Engine note per flag it raised and was never
+/// reminded of, at most `NUDGES_PER_TICK_MAX` a call, only while the project's nudges are
+/// on. The note's idempotency key is the flag and the agent, so a reminder is sent once
+/// whatever the retries. Takes the database, the project and the time in ms. Returns Ok
+/// or the first refusal.
 pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), EngineError> {
     if !super::settings::read(db, project)?.nudges {
         return Ok(());
     }
-    let unavailable = |_| EngineError("coord_adoption_unavailable".into());
+    let ids: Vec<AgentId> = {
+        let mut statement = db
+            .prepare_cached(
+                "SELECT id FROM team_agents WHERE project=?1 AND tools=1
+                 AND status NOT IN ('stopped','failed') ORDER BY id DESC LIMIT ?2",
+            )
+            .map_err(state)?;
+        let limit = i64::try_from(AGENTS_CHECKED_MAX).map_err(state)?;
+        let rows = statement
+            .query_map(params![project.as_str(), limit], |found| found.get(0))
+            .map_err(state)?;
+        rows.collect::<Result<_, _>>().map_err(state)?
+    };
     let mut sent = 0;
-    for agent in checked(db, project, AGENTS_CHECKED_MAX, true, now)? {
-        for flag in agent.flags {
+    for id in ids {
+        let Some(row) = agent(db, id)? else {
+            continue;
+        };
+        let raised = flags(db, id, &row, &used(db, id)?, now)?;
+        if raised.is_empty() {
+            continue;
+        }
+        let earlier = reminded(db, project, id)?;
+        for flag in raised.into_iter().filter(|flag| !earlier.contains(flag)) {
             if sent == NUDGES_PER_TICK_MAX {
                 return Ok(());
             }
-            let claimed = db
-                .execute(
-                    "INSERT OR IGNORE INTO coord_nudges(project,agent,flag,message,at)
-                     VALUES (?1,?2,?3,NULL,?4)",
-                    params![project.as_str(), agent.agent, flag.name(), now],
-                )
-                .map_err(unavailable)?;
-            if claimed == 0 {
-                continue;
-            }
-            let note = NewMessage {
-                project: project.clone(),
-                from: Party::Engine,
-                to: Party::Agent(agent.agent),
-                kind: MessageKind::Note,
-                question: None,
-                work: None,
-                reply_to: None,
-                body: flag.reminder().to_owned(),
-                idempotency_key: Some(format!("adoption-{}-{}", flag.name(), agent.agent)),
-            };
-            match super::send(db, note, now) {
-                Ok(message) => {
-                    let stored = db
-                        .execute(
-                            "UPDATE coord_nudges SET message=?3 WHERE agent=?1 AND flag=?2",
-                            params![agent.agent, flag.name(), message],
-                        )
-                        .map_err(unavailable)?;
-                    assert_eq!(stored, 1);
-                    sent += 1;
-                }
-                Err(problem) => {
-                    db.execute(
-                        "DELETE FROM coord_nudges WHERE agent=?1 AND flag=?2 AND message IS NULL",
-                        params![agent.agent, flag.name()],
-                    )
-                    .map_err(unavailable)?;
-                    return Err(problem);
-                }
-            }
+            super::send(
+                db,
+                NewMessage {
+                    project: project.clone(),
+                    from: Party::Engine,
+                    to: Party::Agent(id),
+                    kind: MessageKind::Note,
+                    question: None,
+                    work: None,
+                    reply_to: None,
+                    body: flag.reminder().to_owned(),
+                    idempotency_key: Some(flag.key(id)),
+                },
+                now,
+            )?;
+            sent += 1;
         }
     }
     assert!(sent <= NUDGES_PER_TICK_MAX);

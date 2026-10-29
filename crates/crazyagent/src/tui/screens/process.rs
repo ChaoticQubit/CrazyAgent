@@ -898,7 +898,11 @@ impl ProcessPage {
                 .map(|(tool, count)| format!("{tool} {count}"))
                 .collect();
             let name = format!("#{} {} {}", agent.agent, agent.role, agent.harness);
-            let role = if agent.active { Role::Accent } else { Role::Muted };
+            let role = if agent.active {
+                Role::Accent
+            } else {
+                Role::Muted
+            };
             lines.push(styled(name, role, theme));
             lines.extend(
                 wrap(&counts.join("  "), width.saturating_sub(2).max(1))

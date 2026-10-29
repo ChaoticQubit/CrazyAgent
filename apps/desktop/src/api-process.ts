@@ -264,11 +264,11 @@ export function loadAgentInstructions(projectId: string, agent: number | null): 
 
 /** A workflow habit an agent missed: editing files with no declared work, or working ten
  * minutes with no code-graph query and no context-mode call. */
-export type AdoptionFlag = "edits_without_start_work" | "no_graphify_or_ctx";
+export type AdoptionFlag = "edits_without_start_work" | "no_graphify_or_context_mode";
 
 const FLAG_WORDS: Record<AdoptionFlag, string> = {
   edits_without_start_work: "Edits without start_work",
-  no_graphify_or_ctx: "10+ min without graphify or ctx",
+  no_graphify_or_context_mode: "10+ min without graphify or context-mode",
 };
 
 /** A flag in the owner's words. Input: the flag. Output: the words. */

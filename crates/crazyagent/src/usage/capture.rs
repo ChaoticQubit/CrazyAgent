@@ -585,7 +585,15 @@ fn scan(
         let collect = counting.is_some().then_some(&mut tools);
         let (growth, observed) = read_record(&path, format, &mut progress, now_ms, collect);
         if progress != before {
-            changed.push((key, session_name(&path), before, progress, growth, observed, tools));
+            changed.push((
+                key,
+                session_name(&path),
+                before,
+                progress,
+                growth,
+                observed,
+                tools,
+            ));
         }
     }
     if changed.is_empty() {
