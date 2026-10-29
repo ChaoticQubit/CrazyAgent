@@ -7,6 +7,7 @@ use super::{
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use crate::team::AgentStatus;
 use crate::team::tool::{Mailbox, call_id, call_id_valid};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ pub(crate) const INBOX: &str = ".inbox";
 pub(crate) const SHOWN: &str = ".shown";
 pub(crate) const TOOLS: &str = ".tools";
 pub(crate) const TOUCH: &str = ".touch";
+pub(crate) const IDLE: &str = ".idle";
 pub(crate) const WAITING: &str = ".waiting";
 pub(crate) const ASKED: &str = ".asked";
 pub(crate) const ASK: &str = ".ask";
@@ -258,7 +260,9 @@ pub fn installed(home: &Path) -> bool {
 /// Runs one engine tick of an agent's relay: refreshes `relay.json`, marks Delivered each
 /// message a session took, drops letters no longer waiting, writes the next waiting
 /// messages of the agent and its native teammates (none under the Typing only delivery
-/// setting, nor for a master, which K2b feeds through its engine input), applies the sessions' tool counts, activity and waits, answers their overlap
+/// setting, nor for a master, which K2b feeds through its engine input), applies the
+/// sessions' tool counts, activity and waits and each native teammate's Idle or Working,
+/// answers their overlap
 /// questions, and, when `receipts` is set, marks Read each delivered message its session
 /// answered after (from the home's newest transcripts). Everything a session wrote is
 /// validated; nothing from the mailbox is trusted. Inputs: the database, the project, the
@@ -593,18 +597,38 @@ fn sender(db: &Connection, from: Party) -> String {
 }
 
 /// Applies what each session reported since the last tick: its tool log as counted tool
-/// calls, its touch as activity, and its latest wait. Each entry is claimed by rename
-/// before it is read, so a report written meanwhile waits for the next tick.
+/// calls, its touch as activity, its latest wait, and for a native teammate whether it
+/// rests, as its row's Idle or Working. Each report is claimed by rename before it is
+/// read, so one written meanwhile waits for the next tick; the resting mark stays until
+/// the teammate's own hook clears it.
 fn take_activity(
     db: &Connection,
     folder: &Mailbox,
     team: &BTreeMap<String, AgentId>,
     now: i64,
 ) -> Result<(), EngineError> {
+    let resting: BTreeSet<String> = folder
+        .entries(IDLE)
+        .into_iter()
+        .map(|(_, stem)| stem)
+        .collect();
     for (tag, agent) in team {
         let Some(key) = tag_key(tag) else {
             continue;
         };
+        if tag != LEAD_TAG {
+            let status = if resting.contains(&key) {
+                AgentStatus::Idle
+            } else {
+                AgentStatus::Working
+            };
+            db.execute(
+                "UPDATE team_agents SET status=?2 WHERE id=?1 AND role='teammate'
+                 AND status IN ('idle','working') AND status<>?2",
+                params![agent, status.name()],
+            )
+            .map_err(state)?;
+        }
         if let Some(log) = claim(folder, &key, TOOLS, TOOLS_TAKEN, TOOLS_LOG_BYTES_MAX) {
             let text = String::from_utf8_lossy(&log);
             for tool in text.lines().take(TOOLS_PER_TICK_MAX) {

@@ -117,6 +117,7 @@ fn graph() -> Box<TeamGraph> {
                 state: EdgeState::Running,
                 reply: None,
                 lead: None,
+                agent_label: None,
             },
             GraphEdge {
                 from: "master".into(),
@@ -127,6 +128,7 @@ fn graph() -> Box<TeamGraph> {
                 state: EdgeState::Done,
                 reply: Some("Added 3 tests.".into()),
                 lead: None,
+                agent_label: None,
             },
         ],
         messages: Vec::new(),

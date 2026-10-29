@@ -166,6 +166,7 @@ mod tests {
             state,
             reply: None,
             lead: None,
+            agent_label: None,
         }
     }
 

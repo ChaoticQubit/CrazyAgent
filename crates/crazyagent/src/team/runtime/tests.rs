@@ -5895,3 +5895,59 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
         "a linked .git pointer was followed: {linked:?}"
     );
 }
+
+#[test]
+fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1)",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    let home = directory.path().join("home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(
+        team.join("config.json"),
+        r#"{"members":[{"name":"team-lead","tmuxPaneId":"leader"},{"name":"greet","tmuxPaneId":"%7"}]}"#,
+    )
+    .unwrap();
+    let row = || -> (i64, String) {
+        connection
+            .query_row(
+                "SELECT id,status FROM team_agents WHERE role='teammate'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    let (mate, found) = row();
+    assert_eq!(
+        found, "working",
+        "a teammate found in its pane starts Working"
+    );
+    connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [mate])
+        .unwrap();
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 6).unwrap();
+    assert_eq!(
+        row(),
+        (mate, "idle".to_owned()),
+        "a discovery pass never wakes a resting teammate"
+    );
+    super::teammates::register(&connection, &project, lead, &home, &[], 1, 7).unwrap();
+    assert_eq!(
+        row(),
+        (mate, "stopped".to_owned()),
+        "a teammate whose pane ended stops"
+    );
+}

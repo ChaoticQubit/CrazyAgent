@@ -285,6 +285,20 @@ test("a card shows its title, role line, branch and newest task, and the full te
   assert.ok(huge[2].endsWith("..."));
 });
 
+test("a task of an agent the graph does not draw stays its own and counts for no other card", () => {
+  const edges = [
+    edge(1, "team-2", "team-9", "running", { agent_label: "Alan (@add-fn)" }),
+    edge(2, "m", "team-8", "done", { agent_label: "Ken (@readme)" }),
+    edge(3, "m", "m", "sent"),
+  ];
+  const shown = graph.layoutGraph({ ...team, edges });
+  assert.ok(shown.cards.every((item) => item.node.id !== "team-9" && item.node.id !== "team-8"));
+  assert.equal(graph.cardTask(node("team-2", "lead"), edges), "No task yet.");
+  assert.equal(graph.latestTask(node("m", "master"), edges)?.task_id, 3);
+  assert.equal(graph.cardTask(node("m", "master"), edges), "2 tasks live, 1 waiting for an agent.");
+  assert.equal(shown.links.reduce((sum, link) => sum + link.tasks, 0), 0, "no drawn link carries another agent's live task");
+});
+
 test("amber marks an agent waiting on the owner, and a teammate with no worktree of its own", () => {
   assert.equal(graph.waitingOnOwner(node("a", "sub", { waiting: "permission" })).word, "Waiting on you");
   assert.equal(graph.waitingOnOwner(node("a", "sub", { waiting: "question" })).sentence, "Waiting on you: it asks a question in its terminal.");

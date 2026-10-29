@@ -1,6 +1,6 @@
 use super::relay::{
-    self, ANSWER, ANSWER_BYTES_MAX, ASK, ASKED, Answer, Ask, Held, INBOX, INBOX_MAX, LEAD_TAG,
-    Letter, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
+    self, ANSWER, ANSWER_BYTES_MAX, ASK, ASKED, Answer, Ask, Held, IDLE, INBOX, INBOX_MAX,
+    LEAD_TAG, Letter, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
 };
 use super::settings::Overlaps;
 use super::{TOOL_BYTES_MAX, Waiting};
@@ -107,11 +107,12 @@ struct Team {
 /// Runs one relay hook (K2a) for Claude Code: reads the hook input JSON, writes the JSON
 /// answer when there is one, and never makes the harness fail: an unreadable mailbox or
 /// input means no answer. PostToolUse hands waiting messages over as `additionalContext`
-/// and logs the tool; Stop blocks with waiting messages as the `reason`; AskUserQuestion
-/// and permission or elicitation notifications set Waiting; a user prompt clears it; an
-/// edit is denied outside a teammate's own worktree or, under Overlaps Block, on a file
-/// another active agent claimed. Inputs: the event argument, the mailbox, the input and
-/// the output. Output: Ok, or the usage text for an unknown event.
+/// and logs the tool; Stop blocks with waiting messages as the `reason`, and a native
+/// teammate that stops with none left rests until its next tool call or prompt;
+/// AskUserQuestion and permission or elicitation notifications set Waiting; a user prompt
+/// clears it; an edit is denied outside a teammate's own worktree or, under Overlaps Block,
+/// on a file another active agent claimed. Inputs: the event argument, the mailbox, the
+/// input and the output. Output: Ok, or the usage text for an unknown event.
 pub fn run(
     event: &str,
     mailbox: &Path,
@@ -140,11 +141,15 @@ pub fn run(
         return Ok(());
     };
     let who = identify(input["session_id"].as_str(), input["agent_id"].as_str());
+    let mate = who.teammate.as_ref().and(who.activity.as_deref());
     let answer = match event {
         Event::PostTool => {
             if let Some(tag) = &who.activity {
                 settle(&folder, tag);
                 log_tools(&folder, tag, &input);
+            }
+            if let Some(tag) = mate {
+                wake(&folder, tag);
             }
             who.inbox.as_deref().and_then(|tag| {
                 deliver(&folder, tag).map(|text| {
@@ -160,9 +165,13 @@ pub fn run(
                 settle(&folder, tag);
                 touch(&folder, tag);
             }
-            who.inbox.as_deref().and_then(|tag| {
-                deliver(&folder, tag).map(|text| json!({"decision": "block", "reason": text}))
-            })
+            let held = who.inbox.as_deref().and_then(|tag| deliver(&folder, tag));
+            if held.is_none()
+                && let Some(tag) = mate
+            {
+                rest(&folder, tag);
+            }
+            held.map(|text| json!({"decision": "block", "reason": text}))
         }
         Event::Asked => {
             if let Some(tag) = &who.activity {
@@ -182,6 +191,9 @@ pub fn run(
             None
         }
         Event::Prompt => {
+            if let Some(tag) = mate {
+                wake(&folder, tag);
+            }
             let typed = matches!(input["source"].as_str(), None | Some("user" | "sdk"));
             if let Some(tag) = who.activity.as_deref().filter(|_| typed) {
                 settle(&folder, tag);
@@ -403,6 +415,21 @@ fn settle(folder: &Mailbox, tag: &str) {
 fn touch(folder: &Mailbox, tag: &str) {
     if let Some(key) = relay::tag_key(tag) {
         let _ = folder.create(&format!("{key}{TOUCH}"));
+    }
+}
+
+/// Marks a native teammate's session resting for the engine, which shows its row Idle
+/// while the mark stays: its turn ended with nothing left to hand it.
+fn rest(folder: &Mailbox, tag: &str) {
+    if let Some(key) = relay::tag_key(tag) {
+        let _ = folder.create(&format!("{key}{IDLE}"));
+    }
+}
+
+/// Clears a native teammate's resting mark once a tool call or prompt shows it works again.
+fn wake(folder: &Mailbox, tag: &str) {
+    if let Some(key) = relay::tag_key(tag) {
+        let _ = folder.remove(&format!("{key}{IDLE}"));
     }
 }
 
