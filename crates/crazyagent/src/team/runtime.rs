@@ -355,6 +355,10 @@ enum Report {
         end: Option<TurnEnd>,
         text: String,
     },
+    Own {
+        end: Option<TurnEnd>,
+        text: String,
+    },
     Conversation(Resume),
     ResumeRefused,
 }
@@ -390,6 +394,7 @@ struct Worker {
     live: bool,
     briefed: bool,
     kept_session: bool,
+    own_turn: Option<i64>,
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
@@ -1880,11 +1885,11 @@ impl TeamRuntime {
         self.reap_idle(&stored)
     }
 
-    /// Lists a project's idle sub-agents that run no process between turns (a signed-in
-    /// account runs one session per turn, except a native lead's kept session, whose pane
-    /// takes typed messages), so no message can be typed into them; they get their
-    /// messages through the turn `wake_for_messages` starts. Takes the project. Returns
-    /// their ids.
+    /// Lists a project's idle sub-agents on a signed-in account, whose messages go through
+    /// a turn `wake_for_messages` starts instead of typing: one session per turn runs no
+    /// process to type into, and a native lead's kept session shares its window with its
+    /// teammates and takes only engine-started turns as tracked work. Takes the project.
+    /// Returns their ids.
     fn asleep(&self, project: &ProjectId) -> BTreeSet<i64> {
         self.workers
             .iter()
@@ -1893,7 +1898,6 @@ impl TeamRuntime {
                     && worker.role == AgentRole::Sub
                     && worker.managed
                     && !worker.live
-                    && !worker.kept_session
                     && worker.busy.is_none()
                     && !worker.stopping
             })
@@ -3404,6 +3408,7 @@ impl TeamRuntime {
                         && w.role == AgentRole::Sub
                         && w.harness == harness
                         && w.busy.is_none()
+                        && w.own_turn.is_none()
                         && !w.stopping
                         && !paused.contains(&w.connection)
                         && pin.map_or(w.parent == parent, |pin| pin == **id)
@@ -3676,7 +3681,13 @@ impl TeamRuntime {
         let ids: Vec<i64> = self
             .workers
             .iter()
-            .filter(|(_, w)| &w.project == project && w.busy.is_none() && !w.stopping && !w.live)
+            .filter(|(_, w)| {
+                &w.project == project
+                    && w.busy.is_none()
+                    && w.own_turn.is_none()
+                    && !w.stopping
+                    && !w.live
+            })
             .map(|(id, _)| *id)
             .collect();
         if ids.is_empty() {
@@ -3688,6 +3699,7 @@ impl TeamRuntime {
         let in_flight = masters && self.work_in_flight(project)?;
         let limits = super::time_limits(&self.connection, project)?;
         for id in ids {
+            let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
             let worker = self.workers.get_mut(&id).expect("worker exists");
             if worker.role == AgentRole::Master && in_flight {
                 worker.idle_since = Instant::now();
@@ -3696,6 +3708,10 @@ impl TeamRuntime {
             let ended = limits
                 .session_time()
                 .is_some_and(|session| worker.ran() >= session);
+            if !ended && waits {
+                worker.idle_since = Instant::now();
+                continue;
+            }
             if !ended {
                 let limit = match worker.role {
                     AgentRole::Master => self.limits.master_idle_stop,
@@ -3718,6 +3734,97 @@ impl TeamRuntime {
             let _ = worker.orders.send(Order::Stop);
         }
         Ok(())
+    }
+
+    /// Whether a kept native lead still has work around it that idle time must not end: a
+    /// teammate of it still working, or a coordination message to it that no channel or
+    /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
+    /// failure.
+    fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
+                                AND status IN ('starting','working'))
+                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Records a turn a kept native lead's app started by itself, such as after messages
+    /// from its teammates: a finished task of the lead's own with the turn's reply as its
+    /// result, which reaches the master as any finished master task does, then lands what
+    /// the turn changed in the lead's clone as a change set for the master. Takes the lead,
+    /// its project, when the turn started, its reply text and how it ended. Returns any
+    /// SQLite failure.
+    fn own_turn_ended(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        started: i64,
+        text: &str,
+        end: TurnEnd,
+    ) -> Result<(), EngineError> {
+        let (status, problem) = match end {
+            TurnEnd::Success => (TaskStatus::Done, None),
+            TurnEnd::Cancelled | TurnEnd::Interrupted => {
+                (TaskStatus::Cancelled, Some("Interrupted by you"))
+            }
+            TurnEnd::RateLimited => (TaskStatus::Failed, Some("The account hit its rate limit")),
+            _ => (TaskStatus::Failed, Some(OWN_TURN_FAILED)),
+        };
+        let result =
+            (!text.trim().is_empty()).then(|| bound_text(text.trim(), super::RESULT_BYTES_MAX));
+        let now = now_ms();
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        super::make_room(
+            &tx,
+            "team_tasks",
+            super::TASK_HISTORY,
+            project,
+            super::TASKS_PER_PROJECT_MAX,
+        )?;
+        let added = tx
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,parent,attempts,
+                                        result,error,output_bytes,created_ms,started_ms,finished_ms)
+                 SELECT project,?3,harness,tools,?4,?5,id,parent,1,?6,?7,?8,?9,?9,?10
+                 FROM team_agents WHERE id=?1 AND project=?2",
+                params![
+                    id,
+                    project.as_str(),
+                    TaskSource::Master.name(),
+                    OWN_TURN_TASK,
+                    status.name(),
+                    result,
+                    problem,
+                    i64::try_from(text.len()).unwrap_or(i64::MAX),
+                    started.min(now),
+                    now
+                ],
+            )
+            .map_err(error)?;
+        assert!(added <= 1);
+        let task = (added == 1).then(|| tx.last_insert_rowid());
+        tx.commit().map_err(error)?;
+        let Some(task) = task else {
+            return Ok(());
+        };
+        assert!(task > 0);
+        super::events::task_ended(&self.connection, task, now)?;
+        self.land_turn(
+            id,
+            project,
+            format!("task-{task}"),
+            OWN_TURN_TASK.to_owned(),
+            &format!("task {task}"),
+            end,
+        )
     }
 
     /// Tells whether a project's master still has work in flight: a task queued, waiting
@@ -4151,6 +4258,7 @@ impl TeamRuntime {
                 live,
                 briefed,
                 kept_session,
+                own_turn: None,
                 turn_started: None,
                 session: None,
                 seed: None,
@@ -5238,6 +5346,46 @@ impl TeamRuntime {
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
             }
+            Report::Own { end: None, .. } => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                assert!(worker.kept_session);
+                worker.own_turn = Some(now_ms());
+                worker.idle_since = Instant::now();
+                let idle = worker.busy.is_none();
+                if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
+                    hosted.set_busy(true);
+                }
+                if idle {
+                    self.mark_agent(id, AgentStatus::Working, None)?;
+                }
+                Ok(false)
+            }
+            Report::Own {
+                end: Some(end),
+                text,
+            } => {
+                let worker = self.workers.get_mut(&id).expect("worker exists");
+                let started = worker.own_turn.take().unwrap_or_else(now_ms);
+                worker.idle_since = Instant::now();
+                worker.worked = true;
+                let idle = worker.busy.is_none();
+                if let Some(hosted) = worker.hosted.as_ref().filter(|_| idle) {
+                    hosted.text(&text);
+                    hosted.set_busy(false);
+                }
+                let (project, connection) = (worker.project.clone(), worker.connection.clone());
+                if end == TurnEnd::RateLimited {
+                    self.pause(&connection)?;
+                }
+                self.connection
+                    .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
+                    .map_err(error)?;
+                self.own_turn_ended(id, &project, started, &text, end)?;
+                if idle {
+                    self.mark_agent(id, AgentStatus::Idle, None)?;
+                }
+                Ok(false)
+            }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
@@ -5397,11 +5545,11 @@ impl TeamRuntime {
         self.land_turn(id, project, turn, line, &what, end)
     }
 
-    /// Lands one ended turn of an agent under its change-set turn key, as `land` does. A
-    /// lead's worker's new change set is told to its lead to merge, never to the owner,
-    /// while the owner's Lands setting is Lead (F3). Inputs: the agent, its project, the
-    /// turn key, the prompt line, what ended for the note and how it ended. Output: any
-    /// SQLite failure writing the note.
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does, and
+    /// closes its workers' sets its tip now holds (F3). A lead's worker's new change set is
+    /// told to its lead to merge, never to the owner, while Lands is Lead. Inputs: the agent,
+    /// its project, the turn key, the prompt line, what ended for the note and how it ended.
+    /// Output: any SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -5478,8 +5626,16 @@ impl TeamRuntime {
             turn,
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
-        let landed = crate::landing::open(&self.root)
-            .and_then(|db| crate::landing_turns::record(&db, &workspace, &ended));
+        let landed = crate::landing::open(&self.root).and_then(|db| {
+            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
+                eprintln!(
+                    "landing_settle_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+            landed
+        });
         let note = match landed {
             Ok(
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
@@ -6503,12 +6659,119 @@ fn native_adopted(
     }
 }
 
+/// A kept native lead's turn its app started by itself, as the lead's worker follows it:
+/// whether one runs, its reply text so far, at most `LIVE_REPLY_BYTES_MAX`, how it went,
+/// and an order that came while it ran, taken once it ends.
+#[derive(Default)]
+struct OwnTurn {
+    running: bool,
+    text: String,
+    limited: bool,
+    interrupted: bool,
+    held: Option<Next>,
+}
+
+/// Reports the turns a kept native lead's app started by itself since the last call: a
+/// start, then an end with the turn's reply text and how it ended. Takes the session, the
+/// reports channel and the lead's own-turn state. Returns nothing.
+fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut OwnTurn) {
+    while let Some(fact) = session.next_own_fact() {
+        match fact {
+            TranscriptEvent::TurnStarted if !own.running => {
+                own.running = true;
+                own.text.clear();
+                (own.limited, own.interrupted) = (false, false);
+                let _ = reports.send(Report::Own {
+                    end: None,
+                    text: String::new(),
+                });
+            }
+            TranscriptEvent::Text { text } if own.running => {
+                if own.text.len() + text.len() <= LIVE_REPLY_BYTES_MAX {
+                    own.text.push_str(&text);
+                }
+            }
+            TranscriptEvent::TurnError { rate_limited } => own.limited |= rate_limited,
+            TranscriptEvent::Interrupted => own.interrupted = true,
+            TranscriptEvent::TurnFinished { success } if own.running => {
+                own.running = false;
+                let end = match (own.limited, own.interrupted, success) {
+                    (true, ..) => TurnEnd::RateLimited,
+                    (false, true, _) => TurnEnd::Interrupted,
+                    (false, false, true) => TurnEnd::Success,
+                    (false, false, false) => TurnEnd::Failed,
+                };
+                let _ = reports.send(Report::Own {
+                    end: Some(end),
+                    text: std::mem::take(&mut own.text),
+                });
+            }
+            _ => {}
+        }
+    }
+    assert!(own.text.len() <= LIVE_REPLY_BYTES_MAX);
+}
+
+/// Waits for a kept native lead's next order as `next_turn` does, and meanwhile reports
+/// the turns its app starts by itself. An order that comes while such a turn runs is held
+/// until that turn ends, so no prompt is typed into a running turn; a stop is not held.
+/// Takes the orders, the cancel flag, the session, the reports channel and the own-turn
+/// state. Returns the next order.
+fn next_lead_turn(
+    orders: &Receiver<Order>,
+    cancel: &AtomicBool,
+    session: &mut AgentSession,
+    reports: &Sender<Report>,
+    own: &mut OwnTurn,
+) -> Next {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Next::Stop;
+        }
+        report_own(session, reports, own);
+        if !own.running {
+            if let Some(next) = own.held.take() {
+                return next;
+            }
+            match orders.recv_timeout(ORDER_WAIT) {
+                Ok(Order::Start(instructions, grant)) => return Next::Start(instructions, grant),
+                Ok(Order::Turn(prompt, grant, limit)) => return Next::Turn(prompt, grant, limit),
+                Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        } else {
+            if own.held.is_none() {
+                match orders.try_recv() {
+                    Ok(Order::Start(instructions, grant)) => {
+                        own.held = Some(Next::Start(instructions, grant));
+                    }
+                    Ok(Order::Turn(prompt, grant, limit)) => {
+                        own.held = Some(Next::Turn(prompt, grant, limit));
+                    }
+                    Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        return Next::Stop;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            std::thread::sleep(ORDER_WAIT);
+        }
+        match session.next_event(IDLE_EVENT_WAIT) {
+            Ok(Some(LaunchEvent::Exited { .. })) => return Next::Closed(None),
+            Err(problem) => return Next::Closed(Some(problem.0)),
+            Ok(_) => {}
+        }
+    }
+}
+
 /// Serves turns on an agent whose harness keeps running between them, the kept turn first
-/// when one is given. At the end it stops the agent, or, when the engine quits with the
-/// agent kept, stops the running turn and leaves the pane running for the next engine. A
-/// kept session's credential copy and custody use are released once its process stopped
-/// or was left. A stop its warden did not confirm keeps both for the engine's life and
-/// ends the agent with that problem.
+/// when one is given. A kept session, a native lead's, also reports the turns its app
+/// starts by itself between orders, so its later work is recorded, landed and told to the
+/// master. At the end it stops the agent, or, when the engine quits with the agent kept,
+/// stops the running turn and leaves the pane running for the next engine. A kept
+/// session's credential copy and custody use are released once its process stopped or was
+/// left. A stop its warden did not confirm keeps both for the engine's life and ends the
+/// agent with that problem.
 fn serve(
     mut session: AgentSession,
     kept: Option<Kept>,
@@ -6518,16 +6781,22 @@ fn serve(
     interrupt: &AtomicBool,
     leave: &AtomicBool,
 ) -> Option<String> {
+    let lead = kept.is_some();
     let (mut first, held) = kept.map_or((None, None), |kept| (kept.first, Some(kept.held)));
+    if lead {
+        session.follow_own_turns();
+    }
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
         pane: session.pane_record(),
     });
     let mut problem = None;
     let mut named = false;
+    let mut own = OwnTurn::default();
     loop {
         let next = match first.take() {
             Some((prompt, limit)) => Next::Turn(prompt, None, limit),
+            None if lead => next_lead_turn(orders, cancel, &mut session, reports, &mut own),
             None => next_turn(orders, cancel, Some(&mut session)),
         };
         let (prompt, grant, limit) = match next {
@@ -6696,6 +6965,11 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+/// The task line a kept native lead's own turn is recorded under: a turn its app started
+/// by itself, such as after messages from its teammates, with no task given to it.
+const OWN_TURN_TASK: &str =
+    "The lead's own turn, after messages from its teammates; no task was given to it.";
+const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";

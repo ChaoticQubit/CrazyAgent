@@ -528,7 +528,7 @@ pub fn session_state(
         )
         .map_err(error)?;
     let found = if landing {
-        crate::landing::list(connection, project)?
+        crate::landing::owner_list(connection, project)?
     } else {
         Vec::new()
     };

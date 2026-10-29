@@ -22,6 +22,8 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
+/// The most facts of turns the app started by itself that wait to be taken at once.
+const OWN_FACTS_MAX: usize = 4096;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
@@ -44,6 +46,7 @@ pub struct TerminalSession {
     ready: bool,
     turn: bool,
     live: bool,
+    own: bool,
     facts: VecDeque<TranscriptEvent>,
     exited: bool,
     stopped: bool,
@@ -218,6 +221,7 @@ impl TerminalSession {
             ready: false,
             turn: false,
             live: false,
+            own: false,
             facts: VecDeque::new(),
             exited: false,
             stopped: false,
@@ -333,9 +337,26 @@ impl TerminalSession {
     /// live master needs: turn facts then come from [`Self::next_fact`] and `next_event`
     /// reports nothing more. Takes the session. Returns nothing.
     pub fn follow_every_turn(&mut self) {
+        assert!(!self.own);
         self.live = true;
         self.queue
             .retain(|event| matches!(event, LaunchEvent::Ready { .. }));
+    }
+
+    /// Keeps the turns the app starts by itself between the engine's turns, as a native
+    /// lead's app does when its teammates write to it: their facts then come from
+    /// [`Self::next_own_fact`], tool use left out, at most `OWN_FACTS_MAX` waiting. The
+    /// engine's turns still come from `next_event`. Takes the session. Returns nothing.
+    pub fn follow_own_turns(&mut self) {
+        assert!(!self.live);
+        self.own = true;
+    }
+
+    /// Takes the oldest kept fact of a turn the app started by itself, read by the last
+    /// poll of `next_event`. Takes the session. Returns the fact, or none.
+    pub fn next_own_fact(&mut self) -> Option<TranscriptEvent> {
+        assert!(self.own && !self.live);
+        self.facts.pop_front()
     }
 
     /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
@@ -452,6 +473,12 @@ impl TerminalSession {
                 continue;
             }
             if !self.turn {
+                if self.own
+                    && self.facts.len() < OWN_FACTS_MAX
+                    && !matches!(fact, TranscriptEvent::ToolUse { .. })
+                {
+                    self.facts.push_back(fact);
+                }
                 continue;
             }
             let event = match fact {
@@ -607,6 +634,24 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.next_event(wait),
             Self::Terminal(session) => session.next_event(wait),
+        }
+    }
+
+    /// Keeps the turns a pane app starts by itself, see
+    /// [`TerminalSession::follow_own_turns`]; a headless agent starts none. Takes the
+    /// session. Returns nothing.
+    pub fn follow_own_turns(&mut self) {
+        if let Self::Terminal(session) = self {
+            session.follow_own_turns();
+        }
+    }
+
+    /// Takes the oldest kept fact of a turn the pane app started by itself; a headless
+    /// agent has none. Takes the session. Returns the fact, or none.
+    pub fn next_own_fact(&mut self) -> Option<TranscriptEvent> {
+        match self {
+            Self::Piped(_) => None,
+            Self::Terminal(session) => session.next_own_fact(),
         }
     }
 
