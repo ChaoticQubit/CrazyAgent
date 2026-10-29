@@ -53,6 +53,7 @@
     "allow-desktop-team-stop-teammate",
     "allow-desktop-team-max-harnesses",
     "allow-desktop-team-max-teammates",
+    "allow-desktop-team-spread-accounts",
     "allow-desktop-team-token-budget",
     "allow-desktop-team-graph",
     "allow-desktop-team-events",

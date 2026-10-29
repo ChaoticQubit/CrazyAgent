@@ -835,12 +835,12 @@ impl TeamRuntime {
         self.sweep()
     }
 
-    /// Reads each running harness's terminal for the teammate panes its agent team split off,
-    /// at most once each `events::SCAN_EVERY`: records new ones and the ones that closed,
-    /// ends the ones the owner stopped and those past the owner's Max teammates per harness,
-    /// newest first, and tells the harness why in its terminal. A harness whose own pane is
-    /// not found among its window's panes is skipped, so its own pane is never ended here.
-    /// Returns any SQLite failure; an unreadable terminal is skipped.
+    /// Holds each running lead to the owner's Max teammates per harness in both modes, at most
+    /// once each `events::SCAN_EVERY`: native teammates past the cap end newest first, then
+    /// its terminal's teammate panes are read, recorded, and ended when the owner stopped
+    /// them or they pass what the cap leaves after its app-spawned sub-agents. The lead hears
+    /// why in its terminal. A lead whose own pane is not found among its window's panes keeps
+    /// its panes, so its own pane is never ended. Returns any SQLite failure.
     fn watch_teammates(&mut self) -> Result<(), EngineError> {
         let Some(host) = self.terminal.clone() else {
             return Ok(());
@@ -865,6 +865,17 @@ impl TeamRuntime {
             .map(|(id, worker)| (*id, worker.project.clone()))
             .collect();
         for (agent, project) in harnesses {
+            let cap = super::teammate_cap(&self.connection, &project)?;
+            if let Some(cap) = cap {
+                self.cap_native(&project, agent, cap)?;
+            }
+            let spawned = self
+                .workers
+                .values()
+                .filter(|worker| worker.parent == Some(agent) && !worker.stopping)
+                .count();
+            let pane_cap =
+                cap.map(|cap| cap.saturating_sub(u8::try_from(spawned).unwrap_or(u8::MAX)));
             let record: Option<String> = self
                 .connection
                 .query_row(
@@ -891,8 +902,7 @@ impl TeamRuntime {
                 .filter(|pane| pane.pid != lead.pid && !pane.dead)
                 .collect();
             self.teammates_seen(&project, agent, &team, at)?;
-            let cap = super::teammate_cap(&self.connection, &project)?;
-            let ended = self.end_teammates(host.as_ref(), &project, agent, &team, cap, at)?;
+            let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
             if let Some(text) = ended {
                 let _ =
@@ -1182,6 +1192,7 @@ impl TeamRuntime {
                     )
                     .map_err(error)?;
                 if !restart {
+                    super::owner_stop(&self.connection, &worker.project, *id, now_ms())?;
                     worker.held = true;
                     stopped.push((*id, worker.project.clone()));
                 }
@@ -1194,16 +1205,225 @@ impl TeamRuntime {
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
-        for (id, project) in stopped {
+        stopped.extend(self.stop_unmanaged()?);
+        for (id, project) in &stopped {
             super::events::record(
                 &self.connection,
-                &project,
-                id,
+                project,
+                *id,
                 None,
                 super::events::EventKind::Progress,
                 OWNER_STOPPED_AGENT,
                 now_ms(),
             )?;
+        }
+        self.tell_leads(&stopped)
+    }
+
+    /// Ends the owner-stopped sub-agents that no worker of this engine runs: native
+    /// teammates a lead's own agent team started (DEC-104 K5a), which the terminal host knows
+    /// by their own names once adopted. Each ends through `Host::kill`, never a tmux client
+    /// of the lead's server (K5c), and its row is marked stopped; a host that failed leaves
+    /// it to the next tick. Returns the agents stopped now, or any SQLite failure.
+    fn stop_unmanaged(&mut self) -> Result<Vec<(i64, ProjectId)>, EngineError> {
+        let listed: Vec<(i64, String)> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT a.id,a.project FROM team_agents a JOIN team_owner_stops s ON s.agent=a.id
+                     WHERE a.parent IS NOT NULL AND a.parent<>a.id
+                     AND a.status IN ('starting','idle','working') ORDER BY a.id LIMIT ?1",
+                )
+                .map_err(error)?;
+            statement
+                .query_map([UNMANAGED_STOPS_PER_TICK_MAX as i64], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        assert!(listed.len() <= UNMANAGED_STOPS_PER_TICK_MAX);
+        let mut stopped = Vec::new();
+        for (id, project) in listed {
+            if self.workers.contains_key(&id) {
+                continue;
+            }
+            let Ok(project) = ProjectId::new(project) else {
+                continue;
+            };
+            if !self.end_unmanaged(id, OWNER_STOPPED_TEAMMATE)? {
+                continue;
+            }
+            stopped.push((id, project));
+        }
+        Ok(stopped)
+    }
+
+    /// Ends one sub-agent no worker runs, a native teammate, through the terminal host and
+    /// marks its row stopped with the reason. Takes the agent and the reason. Returns
+    /// whether it ended: false while the host could not end it, so the next tick tries
+    /// again, or a SQLite failure.
+    fn end_unmanaged(&self, id: i64, reason: &str) -> Result<bool, EngineError> {
+        assert!(!self.workers.contains_key(&id));
+        if let Some(host) = &self.terminal {
+            let name = AgentId::team(id).map_err(EngineError::from)?;
+            match host.kill(&name) {
+                Ok(()) => {}
+                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+                Err(_) => return Ok(false),
+            }
+        }
+        self.connection
+            .execute(
+                "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
+                 WHERE id=?1 AND status IN ('starting','idle','working')",
+                params![id, reason, now_ms()],
+            )
+            .map_err(error)?;
+        Ok(true)
+    }
+
+    /// Marks stopped the native teammates of a lead that just ended, since they ran in the
+    /// lead's own terminal server and ended with it. Sub-agents a worker runs go on. Takes
+    /// the lead. Returns any SQLite failure.
+    fn lead_ended(&self, lead: i64) -> Result<(), EngineError> {
+        let children: Vec<i64> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT id FROM team_agents WHERE parent=?1 AND id<>?1
+                     AND status IN ('starting','idle','working')",
+                )
+                .map_err(error)?;
+            statement
+                .query_map([lead], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        for child in children
+            .into_iter()
+            .filter(|child| !self.workers.contains_key(child))
+        {
+            self.connection
+                .execute(
+                    "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?3
+                     WHERE id=?1 AND status IN ('starting','idle','working')",
+                    params![child, LEAD_ENDED_TEAMMATE, now_ms()],
+                )
+                .map_err(error)?;
+        }
+        Ok(())
+    }
+
+    /// Ends a running lead's newest native teammates past the owner's Max teammates per
+    /// harness, counted with its app-spawned sub-agents (DEC-104 K8). App-spawned ones are
+    /// never ended here: the engine admits them against the cap before they start. The lead
+    /// gets a note naming the ones ended. Takes the project, the lead and the cap. Returns
+    /// any SQLite or coordination store failure.
+    fn cap_native(&self, project: &ProjectId, lead: i64, cap: u8) -> Result<(), EngineError> {
+        let running = super::caps::running_sub_agents(&self.connection, project, lead)?;
+        if running <= u32::from(cap) {
+            return Ok(());
+        }
+        let native: Vec<i64> = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT id FROM team_agents WHERE project=?1 AND parent=?2 AND id<>?2
+                     AND status IN ('starting','idle','working') ORDER BY id DESC LIMIT ?3",
+                )
+                .map_err(error)?;
+            statement
+                .query_map(
+                    params![
+                        project.as_str(),
+                        lead,
+                        crate::terminal::PANES_LISTED_MAX as i64
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let over = usize::try_from(running - u32::from(cap)).unwrap_or(usize::MAX);
+        let mut ended = Vec::new();
+        for id in native
+            .into_iter()
+            .filter(|id| !self.workers.contains_key(id))
+            .take(over)
+        {
+            if self.end_unmanaged(id, OVER_TEAMMATE_CAP)? {
+                let name = names::name(&self.connection, id)?;
+                ended.push(names::label(AgentRole::Sub, id, name.as_ref()));
+            }
+        }
+        assert!(ended.len() <= over);
+        if ended.is_empty() {
+            return Ok(());
+        }
+        self.note_lead(
+            project,
+            lead,
+            format!(
+                "The owner allows at most {cap} sub-agents per harness, so the engine ended your newest teammates: {}. Keep at most {cap}.",
+                ended.join(", ")
+            ),
+        )
+    }
+
+    /// Sends a lead an engine note through the coordination layer (DEC-104), which delivers
+    /// it natively or by typing. A lead the layer no longer knows is skipped. Takes the
+    /// project, the lead and the note. Returns any coordination store failure.
+    fn note_lead(&self, project: &ProjectId, lead: i64, body: String) -> Result<(), EngineError> {
+        let note = crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Engine,
+            to: crate::coord::Party::Agent(lead),
+            kind: crate::coord::MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body,
+            idempotency_key: None,
+        };
+        match crate::coord::send(&self.connection, note, now_ms()) {
+            Ok(_) => Ok(()),
+            Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+            Err(_) => Ok(()),
+        }
+    }
+
+    /// Tells each running lead which of its sub-agents the owner just stopped, once per
+    /// stop, so it neither waits for them nor hands their work to another agent. A lead the
+    /// owner stopped too is not told. Takes the stopped agents. Returns any SQLite failure.
+    fn tell_leads(&self, stopped: &[(i64, ProjectId)]) -> Result<(), EngineError> {
+        for (id, project) in stopped {
+            let lead: Option<i64> = self
+                .connection
+                .query_row("SELECT parent FROM team_agents WHERE id=?1", [*id], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(error)?
+                .flatten();
+            let Some(lead) = lead.filter(|lead| {
+                *lead != *id
+                    && self
+                        .workers
+                        .get(lead)
+                        .is_some_and(|worker| worker.role == AgentRole::Sub && !worker.stopping)
+            }) else {
+                continue;
+            };
+            let name = names::name(&self.connection, *id)?;
+            let text = format!(
+                "The owner stopped your sub-agent {}. Its task waits for it until the owner wakes it; do not start another sub-agent for that work unless the owner asks.",
+                names::label(AgentRole::Sub, *id, name.as_ref())
+            );
+            self.note_lead(project, lead, text)?;
         }
         Ok(())
     }
@@ -1260,18 +1480,19 @@ impl TeamRuntime {
         again: Option<&HostedRestart>,
         access: &ModelAccess,
     ) -> Result<(), EngineError> {
-        let row: Option<(String, String, String, bool)> = self
+        let row: Option<(String, String, String, bool, Option<i64>)> = self
             .connection
             .query_row(
                 "SELECT a.project,a.role,a.harness,
-                        a.status IN ('stopped','failed') AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+                        a.status IN ('stopped','failed') AND EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project),
+                        a.parent
                  FROM team_agents a WHERE a.id=?1",
                 [reference],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )
             .optional()
             .map_err(error)?;
-        let Some((project, role, harness, wakes)) = row else {
+        let Some((project, role, harness, wakes, lead)) = row else {
             return Ok(());
         };
         let (Ok(project), Some(role)) = (ProjectId::new(project), AgentRole::parse(&role)) else {
@@ -1323,14 +1544,19 @@ impl TeamRuntime {
                     );
                 }
                 Some(_)
-                    if self.harnesses_full(
+                    if self.capped(
                         &project,
-                        super::caps(&self.connection, &project)?.harnesses,
+                        lead.filter(|lead| *lead != reference),
+                        super::caps::read(&self.connection, &project)?.harnesses,
                     ) =>
                 {
                     return self.note(
                         &project,
-                        "The project already runs as many harnesses as your Max harnesses setting allows, so no other was started. Stop one or raise the setting.",
+                        if lead.is_some() {
+                            "Its lead already runs as many sub-agents as your Max teammates per harness setting allows, so it was not started. Stop one or raise the setting."
+                        } else {
+                            "The project already runs as many harnesses as your Max harnesses setting allows, so no other was started. Stop one or raise the setting."
+                        },
                     );
                 }
                 Some(slot) => (slot.harness.clone(), slot.tools),
@@ -1671,14 +1897,37 @@ impl TeamRuntime {
             .count()
     }
 
-    /// Counts a project's agents that may still hold a terminal, stopping ones included.
     /// Tells whether the project already runs as many harnesses, the sub-agents the master
-    /// starts, as the owner's Max harnesses per project allows, so no other starts. Takes
-    /// the project and the cap, None for No limit. Returns true at the cap.
+    /// starts and not those a lead starts, as the owner's Max harnesses per project allows,
+    /// so no other starts. Takes the project and the cap, None for No limit. Returns true at
+    /// the cap.
     fn harnesses_full(&self, project: &ProjectId, cap: Option<u8>) -> bool {
-        cap.is_some_and(|cap| self.live(project, AgentRole::Sub, None) >= usize::from(cap))
+        cap.is_some_and(|cap| {
+            self.workers
+                .values()
+                .filter(|w| {
+                    &w.project == project
+                        && w.role == AgentRole::Sub
+                        && w.parent.is_none()
+                        && (!w.stopping || w.restarting)
+                })
+                .count()
+                >= usize::from(cap)
+        })
     }
 
+    /// Tells whether one more agent may start for a task or wake: a lead's sub-agent while
+    /// the lead runs fewer than Max teammates per harness in both modes, any other agent
+    /// while the project runs fewer harnesses than Max harnesses per project. Takes the
+    /// project, the lead, if any, and the harness cap. Returns true when the cap is reached.
+    fn capped(&self, project: &ProjectId, lead: Option<i64>, harness_cap: Option<u8>) -> bool {
+        match lead {
+            Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead).is_err(),
+            None => self.harnesses_full(project, harness_cap),
+        }
+    }
+
+    /// Counts a project's agents that may still hold a terminal, stopping ones included.
     fn panes(&self, project: &ProjectId) -> usize {
         self.workers
             .values()
@@ -1755,6 +2004,27 @@ impl TeamRuntime {
             super::now_ms(),
         )
         .map_err(|_| "Could not read the account scheduling settings".to_owned())?;
+        if super::spread_accounts(&self.connection, project)
+            .map_err(|_| "Could not read the Spread harnesses across accounts setting".to_owned())?
+        {
+            let used: BTreeSet<&CredentialRef> = self
+                .workers
+                .values()
+                .filter(|w| &w.project == project && !w.stopping)
+                .map(|w| &w.connection)
+                .collect();
+            let unused: Vec<TeamAccount> = accounts
+                .iter()
+                .filter(|account| !used.contains(&account.connection))
+                .cloned()
+                .collect();
+            assert!(unused.len() <= accounts.len());
+            if let Some(account) =
+                pick_account(&unused, &|c: &CredentialRef| self.load(c), paused, &choice)
+            {
+                return Ok(account.clone());
+            }
+        }
         if let Some(account) = pick_account(
             &accounts,
             &|c: &CredentialRef| self.load(c),
@@ -2799,7 +3069,7 @@ impl TeamRuntime {
                 .map_err(error)?
         };
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
-        let harness_cap = super::caps(&self.connection, project)?.harnesses;
+        let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         for (task, harness, prompt, pin, by_master, parent) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -2851,7 +3121,7 @@ impl TeamRuntime {
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
-                        || self.harnesses_full(project, harness_cap)
+                        || self.capped(project, parent, harness_cap)
                     {
                         continue;
                     }
@@ -2880,7 +3150,7 @@ impl TeamRuntime {
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
                         || self.panes(project) >= PANES_PER_PROJECT_MAX
-                        || self.harnesses_full(project, harness_cap)
+                        || self.capped(project, parent, harness_cap)
                     {
                         continue;
                     }
@@ -3014,7 +3284,7 @@ impl TeamRuntime {
             return Ok(());
         }
         let floor = usize::from(stored.team.min_agents.saturating_sub(1));
-        let harness_cap = super::caps(&self.connection, project)?.harnesses;
+        let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         for slot in &stored.team.sub_harnesses {
             while self.live(project, AgentRole::Sub, None) < floor
                 && self.live(project, AgentRole::Sub, Some(&slot.harness))
@@ -3324,9 +3594,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
-        self.connection
-            .execute("DELETE FROM team_owner_stops WHERE agent=?1", [id])
-            .map_err(error)?;
+        super::owner_start(&self.connection, &stored.project_id, id)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
@@ -4408,6 +4676,9 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                if !worker.leave.load(Ordering::SeqCst) {
+                    self.lead_ended(id)?;
+                }
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
@@ -5643,6 +5914,11 @@ const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its t
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
 const TEAMMATE_ROWS_KEPT: i64 = 32;
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
+/// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
+const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
+const OWNER_STOPPED_TEAMMATE: &str = "The owner stopped this teammate.";
+const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with the lead's.";
+const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
 
