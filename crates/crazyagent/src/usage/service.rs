@@ -1,4 +1,4 @@
-use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
+use super::capture::{Attribution, Format, RunKind, scan_agent_home, scan_runs};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
 use super::{LimitSource, failure, record_failure, record_observation, storage};
 use crate::config::{ModelAccess, ModelConnection};
@@ -245,7 +245,7 @@ impl Usage {
                 .join("agents")
                 .join(format!("agent-{id}"))
                 .join("home");
-            scan_home(&self.db, &home, format, &attribution, now_ms)?;
+            scan_agent_home(&self.db, &home, format, &attribution, id, now_ms)?;
         }
         Ok(())
     }

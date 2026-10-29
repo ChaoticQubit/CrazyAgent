@@ -140,7 +140,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
         <td>{displayText(row.account)}</td>
         <td><StatusBadge word={row.word} />
           {row.stoppedByYou && <span className="pj-small pj-muted pj-block">Stopped by you. Its task waits until you wake it.</span>}
-          {row.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={`Stop ${displayText(row.name)} and its teammates`}
+          {row.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={row.lead ? `Stop ${displayText(row.name)}` : `Stop ${displayText(row.name)} and every agent it leads`}
             onClick={() => setHalting(row)}>Stop</button>}</td>
         <td className="pj-secondary">{displayText(row.task)}</td>
       </tr>)}</tbody>
@@ -166,9 +166,11 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       {displayText(stopping?.prompt ?? "")}
     </ConfirmDialog>
-    <ConfirmDialog open={halting !== null} title={`Stop ${displayText(halting?.name ?? "")}?`} confirmLabel="Stop harness" cancelLabel="Keep it running" pending={busy}
+    <ConfirmDialog open={halting !== null} title={`Stop ${displayText(halting?.name ?? "")}?`} confirmLabel={halting?.lead ? "Stop sub-agent" : "Stop harness"} cancelLabel="Keep it running" pending={busy}
       onCancel={() => setHalting(null)} onConfirm={() => { if (halting) void haltHarness(halting); }}>
-      This harness and every teammate in its terminal stop now, and stay stopped across app and engine restarts. Its task waits for it, in its own worktree, until you wake it.
+      {halting?.lead
+        ? `This sub-agent of ${displayText(halting.lead)} stops now, app-spawned or a native teammate, and stays stopped across app and engine restarts. Its lead is told. Its task waits for it until you wake it.`
+        : "This harness, every sub-agent it leads and every teammate in its terminal stop now, and stay stopped across app and engine restarts. Its task waits for it, in its own worktree, until you wake it."}
     </ConfirmDialog>
   </section>;
 }

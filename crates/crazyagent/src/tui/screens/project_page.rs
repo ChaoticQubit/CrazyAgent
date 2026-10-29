@@ -10,7 +10,7 @@ use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
-use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage};
+use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
@@ -1018,6 +1018,11 @@ impl ProjectPage {
             PluginsReply::Edit(server) => {
                 return Flow::Replace(Box::new(
                     EditServer::new(*server).for_project(project, name),
+                ));
+            }
+            PluginsReply::Tools { servers, at } => {
+                return Flow::Replace(Box::new(
+                    ToolsPage::new(servers, at).for_project(project, name),
                 ));
             }
         };

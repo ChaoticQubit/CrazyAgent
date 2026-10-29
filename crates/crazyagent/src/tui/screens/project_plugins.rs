@@ -18,8 +18,8 @@ const PANEL_TEXT_LINES: usize = 2;
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
 /// to queue, whose reply comes back through `apply`; AddSkill, AddServer,
-/// AddHooks, Edit and OpenSkill ask the host to open the add form, the server's
-/// edit page or the skill's page for this project.
+/// AddHooks, Edit, OpenSkill and Tools ask the host to open the add form, the
+/// server's edit page, the skill's page or the tool switches for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -29,7 +29,14 @@ pub(in crate::tui) enum PluginsReply {
     AddServer,
     AddHooks,
     Edit(Box<ServerView>),
-    OpenSkill { id: String, name: String },
+    OpenSkill {
+        id: String,
+        name: String,
+    },
+    Tools {
+        servers: Vec<(String, String)>,
+        at: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +344,17 @@ impl ProjectPlugins {
             KeyCode::Char('h') => PluginsReply::AddHooks,
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('e') => self.edit(),
+            KeyCode::Char('l') => PluginsReply::Tools {
+                servers: self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect(),
+                at: match self.item() {
+                    Some(Item::Server(index)) => index + 1,
+                    _ => 0,
+                },
+            },
             KeyCode::Enter => match self.item() {
                 Some(Item::Skill(index)) => PluginsReply::OpenSkill {
                     id: self.skills[index].id.clone(),
@@ -867,6 +885,7 @@ impl ProjectPlugins {
             ("a", "Add skill"),
             ("m", "Add MCP server"),
             ("h", "Add hooks"),
+            ("l", "Tools"),
             TABS,
             ("Esc", "Home"),
         ]);

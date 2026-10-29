@@ -1,4 +1,5 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
+use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
@@ -265,6 +266,70 @@ impl NativeBridge {
             .await
     }
 
+    /// Saves a project's coordination settings: where sub-agent questions go, what overlapping
+    /// claims do, workflow nudges and the counted tools. Takes the project id, the settings and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_coordination(
+        &mut self,
+        id: &str,
+        settings: CoordSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::CoordSettings {
+                project_id,
+                settings,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets how one harness kind's agents get sub-agents in a project: app-spawned, or native
+    /// teammates where the harness has them. Takes the project id, the harness kind, the mode
+    /// and the client generation. Returns the actual commit receipt.
+    pub async fn team_harness_mode(
+        &mut self,
+        id: &str,
+        harness: HarnessKind,
+        mode: SubagentMode,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::HarnessMode {
+                project_id,
+                harness,
+                mode,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets how messages reach one harness kind's agents in a project: auto, native only or
+    /// typing only. Takes the project id, the harness kind, the delivery and the client
+    /// generation. Returns the actual commit receipt.
+    pub async fn team_harness_delivery(
+        &mut self,
+        id: &str,
+        harness: HarnessKind,
+        delivery: Delivery,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::HarnessDelivery {
+                project_id,
+                harness,
+                delivery,
+            },
+            generation,
+        )
+        .await
+    }
+
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
     /// app running in a terminal the owner types into. Takes the project id, the switch and
     /// the client generation. Returns the actual commit receipt.
@@ -429,6 +494,20 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::TokenBudget { project_id, tokens }, generation)
+            .await
+    }
+
+    /// Turns the project's Spread harnesses across accounts on or off: on, a new or woken
+    /// agent prefers a pool account no running agent of the project uses. Takes the project
+    /// id, the switch and the client generation. Returns the actual commit receipt.
+    pub async fn team_spread_accounts(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::SpreadAccounts { project_id, on }, generation)
             .await
     }
 
