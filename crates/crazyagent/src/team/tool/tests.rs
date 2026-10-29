@@ -316,6 +316,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             task: "Write page.md".into(),
             harness: Some("codex".into()),
             role: Some("page-writer".into()),
+            mode: None,
         })
     );
     assert_eq!(
@@ -324,6 +325,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             task: "Write page.md".into(),
             harness: None,
             role: None,
+            mode: None,
         })
     );
     for role in ["@", "???", &"r".repeat(65)] {
@@ -461,6 +463,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         task: "Write page.md".into(),
         harness: Some("Codex".into()),
         role: None,
+        mode: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
     let planted = Call::UpdateWork {
@@ -478,6 +481,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         task: "Write page.md".into(),
         harness: None,
         role: Some("Page".into()),
+        mode: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
 }

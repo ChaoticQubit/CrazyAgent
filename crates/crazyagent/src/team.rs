@@ -1177,6 +1177,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 session TEXT,
                 parent INTEGER,
                 pane TEXT,
+                mode TEXT,
                 hookless INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
@@ -1200,7 +1201,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 started_ms INTEGER,
                 finished_ms INTEGER,
                 session TEXT,
-                parent INTEGER
+                parent INTEGER,
+                mode TEXT
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -1342,7 +1344,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
-    add_agent_columns(connection)?;
+    add_late_columns(connection)?;
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
@@ -2939,30 +2941,79 @@ pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineErro
 const DEPTH_WALK_MAX: i64 = 8;
 const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 
-/// Gives a `team_agents` table made before native teammates its `pane` column, the tmux
-/// pane id of a teammate row (the id `team_teammates` keeps, NULL for every other agent),
-/// and one made before DEC-104 bare-hooks its `hookless` column, 1 when the agent's launch
-/// fires no hooks. Runs on every open and adds each column once. Takes the engine
+/// Gives team tables made before later columns those columns, older rows taking the
+/// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
+/// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
+/// for a lead's task) and `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// DEC-104 bare-hooks). Runs on every open and adds each column once. Takes the engine
 /// connection. Returns any SQLite failure.
-fn add_agent_columns(connection: &Connection) -> Result<(), EngineError> {
-    for (name, definition) in [
-        ("pane", "pane TEXT"),
-        ("hookless", "hookless INTEGER NOT NULL DEFAULT 0"),
+fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
+    for (table, column, definition) in [
+        ("team_agents", "pane", "TEXT"),
+        ("team_agents", "mode", "TEXT"),
+        ("team_tasks", "mode", "TEXT"),
+        ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present: bool = connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_agents') WHERE name=?1)",
-                [name],
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
                 |row| row.get(0),
             )
             .map_err(error)?;
         if !present {
             connection
-                .execute_batch(&format!("ALTER TABLE team_agents ADD COLUMN {definition}"))
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
                 .map_err(error)?;
         }
     }
     Ok(())
+}
+
+/// The sub-agent mode an agent leads in (DEC-104), fixed at its first start: its row's
+/// mode, else the project's setting for its harness kind when the master started it on a
+/// kind with native teammates, else app-spawned, then stored so a later setting change
+/// never moves it. Takes the connection, project and agent. Returns the mode, or a SQLite
+/// failure or `team_lead_mode_invalid` for a stored name this build does not know.
+pub(crate) fn lead_mode(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<crate::coord::settings::SubagentMode, EngineError> {
+    use crate::coord::settings::{HarnessKind, SubagentMode, mode, native_supported};
+    assert!(agent > 0);
+    let read = |connection: &Connection| -> Result<(String, String, Option<i64>, Option<String>), EngineError> {
+        connection
+            .query_row(
+                "SELECT role,harness,parent,mode FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(error)
+    };
+    let (role, harness, parent, stored) = read(connection)?;
+    let stored = match stored {
+        Some(stored) => stored,
+        None => {
+            let chosen =
+                match HarnessKind::from_harness(&harness).filter(|kind| native_supported(*kind)) {
+                    Some(kind) if role == AgentRole::Sub.name() && parent.is_none() => {
+                        mode(connection, project, kind)?
+                    }
+                    _ => SubagentMode::AppSpawned,
+                };
+            connection
+                .execute(
+                    "UPDATE team_agents SET mode=?2 WHERE id=?1 AND mode IS NULL",
+                    params![agent, chosen.as_str()],
+                )
+                .map_err(error)?;
+            read(connection)?.3.expect("the mode was just stored")
+        }
+    };
+    SubagentMode::parse(&stored).ok_or_else(|| failure("team_lead_mode_invalid"))
 }
 
 /// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
