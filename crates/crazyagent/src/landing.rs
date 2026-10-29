@@ -19,6 +19,8 @@ mod owner;
 mod retire;
 #[cfg(unix)]
 mod store;
+#[cfg(unix)]
+mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -383,6 +385,25 @@ pub fn agent_tip(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
+/// Lists the branches of a lead's sub-agents (DEC-104 K5b) whose work is not yet in the
+/// lead's task branch, so a lead cannot report its work complete while a sub-agent's work
+/// waits. Read through the engine's checked fetch; no git runs in any agent's clone.
+/// Inputs: the engine database, the project and the lead's team agent id. Output: the
+/// unmerged branches, empty when every sub-agent's work is in, or a plain `changes_*` code.
+pub fn unmerged_sub_agents(
+    db: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(unix)]
+    return subagent::unmerged(db, project, lead);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project, lead);
         Err(unavailable())
     }
 }
