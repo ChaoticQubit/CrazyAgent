@@ -6,8 +6,8 @@ mod tests;
 
 /// One Process request the TUI sends.
 /// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
-/// reads what one team agent received at its last launch (none for the newest master), or
-/// reads or saves one project's agent instruction settings.
+/// reads what one team agent received at its last launch (none for the newest master),
+/// reads or saves one project's agent instruction settings, or reads its workflow adoption.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -31,17 +31,21 @@ pub(in crate::tui) enum ProcessQuery {
         project: ProjectId,
         settings: crate::engine::owner::InstructionSettings,
     },
+    Adoption {
+        project: ProjectId,
+    },
 }
 
 /// What one Process request returned: the text read, what a save comes to beside what a
-/// Claude master takes, what one team agent received at its last launch, or one project's
-/// agent instruction settings as stored.
+/// Claude master takes, what one team agent received at its last launch, one project's
+/// agent instruction settings as stored, or its workflow adoption.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
     Saved(crate::engine::owner::ProcessSaved),
     Agent(Box<crate::engine::owner::AgentInstructions>),
     Settings(crate::engine::owner::InstructionSettings),
+    Adoption(Box<crate::engine::owner::Adoption>),
 }
 
 /// One Process reply for the screens.
@@ -131,6 +135,10 @@ impl NativeOwner {
                 .save_instruction_settings(project, settings)
                 .await
                 .map(ProcessReply::Settings),
+            ProcessQuery::Adoption { project } => controller
+                .adoption(project)
+                .await
+                .map(|view| ProcessReply::Adoption(Box::new(view))),
         }
         .map_err(problem)
     }

@@ -2574,6 +2574,17 @@ async fn desktop_instruction_settings(
 }
 
 #[tauri::command]
+async fn desktop_adoption(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::Adoption, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.adoption(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_save_instruction_settings(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3035,6 +3046,7 @@ pub fn run() {
             desktop_agent_instructions,
             desktop_instruction_settings,
             desktop_save_instruction_settings,
+            desktop_adoption,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

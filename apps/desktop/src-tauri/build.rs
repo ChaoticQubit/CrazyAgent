@@ -192,6 +192,7 @@ fn main() {
         "desktop_agent_instructions",
         "desktop_instruction_settings",
         "desktop_save_instruction_settings",
+        "desktop_adoption",
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
