@@ -29,6 +29,7 @@ use ratatui::text::{Line, Span};
 
 mod cleanup;
 mod finished;
+mod questions;
 #[cfg(test)]
 mod tests;
 
@@ -130,6 +131,7 @@ pub struct Team {
     task: Option<i64>,
     cleanup: cleanup::Cleanup,
     finished: finished::Finished,
+    questions: questions::Questions,
     instructions: Option<Instructions>,
     settings: Option<TeamView>,
 }
@@ -154,6 +156,7 @@ impl Team {
             task: None,
             cleanup: cleanup::Cleanup::new(),
             finished: finished::Finished::new(),
+            questions: questions::Questions::new(),
             instructions: None,
             settings: None,
         }
@@ -516,6 +519,33 @@ impl Team {
         attached.closed = Some(STOPPED.into());
     }
 
+    /// Opens the terminal of the agent a Questions row names, as Enter on its node does,
+    /// and moves the tree cursor to that node. Inputs: the terminal and the context.
+    /// Output: none; an agent the tree does not show yet gets a plain message.
+    fn open_agent(&mut self, agent: &AgentId, ctx: &mut Ctx) {
+        let node = self.graph.ready().and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .position(|node| node.terminal.as_ref() == Some(agent))
+        });
+        let Some(node) = node else {
+            ctx.say(Message::warning(
+                "That agent is not in the team tree yet.",
+                "Press r to read the team again.",
+            ));
+            return;
+        };
+        if let Some(at) = self
+            .items(ctx.glyphs)
+            .iter()
+            .position(|item| *item == Item::Node(node))
+        {
+            self.cursor = at;
+        }
+        self.open(node, ctx);
+    }
+
     fn show_task(&mut self, edge: usize) {
         self.task = self
             .graph
@@ -782,6 +812,24 @@ impl Team {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
         }
+        if let Some((title, lines, cursor)) =
+            self.questions.lines(limit, usize::from(inner.height), ctx)
+        {
+            let typing = cursor.is_some();
+            boxed(frame, area, &title, typing, lines, ctx);
+            return cursor.map(|(row, column)| Position {
+                x: inner.x.saturating_add(
+                    u16::try_from(column)
+                        .unwrap_or(u16::MAX)
+                        .min(inner.width.saturating_sub(1)),
+                ),
+                y: inner.y.saturating_add(
+                    u16::try_from(row)
+                        .unwrap_or(u16::MAX)
+                        .min(inner.height.saturating_sub(1)),
+                ),
+            });
+        }
         if let Some(open) = self.instructions.as_mut() {
             let lines = instruction_lines(&open.read, limit, ctx);
             open.top = open
@@ -920,6 +968,9 @@ impl Screen for Team {
         if self.finished.open() {
             return self.finished.hints();
         }
+        if self.questions.open() {
+            return self.questions.hints(ctx);
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let mut hints = vec![
             hint(&vertical, "Move"),
@@ -940,6 +991,13 @@ impl Screen for Team {
                 hints.push(hint("Esc", "Close"));
             }
             None => {
+                let questions = match self.questions.counts() {
+                    Some((asked, waiting)) if asked + waiting > 0 => {
+                        format!("Questions ({})", asked + waiting)
+                    }
+                    _ => "Questions".to_owned(),
+                };
+                hints.push(hint("q", &questions));
                 hints.push(hint("f", "Finished"));
                 hints.push(hint("c", "Clean up"));
                 hints.push(hint("Esc", "Back"));
@@ -949,12 +1007,12 @@ impl Screen for Team {
         hints
     }
 
-    fn typing(&self) -> bool {
-        self.settings.as_ref().is_some_and(TeamView::typing)
-    }
-
     fn raw(&self) -> bool {
         self.focus == Focus::Terminal
+    }
+
+    fn typing(&self) -> bool {
+        self.settings.as_ref().is_some_and(TeamView::typing) || self.questions.typing()
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -966,6 +1024,15 @@ impl Screen for Team {
         }
         if self.settings.is_some() {
             return self.settings_key(key, ctx);
+        }
+        if !self.cleanup.open()
+            && !self.finished.open()
+            && let Some(took) = self.questions.key(key, &self.project, ctx)
+        {
+            if let questions::Took::Open(agent) = took {
+                self.open_agent(&agent, ctx);
+            }
+            return Flow::Handled;
         }
         if !self.cleanup.open()
             && let Some(flow) = self.finished.key(key, &self.project, ctx)
@@ -1029,11 +1096,15 @@ impl Screen for Team {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.cleanup.arrive(arrival, &self.project, ctx);
         self.finished.arrive(arrival, &self.project, ctx);
+        self.questions.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
                 self.follow_master(ctx);
+                if !self.master {
+                    questions::Questions::read(&self.project, ctx);
+                }
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
             Arrival::Owner(event) => match event.as_ref() {

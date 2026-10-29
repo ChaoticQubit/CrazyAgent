@@ -14,6 +14,7 @@ pub mod graph;
 pub mod history;
 pub mod master;
 pub mod names;
+pub mod questions;
 pub mod runtime;
 pub mod tool;
 
@@ -606,6 +607,11 @@ pub enum TeamAction {
         project_id: ProjectId,
         tokens: Option<u64>,
     },
+    AnswerQuestion {
+        project_id: ProjectId,
+        message: i64,
+        text: String,
+    },
     SpreadAccounts {
         project_id: ProjectId,
         on: bool,
@@ -779,6 +785,14 @@ impl TeamAction {
                 .is_none_or(plain_branch_name)
                 .then_some(())
                 .ok_or_else(|| failure("team_master_branch_invalid")),
+            Self::AnswerQuestion { message, text, .. } => {
+                if *message <= 0 {
+                    return Err(failure("coord_question_missing"));
+                }
+                text_valid(text, crate::coord::BODY_BYTES_MAX)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_answer_invalid"))
+            }
             Self::KeepWarm { .. }
             | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
@@ -827,6 +841,7 @@ impl TeamAction {
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
             | Self::TokenBudget { project_id, .. }
+            | Self::AnswerQuestion { project_id, .. }
             | Self::SpreadAccounts { project_id, .. }
             | Self::CoordSettings { project_id, .. }
             | Self::HarnessMode { project_id, .. }
@@ -1311,6 +1326,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
+    questions::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -2224,6 +2240,9 @@ pub fn execute(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::AnswerQuestion { message, text, .. } => {
+            questions::answer(tx, project, *message, text, now)
+        }
     }
 }
 

@@ -263,10 +263,7 @@ pub(super) fn agent_in(
 
 /// Finds the project's running master. Takes the database and the project. Returns its
 /// id, or None while no master runs.
-pub(super) fn master_of(
-    db: &Connection,
-    project: &ProjectId,
-) -> Result<Option<AgentId>, EngineError> {
+pub fn master_of(db: &Connection, project: &ProjectId) -> Result<Option<AgentId>, EngineError> {
     db.query_row(
         "SELECT id FROM team_agents WHERE project=?1 AND role='master'
          AND status NOT IN ('stopped','failed') ORDER BY id DESC LIMIT 1",
@@ -395,7 +392,7 @@ pub(super) fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
 
 /// Reads one message. Takes the database and the id. Returns it, or
 /// `coord_message_unknown`.
-pub(super) fn message(db: &Connection, id: i64) -> Result<Message, EngineError> {
+pub fn message(db: &Connection, id: i64) -> Result<Message, EngineError> {
     db.query_row(
         &format!("SELECT {MESSAGE_COLUMNS} FROM coord_messages WHERE id=?1"),
         params![id],

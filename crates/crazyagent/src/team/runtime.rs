@@ -70,7 +70,7 @@ const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
 /// How streams, leads and their branches work, given to every master (N3).
 const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works in its own git worktree and branch. The sub-agent you start for a stream of work leads it and may start workers of its own, up to the owner's Sub-agent depth setting. Workers' work lands on their lead's branch; the owner accepts a lead's work onto any branch. One harness per stream means one lead agent per stream, on the harness and model the owner chose or the settings default. Never ask the owner how streams share a branch.\n";
 /// What a sub-agent that may lead its own workers is told with each task (N3).
-const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with delegate(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. status(), message(), answer(), wake() and changes() reach only your workers, and accept(change_set) lands a worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
+const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with spawn(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. inspect_work() shows your workers, their work and their change sets, update_work(to, text) reaches one of them and wakes a finished one, stop(agent) stops one, and merge(agent) lands a finished worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
 /// What a lead's worker is told with each task (N3).
 const WORKER_LINE: &str =
     "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
@@ -385,9 +385,11 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
+    receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
+    deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
 }
 
@@ -531,9 +533,11 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             teammates_next: None,
+            receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
             naming: None,
+            deliveries: crate::coord::delivery::Deliveries::default(),
             adoption_failed: None,
         })
     }
@@ -817,7 +821,8 @@ impl TeamRuntime {
     /// Runs one step for every project with team work: applies agent reports and the
     /// owner's stop and restart from the agent register, sends pending messages to the
     /// master, delivers finished results, starts or reuses sub-agents within the plan's
-    /// limits, stops idle or cancelled agents and ends team panes no agent owns.
+    /// limits, stops idle or cancelled agents, ends team panes no agent owns, then alerts
+    /// the owner to new questions and terminal waits by severity.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.collect()?;
         self.owner_controls()?;
@@ -832,7 +837,8 @@ impl TeamRuntime {
         self.note_conversations()?;
         self.watch_questions()?;
         self.watch_teammates()?;
-        self.sweep()
+        self.sweep()?;
+        super::questions::tick(&mut self.connection, now_ms())
     }
 
     /// Holds each running lead to the owner's Max teammates per harness in both modes, at most
@@ -1765,9 +1771,18 @@ impl TeamRuntime {
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.serve_agent_calls(&stored, access);
+        self.serve_relays(project);
         self.feed_master(&stored, access, &paused)?;
         self.deliver(&stored)?;
         self.deliver_to_leads(project)?;
+        super::events::forward_to_parents(&self.connection, project, now_ms())?;
+        let reach = crate::coord::delivery::Reach {
+            host: self.terminal.as_deref(),
+            owner: self.agents.as_deref().map(Agents::typing),
+            state: &self.state,
+        };
+        self.deliveries
+            .tick(&self.connection, project, now_ms(), &reach)?;
         let master_live = self.master(project).is_some();
         super::events::deliver_by_message(&self.connection, project, master_live, now_ms())?;
         self.check_adoption(project);
@@ -2716,13 +2731,14 @@ impl TeamRuntime {
             events: self.events.as_ref(),
             host: self.terminal.as_deref(),
         };
-        super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+        super::master::serve_calls(&mut self.connection, &answering, id, &mailbox).map(drop)
     }
 
     /// Answers the team calls a project's sub-agents made since the last tick, from each
-    /// running sub-agent's own mailbox, with the sub-agent's label as the origin of what it
-    /// saves: past conversations and memory, and the lead calls that reach only the
-    /// workers it started (N1, N2). Takes the setup and live access.
+    /// running sub-agent's own mailbox, which names the caller, with the sub-agent's label
+    /// as the origin of what it saves: past conversations and memory, the work verbs and
+    /// the lead calls that reach only the workers it started (DEC-104, N1, N2). Takes the
+    /// setup and live access.
     fn serve_agent_calls(&mut self, stored: &StoredSetup, access: &ModelAccess) {
         if self.delegation_tool.is_none() {
             return;
@@ -2752,13 +2768,57 @@ impl TeamRuntime {
             super::history::serve_agent_calls(
                 &mut self.connection,
                 project,
-                &label,
+                (id, &label),
                 &agents,
                 &mailbox,
                 &mut |connection, call| {
-                    super::master::answer_lead(connection, &answering, id, call)
+                    super::master::answer_sub(connection, &answering, id, call)
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
+            );
+        }
+    }
+
+    /// Runs the Claude Code relay (K2a) of each running Claude agent of a project whose home
+    /// holds the relay plugin: delivers its and its native teammates' messages through the
+    /// mailbox, applies their reported activity and waits, answers their overlap questions
+    /// and, at most once each `events::SCAN_EVERY` per project, marks read receipts from
+    /// their transcripts. A relay that fails is skipped until the next tick, like the
+    /// agents' team calls. Takes the project.
+    fn serve_relays(&mut self, project: &ProjectId) {
+        let now = Instant::now();
+        let receipts = self
+            .receipts_next
+            .get(project)
+            .is_none_or(|next| now >= *next);
+        if receipts {
+            self.receipts_next
+                .insert(project.clone(), now + super::events::SCAN_EVERY);
+        }
+        let relays: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && crate::coord::settings::HarnessKind::from_harness(&worker.harness)
+                        == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in relays {
+            let home = agent_home(&self.state, id);
+            if !crate::coord::relay::installed(&home) {
+                continue;
+            }
+            let _ = crate::coord::relay::serve(
+                &self.connection,
+                project,
+                id,
+                &home,
+                &self.mailbox(id),
+                receipts,
+                now_ms(),
             );
         }
     }
@@ -2980,13 +3040,11 @@ impl TeamRuntime {
     }
 
     /// Tells each running lead how its workers' tasks ended (N1): the finished tasks it
-    /// handed off, typed into its terminal as one results message, so the lead hears them
-    /// as the master hears its own. A lead that is not running hears them once it runs again.
+    /// handed off, as one results message from the engine in the coordination layer, which
+    /// delivers it by the lead's harness channel and keeps its receipt (DEC-104 K2b). A
+    /// lead that is not running hears them once it runs again.
     /// Takes the project. Returns any SQLite failure.
     fn deliver_to_leads(&mut self, project: &ProjectId) -> Result<(), EngineError> {
-        let Some(host) = self.terminal.clone() else {
-            return Ok(());
-        };
         let leads: Vec<i64> = self
             .workers
             .iter()
@@ -3023,10 +3081,24 @@ impl TeamRuntime {
                 continue;
             }
             let (text, held) =
-                results_within(&ready, super::events::SEND_BYTES_MAX, LEAD_RESULTS_TRAILER);
-            let sent = super::events::send_to(&self.connection, host.as_ref(), Some(lead), &text)?;
-            if sent.is_err() {
-                continue;
+                results_within(&ready, crate::coord::BODY_BYTES_MAX, LEAD_RESULTS_TRAILER);
+            let message = crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Engine,
+                to: crate::coord::Party::Agent(lead),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: text,
+                idempotency_key: Some(format!("lead-results-{}", ready[0].0)),
+            };
+            match crate::coord::send(&self.connection, message, now_ms()) {
+                Ok(_) => {}
+                Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+                    return Err(problem);
+                }
+                Err(_) => continue,
             }
             for (id, ..) in &ready[..held] {
                 self.connection
@@ -3241,6 +3313,8 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
+            prompt.push_str(&waiting);
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -3255,6 +3329,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
@@ -4123,6 +4198,12 @@ impl TeamRuntime {
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
         sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        if launch == "codex"
+            && let Some(socket) = crate::coord::delivery::codex::socket(&home)
+            && crate::coord::delivery::codex::prepare_folder().is_ok()
+        {
+            sandbox = sandbox.allow_unix_socket(&socket).map_err(sandboxed)?;
+        }
         if tools {
             for server in context.read_paths() {
                 if let Some(folder) = server.parent() {
@@ -4335,8 +4416,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_live_team_tool(engine, &self.mailbox(id))
+                    .with_live_team_tool(engine, &self.mailbox(id), &off)
                     .map_err(unread)
             }
             Some(engine) if master && tools => {
@@ -4354,12 +4438,47 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_agent_team_tool(engine, &self.mailbox(id))
+                    .with_agent_team_tool(engine, &self.mailbox(id), &off)
                     .map_err(unread)
             }
             _ => Ok(context),
         }
+    }
+
+    /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
+    /// off or deleted for the project, and for a sub-agent the owner's Sub-agent depth
+    /// setting keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway. Takes
+    /// the project, the agent and its role. Returns the names, or a SQLite failure.
+    fn off_tools(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+    ) -> Result<Vec<String>, EngineError> {
+        let mut off: Vec<String> = crate::coord::tool_switches::off_tools(
+            &self.connection,
+            project,
+            crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        )?
+        .into_iter()
+        .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
+        .collect();
+        let leads = role == AgentRole::Master
+            || super::agent_depth(&self.connection, id)?
+                < super::nesting(&self.connection, project)?.depth;
+        if !leads {
+            for name in tool::LEAD_TOOLS {
+                if !off.iter().any(|tool| tool == name) {
+                    off.push(name.to_owned());
+                }
+            }
+        }
+        assert!(tool::known_tools(&off));
+        Ok(off)
     }
 
     /// Records one team agent in the engine's agent register, continuing the register
@@ -4676,6 +4795,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
                 }
@@ -5290,30 +5410,20 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 /// The instructions a live master's harness reads at launch as system context, never as a
 /// typed message: who it is, how team events arrive, its team tools or the DELEGATE line,
 /// when to ask the owner and how the team's work lands. The team is not listed; with its
-/// tools the master reads it through the status tool when it needs it. The project name,
+/// tools the master reads it through `inspect_work` when it needs it. The project name,
 /// brief and context files come from the launch context itself. Takes the setup and whether
 /// it has the engine's team tools. Returns at most `LIVE_RULES_BYTES_MAX` bytes.
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one. The team is not listed here: call {}() whenever you need to know who is on it, what each sub-agent is doing and which finished sub-agents you can wake.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
-            tool::TOOL_NAME,
-            tool::MESSAGE_TOOL,
-            tool::ANSWER_TOOL,
-            tool::WAKE_TOOL,
-            tool::STATUS_TOOL,
-            tool::CHANGES_TOOL,
-            tool::ESCALATE_TOOL,
-            tool::STATUS_TOOL
+            tool::SPAWN_TOOL,
+            tool::UPDATE_WORK_TOOL,
+            tool::INSPECT_WORK_TOOL
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
-    };
-    let how = if team_tool {
-        how + tool::HISTORY_LINE + tool::MEMORY_LINE
-    } else {
-        how
     };
     let text = format!(
         "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",

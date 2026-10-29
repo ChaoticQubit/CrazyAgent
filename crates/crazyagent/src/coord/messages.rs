@@ -157,6 +157,44 @@ pub fn pending(db: &Connection, to: AgentId, limit: usize) -> Result<Vec<Message
     Ok(found)
 }
 
+/// Lists the messages one agent has not read yet, oldest first: receipt Sent,
+/// Delivered or Typed. Takes the database, the agent and the most to return, capped at
+/// `PENDING_MAX`. Returns the messages.
+pub fn unread(db: &Connection, to: AgentId, limit: usize) -> Result<Vec<Message>, EngineError> {
+    let limit = i64::try_from(limit.min(PENDING_MAX)).map_err(state)?;
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM coord_messages
+             WHERE to_kind='agent' AND to_agent=?1 AND receipt IN ('sent','delivered','typed')
+             ORDER BY id LIMIT ?2"
+        ))
+        .map_err(state)?;
+    let rows = statement
+        .query_map(params![to, limit], message_from_row)
+        .map_err(state)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(state)?;
+    assert!(found.len() <= PENDING_MAX);
+    Ok(found)
+}
+
+/// Lists the messages one agent sent, newest first, with how far each got. Takes the
+/// database, the agent and the most to return, capped at `PENDING_MAX`. Returns them.
+pub fn outbox(db: &Connection, from: AgentId, limit: usize) -> Result<Vec<Message>, EngineError> {
+    let limit = i64::try_from(limit.min(PENDING_MAX)).map_err(state)?;
+    let mut statement = db
+        .prepare(&format!(
+            "SELECT {MESSAGE_COLUMNS} FROM coord_messages
+             WHERE from_kind='agent' AND from_agent=?1 ORDER BY id DESC LIMIT ?2"
+        ))
+        .map_err(state)?;
+    let rows = statement
+        .query_map(params![from, limit], message_from_row)
+        .map_err(state)?;
+    let found = rows.collect::<Result<Vec<_>, _>>().map_err(state)?;
+    assert!(found.len() <= PENDING_MAX);
+    Ok(found)
+}
+
 /// Moves a message's receipt forward (`Receipt::may_become`). The same receipt again is
 /// a no-op, since delivery is at least once. Takes the database, the message, the new
 /// receipt and the time in ms. Returns Ok, `coord_message_unknown` or, for a receipt

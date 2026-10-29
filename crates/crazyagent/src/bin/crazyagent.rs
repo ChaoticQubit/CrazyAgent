@@ -22,7 +22,10 @@ crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
 crazyagent team-mcp DROP_FILE\n\
-crazyagent team-mcp-live MAILBOX_DIR\n\
+crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
+crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
+crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
+crazyagent coord-watch MAILBOX_DIR\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -121,15 +124,23 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::AGENT_SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp-agent MAILBOX_DIR".to_owned())
-        } else {
-            crazyagent::team::tool::serve_agent(
-                io::stdin().lock(),
-                io::stdout().lock(),
-                Path::new(&args[1]),
-            )
-            .map_err(|e| e.to_string())
+        let off: Option<Vec<String>> = args
+            .get(2..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve_live(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => Err("usage: crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]".to_owned()),
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
@@ -143,15 +154,64 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::LIVE_SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp-live MAILBOX_DIR".to_owned())
-        } else {
-            crazyagent::team::tool::serve_live(
+        let off: Option<Vec<String>> = args
+            .get(2..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve_live(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => Err("usage: crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]".to_owned()),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::relay::HOOK_COMMAND)
+    {
+        let result = match (args.len(), args.get(1).and_then(|event| event.to_str())) {
+            (3, Some(event)) => crazyagent::coord::hook::run(
+                event,
+                Path::new(&args[2]),
                 io::stdin().lock(),
                 io::stdout().lock(),
-                Path::new(&args[1]),
-            )
-            .map_err(|e| e.to_string())
+            ),
+            _ => Err(
+                "usage: crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR"
+                    .to_owned(),
+            ),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::relay::WATCH_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent coord-watch MAILBOX_DIR".to_owned())
+        } else {
+            crazyagent::coord::watch::run(Path::new(&args[1]), io::stdout().lock())
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,

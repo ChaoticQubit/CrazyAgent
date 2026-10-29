@@ -74,6 +74,10 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 const HIDDEN_MAX: usize = 4;
+/// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
+const SOCKETS_MAX: usize = 2;
+/// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
+const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
@@ -599,6 +603,7 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
+    sockets: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -650,7 +655,42 @@ impl ProjectSandbox {
             engine_secrets: Vec::new(),
             checkout: None,
             clone: None,
+            sockets: Vec::new(),
         })
+    }
+
+    /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
+    /// file and its `<path>.lock`, and read its folder's metadata, nothing else there: its
+    /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
+    /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
+    /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
+    pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(invalid("unix socket grants need Seatbelt"));
+        }
+        if self.sockets.len() >= SOCKETS_MAX {
+            return Err(invalid("too many unix sockets"));
+        }
+        let text = socket
+            .to_str()
+            .ok_or_else(|| invalid("the unix socket path is not plain"))?;
+        let plain = socket.is_absolute()
+            && text.len() <= SOCKET_PATH_BYTES_MAX
+            && !text.ends_with('/')
+            && !text.contains("//")
+            && text.split('/').all(|part| part != "." && part != "..")
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'));
+        let folder = socket
+            .parent()
+            .filter(|folder| std::fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()));
+        if !plain || folder.is_none() {
+            return Err(invalid("the unix socket path is not plain"));
+        }
+        self.sockets.push(socket.to_path_buf());
+        assert!(self.sockets.len() <= SOCKETS_MAX);
+        Ok(self)
     }
 
     /// Keeps the ports of the owner's configured local model endpoints free of this agent's
@@ -1105,6 +1145,14 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
+        for socket in &self.sockets {
+            let path = socket.display();
+            let folder = socket.parent().unwrap_or(socket).display();
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
+            ));
+        }
+        assert_eq!(text.matches("unix-socket").count(), 2 * self.sockets.len());
         let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {
