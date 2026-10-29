@@ -21,10 +21,26 @@ pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
 /// What the clients show in place of receipts and adoption counts for an agent whose
 /// launch fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank.
 pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
-/// The most bytes one adoption view takes once encoded.
-pub const VIEW_BYTES_MAX: usize = AGENTS_SHOWN_MAX * (COUNTED_TOOLS_MAX * 11 + 256)
+/// The most bytes one adoption view takes once encoded. Newer agents are kept first; the
+/// older ones past it are counted in `Adoption::hidden`.
+pub const VIEW_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX / 2;
+/// The most skill columns one view names: every skill a project's agents can receive,
+/// global and the project's own.
+pub const SKILLS_SHOWN_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
+/// The most skills one agent called that its project has not enabled, listed by name.
+pub const OTHER_SKILLS_MAX: usize = 16;
+/// The stored-name prefix of one skill's calls, kept beside the harness's own `Skill` count
+/// so each skill counts by name (F7).
+pub const SKILL_PREFIX: &str = "skill:";
+/// The longest skill name a stored skill call keeps, in bytes.
+pub const SKILL_NAME_BYTES_MAX: usize = TOOL_BYTES_MAX - SKILL_PREFIX.len();
+const HEADER_BYTES_MAX: usize = 64
     + COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 4)
-    + 64;
+    + SKILLS_SHOWN_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 4);
+const AGENT_BYTES_MAX: usize = 512
+    + COUNTED_TOOLS_MAX * 11
+    + SKILLS_SHOWN_MAX * 11
+    + OTHER_SKILLS_MAX * (SKILL_NAME_BYTES_MAX + 32);
 const TOOLS_PER_AGENT_MAX: usize = 256;
 const LABEL_BYTES_MAX: usize = 64;
 const EDIT_TOOLS: [&str; 5] = ["Edit", "Write", "MultiEdit", "NotebookEdit", "apply_patch"];
@@ -41,6 +57,8 @@ const CONTEXT_PREFIX: &str = "ctx_";
 const NUDGE_KEY: &str = "adoption-";
 
 const _: () = assert!(VIEW_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX / 2);
+const _: () = assert!(HEADER_BYTES_MAX + AGENT_BYTES_MAX <= VIEW_BYTES_MAX);
+const _: () = assert!(crate::plugins::skill_folder::NAME_BYTES_MAX <= SKILL_NAME_BYTES_MAX);
 const _: () = assert!(COUNTED_TOOL_BYTES_MAX <= TOOL_BYTES_MAX);
 const _: () = assert!(NUDGES_PER_TICK_MAX <= AGENTS_CHECKED_MAX);
 
@@ -94,8 +112,10 @@ impl Flag {
 }
 
 /// One agent's row on the Process page: who it is, whether it still runs, its count for
-/// each counted-tools entry in the settings' order, the flags it has now, the flags it was
-/// already reminded of and whether its launch fires no hooks, so no counts or flags exist.
+/// each counted-tools entry in the settings' order, its calls of each enabled skill in the
+/// view's skill order (zero included), the skills it called that the project has not
+/// enabled, its graphify and `ctx_*` calls, the flags it has now, the flags it was already
+/// reminded of and whether its launch fires no hooks, so no counts or flags exist.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdoption {
@@ -104,20 +124,41 @@ pub struct AgentAdoption {
     pub harness: String,
     pub active: bool,
     pub counts: Vec<u32>,
+    #[serde(default)]
+    pub skills: Vec<u32>,
+    #[serde(default)]
+    pub other_skills: Vec<SkillCount>,
+    #[serde(default)]
+    pub graphify: u32,
+    #[serde(default)]
+    pub context_mode: u32,
     pub flags: Vec<Flag>,
     pub reminded: Vec<Flag>,
     #[serde(default)]
     pub hookless: bool,
 }
 
+/// One skill an agent called by name, with how many times.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillCount {
+    pub name: String,
+    pub count: u32,
+}
+
 /// A project's adoption view: whether nudges are on, the counted-tools entries that name
-/// the count columns, and its newest agents, at most `AGENTS_SHOWN_MAX`.
+/// the count columns, the skills its agents receive (sorted by name), its newest agents, at
+/// most `AGENTS_SHOWN_MAX`, and how many older agents the view's byte limit left out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adoption {
     pub nudges: bool,
     pub counted: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
     pub agents: Vec<AgentAdoption>,
+    #[serde(default)]
+    pub hidden: u32,
 }
 
 /// Names a tool call the way adoption counts it: an MCP tool by its own name without the
@@ -173,6 +214,33 @@ fn shell_command(name: &str, input: &Value) -> Option<String> {
     }
     assert!(text.len() <= COMMAND_BYTES_MAX);
     Some(text)
+}
+
+/// Names the skill one tool call used, the way adoption counts it per skill: Claude's
+/// `Skill` call by the skill it names, a shell command that reads `<folder>/SKILL.md` by
+/// the folder's name. Takes the harness's tool name and its input. Returns `skill:` and the
+/// name, none for another call or a name that is not 1 to `SKILL_NAME_BYTES_MAX` bytes of
+/// letters, digits, `_`, `-`, `.` or `:`.
+pub fn skill_key(name: &str, input: &Value) -> Option<String> {
+    let skill = if name == "Skill" {
+        input["skill"].as_str()?.to_owned()
+    } else {
+        let command = shell_command(name, input)?;
+        command
+            .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
+            .find_map(|word| word.strip_suffix("/SKILL.md"))?
+            .rsplit('/')
+            .next()?
+            .to_owned()
+    };
+    let plain = !skill.is_empty()
+        && skill.len() <= SKILL_NAME_BYTES_MAX
+        && skill
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:".contains(&byte));
+    let key = plain.then(|| format!("{SKILL_PREFIX}{skill}"))?;
+    assert!(key.len() <= TOOL_BYTES_MAX);
+    Some(key)
 }
 
 fn runs_graphify(command: &str) -> bool {
@@ -263,6 +331,42 @@ fn counted(used: &[(String, i64)], entries: &[String]) -> Vec<u32> {
     sums
 }
 
+/// Sums an agent's calls of each enabled skill, a call matching a skill by its whole name or
+/// by the part after its last `:` (a plugin's namespaced skill), and lists the other skills
+/// it called, at most `OTHER_SKILLS_MAX`, by name. Takes its counts by stored tool name and
+/// the enabled skills. Returns one count per enabled skill and the others.
+fn skill_counts(used: &[(String, i64)], skills: &[String]) -> (Vec<u32>, Vec<SkillCount>) {
+    let calls: Vec<(&str, i64)> = used
+        .iter()
+        .filter_map(|(tool, count)| Some((tool.strip_prefix(SKILL_PREFIX)?, (*count).max(0))))
+        .collect();
+    let names = |call: &str, skill: &str| call == skill || call.rsplit(':').next() == Some(skill);
+    let sum = |pick: &dyn Fn(&str) -> bool| {
+        let total = calls
+            .iter()
+            .filter(|(call, _)| pick(call))
+            .map(|(_, count)| *count)
+            .fold(0i64, i64::saturating_add);
+        u32::try_from(total).unwrap_or(u32::MAX)
+    };
+    let enabled: Vec<u32> = skills
+        .iter()
+        .map(|skill| sum(&|call| names(call, skill)))
+        .collect();
+    let others: Vec<SkillCount> = calls
+        .iter()
+        .filter(|(call, count)| *count > 0 && !skills.iter().any(|skill| names(call, skill)))
+        .take(OTHER_SKILLS_MAX)
+        .map(|(call, count)| SkillCount {
+            name: (*call).to_owned(),
+            count: u32::try_from(*count).unwrap_or(u32::MAX),
+        })
+        .collect();
+    assert_eq!(enabled.len(), skills.len());
+    assert!(others.len() <= OTHER_SKILLS_MAX);
+    (enabled, others)
+}
+
 fn reminded(db: &Connection, project: &ProjectId, id: AgentId) -> Result<Vec<Flag>, EngineError> {
     let mut statement = db
         .prepare(
@@ -283,12 +387,34 @@ fn reminded(db: &Connection, project: &ProjectId, id: AgentId) -> Result<Vec<Fla
 }
 
 /// Reads a project's adoption view for the Process page: the counted-tools entries from
-/// its settings and its newest agents with their counts, flags and reminders. Reads
-/// only. Takes the database, the project and the time in ms. Returns the view, at most
-/// `VIEW_BYTES_MAX` once encoded.
-pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, EngineError> {
+/// its settings, the skills its agents receive and its newest agents with their counts,
+/// per-skill counts, graphify and `ctx_*` counts, flags and reminders. Reads only. Takes
+/// the database, the project, the names of the skills its agents receive and the time in
+/// ms. Returns the view, at most `VIEW_BYTES_MAX` once encoded: older agents past it are
+/// left out and counted.
+pub fn view(
+    db: &Connection,
+    project: &ProjectId,
+    skills: &[String],
+    now: i64,
+) -> Result<Adoption, EngineError> {
     let settings = super::settings::read(db, project)?;
     assert!(settings.counted_tools.len() <= COUNTED_TOOLS_MAX);
+    let mut skills: Vec<String> = skills
+        .iter()
+        .filter(|skill| {
+            !skill.is_empty()
+                && skill.len() <= crate::plugins::skill_folder::NAME_BYTES_MAX
+                && skill
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:".contains(&byte))
+        })
+        .take(SKILLS_SHOWN_MAX)
+        .cloned()
+        .collect();
+    skills.sort();
+    skills.dedup();
+    let grounding = [GRAPH_TOOL.to_owned(), format!("{CONTEXT_PREFIX}*")];
     let ids: Vec<(AgentId, String, bool)> = {
         let mut statement = db
             .prepare(
@@ -318,23 +444,46 @@ pub fn view(db: &Connection, project: &ProjectId, now: i64) -> Result<Adoption, 
             continue;
         };
         let used = used(db, id)?;
+        let (skill_calls, other_skills) = skill_counts(&used, &skills);
+        let [graphify, context_mode] = counted(&used, &grounding)[..] else {
+            unreachable!("one count per grounding entry");
+        };
         agents.push(AgentAdoption {
             agent: id,
             role: label(&row.role),
             harness: label(&harness),
             active: row.live(),
             counts: counted(&used, &settings.counted_tools),
+            skills: skill_calls,
+            other_skills,
+            graphify,
+            context_mode,
             flags: flags(db, id, &row, &used, now)?,
             reminded: reminded(db, project, id)?,
             hookless,
         });
     }
     assert!(agents.len() <= AGENTS_SHOWN_MAX);
-    Ok(Adoption {
+    let mut view = Adoption {
         nudges: settings.nudges,
         counted: settings.counted_tools,
-        agents,
-    })
+        skills,
+        agents: Vec::new(),
+        hidden: 0,
+    };
+    let mut bytes = serde_json::to_vec(&view).map_err(state)?.len();
+    assert!(bytes <= HEADER_BYTES_MAX);
+    for agent in agents {
+        let size = serde_json::to_vec(&agent).map_err(state)?.len() + 1;
+        if view.hidden == 0 && bytes + size <= VIEW_BYTES_MAX {
+            bytes += size;
+            view.agents.push(agent);
+        } else {
+            view.hidden = view.hidden.saturating_add(1);
+        }
+    }
+    assert!(bytes <= VIEW_BYTES_MAX);
+    Ok(view)
 }
 
 /// Sends each running agent of a project one Engine note per flag it raised and was never

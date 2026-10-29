@@ -2,4 +2,6 @@
 .adoption-note { margin: 0; padding: 12px 16px 8px; }
 .adoption-table td { font-variant-numeric: tabular-nums; }
 .adoption-flags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.adoption-skills { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; max-width: 48ch; }
+.adoption-skills > span { white-space: nowrap; }
 .adoption-stopped th, .adoption-stopped td { color: var(--text-2); }

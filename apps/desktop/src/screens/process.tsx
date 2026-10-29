@@ -175,15 +175,54 @@ export function adoptionLabel(agent: Pick<AgentAdoption, "agent" | "role" | "har
   return `#${agent.agent} ${agent.role} ${agent.harness}`.trim();
 }
 
+/** One agent's grounding and skill counts: graphify, ctx_*, then every skill its project
+ * enabled by name with zero included, then the other skills it called. Inputs: the view's
+ * skill names and the agent's row. Output: the list. */
+export function SkillCounts({ skills, agent }: { skills: readonly string[]; agent: AgentAdoption }) {
+  const counts = agent.skills ?? [];
+  const items = [
+    { name: "graphify", count: agent.graphify ?? 0, note: "" },
+    { name: "ctx_*", count: agent.context_mode ?? 0, note: "" },
+    ...skills.map((name, index) => ({ name, count: counts[index] ?? 0, note: "" })),
+    ...(agent.other_skills ?? []).map((other) => ({ name: other.name, count: other.count, note: " (not enabled)" })),
+  ];
+  return <span className="adoption-skills">
+    {items.map((item) => <span key={`${item.name}${item.note}`} className={item.count === 0 ? "secondary" : undefined}>
+      {item.name}{item.note} <strong>{item.count}</strong>
+    </span>)}
+    {skills.length === 0 && <span className="secondary">No skills enabled</span>}
+  </span>;
+}
+
+/** One agent's skill counts for its graph card menu: reads the project's adoption and shows
+ * that agent's graphify, ctx_* and per-skill counts, or why there are none. Inputs: the
+ * project, the agent's team row id and its label, and the close action. */
+export function AgentSkillsDialog({ projectId, agent, label, onClose }: { projectId: string; agent: number; label: string; onClose: () => void }) {
+  const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
+  const row = adoption.kind === "ok" ? adoption.value.agents.find((item) => item.agent === agent) : undefined;
+  return <Dialog open title={`Skills of ${label}`} onClose={onClose}
+    footer={<><Button icon="refresh-cw" onClick={reload}>Refresh</Button><Button variant="primary" onClick={onClose}>Close</Button></>}>
+    {adoption.kind === "loading" ? <Skeleton shape="card" count={1} />
+      : adoption.kind === "not_ready" ? <NotReady what="Skill counts" />
+      : adoption.kind === "error" ? <LoadError message={processMessage(adoption)} onRetry={reload} />
+      : !row ? <p className="secondary">This agent is older than the agents the Process page lists, so its counts are not shown.</p>
+      : row.hookless ? <p className="secondary">Skill counts {HOOKLESS_WORDS}.</p>
+      : <SkillCounts skills={adoption.value.skills ?? []} agent={row} />}
+  </Dialog>;
+}
+
 /** A project's workflow adoption as a pure view: one row per recent agent with its count for
- * each counted tool and its flags in red, marked once the agent was reminded, and whether
- * nudges are on. Stopped agents are dimmed; an agent whose launch fires no hooks says its
- * counts and flags are unavailable. Inputs: the read and the refresh action. */
+ * each counted tool, its graphify, ctx_* and per-skill counts, and its flags in red, marked
+ * once the agent was reminded, and whether nudges are on. Stopped agents are dimmed; an
+ * agent whose launch fires no hooks says its counts and flags are unavailable. Inputs: the
+ * read and the refresh action. */
 export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoption>; onRefresh: () => void }) {
   if (adoption.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (adoption.kind === "not_ready") return <NotReady what="Workflow adoption" />;
   if (adoption.kind === "error") return <LoadError message={processMessage(adoption)} onRetry={onRefresh} />;
   const { nudges, counted, agents } = adoption.value;
+  const skills = adoption.value.skills ?? [];
+  const hidden = adoption.value.hidden ?? 0;
   return <Panel title="Workflow adoption" padded={false} actions={<Button icon="refresh-cw" onClick={onRefresh}>Refresh</Button>}>
     <p className="secondary adoption-note">{nudges
       ? "Nudges are on: each red flag sends that agent one reminder."
@@ -191,20 +230,23 @@ export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoptio
     {agents.length === 0
       ? <EmptyState compact icon="users" title="No agents yet">Counts appear once this project's agents use tools.</EmptyState>
       : <div className="pj-table-wrap"><table className="pj-table adoption-table">
-        <thead><tr><th scope="col">Agent</th>{counted.map((tool) => <th scope="col" key={tool}>{tool}</th>)}<th scope="col">Flags</th></tr></thead>
+        <thead><tr><th scope="col">Agent</th>{counted.map((tool) => <th scope="col" key={tool}>{tool}</th>)}<th scope="col">Skills</th><th scope="col">Flags</th></tr></thead>
         <tbody>{agents.map((agent) => <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
           <th scope="row">{adoptionLabel(agent)}</th>
           {agent.hookless
-            ? <td colSpan={counted.length + 1} className="secondary">Counts and flags {HOOKLESS_WORDS}</td>
+            ? <td colSpan={counted.length + 2} className="secondary">Counts and flags {HOOKLESS_WORDS}</td>
             : <>
               {counted.map((tool, index) => <td key={tool}>{agent.counts[index] ?? 0}</td>)}
+              <td><SkillCounts skills={skills} agent={agent} /></td>
               <td><span className="adoption-flags">{agent.flags.length === 0
                 ? <span className="secondary">None</span>
                 : agent.flags.map((flag) => <StatusBadge key={flag} tone="danger"
                   word={agent.reminded.includes(flag) ? `${flagWords(flag)}, reminded` : flagWords(flag)} />)}</span></td>
             </>}
         </tr>)}</tbody>
-      </table></div>}
+      </table>
+      {hidden > 0 && <p className="secondary adoption-note">{hidden} older {hidden === 1 ? "agent is" : "agents are"} not listed.</p>}
+      </div>}
   </Panel>;
 }
 

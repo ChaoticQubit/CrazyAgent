@@ -7,6 +7,7 @@ import { HOOKLESS_WORDS, type GraphEdge, type GraphNode, type TeamGraph } from "
 import { Button, ConfirmDialog, Dialog, EmptyState, Icon, LoadError, Menu, NotReady, Notice, Skeleton, TextArea, navigate, type IconName, type MenuItem } from "../../ui";
 import { actions } from "../changes/model";
 import { displayText } from "../conversation";
+import { AgentSkillsDialog } from "../process";
 import {
   BADGE_HEIGHT, BADGE_WIDTH, DRAG_SLOP, ZOOM_STEP, badgeLabel, cardTask, cardText, cardTip, dotTone, fitView, fromOwner,
   graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView, questionCount,
@@ -99,9 +100,10 @@ function LinkBadges({ link }: { link: Link }) {
   </span>;
 }
 
-/** What the owner is doing from a card's menu: writing a message to its agent, or confirming
- * a stop of its agent or of a native teammate's pane. */
+/** What the owner is doing from a card's menu: reading its agent's skill counts, writing a
+ * message to its agent, or confirming a stop of its agent or of a native teammate's pane. */
 type Acting =
+  | { kind: "skills"; node: GraphNode; agent: number }
   | { kind: "message"; node: GraphNode; agent: number }
   | { kind: "stop"; node: GraphNode; stop: NonNullable<ReturnType<typeof nodeActions>["stop"]> };
 
@@ -249,6 +251,10 @@ export function TeamGraphView({ projectId, harness, account }: {
   function menuItems(node: GraphNode, nodes: readonly GraphNode[]): MenuItem[] {
     const can = nodeActions(node, nodes);
     const items: MenuItem[] = [];
+    const agent = node.agent;
+    if (typeof agent === "number") {
+      items.push({ label: "Skills", icon: "list-checks", onSelect: () => setActing({ kind: "skills", node, agent }) });
+    }
     const message = can.message;
     if (message !== null) {
       items.push({ label: "Message", icon: "send", onSelect: () => {
@@ -323,7 +329,7 @@ export function TeamGraphView({ projectId, harness, account }: {
       <span className="grow">{displayText(`Couldn't refresh the team graph. ${read.stale} Showing the last read.`)}</span>
       <Button size="small" icon="refresh-cw" onClick={reload}>Try again</Button>
     </Notice>}
-    <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu sends a message, stops it or merges its work.</p>
+    <p className="tg-hint" id={`${ids}-hint`}>Drag or use the arrow keys to move around. Pinch or Ctrl+scroll to zoom, 0 fits. Click a card to open its terminal; its menu shows its skill counts, sends a message, stops it or merges its work.</p>
     <div className={`tg-split${openNode ? " with-terminal" : ""}`}>
       <div className="tg-stage">
         <div className="tg-tools" role="toolbar" aria-label="Graph view">
@@ -390,6 +396,8 @@ export function TeamGraphView({ projectId, harness, account }: {
         <AgentInstructions key={openNode.id} projectId={projectId} node={openNode} />
       </div>}
     </div>
+    {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
+      label={displayText(acting.node.label)} onClose={() => setActing(null)} />}
     {acting?.kind === "message" && <Dialog open title={`Message ${displayText(acting.node.label)}`} busy={busy}
       onClose={() => { setActing(null); setSendNote(null); }}
       footer={<><Button disabled={busy} onClick={() => { setActing(null); setSendNote(null); }}>Cancel</Button>
