@@ -44,13 +44,38 @@ pub struct Reach<'a> {
 }
 
 /// The delivery loop's memory between ticks: when each agent whose messages could not go
-/// may be tried again. Holds at most `RETRIES_KEPT_MAX` agents.
+/// may be tried again, at most `RETRIES_KEPT_MAX` agents, and the last tick's failure code.
 #[derive(Debug, Default)]
 pub struct Deliveries {
     retry: BTreeMap<AgentId, i64>,
+    failed: Option<String>,
 }
 
 impl Deliveries {
+    /// Runs [`Deliveries::tick`] for the team loop, which goes on when it fails: a failure
+    /// code is written to the engine log once, until a different failure or a clean tick
+    /// replaces it, as the adoption check does. Takes the database, the project, the time in
+    /// ms and the reach. Returns nothing.
+    pub fn tick_logged(
+        &mut self,
+        db: &Connection,
+        project: &ProjectId,
+        now: i64,
+        reach: &Reach<'_>,
+    ) {
+        let failed = self
+            .tick(db, project, now, reach)
+            .err()
+            .map(|problem| crate::protocol::plain_code(&problem.0).to_owned());
+        if failed.is_some() && failed != self.failed {
+            eprintln!(
+                "team messages not delivered: {}",
+                failed.as_deref().unwrap_or_default()
+            );
+        }
+        self.failed = failed;
+    }
+
     /// Moves one project's waiting messages toward their agents, once per team tick: the
     /// messages of an agent whose session died go back to Sent for its next session, and
     /// each live recipient gets its messages through its harness's channel under the
@@ -211,8 +236,9 @@ fn deliver_to(
 
 /// Hands a project master its waiting messages through the engine's own master input
 /// (`feed_live` or the next master turn), which already waits for the owner, as one engine
-/// message once none of the master's other messages wait. Takes the database, the
-/// project, the messages and the time. Returns true once they were handed over.
+/// message once none of the master's other messages wait; the engine message and the
+/// Delivered receipts commit together, so a failure leaves both undone. Takes the database,
+/// the project, the messages and the time. Returns true once they were handed over.
 fn to_master(
     db: &Connection,
     project: &ProjectId,
@@ -243,8 +269,8 @@ fn to_master(
     if appended.is_err() {
         return Ok(false);
     }
+    mark_all(&tx, &carried, Receipt::Delivered, now)?;
     tx.commit().map_err(state)?;
-    mark_all(db, &carried, Receipt::Delivered, now)?;
     Ok(carried.len() == messages.len())
 }
 
