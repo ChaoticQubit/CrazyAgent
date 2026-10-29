@@ -126,6 +126,8 @@ fn graph() -> Box<TeamGraph> {
                 reply: Some("Added 3 tests.".into()),
             },
         ],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     })
 }
 

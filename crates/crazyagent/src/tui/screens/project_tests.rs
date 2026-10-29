@@ -1249,8 +1249,14 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             questions: None,
             agent: Some(1),
             pane: None,
+            presence: None,
+            waiting: None,
+            owner_questions: 0,
+            no_worktree: false,
         }],
         edges: Vec::new(),
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -2079,6 +2085,10 @@ fn console_screen() -> ProjectScreen {
         questions: None,
         agent: None,
         pane: None,
+        presence: None,
+        waiting: None,
+        owner_questions: 0,
+        no_worktree: false,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
@@ -2087,6 +2097,8 @@ fn console_screen() -> ProjectScreen {
             node("team-1", NodeKind::Lead, "Ada (@page)"),
         ],
         edges: vec![],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     }));
     screen.context = Some(ProjectContext {
         project_id: project,

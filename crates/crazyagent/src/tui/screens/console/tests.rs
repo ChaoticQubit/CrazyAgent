@@ -21,6 +21,10 @@ fn node(id: &str, kind: NodeKind, label: &str) -> GraphNode {
         questions: None,
         agent: None,
         pane: None,
+        presence: None,
+        waiting: None,
+        owner_questions: 0,
+        no_worktree: false,
     }
 }
 
@@ -35,6 +39,8 @@ fn team() -> TeamGraph {
             node("teammate-3-12", NodeKind::Teammate, "Teammate %12"),
         ],
         edges: vec![],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     }
 }
 

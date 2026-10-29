@@ -148,6 +148,10 @@ mod tests {
             questions: None,
             agent: None,
             pane: None,
+            presence: None,
+            waiting: None,
+            owner_questions: 0,
+            no_worktree: false,
         }
     }
 
@@ -168,6 +172,8 @@ mod tests {
             project_id: ProjectId::new("tidepool").unwrap(),
             nodes: agents,
             edges,
+            messages: Vec::new(),
+            overlaps: Vec::new(),
         }))
     }
 
