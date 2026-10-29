@@ -4759,6 +4759,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         live: false,
         resume: None,
         continues: true,
+        native: false,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),

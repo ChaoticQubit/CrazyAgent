@@ -147,7 +147,8 @@ struct Grant {
 /// Everything about an agent's harness launch except the account, so a managed agent
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
-/// conversation a live master continues instead of starting one.
+/// conversation a live master continues instead of starting one; `native` marks a
+/// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -163,7 +164,12 @@ struct Plan {
     live: bool,
     resume: Option<Resume>,
     continues: bool,
+    native: bool,
 }
+
+/// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
+/// panes and the engine's client on that server must all run inside its Seatbelt profile.
+const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
 
 impl Plan {
     /// Builds one start of the plan at `access`, the level the owner saved when this start
@@ -176,6 +182,12 @@ impl Plan {
         access: AgentAccess,
     ) -> Result<LaunchRequest, String> {
         let unconfined = confinement(self.layout, access)?;
+        if self.native && unconfined {
+            return Err(with_code(
+                NATIVE_NEEDS_SANDBOX,
+                Some("team_native_needs_sandbox"),
+            ));
+        }
         Ok(LaunchRequest {
             harness: self.harness.clone(),
             executable: self.executable.clone(),
@@ -3987,6 +3999,31 @@ impl TeamRuntime {
 
     /// Tells whether a team agent was started by a lead agent rather than by the master,
     /// read from its stored parent. Takes the agent. Returns the answer, false when unread.
+    /// Whether an agent starts as a native-mode lead (DEC-104): a harness the master leads,
+    /// not a lead's own sub-agent, on a harness kind with native teammates whose project
+    /// setting picks Native, with a terminal host to start its own server in. Takes the
+    /// project, the agent, its role and its launch harness. Returns the answer, or the plain
+    /// reason the setting could not be read.
+    fn native_lead(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+        launch: &str,
+    ) -> Result<bool, String> {
+        use crate::coord::settings::{HarnessKind, SubagentMode, mode, native_supported};
+        let Some(kind) = HarnessKind::from_harness(launch).filter(|kind| native_supported(*kind))
+        else {
+            return Ok(false);
+        };
+        if role != AgentRole::Sub || self.terminal.is_none() || self.has_lead(id) {
+            return Ok(false);
+        }
+        let chosen = mode(&self.connection, project, kind)
+            .map_err(|e| with_code("the project's sub-agent mode could not be read", Some(&e.0)))?;
+        Ok(chosen == SubagentMode::Native)
+    }
+
     fn has_lead(&self, id: i64) -> bool {
         self.connection
             .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
@@ -4220,6 +4257,9 @@ impl TeamRuntime {
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
         sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        (sandbox, _) = sandbox
+            .allow_extra_reads(&toolchains::graphify(&homes))
+            .map_err(sandboxed)?;
         if launch == "codex"
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)
             && crate::coord::delivery::codex::prepare_folder().is_ok()
@@ -4233,7 +4273,7 @@ impl TeamRuntime {
                 }
             }
         }
-        let profile = self.state.join("profiles").join(format!("agent-{id}.sb"));
+        let profile = agent_profile(&self.state, id);
         sandbox.install(&profile).map_err(sandboxed)?;
         ensure_repository(&root, &tmp).map_err(|e| {
             with_code(
@@ -4323,6 +4363,40 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
+        let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        if native {
+            if confinement(layout, policy.access)? {
+                return Err(with_code(
+                    NATIVE_NEEDS_SANDBOX,
+                    Some("team_native_needs_sandbox"),
+                ));
+            }
+            let tmux = self
+                .state
+                .parent()
+                .and_then(crate::terminal::tmux::installed)
+                .ok_or_else(|| {
+                    with_code(
+                        "native teammates need tmux",
+                        Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+                    )
+                })?;
+            let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
+            assert!(
+                self.state
+                    .parent()
+                    .zip(AgentId::team(id).ok())
+                    .and_then(
+                        |(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok()
+                    )
+                    .is_some_and(|named| named == socket),
+                "the lead's own socket is the one the terminal host routes to"
+            );
+            sandbox = sandbox
+                .allow_tmux_server(&socket, &tmux)
+                .map_err(sandboxed)?;
+        }
+        expose_graph(&root, &working_dir);
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -4348,10 +4422,21 @@ impl TeamRuntime {
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
-            pane: self.terminal.clone().zip(AgentId::team(id).ok()),
+            pane: self
+                .terminal
+                .clone()
+                .map(|host| {
+                    if native {
+                        crate::terminal::own_server(host)
+                    } else {
+                        host
+                    }
+                })
+                .zip(AgentId::team(id).ok()),
             live,
             resume: None,
             continues: role == AgentRole::Sub,
+            native,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -6663,6 +6748,102 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
         .join("agents")
         .join(format!("agent-{id}"))
         .join("home")
+}
+
+/// The project folder graphify keeps its graph in, and the entries of it an agent's
+/// worktree shows: the graph the CLI queries, its report and its wiki.
+const GRAPH_FOLDER: &str = "graphify-out";
+const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
+/// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
+const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
+
+/// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
+/// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
+/// agent's sandbox reads but never writes, so `graphify query` and the graphify reminder hook
+/// find the graph from the worktree. Only when the worktree's `.gitignore` ignores the
+/// folder, so it never shows as a change; anything the agent made there itself is left alone,
+/// and every step works through the folder's own descriptor without following a link. A
+/// failure leaves the agent without the graph, never without its start. Takes the project
+/// folder and the worktree.
+fn expose_graph(root: &Path, worktree: &Path) {
+    use rustix::fs::{
+        AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, readlinkat, statat, symlinkat,
+        unlinkat,
+    };
+    let source = root.join(GRAPH_FOLDER);
+    let shared = std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
+    if !shared || !ignores_graph(worktree) {
+        return;
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let Ok(tree) = openat(CWD, worktree, flags, Mode::empty()) else {
+        return;
+    };
+    match mkdirat(&tree, GRAPH_FOLDER, Mode::from_raw_mode(0o755)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(_) => return,
+    }
+    let Ok(folder) = openat(&tree, GRAPH_FOLDER, flags, Mode::empty()) else {
+        return;
+    };
+    for entry in GRAPH_ENTRIES {
+        let target = source.join(entry);
+        if std::fs::symlink_metadata(&target).is_err() {
+            continue;
+        }
+        match statat(&folder, entry, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) if FileType::from_raw_mode(stat.st_mode) != FileType::Symlink => continue,
+            Ok(_) => {
+                let current = readlinkat(&folder, entry, Vec::new());
+                if current
+                    .is_ok_and(|named| named.as_bytes() == target.as_os_str().as_encoded_bytes())
+                {
+                    continue;
+                }
+                if unlinkat(&folder, entry, AtFlags::empty()).is_err() {
+                    continue;
+                }
+            }
+            Err(_) => {}
+        }
+        let _ = symlinkat(target.as_path(), &folder, entry);
+    }
+}
+
+/// Whether a worktree's `.gitignore` ignores the graph folder by one of its usual spellings,
+/// read as a plain file, never through a link or from a pipe, at most `GITIGNORE_BYTES_MAX`
+/// bytes. Takes the worktree. Returns the answer; anything unreadable reads as no.
+fn ignores_graph(worktree: &Path) -> bool {
+    use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
+    use std::io::Read;
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let Ok(fd) = openat(CWD, worktree.join(".gitignore"), flags, Mode::empty()) else {
+        return false;
+    };
+    let plain =
+        fstat(&fd).is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
+    let mut text = String::new();
+    if !plain
+        || std::fs::File::from(fd)
+            .take(GITIGNORE_BYTES_MAX)
+            .read_to_string(&mut text)
+            .is_err()
+    {
+        return false;
+    }
+    text.lines().map(str::trim).any(|line| {
+        matches!(
+            line,
+            "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
+        )
+    })
+}
+
+/// The Seatbelt profile the engine installs for one team agent, which its harness, and for a
+/// native-mode lead its own tmux server and every engine client on it, run inside. Inputs:
+/// the team state folder and the agent id. Output: `<state>/profiles/agent-<id>.sb`.
+pub fn agent_profile(state: &Path, id: i64) -> PathBuf {
+    state.join("profiles").join(format!("agent-{id}.sb"))
 }
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,

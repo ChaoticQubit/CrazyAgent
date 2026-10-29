@@ -369,15 +369,19 @@ fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Adds the hooks of every installed default-pack entry whose pinned checkout is already
-/// in the setup folder, so entries installed before hooks were seeded get them too.
-/// Nothing is downloaded, a linked checkout is skipped and an entry whose hooks are present
-/// is left alone. Inputs: the storage job sender and the engine root. Output: nothing; an
-/// entry that fails is logged and the rest still run.
+/// Adds the hooks of every installed default-pack entry whose hook folder this build ships
+/// or whose pinned checkout is already in the setup folder, so entries installed before
+/// hooks were seeded get them too. The shipped hook folders are unpacked first; nothing is
+/// downloaded, a linked checkout is skipped and an entry whose hooks are present is left
+/// alone. Inputs: the storage job sender and the engine root. Output: nothing; an entry
+/// that fails is logged and the rest still run.
 #[cfg(unix)]
 pub(super) async fn backfill_hooks(sender: mpsc::Sender<Job>, root: PathBuf) {
     let setup = root.join("setup");
     let cached = tokio::task::spawn_blocking(move || {
+        if let Err(problem) = crate::setup::bundled::extract_hooks(&setup) {
+            eprintln!("pack_hooks_not_unpacked cause={}", problem.0);
+        }
         let manifest = crate::setup::pack::default_pack().ok()?;
         Some(
             manifest

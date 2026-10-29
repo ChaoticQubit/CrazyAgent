@@ -77,9 +77,10 @@ pub fn valid_plugin_name(name: &str) -> bool {
 /// Reads the command hooks a Claude Code plugin folder defines, running nothing: the
 /// `hooks/hooks.json` file and the `hooks` entry of `.claude-plugin/plugin.json`, an object
 /// or the relative path of a hooks file inside the folder, or a list of those. The plugin's
-/// name comes from `plugin.json`, else the folder's own name. Input: the absolute plugin
-/// folder. Output: what was found, or `hooks_none_found`, `hooks_invalid`, `hooks_too_many`,
-/// `hook_plugin_name_invalid` or `skill_folder_not_found`.
+/// name comes from `plugin.json`, else the folder's own name, and is checked only once hooks
+/// were found, so a folder with none reports `hooks_none_found` whatever it is called.
+/// Input: the absolute plugin folder. Output: what was found, or `hooks_none_found`,
+/// `hooks_invalid`, `hooks_too_many`, `hook_plugin_name_invalid` or `skill_folder_not_found`.
 pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if !folder.is_absolute()
         || folder.as_os_str().len() > super::skill_folder::SOURCE_BYTES_MAX
@@ -93,12 +94,6 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
     )?
     .map(|text| serde_json::from_str::<serde_json::Value>(&text).map_err(|_| "hooks_invalid"))
     .transpose()?;
-    let plugin = manifest
-        .as_ref()
-        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned))
-        .or_else(|| folder.file_name()?.to_str().map(str::to_owned))
-        .filter(|name| valid_plugin_name(name))
-        .ok_or("hook_plugin_name_invalid")?;
     let mut configs = Vec::new();
     if let Some(text) = read_small(
         &folder.join("hooks").join("hooks.json"),
@@ -135,7 +130,7 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
         }
     }
     let mut found = Found {
-        plugin,
+        plugin: String::new(),
         hooks: Vec::new(),
         skipped: 0,
     };
@@ -145,6 +140,12 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if found.hooks.is_empty() {
         return Err("hooks_none_found");
     }
+    found.plugin = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned))
+        .or_else(|| folder.file_name()?.to_str().map(str::to_owned))
+        .filter(|name| valid_plugin_name(name))
+        .ok_or("hook_plugin_name_invalid")?;
     assert!(found.hooks.len() <= super::HOOKS_PER_PLUGIN_MAX);
     Ok(found)
 }
