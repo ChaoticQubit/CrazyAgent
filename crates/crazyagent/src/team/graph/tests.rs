@@ -28,6 +28,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         owner_stopped: false,
         teammates: Vec::new(),
         pane: None,
+        hookless: false,
     }
 }
 

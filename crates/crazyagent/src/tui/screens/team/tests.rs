@@ -825,6 +825,7 @@ fn finished_team() -> crate::team::TeamStatus {
         owner_stopped: false,
         teammates: Vec::new(),
         pane: None,
+        hookless: false,
     };
     TeamStatus {
         project_id: project(),
@@ -1145,6 +1146,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 owner_stopped: false,
                 teammates: Vec::new(),
                 pane: None,
+                hookless: false,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]

@@ -1176,7 +1176,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 stopped_ms INTEGER,
                 session TEXT,
                 parent INTEGER,
-                pane TEXT
+                pane TEXT,
+                hookless INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -1341,7 +1342,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
-    add_pane_column(connection)?;
+    add_agent_columns(connection)?;
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
@@ -2487,6 +2488,8 @@ pub struct TeamAgent {
     pub teammates: Vec<Teammate>,
     #[serde(default)]
     pub pane: Option<String>,
+    #[serde(default)]
+    pub hookless: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2717,10 +2720,11 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         owner_stopped: false,
         teammates: Vec::new(),
         pane: row.get(17)?,
+        hookless: row.get(18)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane,hookless";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
@@ -2935,30 +2939,36 @@ pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineErro
 const DEPTH_WALK_MAX: i64 = 8;
 const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 
-/// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
-/// each task and agent records the lead that started it, NULL for the master's own. A
-/// table the engine has not opened yet gets the column from `initialize`. Takes the
-/// upgrade transaction. Returns any SQLite failure.
-/// Gives a `team_agents` table made before native teammates its `pane` column: the tmux
-/// pane id of a teammate row, the same id `team_teammates` keeps, NULL for every other
-/// agent. Runs on every open and adds the column once. Takes the engine connection.
-/// Returns any SQLite failure.
-fn add_pane_column(connection: &Connection) -> Result<(), EngineError> {
-    let present: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_agents') WHERE name='pane')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(error)?;
-    if !present {
-        connection
-            .execute_batch("ALTER TABLE team_agents ADD COLUMN pane TEXT")
+/// Gives a `team_agents` table made before native teammates its `pane` column, the tmux
+/// pane id of a teammate row (the id `team_teammates` keeps, NULL for every other agent),
+/// and one made before DEC-104 bare-hooks its `hookless` column, 1 when the agent's launch
+/// fires no hooks. Runs on every open and adds each column once. Takes the engine
+/// connection. Returns any SQLite failure.
+fn add_agent_columns(connection: &Connection) -> Result<(), EngineError> {
+    for (name, definition) in [
+        ("pane", "pane TEXT"),
+        ("hookless", "hookless INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_agents') WHERE name=?1)",
+                [name],
+                |row| row.get(0),
+            )
             .map_err(error)?;
+        if !present {
+            connection
+                .execute_batch(&format!("ALTER TABLE team_agents ADD COLUMN {definition}"))
+                .map_err(error)?;
+        }
     }
     Ok(())
 }
 
+/// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
+/// each task and agent records the lead that started it, NULL for the master's own. A
+/// table the engine has not opened yet gets the column from `initialize`. Takes the
+/// upgrade transaction. Returns any SQLite failure.
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

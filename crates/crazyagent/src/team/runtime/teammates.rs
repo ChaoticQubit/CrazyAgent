@@ -102,16 +102,16 @@ pub(super) fn register(
     since: i64,
     at: i64,
 ) -> Result<(), EngineError> {
-    let row: Option<(String, bool, Option<String>)> = connection
+    let row: Option<(String, bool, Option<String>, bool)> = connection
         .query_row(
-            "SELECT harness,tools,connection FROM team_agents
+            "SELECT harness,tools,connection,hookless FROM team_agents
              WHERE id=?1 AND project=?2 AND role='sub' AND parent IS NULL",
             params![lead, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()
         .map_err(error)?;
-    let Some((harness, tools, account)) = row else {
+    let Some((harness, tools, account, hookless)) = row else {
         return Ok(());
     };
     for member in members(home)
@@ -153,9 +153,9 @@ pub(super) fn register(
             None => {
                 connection
                     .execute(
-                        "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane)
-                         VALUES (?1,'teammate',?2,?3,?4,'working',?5,?5,?6,?7)",
-                        params![project.as_str(), harness, tools, account, at, lead, member.pane],
+                        "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane,hookless)
+                         VALUES (?1,'teammate',?2,?3,?4,'working',?5,?5,?6,?7,?8)",
+                        params![project.as_str(), harness, tools, account, at, lead, member.pane, hookless],
                     )
                     .map_err(error)?;
                 let id = connection.last_insert_rowid();

@@ -15,7 +15,7 @@ use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RUN_TIME_MAX,
+    RUN_TIME_MAX, claude_bare,
 };
 use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
 use crate::harnesses::transcript::TranscriptEvent;
@@ -149,7 +149,8 @@ struct Grant {
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
-/// and `tmux` is that server's program, which its teammates are split off with.
+/// and `tmux` is that server's program, which its teammates are split off with; `hookless`
+/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -167,11 +168,20 @@ struct Plan {
     continues: bool,
     native: bool,
     tmux: Option<PathBuf>,
+    hookless: bool,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
 /// panes and the engine's client on that server must all run inside its Seatbelt profile.
 const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
+
+/// Why a lead Claude Code starts `--bare` does not run native teammates: no hook fires there,
+/// so the relay that counts, guards and reports its teammates never runs (DEC-104 bare-hooks).
+const NATIVE_NEEDS_HOOKS: &str = "Native teammates need hooks, and this account starts Claude Code without them. Switch Sub-agents to App-spawned, or use a signed-in account.";
+
+/// Why an agent with tools that Claude Code starts `--bare` does not start while Overlaps is
+/// Block: the edit guard is a hook, and no hook fires there (DEC-104 bare-hooks).
+const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and this account starts Claude Code without them. Set Overlaps to Warn, or use a signed-in account.";
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
@@ -201,6 +211,13 @@ impl Plan {
                 Some("team_native_needs_sandbox"),
             ));
         }
+        assert_eq!(
+            self.hookless,
+            crate::coord::settings::HarnessKind::from_harness(&self.harness)
+                == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+                && claude_bare(&account),
+            "an agent's recorded hooks state is the one its launch gets"
+        );
         Ok(LaunchRequest {
             harness: self.harness.clone(),
             executable: self.executable.clone(),
@@ -4284,6 +4301,39 @@ impl TeamRuntime {
                 (own_home, SandboxRemote::AnyHost(443), model.clone())
             }
         };
+        let hookless = crate::coord::settings::HarnessKind::from_harness(launch)
+            == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            && matches!(account.reach, TeamReach::Endpoint { .. });
+        self.connection
+            .execute(
+                "UPDATE team_agents SET hookless=?2 WHERE id=?1",
+                params![id, hookless],
+            )
+            .map_err(|_| with_code("the agent's hooks state could not be saved", None))?;
+        if hookless
+            && tools
+            && crate::coord::settings::read(&self.connection, &stored.project_id)
+                .map_err(|e| {
+                    with_code(
+                        "the project's coordination settings could not be read",
+                        Some(&e.0),
+                    )
+                })?
+                .overlaps
+                == crate::coord::settings::Overlaps::Block
+        {
+            return Err(with_code(
+                OVERLAP_BLOCK_NEEDS_HOOKS,
+                Some("overlap_block_needs_hooks"),
+            ));
+        }
+        let native = self.native_lead(&stored.project_id, id, role, launch)?;
+        if native && hookless {
+            return Err(with_code(
+                NATIVE_NEEDS_HOOKS,
+                Some("native_team_needs_hooks"),
+            ));
+        }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
         if (live && tools) || agent_tools {
@@ -4440,7 +4490,6 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
-        let native = self.native_lead(&stored.project_id, id, role, launch)?;
         let mut native_tmux = None;
         if native {
             if confinement(layout, policy.access)? {
@@ -4517,6 +4566,7 @@ impl TeamRuntime {
             continues: role == AgentRole::Sub,
             native,
             tmux: native_tmux,
+            hookless,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
