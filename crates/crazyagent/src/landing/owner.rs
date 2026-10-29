@@ -417,8 +417,10 @@ fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result
     Ok(())
 }
 
-/// Marks a change set landed as `landed`, drops its pending ref and points the agent's
-/// worktree at the landed commit when the worktree holds nothing newer than the set.
+/// Marks a change set landed as `landed`, closes its agent's workers' open sets it holds
+/// (F3), drops its pending ref and points the agent's worktree at the landed commit when
+/// the worktree holds nothing newer than the set. A worker set that cannot be judged now
+/// is logged by its plain code and left open, so the Accept itself never fails on it.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
@@ -426,6 +428,12 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
+    if let Err(error) = super::subagent::settle_landed(db, record, landed) {
+        eprintln!(
+            "landing_settle_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
     flow::set_engine_ref(
         &shared(&record.repository)?,
         &record.repository,

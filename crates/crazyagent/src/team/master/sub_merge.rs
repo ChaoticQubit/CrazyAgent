@@ -187,7 +187,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
             false,
         ),
         Ok(MergeOutcome::Conflict { branch, files }) => refused(format!(
-            "Not merged: {label}'s branch {branch} conflicts with your task branch in {}. The merge was undone. Run git merge {branch} in your worktree and resolve it yourself, or ask {label} to merge your task branch first and finish its work again.",
+            "Not merged: {label}'s branch {branch} conflicts with your task branch in {}. The merge was undone. Run git merge {branch} in your worktree, resolve and commit it, then call merge again; or ask {label} to merge your task branch first and finish its work again.",
             bound_text(&files.join(", "), FILES_SHOWN_MAX),
             branch = bound_text(&branch, crate::landing::BRANCH_BYTES_MAX)
         )),

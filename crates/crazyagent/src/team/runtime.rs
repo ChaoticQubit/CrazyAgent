@@ -5396,11 +5396,11 @@ impl TeamRuntime {
         self.land_turn(id, project, turn, line, &what, end)
     }
 
-    /// Lands one ended turn of an agent under its change-set turn key, as `land` does. A
-    /// lead's worker's new change set is told to its lead to merge, never to the owner,
-    /// while the owner's Lands setting is Lead (F3). Inputs: the agent, its project, the
-    /// turn key, the prompt line, what ended for the note and how it ended. Output: any
-    /// SQLite failure writing the note.
+    /// Lands one ended turn of an agent under its change-set turn key, as `land` does, and
+    /// closes its workers' sets its tip now holds (F3). A lead's worker's new change set is
+    /// told to its lead to merge, never to the owner, while Lands is Lead. Inputs: the agent,
+    /// its project, the turn key, the prompt line, what ended for the note and how it ended.
+    /// Output: any SQLite failure writing the note.
     fn land_turn(
         &mut self,
         id: i64,
@@ -5477,8 +5477,16 @@ impl TeamRuntime {
             turn,
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
-        let landed = crate::landing::open(&self.root)
-            .and_then(|db| crate::landing_turns::record(&db, &workspace, &ended));
+        let landed = crate::landing::open(&self.root).and_then(|db| {
+            let landed = crate::landing_turns::record(&db, &workspace, &ended);
+            if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
+                eprintln!(
+                    "landing_settle_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
+            landed
+        });
         let note = match landed {
             Ok(
                 crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
