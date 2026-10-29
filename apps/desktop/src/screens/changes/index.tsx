@@ -139,15 +139,16 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
 }
 
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
- * the owner's Accept, Discard, Restore and Ask agent to update. Input: the project data.
- * Output: the tab; the list rereads every few seconds while it is open. */
+ * the owner's Accept, Discard, Restore and Ask agent to update. A refused action is shown only
+ * while the set it was about is the one shown, never under another set. Input: the project
+ * data. Output: the tab; the list rereads every few seconds while it is open. */
 export function ChangesTab({ data }: { data: ProjectData }) {
   const [list, setList] = useState<Result<ChangeSet[]>>();
   const [round, setRound] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState<{ set: string; text: string } | null>(null);
   useEffect(() => {
     let current = true;
     void loadChanges(data.id).then((result) => { if (current) setList(result); });
@@ -157,42 +158,42 @@ export function ChangesTab({ data }: { data: ProjectData }) {
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
-  async function settle<T>(result: Result<T>, done: (value: T) => string | null) {
+  async function settle<T>(set: ChangeSet, result: Result<T>, done: (value: T) => string | null) {
     setBusy(false);
     setAsking(null);
     if (result.kind === "ok") {
-      setNote("");
+      setNote(null);
       const message = done(result.value);
       if (message !== null) data.notify(message);
-    } else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
+    } else setNote({ set: set.id, text: notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result) });
     setRound((value) => value + 1);
   }
 
   async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(await acceptChange(set.id, set.head, message, target), acceptNote);
+    await settle(set, await acceptChange(set.id, set.head, message, target), acceptNote);
   }
 
   async function discard(set: ChangeSet) {
     setBusy(true);
-    await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
+    await settle(set, await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
   }
 
   async function update(set: ChangeSet) {
     setBusy(true);
-    await settle(await updateChange(set.id), () => "Your branch is merged into the agent's copy. The list shows when the agent picks it up.");
+    await settle(set, await updateChange(set.id), () => "Your branch is merged into the agent's copy. The list shows when the agent picks it up.");
   }
 
   async function restore(set: ChangeSet) {
     setBusy(true);
-    await settle(await restoreChange(set.id), () => "Restored. The changes are ready to review again.");
+    await settle(set, await restoreChange(set.id), () => "Restored. The changes are ready to review again.");
   }
 
   if (list === undefined) return <p className="pj-muted pj-small" role="status">Loading changes...</p>;
   if (notReady(list)) return <ChangesNotReady />;
   return <div className="pj-stack">
     {list.kind === "error" && <p className="pj-error" role="alert">Couldn't load changes. {refusalOf(list)}</p>}
-    {note && <p className="pj-note warn" role="alert">{note}</p>}
+    {note !== null && note.set === shown?.id && <p className="pj-note warn" role="alert">{note.text}</p>}
     {list.kind === "ok" && sets.length === 0 && <ProjectEmpty title="No changes yet">
       When the master or a sub-agent edits files, its changes wait here for you to review and accept.
     </ProjectEmpty>}
