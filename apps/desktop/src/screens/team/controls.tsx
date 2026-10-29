@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -84,6 +84,14 @@ export const DEPTH_OPTIONS: SelectOption[] = [
 ];
 export const DEPTH_DEFAULT = 2;
 
+/** The New folder limit choices, the engine's own list, 1,000 files as the default: the most
+ * files one new top-level folder the owner's branch does not have may gain in a change set. */
+export const NEW_FOLDER_OPTIONS: SelectOption[] = [100, 1000, 10000, 100000].map((files) => ({
+  value: String(files),
+  label: `${files.toLocaleString("en-US")} files`,
+}));
+export const NEW_FOLDER_DEFAULT = 1000;
+
 /** The choices of where a lead's worker lands, When the lead accepts first as the default. */
 export const LANDING_OPTIONS: SelectOption[] = [
   { value: "lead", label: "When the lead accepts" },
@@ -158,6 +166,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [spread, setSpread] = useState<"off" | "on" | null>(null);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
+  const [newFolder, setNewFolder] = useState<number | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -303,6 +312,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseNewFolder(files: number) {
+    setNewFolder(files);
+    setBusy(true);
+    const message = changeNote(await setNewFolderLimit(projectId, files), "the new folder limit");
+    setBusy(false);
+    setNewFolder(null);
+    setNote(message);
+    reload();
+  }
+
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
@@ -351,6 +370,9 @@ export function TeamControls({ projectId, status, harness, reload }: {
       helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
     <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
       onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
+    <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder ?? status.new_folder_files_max ?? NEW_FOLDER_DEFAULT)} options={NEW_FOLDER_OPTIONS}
+      onValue={(value) => { const chosen = Number(value); if (!busy && NEW_FOLDER_OPTIONS.some((option) => option.value === value)) void chooseNewFolder(chosen); }}
+      helper="Counts the files a change set adds in one new top-level folder your branch does not have, such as a scratch folder an agent committed. The agent is told the folder to remove and finishes again." />
     <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={status.max_harnesses == null ? NO_LIMIT : String(status.max_harnesses)} options={capOptions()}
       onValue={(value) => void cap("harnesses", value)}
       helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />

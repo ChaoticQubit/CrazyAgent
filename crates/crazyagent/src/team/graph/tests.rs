@@ -87,6 +87,7 @@ fn status() -> TeamStatus {
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         ask_before_merge: false,
+        new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
         paused: false,

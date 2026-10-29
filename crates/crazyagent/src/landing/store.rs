@@ -497,6 +497,25 @@ pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>
     .map_err(storage)
 }
 
+/// Reads the change set of one team sub-agent of a project changed last. Inputs: the
+/// store, the project and the agent id. Output: the record, None when it has none.
+pub(super) fn newest_of(
+    db: &Connection,
+    project: &ProjectId,
+    agent_id: &str,
+) -> Result<Option<Record>, EngineError> {
+    db.query_row(
+        &format!(
+            "SELECT {COLUMNS} FROM landing_change_sets WHERE project=?1 AND agent_kind='sub' \
+             AND agent_id=?2 ORDER BY updated_ms DESC LIMIT 1"
+        ),
+        params![project.as_str(), agent_id],
+        read,
+    )
+    .optional()
+    .map_err(storage)
+}
+
 /// Reads one project's change sets, open ones first, then newest first.
 /// Inputs: the store, the project and the most to read. Output: the records.
 pub(super) fn of_project(

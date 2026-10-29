@@ -547,10 +547,11 @@ pub(super) fn commit_deletions(
     ))
 }
 
-/// Marks a change set landed as `landed`, closes its agent's workers' open sets it holds
-/// (F3), drops its pending ref and points the agent's worktree at the landed commit when
-/// the worktree holds nothing newer than the set. A worker set that cannot be judged now
-/// is logged by its plain code and left open, so the Accept itself never fails on it.
+/// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
+/// (F3, DEC-107), drops its pending ref and points the agent's worktree at the landed
+/// commit when the worktree holds nothing newer than the set. A worker set that cannot be
+/// closed now is logged by its plain code and left open, so the Accept itself never fails
+/// on it.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
@@ -558,7 +559,7 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
     record.intent = None;
     record.updated_ms = flow::now_ms()?;
     store::save(db, record)?;
-    if let Err(error) = super::subagent::settle_landed(db, record, landed) {
+    if let Err(error) = super::subagent::close_with_lead(db, record) {
         eprintln!(
             "landing_settle_failed cause={}",
             crate::protocol::plain_code(&error.0)
@@ -590,11 +591,14 @@ fn edited(text: &str) -> Result<String, EngineError> {
 }
 
 /// Lands a change set as one squash commit on the owner's checked-out branch: refuses
-/// an unusable checkout or a configured filter or merge driver, merges with
-/// merge-tree, refuses a merge that completes a bare-repository layout (SR1-1), makes
-/// the commit with the owner's identity, records the intent, writes the index and files
-/// with a two-tree read-tree and moves the branch by compare and swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
-/// owner's edited message and where a test stops it. Output: the landed commit and branch, or the conflicts.
+/// an unusable checkout or a configured filter or merge driver, merges with merge-tree
+/// from the merge base of the branch tip and the set's head, so only what would change
+/// on that branch lands (DEC-107), refuses a merge that completes a bare-repository
+/// layout (SR1-1), makes the commit with the owner's identity, records the intent, writes
+/// the index and files with a two-tree read-tree and moves the branch by compare and
+/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
+/// owner's edited message and where a test stops it. Output: the landed commit and
+/// branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
     home: &Path,
@@ -636,11 +640,12 @@ pub(super) fn accept_to(
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (reference, tip, target) = landing_target(db, &owner, &repository, target)?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
-    let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
-    if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
+    let from = measured_from(&owner, &record.base, &record.head, &tip)?;
+    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
-    let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
+    let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let branch = reference.trim_start_matches("refs/heads/").to_owned();
     if !conflicts.is_empty() {
         record.state = ChangeState::Conflict;
@@ -652,7 +657,7 @@ pub(super) fn accept_to(
     if uses_configured_commands(&owner, &paths, &[&tree])? {
         return Err(failure("changes_git_unsupported"));
     }
-    flow::check_layout(&owner, &record.base, &record.head, &tree)?;
+    flow::check_layout(&owner, &from, &record.head, &tree)?;
     match &target {
         Target::Checkout => check_clean(&owner, &repository, &tip, &tree)?,
         Target::Ref => {}
@@ -745,8 +750,9 @@ pub(super) fn accept_to(
 }
 
 /// Merges the owner's branch tip into a change set's agent worktree with conflict
-/// markers as an engine merge commit, so the agent can resolve them in its next turn.
-/// Inputs: the store and the change set. Output: Ok once the worktree holds the merge.
+/// markers as an engine merge commit, from the merge base of the tip and the set's head,
+/// so the agent can resolve them in its next turn. Inputs: the store and the change set.
+/// Output: Ok once the worktree holds the merge.
 pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -781,11 +787,12 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
-    let paths = diff::changed_paths(&owner, &record.base, &record.head)?;
-    if uses_configured_commands(&owner, &paths, &[&record.base, &tip, &record.head])? {
+    let from = measured_from(&owner, &record.base, &record.head, &tip)?;
+    let paths = diff::changed_paths(&owner, &from, &record.head)?;
+    if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
     }
-    let (tree, conflicts) = merge(&owner, &record.base, &tip, &record.head)?;
+    let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
     let message = "Merge the owner's branch into this agent's work\n";
     let merged = owner.commit_tree(&tree, &[&record.head, &tip], message, ENGINE)?;
     verify_objects(&repository, &[&merged], &[&record.head, &tip, &record.base])?;
@@ -915,13 +922,40 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// What the owner's branch tip leaves of one open change set's work: the tip and the tree
-/// merging the work onto it makes, when that merge is clean and adds something, and the
-/// counts the Changes view shows, of that remainder or else of the whole change.
+/// What the owner's branch tip leaves of one open change set's work (DEC-107): the two
+/// trees its diff shows, the tip and the tree merging the work onto it makes when that
+/// merge is clean and adds something, else the change from where it is measured against
+/// the tip to its head, and the counts the Changes view shows of the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Shown {
-    remainder: Option<(String, String)>,
+    range: (String, String),
     counts: (u32, u32, u32),
+}
+
+/// The commit a change set's work is measured from against a branch tip (DEC-107): the
+/// merge base of the tip and the set's head, so work the tip already holds is never shown,
+/// counted or landed again, whatever the set started from; the stored base for a head that
+/// shares no history with the tip. Inputs: the repository, the stored base, the head and
+/// the tip. Output: the commit.
+pub(super) fn measured_from(
+    owner: &Repo,
+    base: &str,
+    head: &str,
+    tip: &str,
+) -> Result<String, EngineError> {
+    let output = owner.exec(&["merge-base", tip, head], None, &[], 256)?;
+    match output.code {
+        0 => super::git::object_id(&output.stdout),
+        1 => Ok(base.to_owned()),
+        _ => Err(failure("changes_git_failed")),
+    }
+}
+
+/// The tip of the owner's checked-out branch, None while it cannot be read: a detached
+/// HEAD, an unfinished git operation or a failed read. Inputs: the owner repository and
+/// its root. Output: the tip.
+pub(super) fn checked_out_tip(owner: &Repo, repository: &Path) -> Option<String> {
+    owner_branch(owner, repository).ok().map(|(_, tip)| tip)
 }
 
 /// What judging one open change set against the owner's branch tip found.
@@ -955,32 +989,34 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// and writing objects but never a work tree: removed when its head commit is gone, landed
 /// when the tip holds its head or merging its work onto the tip changes nothing, else the
 /// remainder a clean merge adds. An empty change, a conflicting merge or a configured
-/// filter or merge driver leaves the whole change shown. Inputs: the owner repository, the
-/// change set and the tip. Output: the judgement.
+/// filter or merge driver leaves the whole change shown, measured from the merge base of
+/// the tip and its head (DEC-107). Inputs: the owner repository, the change set and the
+/// tip. Output: the judgement.
 fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
     if owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str()) {
         return Ok(Judged::Removed);
     }
-    let whole = |owner: &Repo| -> Result<Judged, EngineError> {
-        let stats = diff::stats(owner, &record.base, &record.head)?;
+    let whole = |from: &str| -> Result<Judged, EngineError> {
+        let stats = diff::stats(owner, from, &record.head)?;
         Ok(Judged::Open(Shown {
-            remainder: None,
+            range: (from.to_owned(), record.head.clone()),
             counts: (stats.files, stats.added, stats.removed),
         }))
     };
     if owner.tree_of(&record.base)? == owner.tree_of(&record.head)? {
-        return whole(owner);
+        return whole(&record.base);
     }
     if owner.test(&["merge-base", "--is-ancestor", &record.head, tip])? {
         return Ok(Judged::Landed);
     }
-    let paths = diff::changed_paths(owner, &record.base, &record.head)?;
-    if uses_configured_commands(owner, &paths, &[&record.base, tip, &record.head])? {
-        return whole(owner);
+    let from = measured_from(owner, &record.base, &record.head, tip)?;
+    let paths = diff::changed_paths(owner, &from, &record.head)?;
+    if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
+        return whole(&from);
     }
-    let (tree, conflicts) = merge(owner, &record.base, tip, &record.head)?;
+    let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;
     if !conflicts.is_empty() {
-        return whole(owner);
+        return whole(&from);
     }
     if tree == owner.tree_of(tip)? {
         return Ok(Judged::Landed);
@@ -988,7 +1024,7 @@ fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError
     assert!(super::git::is_object_id(&tree));
     let stats = diff::stats(owner, tip, &tree)?;
     Ok(Judged::Open(Shown {
-        remainder: Some((tip.to_owned(), tree)),
+        range: (tip.to_owned(), tree),
         counts: (stats.files, stats.added, stats.removed),
     }))
 }
@@ -1054,7 +1090,7 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
 /// closes as landed outside like an Accept onto that tip, and otherwise its counts become
 /// what is not yet on the tip. Inputs: the store, the change set and the owner repository
 /// with its tip, None while the owner's HEAD is detached, busy or unreadable. Output: the
-/// tip and remainder tree its diff shows, None to show its whole change.
+/// two trees its diff shows against the tip (DEC-107), None to show its stored change.
 fn observe_one(
     db: &Connection,
     id: &ChangeSetId,
@@ -1091,7 +1127,7 @@ fn observe_one(
                 (record.files, record.added, record.removed) = (files, added, removed);
                 store::save(db, &record)?;
             }
-            Ok(shown.remainder)
+            Ok(Some(shown.range))
         }
     }
 }
@@ -1121,7 +1157,8 @@ fn owner_tip(repository: &Path) -> Option<(Repo, String)> {
 }
 
 /// Notices what the owner did outside the app to every open change set of one project, or
-/// of every project, one repository at a time under its hold, reading each owner tip once.
+/// of every project, one repository at a time under its hold, reading each owner tip once,
+/// after closing lead workers' sets their lead's closed set left open (DEC-107).
 /// A change set that cannot be judged now is logged by its plain code and left as it was.
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
@@ -1136,6 +1173,12 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
     }
     for (repository, ids) in by_repository {
         let _held = hold(&repository);
+        if let Err(error) = super::subagent::close_orphaned(db, &ids) {
+            eprintln!(
+                "landing_settle_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
         let owner = owner_tip(&repository);
         for id in ids {
             if let Err(error) = observe_one(db, &id, owner.as_ref()) {
@@ -1150,8 +1193,8 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
 }
 
 /// Notices what the owner did outside the app to one change set before its diff is read.
-/// Inputs: the store and the change set. Output: the tip and remainder tree to show, None
-/// to show its whole change, also once it closed.
+/// Inputs: the store and the change set. Output: the two trees to show against the owner's
+/// branch tip, None to show its stored change, also once it closed.
 pub(super) fn observe_for_diff(
     db: &Connection,
     id: &ChangeSetId,

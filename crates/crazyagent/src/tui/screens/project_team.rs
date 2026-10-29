@@ -520,6 +520,7 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
+            KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('c') => {
                 self.open_coord();
                 TeamReply::Handled
@@ -1456,6 +1457,34 @@ impl TeamView {
         })
     }
 
+    /// Moves "New folder limit", the most files one new top-level folder may gain in a change
+    /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
+    /// notice while loading or saving.
+    fn new_folder_limit(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let choices = crate::team::NEW_FOLDER_FILES_CHOICES;
+        let files = choices
+            .iter()
+            .position(|choice| *choice == status.new_folder_files_max)
+            .map_or(choices[0], |at| choices[(at + 1) % choices.len()]);
+        self.changing = Some(format!(
+            "A change set adding more than {files} files in one new folder is now refused."
+        ));
+        TeamReply::Change(TeamAction::NewFolderLimit {
+            project_id: self.project.clone(),
+            files,
+        })
+    }
+
     /// Opens the coordination editor on its first row. Output: none; a notice while the team
     /// is loading or when the engine sends no coordination settings.
     fn open_coord(&mut self) {
@@ -2002,7 +2031,7 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Ask before merge), each whole. A
+    /// budget, Master's branch, Ask before merge, New folder limit), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2108,6 +2137,10 @@ impl TeamView {
             setting(
                 "Ask before merge",
                 if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+            ),
+            setting(
+                "New folder limit",
+                format!("{} files", status.new_folder_files_max),
             ),
         ];
         let mut rows = Vec::new();
@@ -2430,6 +2463,7 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("g", "Ask before merge"),
+            ("F", "New folder limit"),
             ("c", "Coordination"),
             ("e", "Wake rules"),
         ];

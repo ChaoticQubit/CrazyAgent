@@ -1196,6 +1196,13 @@ export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<Inten
   return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
 }
 
+/** Sets the most files one new top-level folder, a folder the owner's branch does not have,
+ * may gain in a project's change set before the engine refuses the set. Inputs: the project id
+ * and the limit. Output: the engine receipt, not ready, or a plain error. */
+export function setNewFolderLimit(id: string, files: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_new_folder_limit", { id, files, generation: nextGeneration() });
+}
+
 /** Saves a project's coordination settings: where sub-agent questions go, what overlapping
  * claims do, workflow nudges and the counted tools. Inputs: the project id and the settings.
  * Output: the engine receipt, not ready, or a plain error. */

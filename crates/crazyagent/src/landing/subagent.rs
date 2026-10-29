@@ -23,6 +23,9 @@ const LISTING_BYTES_MAX: usize = 4096;
 const ID_BYTES_MAX: usize = 256;
 const CONFLICTS_BYTES_MAX: usize = 64 * 1024;
 const CONFLICTS_SHOWN_MAX: usize = 50;
+/// The most levels of workers below one lead whose change sets close with the lead's.
+const WORKER_LEVELS_MAX: u8 = 3;
+const _: () = assert!(WORKER_LEVELS_MAX >= crate::team::DEPTH_CHOICES[2]);
 
 fn unavailable(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
@@ -138,25 +141,103 @@ pub(super) fn settle(db: &Connection, project: &ProjectId, lead: i64) -> Result<
     Ok(())
 }
 
-/// Closes the open change sets of an agent's sub-agents whose work one of its change sets
-/// held when it landed (F3): the lead's Accept carries its workers' work, even when the
-/// lead squashed or resolved it by hand. Each lands where the lead's set landed. The
-/// caller holds [`hold`] on the landed set's repository. Inputs: the store, the landed
-/// change set and the commit it landed as. Output: Ok, or the first failure.
-pub(super) fn settle_landed(
+/// Closes the open change sets of a lead's workers with the lead's own closed change set
+/// (DEC-107): when the lead's set lands, a worker set whose work it holds lands with it as
+/// Accepted, even when the lead squashed or resolved it by hand (F3); while the owner's
+/// Lands setting is Lead, every other worker set opened before the lead's set closed is
+/// discarded with it, restorable as an owner's Discard keeps one, since only that lead
+/// would have merged it. A worker's own workers close with it the same way. The caller
+/// holds [`hold`] on the closed set's repository. Inputs: the store and the lead's closed
+/// change set. Output: Ok, or the first failure.
+pub(super) fn close_with_lead(
     db: &Connection,
-    landed_set: &store::Record,
-    landed: &str,
+    lead_set: &store::Record,
 ) -> Result<(), EngineError> {
-    if landed_set.agent.kind != super::AgentKind::Sub {
+    close_workers(db, lead_set, WORKER_LEVELS_MAX)
+}
+
+/// Closes the workers' sets of one closed change set as [`close_with_lead`] says, then
+/// their own workers', at most `levels` deep. Inputs: the store, the closed change set and
+/// the levels left. Output: Ok, or the first failure.
+fn close_workers(db: &Connection, lead_set: &store::Record, levels: u8) -> Result<(), EngineError> {
+    assert!(!lead_set.is_open());
+    if levels == 0 || lead_set.agent.kind != super::AgentKind::Sub {
         return Ok(());
     }
-    let Ok(lead) = landed_set.agent.id.parse::<i64>() else {
+    let Ok(lead) = lead_set.agent.id.parse::<i64>() else {
         return Ok(());
     };
-    for (_, sub) in sub_agents(db, &landed_set.project, lead)? {
-        if sub.repository == landed_set.repository {
-            close_covered(db, &sub, &landed_set.head, landed)?;
+    let orphans = leads_merge(db, &lead_set.project)?;
+    for (_, sub) in sub_agents(db, &lead_set.project, lead)? {
+        if sub.repository != lead_set.repository {
+            continue;
+        }
+        let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
+            continue;
+        };
+        if record.intent.is_some() || record.created_ms > lead_set.updated_ms {
+            continue;
+        }
+        let landed = match (lead_set.state, lead_set.landed.as_deref()) {
+            (ChangeState::Accepted, Some(landed)) => Some(landed),
+            _ => None,
+        };
+        match landed {
+            Some(landed) if covers(&record, &lead_set.head)? => {
+                land_covered(db, &mut record, landed)?
+            }
+            _ if orphans => {
+                super::flow::discard_held(db, &mut record, lead_set.updated_ms)?;
+            }
+            _ => continue,
+        }
+        close_workers(db, &record, levels - 1)?;
+    }
+    Ok(())
+}
+
+/// Closes the open sets of lead workers whose lead's newest change set closed after they
+/// opened, while the lead has none open, as [`close_with_lead`] would have when it closed:
+/// sets left open before the engine closed workers with their lead. The caller holds
+/// [`hold`] on their repository. Inputs: the store and the open change sets of one
+/// repository. Output: Ok, or the first failure.
+pub(super) fn close_orphaned(
+    db: &Connection,
+    ids: &[super::ChangeSetId],
+) -> Result<(), EngineError> {
+    if !team_kept(db)? {
+        return Ok(());
+    }
+    let mut leads = Vec::new();
+    for id in ids {
+        let record = store::load(db, id)?;
+        if !record.is_open() || record.agent.kind != super::AgentKind::Sub {
+            continue;
+        }
+        let Ok(agent) = record.agent.id.parse::<i64>() else {
+            continue;
+        };
+        let lead: Option<i64> = db
+            .query_row(
+                "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+                params![agent, record.project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?
+            .flatten();
+        if let Some(lead) = lead
+            && !leads.contains(&(record.project.clone(), lead))
+        {
+            leads.push((record.project.clone(), lead));
+        }
+    }
+    for (project, lead) in leads {
+        let Some(lead_set) = store::newest_of(db, &project, &lead.to_string())? else {
+            continue;
+        };
+        if !lead_set.is_open() && lead_set.intent.is_none() {
+            close_workers(db, &lead_set, WORKER_LEVELS_MAX)?;
         }
     }
     Ok(())
@@ -166,6 +247,15 @@ pub(super) fn settle_landed(
 /// leave them out: the owner's Lands setting is Lead. Inputs: the store and the project.
 /// Output: the answer, false where the engine keeps no team tables.
 pub(super) fn leads_merge(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    if !team_kept(db)? {
+        return Ok(false);
+    }
+    Ok(crate::team::nesting(db, project)?.lands == crate::team::ChildLanding::Lead)
+}
+
+/// Tells whether the store holds the team tables the engine keeps beside change sets.
+/// Input: the store. Output: the answer.
+fn team_kept(db: &Connection) -> Result<bool, EngineError> {
     let tables: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('team_agents','team_nesting')",
@@ -173,10 +263,7 @@ pub(super) fn leads_merge(db: &Connection, project: &ProjectId) -> Result<bool, 
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    if tables != 2 {
-        return Ok(false);
-    }
-    Ok(crate::team::nesting(db, project)?.lands == crate::team::ChildLanding::Lead)
+    Ok(tables == 2)
 }
 
 /// Tells whether a change set's agent is a worker of a lead. Inputs: the store, the
@@ -567,19 +654,40 @@ fn close_covered(
     let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
         return Ok(());
     };
-    let shared = shared(&record.repository)?;
-    let covered = record.head == merged
-        || (shared.commit_of(&record.head)?.is_some()
-            && shared.test(&["merge-base", "--is-ancestor", &record.head, merged])?);
-    if record.intent.is_some() || !covered {
+    if record.intent.is_some() || !covers(&record, merged)? {
         return Ok(());
     }
+    land_covered(db, &mut record, landed)
+}
+
+/// Tells whether a commit holds an open change set's head. Inputs: the change set and the
+/// commit. Output: the answer.
+fn covers(record: &store::Record, merged: &str) -> Result<bool, EngineError> {
+    if record.head == merged {
+        return Ok(true);
+    }
+    let shared = shared(&record.repository)?;
+    Ok(shared.commit_of(&record.head)?.is_some()
+        && shared.test(&["merge-base", "--is-ancestor", &record.head, merged])?)
+}
+
+/// Closes an open change set whose work a commit holds as Accepted with `landed` as where
+/// it landed, drops its pending ref and has the agent's next change set open above it.
+/// The caller holds [`hold`] on its repository. Inputs: the store, the change set and the
+/// commit it landed as. Output: Ok once closed.
+fn land_covered(
+    db: &Connection,
+    record: &mut store::Record,
+    landed: &str,
+) -> Result<(), EngineError> {
+    assert!(record.is_open() && record.intent.is_none());
+    let shared = shared(&record.repository)?;
     record.state = ChangeState::Accepted;
     record.landed = Some(landed.to_owned());
     record.conflicts.clear();
     record.waiting = false;
     record.updated_ms = now_ms()?;
-    store::save(db, &record)?;
+    store::save(db, record)?;
     set_engine_ref(&shared, &record.repository, &pending_ref(&record.id), None)?;
     store::set_base(db, &record.worktree, &record.head)?;
     assert!(!record.is_open());

@@ -1461,9 +1461,10 @@ impl TeamRuntime {
         )
     }
 
-    /// Sends a lead an engine note through the coordination layer (DEC-104), which delivers
-    /// it natively or by typing. A lead the layer no longer knows is skipped. Takes the
-    /// project, the lead and the note. Returns any coordination store failure.
+    /// Sends a lead, or any team agent, an engine note through the coordination layer
+    /// (DEC-104), which delivers it natively or by typing. An agent the layer no longer
+    /// knows is skipped. Takes the project, the agent and the note. Returns any
+    /// coordination store failure.
     fn note_lead(&self, project: &ProjectId, lead: i64, body: String) -> Result<(), EngineError> {
         let note = crate::coord::NewMessage {
             project: project.clone(),
@@ -5665,12 +5666,17 @@ impl TeamRuntime {
                 }
                 note
             }
-            Err(problem) => with_code(
-                &format!(
-                    "The edits from {what} could not be kept for review and stay only in its worktree"
-                ),
-                Some(&problem.0),
-            ),
+            Err(problem) => {
+                if let Some(text) = crate::landing::refusal_for_agent(&problem) {
+                    self.note_lead(project, id, text)?;
+                }
+                with_code(
+                    &format!(
+                        "The edits from {what} could not be kept for review and stay only in its worktree"
+                    ),
+                    Some(crate::landing::refusal_code(&problem)),
+                )
+            }
         };
         assert!(note.len() <= NOTE_BYTES_MAX);
         self.note(project, &note)

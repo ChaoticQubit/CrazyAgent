@@ -5,9 +5,10 @@ use super::store::{self, Intent, Record};
 use super::{AgentKind, ChangeSetId, ChangeState, RESTORE_WINDOW_MS, TurnEnd, Workspace};
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
+use crate::protocol::ProjectId;
 use crate::worktrees::TreeBounds;
 use rusqlite::Connection;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
 
@@ -15,6 +16,7 @@ pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invali
 const TASK_SUFFIXES_MAX: usize = 64;
 const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
+const FOLDER_CHARS_MAX: usize = 128;
 const LAYOUT_NAMES: [&str; 4] = ["head", "objects", "refs", "commondir"];
 const LAYOUT_FOLDERS_MAX: usize = 64;
 const LINK_HEADER_BYTES_MAX: usize = 128;
@@ -1051,6 +1053,95 @@ fn check_change(
     Ok(())
 }
 
+/// Refuses a change set in which one new top-level folder, one the owner's branch does
+/// not have, gains more files than the owner's limit (DEC-107 rule 3), such as a scratch
+/// folder an agent committed. Inputs: the repository, the commit whose top names count as
+/// the owner's, the commit the set is measured from, its head and the limit. Output: Ok,
+/// else [`super::NEW_FOLDER_REFUSED`] carrying the folder, its file count and the limit
+/// for the agent, as [`super::refusal_for_agent`] reads them.
+fn check_new_folders(
+    repo: &Repo,
+    owner: &str,
+    from: &str,
+    to: &str,
+    limit: u32,
+) -> Result<(), EngineError> {
+    if from == to {
+        return Ok(());
+    }
+    let output = repo.exec(
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--name-only",
+            "--diff-filter=A",
+            from,
+            to,
+        ],
+        None,
+        &[],
+        LISTING_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    if output.overflow {
+        return Err(failure("changes_too_large"));
+    }
+    let mut added: BTreeMap<&[u8], u32> = BTreeMap::new();
+    for path in output.stdout.split(|byte| *byte == 0) {
+        if let Some(at) = path.iter().position(|byte| *byte == b'/') {
+            let files = added.entry(&path[..at]).or_default();
+            *files = files.saturating_add(1);
+        }
+    }
+    added.retain(|_, files| *files > limit);
+    if added.is_empty() {
+        return Ok(());
+    }
+    let listed = repo.run(&["ls-tree", "-z", "--name-only", owner])?;
+    let kept: BTreeSet<&[u8]> = listed
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect();
+    let Some((folder, files)) = added
+        .into_iter()
+        .filter(|(folder, _)| !kept.contains(folder))
+        .max_by_key(|(_, files)| *files)
+    else {
+        return Ok(());
+    };
+    assert!(files > limit);
+    let name: String = plain(&String::from_utf8_lossy(folder))
+        .replace(['\n', '\t'], "\u{FFFD}")
+        .chars()
+        .take(FOLDER_CHARS_MAX)
+        .collect();
+    Err(EngineError(format!(
+        "{}\n{files}\n{limit}\n{name}",
+        super::NEW_FOLDER_REFUSED
+    )))
+}
+
+/// The most files one new top-level folder may gain in a project's change set: the owner's
+/// Team setting, else its default where the engine keeps no team tables. Inputs: the store
+/// and the project. Output: the limit.
+fn new_folder_limit(db: &Connection, project: &ProjectId) -> Result<u32, EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_new_folder_limit')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure("changes_unavailable"))?;
+    if !kept {
+        return Ok(crate::team::NEW_FOLDER_FILES_DEFAULT);
+    }
+    crate::team::new_folder_files_max(db, project)
+}
+
 /// Adds the folders above each component of a path named like a part of a git folder
 /// (`LAYOUT_NAMES`, any case): the folders `repository_layout` lists.
 /// Inputs: the set and one added or changed path.
@@ -1537,7 +1628,19 @@ pub(super) fn record(
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();
-    let stats = diff::stats(repo, &record.base, &record.head)?;
+    let tip = super::owner::checked_out_tip(&shared, &workspace.repository);
+    let from = match &tip {
+        Some(tip) => super::owner::measured_from(&shared, &record.base, &record.head, tip)?,
+        None => record.base.clone(),
+    };
+    check_new_folders(
+        &shared,
+        tip.as_deref().unwrap_or(&from),
+        &from,
+        &record.head,
+        new_folder_limit(db, &workspace.project)?,
+    )?;
+    let stats = diff::stats(repo, &from, &record.head)?;
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.message = proposed(repo, &record, &roots)?;
     record.updated_ms = now;
@@ -1614,9 +1717,9 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
 }
 
 /// Discards an open change set: keeps its head under a discarded ref, then points the
-/// agent's worktree at the owner's current commit when it holds nothing newer.
-/// Inputs: the store, the change set, the head the owner reviewed and the time now.
-/// Output: the time it stays restorable until.
+/// agent's worktree at the owner's current commit when it holds nothing newer. A lead's
+/// workers' open sets close with it (DEC-107). Inputs: the store, the change set, the head
+/// the owner reviewed and the time now. Output: the time it stays restorable until.
 pub(super) fn discard(
     db: &Connection,
     id: &ChangeSetId,
@@ -1630,6 +1733,26 @@ pub(super) fn discard(
     if !record.is_open() || record.head != expected_head || record.intent.is_some() {
         return Err(failure("changes_stale"));
     }
+    let until = discard_held(db, &mut record, now)?;
+    if let Err(error) = super::subagent::close_with_lead(db, &record) {
+        eprintln!(
+            "landing_settle_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
+    Ok(until)
+}
+
+/// Discards one open change set holding no intent, as [`discard`] does once it checked the
+/// owner's reviewed head. The caller holds [`hold`] on its repository. Inputs: the store,
+/// the change set and the time now. Output: the time it stays restorable until.
+pub(super) fn discard_held(
+    db: &Connection,
+    record: &mut Record,
+    now: u64,
+) -> Result<u64, EngineError> {
+    assert!(record.is_open() && record.intent.is_none());
+    let id = record.id.clone();
     let shared = shared(&record.repository)?;
     let target = shared
         .commit_of("HEAD")?
@@ -1637,7 +1760,7 @@ pub(super) fn discard(
     set_engine_ref(
         &shared,
         &record.repository,
-        &discarded_ref(id),
+        &discarded_ref(&id),
         Some(&record.head),
     )?;
     let until = now
@@ -1648,10 +1771,10 @@ pub(super) fn discard(
     record.pruned = false;
     record.conflicts.clear();
     record.updated_ms = now;
-    store::save(db, &record)?;
-    set_engine_ref(&shared, &record.repository, &pending_ref(id), None)?;
+    store::save(db, record)?;
+    set_engine_ref(&shared, &record.repository, &pending_ref(&id), None)?;
     let head = record.head.clone();
-    reset_if_quiet(db, &mut record, &head, &target)?;
+    reset_if_quiet(db, record, &head, &target)?;
     Ok(until)
 }
 

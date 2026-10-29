@@ -893,6 +893,21 @@ async fn desktop_team_ask_before_merge(
 }
 
 #[tauri::command]
+async fn desktop_team_new_folder_limit(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    files: u32,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_new_folder_limit(&id, files, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_coordination(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2990,6 +3005,7 @@ pub fn run() {
             desktop_team_agent_branches,
             desktop_team_master_branch,
             desktop_team_ask_before_merge,
+            desktop_team_new_folder_limit,
             desktop_team_coordination,
             desktop_team_harness_mode,
             desktop_team_harness_delivery,

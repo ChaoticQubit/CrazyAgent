@@ -44,6 +44,7 @@
     "allow-desktop-team-agent-branches",
     "allow-desktop-team-master-branch",
     "allow-desktop-team-ask-before-merge",
+    "allow-desktop-team-new-folder-limit",
     "allow-desktop-team-coordination",
     "allow-desktop-team-harness-mode",
     "allow-desktop-team-harness-delivery",
