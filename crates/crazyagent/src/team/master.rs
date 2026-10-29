@@ -27,6 +27,8 @@ const MASTER_TURNS_KEPT: i64 = 2000;
 const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
+const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
+const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
@@ -832,6 +834,7 @@ fn answer(
             task,
             harness,
             role,
+            mode,
         } => {
             return delegate(
                 connection,
@@ -839,6 +842,7 @@ fn answer(
                 &task,
                 harness.as_deref(),
                 role.as_deref(),
+                mode,
             );
         }
         Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
@@ -868,10 +872,12 @@ pub(super) fn answer_sub(
     call: Call,
 ) -> Result<Option<(String, bool)>, EngineError> {
     Ok(Some(match call {
+        Call::Spawn { mode: Some(_), .. } => (LEAD_MODE_REFUSED.to_owned(), true),
         Call::Spawn {
             task,
             harness,
             role,
+            mode: None,
         } => lead_delegate(
             connection,
             answering,
@@ -1028,24 +1034,8 @@ fn lead_delegate(
             true,
         ));
     }
-    let lead_harness: String = tx
-        .query_row(
-            "SELECT harness FROM team_agents WHERE id=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(state)?;
-    if let Some(kind) = crate::coord::settings::HarnessKind::from_harness(&lead_harness)
-        && crate::coord::settings::mode(&tx, project, kind)?
-            == crate::coord::settings::SubagentMode::Native
-    {
-        return Ok((
-            format!(
-                "Not started: the owner set {} leads to run sub-agents as native teammates. Start them in your own agent team instead.",
-                super::bound_text(&lead_harness, AGENT_SHOWN_MAX)
-            ),
-            true,
-        ));
+    if super::lead_mode(&tx, project, lead)? == crate::coord::settings::SubagentMode::Native {
+        return Ok((NATIVE_LEAD_REFUSED.to_owned(), true));
     }
     if let Err(reason) = super::caps::admit_sub_agent(&tx, project, lead) {
         return Ok((format!("Not started: {reason}"), true));
@@ -1424,6 +1414,7 @@ fn delegate(
     task: &str,
     harness: Option<&str>,
     role: Option<&str>,
+    mode: Option<crate::coord::settings::SubagentMode>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1457,6 +1448,25 @@ fn delegate(
         .map_err(state)?;
     if let Some(role) = role {
         super::names::set_task_role(&tx, project, id, role)?;
+    }
+    if let Some(mode) = mode {
+        use crate::coord::settings::{HarnessKind, SubagentMode, native_supported};
+        if mode == SubagentMode::Native
+            && !HarnessKind::from_harness(&chosen).is_some_and(native_supported)
+        {
+            return Ok((
+                format!(
+                    "Not handed off: a {} lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).",
+                    super::bound_text(&chosen, AGENT_SHOWN_MAX)
+                ),
+                true,
+            ));
+        }
+        tx.execute(
+            "UPDATE team_tasks SET mode=?2 WHERE id=?1",
+            params![id, mode.as_str()],
+        )
+        .map_err(state)?;
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {
