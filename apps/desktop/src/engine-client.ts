@@ -783,6 +783,40 @@ export type ChildLanding = "lead" | "owner";
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
 
+/** A harness kind the coordination settings are kept for, by its catalog id. */
+export type CoordHarness = "claude-code" | "codex" | "rcli";
+/** How a lead's sub-agents start: app-spawned processes, or the harness's native teammates. */
+export type SubagentMode = "app_spawned" | "native";
+/** How messages reach an agent: native channels with typing as fallback, native only, or typing only. */
+export type Delivery = "auto" | "native_only" | "typing_only";
+/** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
+export type QuestionsTo = "lead" | "me";
+/** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
+export type Overlaps = "warn" | "block" | "off";
+
+/** A project's coordination settings: question routing, claim overlaps, workflow nudges and the
+ * tool names the adoption counts include. */
+export interface CoordSettings {
+  questions_to: QuestionsTo;
+  overlaps: Overlaps;
+  nudges: boolean;
+  counted_tools: string[];
+}
+
+/** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
+export interface HarnessCoordination {
+  harness: CoordHarness;
+  mode: SubagentMode;
+  delivery: Delivery;
+  native: boolean;
+}
+
+/** A project's coordination settings with each harness kind's mode and delivery. */
+export interface CoordinationView {
+  settings: CoordSettings;
+  harnesses: HarnessCoordination[];
+}
+
 export interface SessionSwitch {
   harness: string;
   mode: SwitchMode;
@@ -802,6 +836,7 @@ export interface TeamStatus {
   agent_branches?: BranchMode;
   master_branch?: string | null;
   ask_before_merge?: boolean;
+  coordination?: CoordinationView | null;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -1600,6 +1635,22 @@ export interface McpServerView {
   checks: number;
   secrets: { name: string; saved: boolean }[];
   on_here: boolean | null;
+}
+
+/** A tool's switch: on, off, or deleted (hidden; built-in tools only). */
+export type ToolSwitch = "on" | "off" | "hidden";
+
+/** One tool with its switches: the CrazyAgent built-in tools, or one MCP server's tools.
+ * `global` is the every-project switch; `here` is the project's own switch, null when the
+ * project follows the global one or in global settings. */
+export interface ToolView {
+  server: string;
+  server_id: string | null;
+  tool: string;
+  description: string;
+  builtin: boolean;
+  global: ToolSwitch;
+  here: ToolSwitch | null;
 }
 
 export interface EffectivePlugins {

@@ -6,6 +6,7 @@ import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } 
 import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
+import { CoordinationControls } from "./coordination";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
@@ -284,6 +285,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
         options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
     </div>
+    <CoordinationControls projectId={projectId} status={status} reload={reload} />
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />
