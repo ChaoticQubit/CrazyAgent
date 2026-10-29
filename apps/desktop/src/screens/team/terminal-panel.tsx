@@ -65,12 +65,13 @@ export function terminalOptions(): ITerminalOptions {
   };
 }
 
-/** The note under a live terminal: who reads what the owner types. Input: the node.
+/** The note under a live terminal: who reads what the owner types. A native teammate known
+ * only by its pane shows its lead's terminal, so typing reaches the lead. Input: the node.
  * Output: one sentence. */
 export function typingNote(node: GraphNode): string {
-  return node.kind === "master"
-    ? "Typing goes straight to the master."
-    : "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
+  if (node.kind === "master") return "Typing goes straight to the master.";
+  if (node.kind === "teammate" && typeof node.agent !== "number") return "This teammate works in its lead's terminal, so typing goes to its lead and is not kept.";
+  return "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
 }
 
 /** The status line's note on where the owner's typing goes. Inputs: the node and the input

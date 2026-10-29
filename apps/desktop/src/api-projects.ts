@@ -216,6 +216,11 @@ const copy: Record<string, string> = {
   team_agents_unavailable: "Team agents can't run on this system in this version.",
   team_stop_master: "The master stops with Stop all.",
   team_teammate_not_found: "That teammate has already ended.",
+  team_agent_message_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_agent_unknown: "That agent is not on this project's team any more.",
+  coord_text_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_message_self: "An agent cannot be sent its own message.",
+  coord_recipient_invalid: "That message has no agent to go to.",
   team_cap_invalid: "Pick a listed limit, or No limit.",
   team_budget_invalid: "Pick a listed token budget, or Off.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
@@ -416,6 +421,16 @@ export function wakeTeamAgent(id: string, agent: number, generation: number): Pr
  * it. Inputs: the project id, the team agent id and a generation. Output: the engine receipt. */
 export function stopTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
+}
+
+/** The most bytes one owner message to an agent may hold, as the coordination layer allows. */
+export const AGENT_MESSAGE_BYTES_MAX = 4000;
+
+/** Sends the owner's message to one team agent through the coordination layer, which delivers
+ * it to the agent's mailbox with a receipt. Inputs: the project id, the team agent id, the text
+ * and a generation. Output: the engine receipt. */
+export function sendAgentMessage(id: string, agent: number, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_send", { id, agent, text, generation });
 }
 
 /** Stops one teammate a harness split off, and tells the harness. Inputs: the project id, the

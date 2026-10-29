@@ -310,16 +310,12 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(masters.len(), 1);
     assert_eq!(masters[0].harness, "codex");
     assert_eq!(masters[0].parent, None);
-    let groups: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::HarnessGroup)
-        .collect();
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].harness, "codex");
-    assert_eq!(groups[0].parent.as_deref(), Some(masters[0].id.as_str()));
-    assert!(groups[0].agents.is_some());
-    assert!(graph.nodes.iter().all(|n| n.kind != NodeKind::Agent));
+    assert_eq!(
+        graph.nodes.len(),
+        1,
+        "a new team is its master alone: {graph:?}"
+    );
+    assert!(graph.nodes.iter().all(|n| !n.kind.agent()));
     assert!(graph.edges.is_empty());
 
     let handed = bridge

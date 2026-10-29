@@ -973,6 +973,13 @@ export function teamStopAgent(id: string, agent: number, generation: number): Pr
   return invoke<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
 }
 
+/** Sends the owner's message to one team agent through the coordination layer, which delivers
+ * it to the agent's mailbox with a receipt. Inputs: the project id, the team agent id, the
+ * text and a generation. Output: the commit receipt; an agent outside the project is rejected. */
+export function coordSend(id: string, agent: number, text: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_coord_send", { id, agent, text, generation });
+}
+
 /** Stops one teammate of a harness. Inputs: the project id, the harness agent id, the teammate's
  * pane id and a generation. Output: the commit receipt; an ended teammate is rejected. */
 export function teamStopTeammate(id: string, agent: number, pane: string, generation: number): Promise<IntentReceipt> {
@@ -1272,15 +1279,20 @@ export function removePackEntry(id: string, generation: number): Promise<SetupSt
   return invoke<SetupStatus>("desktop_remove_pack_entry", { id, generation });
 }
 
-/** What one node of a project's team graph stands for: the master, one harness with its
- * agent count, or one agent. */
-export type GraphNodeKind = "master" | "harness_group" | "agent";
+/** What one node of the who-leads-whom tree stands for: the master, a harness lead the master
+ * started, a sub-agent a lead started, or a native teammate a lead's harness split off. */
+export type GraphNodeKind = "master" | "lead" | "sub" | "teammate";
 export type GraphEdgeState = "sent" | "running" | "done" | "failed";
+export type Presence = "live" | "idle" | "away" | "stopped";
+export type Waiting = "question" | "permission";
+export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "failed" | "expired";
 
 /** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
- * links an agent to its harness group and a group to the master; `terminal` is the name the
- * terminal commands take, for the master and agents that have one. `questions` counts the
- * questions an agent waits on, once the engine reports them. */
+ * names the node that leads it; `terminal` is the name the terminal commands take, for the
+ * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
+ * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
+ * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
+ * come from the coordination layer; older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1290,13 +1302,39 @@ export interface GraphNode {
   status: TeamAgentStatus | null;
   status_label: string | null;
   account: string | null;
-  agents: number | null;
+  branch?: string | null;
   terminal: string | null;
   questions?: number | null;
+  agent?: number | null;
+  pane?: string | null;
+  presence?: Presence | null;
+  waiting?: Waiting | null;
+  owner_questions?: number;
+  no_worktree?: boolean;
 }
 
-/** One task edge from the master to the agent running it, or to its harness group before
- * that. `reply` is the result or the plain problem once the task ended. */
+/** Unread messages from one party to another: how many and the newest one's receipt. Each end
+ * is a node id, "owner" or "engine". */
+export interface MessageEdge {
+  from: string;
+  to: string;
+  unread: number;
+  receipt: Receipt;
+}
+
+/** Active claims of two agents that may touch the same thing: how many claim pairs, the first
+ * plain reason, and whether every pair has a stale side. */
+export interface OverlapEdge {
+  from: string;
+  to: string;
+  count: number;
+  reason: string;
+  stale: boolean;
+}
+
+/** One assignment edge from the node leading an agent to the agent running the task, or from
+ * the master to the master while no agent took it. `reply` is the result or the plain problem
+ * once the task ended. */
 export interface GraphEdge {
   from: string;
   to: string;
@@ -1307,11 +1345,14 @@ export interface GraphEdge {
   reply: string | null;
 }
 
-/** One project's team as a graph: the master, harness groups, agents and task edges. */
+/** One project's team as a tree of who leads whom, its assignment edges, and the unread
+ * message and claim overlap edges of the coordination layer. */
 export interface TeamGraph {
   project_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  messages?: MessageEdge[];
+  overlaps?: OverlapEdge[];
 }
 
 /** A control message on an attached terminal channel: the terminal's size once attached,

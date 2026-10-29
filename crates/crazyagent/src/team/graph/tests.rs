@@ -121,8 +121,8 @@ fn status() -> TeamStatus {
     }
 }
 
-fn none() -> BTreeMap<i64, String> {
-    BTreeMap::new()
+fn none() -> GraphFacts {
+    GraphFacts::default()
 }
 
 fn teammate(pane: &str, ended: bool, stopped: bool) -> Teammate {
@@ -176,11 +176,14 @@ fn agents(graph: &TeamGraph) -> Vec<String> {
 
 #[test]
 fn the_team_graph_is_a_tree_of_who_leads_whom() {
-    let branches = BTreeMap::from([
-        (3, "crazyagent/charts".to_owned()),
-        (7, "crazyagent/charts--axis".to_owned()),
-    ]);
-    let graph = graph(&tree(), &branches);
+    let facts = GraphFacts {
+        branches: BTreeMap::from([
+            (3, "crazyagent/charts".to_owned()),
+            (7, "crazyagent/charts--axis".to_owned()),
+        ]),
+        coord: None,
+    };
+    let graph = graph(&tree(), &facts);
     assert_eq!(graph.project_id.as_str(), "tidepool");
     assert_eq!(
         kinds(&graph),
@@ -437,7 +440,16 @@ fn only_agent_nodes_carry_their_queued_question_count() {
     assert_eq!(questions("teammate-3-12"), None);
     let text = serde_json::to_value(&graph.nodes[0]).unwrap();
     let mut old = text.clone();
-    for field in ["questions", "branch", "agent", "pane"] {
+    for field in [
+        "questions",
+        "branch",
+        "agent",
+        "pane",
+        "presence",
+        "waiting",
+        "owner_questions",
+        "no_worktree",
+    ] {
         old.as_object_mut().unwrap().remove(field);
     }
     let read = serde_json::from_value::<GraphNode>(old).unwrap();
@@ -446,6 +458,15 @@ fn only_agent_nodes_carry_their_queued_question_count() {
         (None, None, None, None),
         "a node from a build before these fields still reads"
     );
+    assert_eq!(
+        (read.presence, read.waiting, read.owner_questions, read.no_worktree),
+        (None, None, 0, false)
+    );
+    let mut old = serde_json::to_value(&graph).unwrap();
+    old.as_object_mut().unwrap().remove("messages");
+    old.as_object_mut().unwrap().remove("overlaps");
+    let read = serde_json::from_value::<TeamGraph>(old).unwrap();
+    assert!(read.messages.is_empty() && read.overlaps.is_empty());
     assert_eq!(
         serde_json::to_value(NodeKind::Teammate).unwrap(),
         serde_json::json!("teammate")
@@ -553,4 +574,166 @@ fn branches_come_from_each_agent_worktree_record_with_no_git_run() {
         branches(&connection, &status).unwrap().is_empty(),
         "another project's worktree records are not read"
     );
+}
+
+fn state(agent: i64, presence: Presence, waiting: Option<Waiting>) -> AgentState {
+    AgentState {
+        agent,
+        presence,
+        waiting,
+        has_worktree: true,
+        unread: 0,
+        tool_counts: Vec::new(),
+        flags: Vec::new(),
+    }
+}
+
+fn claim(id: i64, agent: i64, stale: bool) -> crate::coord::Claim {
+    crate::coord::Claim {
+        id,
+        agent,
+        work: 1,
+        pattern: format!("src/{id}.rs"),
+        stale,
+    }
+}
+
+fn question(id: i64, from: Party) -> crate::coord::Message {
+    crate::coord::Message {
+        id,
+        project: ProjectId::new("tidepool").unwrap(),
+        from,
+        to: Party::Owner,
+        kind: crate::coord::MessageKind::Question,
+        question: Some((
+            crate::coord::QuestionFor::Me,
+            crate::coord::Severity::Normal,
+        )),
+        work: None,
+        reply_to: None,
+        body: format!("Question {id}"),
+        receipt: Receipt::Sent,
+        created: 1,
+    }
+}
+
+#[test]
+fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_agents() {
+    let overlap = |mine: crate::coord::Claim, theirs: crate::coord::Claim, reason: &str| {
+        crate::coord::Overlap {
+            mine,
+            theirs,
+            reasons: vec![reason.into()],
+        }
+    };
+    let facts = GraphFacts {
+        branches: BTreeMap::new(),
+        coord: Some(Snapshot {
+            agents: vec![
+                state(2, Presence::Live, None),
+                state(3, Presence::Idle, Some(Waiting::Permission)),
+                state(7, Presence::Away, None),
+            ],
+            overlaps: vec![
+                overlap(claim(1, 3, false), claim(2, 6, false), "same file src/1.rs"),
+                overlap(claim(3, 6, false), claim(4, 3, true), "same folder src"),
+                overlap(claim(5, 7, true), claim(6, 8, true), &"x".repeat(400)),
+                overlap(claim(7, 3, false), claim(8, 99, false), "an agent not shown"),
+            ],
+            questions_for_owner: vec![
+                question(1, Party::Agent(7)),
+                question(2, Party::Agent(7)),
+                question(3, Party::Engine),
+            ],
+            unread_edges: vec![
+                (Party::Owner, Party::Agent(3), 2, Receipt::Typed),
+                (Party::Agent(2), Party::Agent(3), 1, Receipt::Delivered),
+                (Party::Agent(1), Party::Agent(3), 4, Receipt::Sent),
+                (Party::Agent(3), Party::Agent(7), 1, Receipt::Sent),
+                (Party::Engine, Party::Agent(8), 1, Receipt::Sent),
+                (Party::Agent(99), Party::Agent(3), 1, Receipt::Sent),
+                (Party::Agent(3), Party::Agent(3), 1, Receipt::Sent),
+            ],
+        }),
+    };
+    let graph = graph(&tree(), &facts);
+    let node = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
+    assert_eq!(
+        (node("master").presence, node("master").waiting),
+        (Some(Presence::Live), None),
+        "the live master's own state shows on the master node"
+    );
+    assert_eq!(
+        (node("team-3").presence, node("team-3").waiting),
+        (Some(Presence::Idle), Some(Waiting::Permission))
+    );
+    assert_eq!(node("team-7").owner_questions, 2);
+    assert_eq!(node("team-3").owner_questions, 0);
+    assert_eq!(
+        (node("team-8").presence, node("teammate-3-12").presence),
+        (None, None),
+        "an agent the snapshot does not list, and a pane teammate, have no presence"
+    );
+    let messages: Vec<(&str, &str, u32, Receipt)> = graph
+        .messages
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.unread, edge.receipt))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            ("owner", "team-3", 2, Receipt::Typed),
+            ("master", "team-3", 5, Receipt::Delivered),
+            ("team-3", "team-7", 1, Receipt::Sent),
+            ("engine", "team-8", 1, Receipt::Sent),
+        ],
+        "every master row is the master node, so its counts add up; an unshown agent and a self message leave"
+    );
+    let overlaps: Vec<(&str, &str, u32, bool)> = graph
+        .overlaps
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.count, edge.stale))
+        .collect();
+    assert_eq!(
+        overlaps,
+        [("team-3", "team-6", 2, false), ("team-7", "team-8", 1, true)],
+        "one red line per pair either way, stale only when every overlap has a stale side"
+    );
+    assert_eq!(graph.overlaps[0].reason, "same file src/1.rs");
+    assert_eq!(graph.overlaps[1].reason.len(), OVERLAP_REASON_BYTES_MAX);
+}
+
+#[test]
+fn coordination_edges_stay_within_their_caps() {
+    let mut status = status();
+    status.agents = (1..=12)
+        .map(|id| agent(id, AgentRole::Sub, "codex", AgentStatus::Working))
+        .collect();
+    let pairs: Vec<(i64, i64)> = (1..=12)
+        .flat_map(|a| (1..=12).map(move |b| (a, b)))
+        .filter(|(a, b)| a != b)
+        .collect();
+    let facts = GraphFacts {
+        branches: BTreeMap::new(),
+        coord: Some(Snapshot {
+            agents: Vec::new(),
+            overlaps: pairs
+                .iter()
+                .filter(|(a, b)| a < b)
+                .map(|(a, b)| crate::coord::Overlap {
+                    mine: claim(*a, *a, false),
+                    theirs: claim(*b, *b, false),
+                    reasons: vec!["same folder src".into()],
+                })
+                .collect(),
+            questions_for_owner: Vec::new(),
+            unread_edges: pairs
+                .iter()
+                .map(|(a, b)| (Party::Agent(*a), Party::Agent(*b), 1, Receipt::Sent))
+                .collect(),
+        }),
+    };
+    let graph = graph(&status, &facts);
+    assert_eq!(graph.messages.len(), MESSAGE_EDGES_MAX);
+    assert_eq!(graph.overlaps.len(), OVERLAP_EDGES_MAX);
 }

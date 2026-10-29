@@ -1,6 +1,8 @@
 use super::{
-    AgentRole, AgentStatus, TaskSource, TaskStatus, TeamAgent, TeamStatus, error, lead_tree,
+    AgentRole, AgentStatus, TaskSource, TaskStatus, TeamAgent, TeamStatus, bound_text, error,
+    lead_tree,
 };
+use crate::coord::{AgentState, Party, Presence, Receipt, Snapshot, Waiting};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::terminal::{AgentId, PANES_PER_PROJECT_MAX};
@@ -10,6 +12,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub const MASTER_NODE: &str = "master";
+/// The end of a message edge that is the owner, or the engine's own notes, not a node.
+pub const OWNER_PARTY: &str = "owner";
+pub const ENGINE_PARTY: &str = "engine";
+/// The most message and overlap edges one graph carries, so the coordination lines never
+/// crowd the tree out of one owner reply; an overlap's reason is cut to
+/// `OVERLAP_REASON_BYTES_MAX`.
+pub const MESSAGE_EDGES_MAX: usize = 32;
+pub const OVERLAP_EDGES_MAX: usize = 16;
+pub const OVERLAP_REASON_BYTES_MAX: usize = 160;
 /// How many stopped sub-agents the graph keeps listed, newest first: one full round of a
 /// project's terminals, so the agents of the latest work stay beside their tasks.
 pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
@@ -39,6 +50,8 @@ impl NodeKind {
 /// master. `branch` is the branch it commits on, `terminal` the name to attach to, and
 /// `questions` its question events still queued for the master. `agent` is its own team
 /// agent row and `pane` a native teammate's pane in its lead's terminal, for Stop.
+/// `presence`, `waiting` (on the owner in its terminal), `owner_questions` (open For: Me
+/// questions) and `no_worktree` (a teammate working with none, Q17) come from coordination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -58,6 +71,14 @@ pub struct GraphNode {
     pub agent: Option<i64>,
     #[serde(default)]
     pub pane: Option<String>,
+    #[serde(default)]
+    pub presence: Option<Presence>,
+    #[serde(default)]
+    pub waiting: Option<Waiting>,
+    #[serde(default)]
+    pub owner_questions: u16,
+    #[serde(default)]
+    pub no_worktree: bool,
 }
 
 /// Where one handed-out task stands, as the graph draws it.
@@ -85,13 +106,49 @@ pub struct GraphEdge {
     pub reply: Option<String>,
 }
 
+/// Unread messages from one party to another: how many, and the newest one's receipt for
+/// its ticks. Each end is a node id, `OWNER_PARTY` or `ENGINE_PARTY`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageEdge {
+    pub from: String,
+    pub to: String,
+    pub unread: u32,
+    pub receipt: Receipt,
+}
+
+/// Active claims of two agents that may touch the same thing, drawn as a red line: how
+/// many claim pairs overlap, the first one's plain reason, and whether every pair has a
+/// stale side, from an agent that is Away or Stopped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlapEdge {
+    pub from: String,
+    pub to: String,
+    pub count: u32,
+    pub reason: String,
+    pub stale: bool,
+}
+
 /// A project's team as a tree of who leads whom: the master, its harness leads, their
-/// sub-agents and native teammates, and the assignment edges between them.
+/// sub-agents and native teammates, the assignment edges between them, and the unread
+/// message and claim overlap edges of the coordination layer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamGraph {
     pub project_id: ProjectId,
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
+    #[serde(default)]
+    pub messages: Vec<MessageEdge>,
+    #[serde(default)]
+    pub overlaps: Vec<OverlapEdge>,
+}
+
+/// What the graph reads beside the team status: each sub-agent's branch and the project's
+/// coordination snapshot. The default draws the tree with no branch, presence or
+/// coordination lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GraphFacts {
+    pub branches: BTreeMap<i64, String>,
+    pub coord: Option<Snapshot>,
 }
 
 fn edge_state(status: TaskStatus) -> EdgeState {
@@ -122,6 +179,20 @@ fn teammate_node(agent: i64, pane: &str) -> String {
         "{TEAMMATE_PREFIX}{agent}-{}",
         pane.strip_prefix('%').unwrap_or(pane)
     )
+}
+
+/// Reads what the graph shows beside a status: `branches` and `crate::coord::snapshot`.
+/// Takes a connection, the status and the time in ms. Returns the facts, or a failure of
+/// either read.
+pub fn facts(
+    connection: &Connection,
+    status: &TeamStatus,
+    now: i64,
+) -> Result<GraphFacts, EngineError> {
+    Ok(GraphFacts {
+        branches: branches(connection, status)?,
+        coord: Some(crate::coord::snapshot(connection, &status.project_id, now)?),
+    })
 }
 
 /// Reads the branch each sub-agent of a status commits on, from its worktree record and the
@@ -164,21 +235,35 @@ pub fn branches(
     Ok(found)
 }
 
-/// Builds a project's who-leads-whom graph from its team status and the agents' branches.
-/// The master is on top; a sub-agent with no lead is a harness lead under it, and one with
-/// a listed lead sits under that lead, as `lead_tree` orders them. Live and failed
+/// Builds a project's who-leads-whom graph from its team status and the facts read beside
+/// it. The master is on top; a sub-agent with no lead is a harness lead under it, and one
+/// with a listed lead sits under that lead, as `lead_tree` orders them. Live and failed
 /// sub-agents and the `STOPPED_SHOWN_MAX` newest stopped ones show, except finished ones
 /// while the owner hides them; a hidden lead's agents move up to the master. Each shown
 /// harness's open teammate panes show under it, ended ones too while finished agents show.
-/// Every listed task is an edge from the node leading its agent. Takes the status and the
-/// branches. Returns the master first, then the tree depth first, and edges in task order.
-pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph {
+/// Every listed task is an edge from the node leading its agent; unread messages and claim
+/// overlaps between shown agents are edges too. Takes the status and the facts. Returns
+/// the master first, then the tree depth first, and edges in task order.
+pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
     let stopped = stopped_shown(&status.agents);
     let shown = |agent: &TeamAgent| {
         agent.role == AgentRole::Sub
             && (status.show_finished || !agent.finished)
             && (agent.status != AgentStatus::Stopped || stopped.contains(&agent.id))
     };
+    let states: BTreeMap<i64, &AgentState> = facts
+        .coord
+        .iter()
+        .flat_map(|coord| &coord.agents)
+        .map(|state| (state.agent, state))
+        .collect();
+    let mut asked: BTreeMap<i64, u16> = BTreeMap::new();
+    for question in facts.coord.iter().flat_map(|coord| &coord.questions_for_owner) {
+        if let Party::Agent(agent) = question.from {
+            let count = asked.entry(agent).or_default();
+            *count = count.saturating_add(1);
+        }
+    }
     let masters = || {
         status
             .agents
@@ -193,6 +278,7 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
         .harnesses
         .iter()
         .find(|harness| harness.role == AgentRole::Master);
+    let master_state = master.and_then(|agent| states.get(&agent.id));
     let mut nodes = vec![GraphNode {
         id: MASTER_NODE.into(),
         kind: NodeKind::Master,
@@ -211,6 +297,10 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
         questions: None,
         agent: master.map(|agent| agent.id),
         pane: None,
+        presence: master_state.map(|state| state.presence),
+        waiting: master_state.and_then(|state| state.waiting),
+        owner_questions: master.map_or(0, |agent| asked.get(&agent.id).copied().unwrap_or(0)),
+        no_worktree: false,
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
     let ids: BTreeSet<i64> = listed.iter().map(|agent| agent.id).collect();
@@ -230,6 +320,7 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
         );
         assert!(parent == MASTER_NODE || agents.contains(&parent));
         let live = agent.status.live() && !agent.owner_stopped;
+        let state = states.get(&agent.id);
         agents.insert(id.clone());
         nodes.push(GraphNode {
             id: id.clone(),
@@ -244,7 +335,7 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
             status: Some(agent.status),
             status_label: Some(agent.status_label.clone()),
             account: agent.account.clone(),
-            branch: branches.get(&agent.id).cloned(),
+            branch: facts.branches.get(&agent.id).cloned(),
             terminal: agent.status.live().then(|| terminal.clone()),
             questions: Some(
                 status
@@ -256,6 +347,10 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
             ),
             agent: Some(agent.id),
             pane: None,
+            presence: state.map(|state| state.presence),
+            waiting: state.and_then(|state| state.waiting),
+            owner_questions: asked.get(&agent.id).copied().unwrap_or(0),
+            no_worktree: false,
         });
         for mate in agent
             .teammates
@@ -285,6 +380,10 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
                 questions: None,
                 agent: None,
                 pane: Some(mate.pane.clone()),
+                presence: None,
+                waiting: None,
+                owner_questions: 0,
+                no_worktree: false,
             });
         }
     }
@@ -319,6 +418,23 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
             }
         })
         .collect();
+    let masters: BTreeSet<i64> = masters().map(|agent| agent.id).collect();
+    let end = |party: Party| -> Option<String> {
+        match party {
+            Party::Owner => Some(OWNER_PARTY.into()),
+            Party::Engine => Some(ENGINE_PARTY.into()),
+            Party::Agent(id) if masters.contains(&id) => Some(MASTER_NODE.into()),
+            Party::Agent(id) => AgentId::team(id)
+                .ok()
+                .map(|terminal| terminal.to_string())
+                .filter(|node| agents.contains(node)),
+        }
+    };
+    let (messages, overlaps) = facts
+        .coord
+        .as_ref()
+        .map(|coord| (message_edges(coord, &end), overlap_edges(coord, &end)))
+        .unwrap_or_default();
     let unique: BTreeSet<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
     assert_eq!(unique.len(), nodes.len());
     assert!(nodes.iter().all(|node| {
@@ -328,11 +444,85 @@ pub fn graph(status: &TeamStatus, branches: &BTreeMap<i64, String>) -> TeamGraph
     }));
     assert_eq!(nodes.len(), 1 + agents.len() + teammates);
     assert_eq!(edges.len(), status.tasks.len());
+    assert!(messages.len() <= MESSAGE_EDGES_MAX && overlaps.len() <= OVERLAP_EDGES_MAX);
     TeamGraph {
         project_id: status.project_id.clone(),
         nodes,
         edges,
+        messages,
+        overlaps,
     }
+}
+
+/// The unread message edges between parties the graph shows, one per pair once each party
+/// is named by `end`, with the counts added and the first receipt the snapshot gave kept,
+/// at most `MESSAGE_EDGES_MAX`. Takes the snapshot and the namer. Returns the edges.
+fn message_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Vec<MessageEdge> {
+    let mut merged: Vec<MessageEdge> = Vec::new();
+    for (from, to, unread, receipt) in &coord.unread_edges {
+        let (Some(from), Some(to)) = (end(*from), end(*to)) else {
+            continue;
+        };
+        if from == to {
+            continue;
+        }
+        match merged
+            .iter_mut()
+            .find(|edge| edge.from == from && edge.to == to)
+        {
+            Some(edge) => edge.unread = edge.unread.saturating_add(*unread),
+            None if merged.len() < MESSAGE_EDGES_MAX => merged.push(MessageEdge {
+                from,
+                to,
+                unread: *unread,
+                receipt: *receipt,
+            }),
+            None => {}
+        }
+    }
+    merged
+}
+
+/// The claim overlap edges between agents the graph shows, one per pair in either order,
+/// counting the overlapping claim pairs and keeping the first reason cut to
+/// `OVERLAP_REASON_BYTES_MAX`, at most `OVERLAP_EDGES_MAX`. Takes the snapshot and the
+/// namer. Returns the edges.
+fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Vec<OverlapEdge> {
+    let mut merged: Vec<OverlapEdge> = Vec::new();
+    for overlap in &coord.overlaps {
+        let (Some(mine), Some(theirs)) = (
+            end(Party::Agent(overlap.mine.agent)),
+            end(Party::Agent(overlap.theirs.agent)),
+        ) else {
+            continue;
+        };
+        if mine == theirs {
+            continue;
+        }
+        let stale = overlap.mine.stale || overlap.theirs.stale;
+        let found = merged.iter_mut().find(|edge| {
+            (edge.from == mine && edge.to == theirs) || (edge.from == theirs && edge.to == mine)
+        });
+        match found {
+            Some(edge) => {
+                edge.count = edge.count.saturating_add(1);
+                edge.stale &= stale;
+            }
+            None if merged.len() < OVERLAP_EDGES_MAX => merged.push(OverlapEdge {
+                from: mine,
+                to: theirs,
+                count: 1,
+                reason: bound_text(
+                    overlap.reasons.first().map_or("", String::as_str),
+                    OVERLAP_REASON_BYTES_MAX,
+                ),
+                stale,
+            }),
+            None => {}
+        }
+    }
+    assert!(merged.iter().all(|edge| edge.reason.len() <= OVERLAP_REASON_BYTES_MAX));
+    merged
 }
 
 #[cfg(test)]

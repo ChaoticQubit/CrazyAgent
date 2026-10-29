@@ -51,6 +51,7 @@
     "allow-desktop-team-wake-agent",
     "allow-desktop-team-stop-agent",
     "allow-desktop-team-stop-teammate",
+    "allow-desktop-coord-send",
     "allow-desktop-team-max-harnesses",
     "allow-desktop-team-max-teammates",
     "allow-desktop-team-token-budget",

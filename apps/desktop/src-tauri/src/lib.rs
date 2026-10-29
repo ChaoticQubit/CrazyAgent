@@ -1020,6 +1020,22 @@ async fn desktop_team_stop_agent(
 }
 
 #[tauri::command]
+async fn desktop_coord_send(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .coord_send(&id, agent, text, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_stop_teammate(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2778,6 +2794,7 @@ pub fn run() {
             desktop_team_rename,
             desktop_team_wake_agent,
             desktop_team_stop_agent,
+            desktop_coord_send,
             desktop_team_stop_teammate,
             desktop_team_max_harnesses,
             desktop_team_max_teammates,

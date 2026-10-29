@@ -1844,7 +1844,7 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
         }))
         .unwrap();
         status.events.questions = questions;
-        crate::team::graph(&status)
+        crate::team::graph(&status, &Default::default())
             .nodes
             .into_iter()
             .find(|node| node.id == format!("team-{agent}"))

@@ -25,9 +25,9 @@ test("only Codex and Claude Code masters run live, and the master is found by ki
   assert.equal(live.runsLive("codex"), true);
   assert.equal(live.runsLive("claude-code"), true);
   for (const other of ["rcli", "opencode", "", undefined]) assert.equal(live.runsLive(other), false, String(other));
-  const node = (id, kind, terminal = null) => ({ id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, agents: null, terminal });
-  assert.equal(live.masterNode([node("g", "harness_group"), node("a", "agent", "team-2")]), null);
-  assert.equal(live.masterNode([node("a", "agent", "team-2"), node("m", "master", "team-1")]).id, "m");
+  const node = (id, kind, terminal = null) => ({ id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal });
+  assert.equal(live.masterNode([node("g", "lead", "team-3"), node("a", "sub", "team-2"), node("t", "teammate", "team-3")]), null);
+  assert.equal(live.masterNode([node("a", "sub", "team-2"), node("m", "master", "team-1")]).id, "m");
 });
 
 test("the project page mounts the master area on one line, where the team activity strip wraps it", () => {

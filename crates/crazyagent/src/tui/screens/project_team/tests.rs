@@ -351,7 +351,7 @@ fn every_team_setting_shows_at_80_columns_on_whole_rows_after_the_counts() {
 
 #[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
-    let graph = crate::team::graph(&team());
+    let graph = crate::team::graph(&team(), &Default::default());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
     assert_eq!(working.label, "Sub-agent 2");
     let mut view = loaded();
@@ -372,7 +372,7 @@ fn a_named_sub_agent_shows_its_persona_and_role_in_the_list_panel_and_graph() {
     status.agents[1].persona = Some("Ada".into());
     status.agents[1].handle = Some("charts".into());
     status.agents[1].label = "Ada (@charts)".into();
-    let graph = crate::team::graph(&status);
+    let graph = crate::team::graph(&status, &Default::default());
     let named = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
     assert_eq!(named.label, "Ada (@charts)");
     let mut view = TeamView::new(project());
