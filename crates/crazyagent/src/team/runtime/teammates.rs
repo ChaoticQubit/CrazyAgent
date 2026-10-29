@@ -86,16 +86,20 @@ fn config_bytes(path: &Path) -> Option<Vec<u8>> {
 
 /// Keeps one team agent row per live native teammate of a lead: role `teammate`, parent the
 /// lead, and the pane id `team_teammates` records for the same pane. A member whose pane is
-/// live gets a row, or its row is marked working again; a teammate row whose pane is no
+/// live gets a row. A row stopped in this run of the lead is marked working again only when
+/// the engine closed or the pane went missing; one the owner stopped, the cap ended or that
+/// ended with its lead stays stopped while its pane is ended. A teammate row whose pane is no
 /// longer live is stopped. Only panes the terminal host lists as the lead's live teammate
 /// panes count, never a pane a config file alone names. Inputs: the connection, project,
-/// lead, its home, its live teammate pane ids and the time. Output: any SQLite failure.
+/// lead, its home, its live teammate pane ids, when this run of the lead started and the
+/// time. Output: any SQLite failure.
 pub(super) fn register(
     connection: &Connection,
     project: &ProjectId,
     lead: i64,
     home: &Path,
     live: &[&str],
+    since: i64,
     at: i64,
 ) -> Result<(), EngineError> {
     let row: Option<(String, bool, Option<String>)> = connection
@@ -114,17 +118,30 @@ pub(super) fn register(
         .into_iter()
         .filter(|member| live.contains(&member.pane.as_str()))
     {
-        let known: Option<i64> = connection
+        let known: Option<(i64, bool)> = connection
             .query_row(
-                "SELECT id FROM team_agents
-                 WHERE project=?1 AND parent=?2 AND role='teammate' AND pane=?3",
-                params![project.as_str(), lead, member.pane],
-                |row| row.get(0),
+                "SELECT id, status IN ('starting','idle','working')
+                        OR error IS NULL OR error NOT IN (?5,?6,?7)
+                 FROM team_agents
+                 WHERE project=?1 AND parent=?2 AND role='teammate' AND pane=?3
+                 AND (status IN ('starting','idle','working') OR stopped_ms>=?4)
+                 ORDER BY status IN ('starting','idle','working') DESC, id DESC LIMIT 1",
+                params![
+                    project.as_str(),
+                    lead,
+                    member.pane,
+                    since,
+                    super::OWNER_STOPPED_TEAMMATE,
+                    super::LEAD_ENDED_TEAMMATE,
+                    super::OVER_TEAMMATE_CAP
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(error)?;
         match known {
-            Some(id) => {
+            Some((_, false)) => {}
+            Some((id, true)) => {
                 connection
                     .execute(
                         "UPDATE team_agents SET status='working', error=NULL, stopped_ms=NULL,
@@ -175,16 +192,16 @@ pub(super) fn register(
 }
 
 /// Stops every teammate row whose lead no longer runs, so no teammate outlives its lead in
-/// the agents list or the graph. Inputs: the connection and the time. Output: any SQLite
-/// failure.
+/// the agents list or the graph, with the reason the lead's own end gives. Inputs: the
+/// connection and the time. Output: any SQLite failure.
 pub(super) fn end_orphans(connection: &Connection, at: i64) -> Result<(), EngineError> {
     connection
         .execute(
-            "UPDATE team_agents SET status='stopped', stopped_ms=?1
+            "UPDATE team_agents SET status='stopped', task=NULL, error=?2, stopped_ms=?1
              WHERE role='teammate' AND status IN ('starting','idle','working')
              AND (parent IS NULL OR parent NOT IN
                (SELECT id FROM team_agents WHERE role='sub' AND status IN ('starting','idle','working')))",
-            [at],
+            params![at, super::LEAD_ENDED_TEAMMATE],
         )
         .map_err(error)?;
     Ok(())

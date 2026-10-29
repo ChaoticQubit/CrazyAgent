@@ -911,6 +911,7 @@ impl TeamRuntime {
                 agent,
                 &agent_home(&self.state, agent),
                 &live,
+                i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
                 at,
             )?;
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
