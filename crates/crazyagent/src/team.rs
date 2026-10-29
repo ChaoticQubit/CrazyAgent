@@ -667,8 +667,11 @@ pub fn coordination(
         settings: settings::read(connection, project)?,
         harnesses,
     };
-    assert!(view.harnesses.iter().all(|row| row.native
-        || row.mode != settings::SubagentMode::Native));
+    assert!(
+        view.harnesses
+            .iter()
+            .all(|row| row.native || row.mode != settings::SubagentMode::Native)
+    );
     Ok(view)
 }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::coord::tool_switches::{self, BUILTIN_TOOLS, CRAZYAGENT_SERVER, Switch};
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill,
     HOOKS_PER_SCOPE_MAX, HookView, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -6,7 +7,6 @@ use crate::plugins::{
     SecretView, ServerSpec, ServerStatus, ServerView, SkillView, TOOL_NAME_BYTES_MAX,
     TOOL_NAMES_BYTES_MAX, TOOLS_MAX, ToolView, hook_folder, skill_folder,
 };
-use crate::coord::tool_switches::{self, BUILTIN_TOOLS, CRAZYAGENT_SERVER, Switch};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -1762,7 +1762,9 @@ fn tool_views(
         }
     };
     let global: std::collections::BTreeMap<String, Switch> =
-        tool_switches::overrides(tx, None, &key)?.into_iter().collect();
+        tool_switches::overrides(tx, None, &key)?
+            .into_iter()
+            .collect();
     let here: std::collections::BTreeMap<String, Switch> = match project {
         Some(project) => tool_switches::overrides(tx, Some(project), &key)?
             .into_iter()

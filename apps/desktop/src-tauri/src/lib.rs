@@ -18,6 +18,8 @@ use bridge::{
 use crazyagent::accounts::{AccountDraft, AccountView, ProviderEntry};
 use crazyagent::agents::{AccountUse, AgentView};
 use crazyagent::config::ModelAccessEdit;
+use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
+use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
@@ -29,8 +31,6 @@ use crazyagent::memory::ReviewDecision;
 use crazyagent::memory::library::ApprovedMemories;
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::owner_profile::OwnerProfile;
-use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
-use crazyagent::coord::tool_switches::Switch;
 use crazyagent::plugins::{
     EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
 };

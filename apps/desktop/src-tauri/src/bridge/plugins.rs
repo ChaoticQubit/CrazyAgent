@@ -1,8 +1,8 @@
 use super::{BridgeError, NativeBridge, Unlocked, failure};
 use crazyagent::client_controller::OwnerController;
+use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::AccountSecret;
-use crazyagent::coord::tool_switches::Switch;
 use crazyagent::plugins::{
     EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
 };
