@@ -935,6 +935,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::projects_home::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::coord::ensure(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
