@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const FILE_BYTES_MAX: usize = 32 * 1024;
+pub const FILE_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_MAX: usize = SOURCES.len();
 const NAME_BYTES_MAX: usize = 32;
@@ -250,16 +250,14 @@ pub(crate) fn owner_home() -> Option<PathBuf> {
 /// most `FILES_BYTES_MAX`; hidden characters are shown as visible escapes; a file that
 /// cannot be given is recorded with the reason and never stops the launch. A file whose text
 /// is already given elsewhere, such as the app instructions, is recorded as the same and
-/// given once. `give` turns each given file into what the section carries for it: its text,
-/// or a shorter line naming where the agent reads it.
-/// Inputs: the owner's checkout folder, the owner's home, the choice, the texts already
-/// given and `give`. Output: the section and the records.
+/// given once.
+/// Inputs: the owner's checkout folder, the owner's home, the choice and the texts already
+/// given. Output: the section and the records.
 pub fn read(
     checkout: Option<&Path>,
     home: Option<&Path>,
     choice: Choice,
     already: &[&str],
-    give: &mut dyn FnMut(&str, &str) -> String,
 ) -> Delivery {
     let mut delivery = Delivery::default();
     let mut given: Vec<(&str, String)> = Vec::new();
@@ -291,14 +289,14 @@ pub fn read(
                 if text.trim().is_empty() {
                     continue;
                 }
-                let state = if text.len() > FILE_BYTES_MAX || total + text.len() > FILES_BYTES_MAX {
-                    State::TooLarge
-                } else if given.iter().any(|(_, earlier)| *earlier == text)
+                let state = if given.iter().any(|(_, earlier)| *earlier == text)
                     || already
                         .iter()
                         .any(|earlier| !earlier.trim().is_empty() && earlier.trim() == text.trim())
                 {
                     State::Same
+                } else if text.len() > FILE_BYTES_MAX || total + text.len() > FILES_BYTES_MAX {
+                    State::TooLarge
                 } else {
                     total += text.len();
                     given.push((name, text));
@@ -319,9 +317,8 @@ pub fn read(
             delivery.text.push_str("\n### ");
             delivery.text.push_str(name);
             delivery.text.push_str("\n\n");
-            let carried = give(name, text);
-            assert!(carried.len() <= text.len() + 1);
-            delivery.text.push_str(&carried);
+            delivery.text.push_str(text);
+            delivery.text.push('\n');
         }
     }
     assert!(committed_found.next().is_none());

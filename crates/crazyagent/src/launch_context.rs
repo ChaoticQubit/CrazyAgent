@@ -68,6 +68,8 @@ const DESCRIPTION_BYTES_MAX: usize = 512;
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
+const CONTEXT_MODE_SERVER: &str = "context-mode";
+const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
@@ -169,7 +171,7 @@ pub fn for_project(
     let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
         .map_err(|problem| LaunchError(problem.0))?;
     drop(tx);
-    crate::agent_home::text(&home_project, None).map_err(|problem| LaunchError(problem.0))?;
+    crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
@@ -509,12 +511,11 @@ impl AgentContext {
         };
         remove(&state);
         directory(&state, true)?;
-        let context = tools.then(|| home.join(crate::agent_home::CONTEXT_FOLDER));
         let given = match &self.process {
             Some(process) => {
                 let harness = crate::agent_home::Harness::from_id(id)
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let given = crate::agent_home::text(&process.project, context.as_deref())
+                let given = crate::agent_home::text(&process.project)
                     .map_err(|problem| LaunchError(problem.0))?;
                 crate::agent_home::prepare(home, harness, &process.project, &given)
                     .map_err(|problem| LaunchError(problem.0))?;
@@ -868,6 +869,17 @@ fn team_index(plugins: &EffectivePlugins) -> String {
     index
 }
 
+/// Names an approved MCP server the way an agent's harness declares it. The context-mode
+/// server takes the name its own Claude Code plugin gives it, so the tool names its hooks
+/// and the owner's instructions use, such as `mcp__plugin_context-mode_context-mode__ctx_search`,
+/// exist for every agent and teammate. Input: the stored server name. Output: the declared name.
+pub(crate) fn declared_server_name(name: &str) -> &str {
+    match name {
+        CONTEXT_MODE_SERVER => CONTEXT_MODE_DECLARED,
+        other => other,
+    }
+}
+
 fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
     std::str::from_utf8(secret.value.expose())
         .ok()
@@ -907,7 +919,11 @@ fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, 
                     }
                 }
             }
-            table.insert(&server.name, toml_edit::Item::Table(entry));
+            let name = declared_server_name(&server.name);
+            if table.contains_key(name) {
+                return Err(failure("launch_context_server_name_taken"));
+            }
+            table.insert(name, toml_edit::Item::Table(entry));
         }
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
@@ -929,7 +945,11 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
                 "type": "http", "url": url, "headers": values
             }),
         };
-        declared.insert(server.name.clone(), entry);
+        let name = declared_server_name(&server.name);
+        if declared.contains_key(name) {
+            return Err(failure("launch_context_server_name_taken"));
+        }
+        declared.insert(name.to_owned(), entry);
     }
     serde_json::to_string(&serde_json::json!({ "mcpServers": declared }))
         .map_err(|_| failure("launch_context_unavailable"))
