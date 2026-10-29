@@ -33,6 +33,10 @@ pub const SKILLS_INDEX_BYTES_MAX: usize = 2 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
     INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
+
+const _: () = assert!(TOOLS_SECTION_BYTES_MAX <= TEAM_INDEX_BYTES_MAX);
+/// The most bytes of the team tools section a live master or sub-agent with tools reads.
+pub const TOOLS_SECTION_BYTES_MAX: usize = 3 * 1024;
 /// The most bytes of a live master's own instructions: its role, its team tools or the
 /// DELEGATE line, and how the team's work lands.
 pub const LIVE_RULES_BYTES_MAX: usize = 4 * 1024;
@@ -358,6 +362,25 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
     section
 }
 
+/// The section that names a live master's or sub-agent's team tools (DEC-104), each on
+/// one line, with the two question tags and the branch rule for the agents it leads
+/// (Q-W-LAND-26). Input: the team tools left out. Output: at most
+/// `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
+pub fn team_tools_section(off: &[String]) -> String {
+    let mut section = format!(
+        "\n## Team tools\n\nYour team tools are in the `{}` MCP server. The engine answers each by your place in the team:\n",
+        crate::team::tool::SERVER_NAME
+    );
+    for (name, line) in crate::coord::tool_switches::BUILTIN_TOOLS {
+        if !off.iter().any(|tool| tool == name) {
+            section.push_str(&format!("- {name}: {line}\n"));
+        }
+    }
+    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    section
+}
+
 fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
     Ok(connection
         .path()
@@ -445,42 +468,53 @@ impl AgentContext {
     /// in the master's private temporary folder. Output: the context, or a plain code when a path
     /// is not plain or an approved server already uses the name.
     pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop)
+        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop, &[])
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
-    /// tools, answered by the engine at once through the mailbox folder. Input: the absolute
-    /// canonical engine executable and the absolute mailbox in the master's private temporary
-    /// folder. Output: the context, or a plain code as for [`Self::with_team_tool`].
+    /// tools (DEC-104), answered by the engine at once through the mailbox folder, and the
+    /// section that names them. Input: the absolute canonical engine executable, the
+    /// absolute mailbox in the master's private temporary folder and the team tools left
+    /// out. Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
+        off: &[String],
     ) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::LIVE_SERVER_COMMAND, mailbox)
+        self.with_team_server(
+            executable,
+            crate::team::tool::LIVE_SERVER_COMMAND,
+            mailbox,
+            off,
+        )
+        .map(|context| context.with_tools_section(off))
     }
 
-    /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools,
-    /// `AGENT_TOOLS` of [`crate::team::tool`], answered by the engine through the mailbox
-    /// folder, and the instructions line that names them. Input: the absolute canonical
-    /// engine executable and the absolute mailbox in the agent's private temporary folder.
-    /// Output: the context, or a plain code as for [`Self::with_team_tool`].
+    /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools
+    /// (DEC-104), answered by the engine through the mailbox folder, and the section that
+    /// names them. Input: the absolute canonical engine executable, the absolute mailbox in
+    /// the agent's private temporary folder and the team tools left out. Output: the
+    /// context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_agent_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
+        off: &[String],
     ) -> Result<Self, LaunchError> {
-        let mut context =
-            self.with_team_server(executable, crate::team::tool::AGENT_SERVER_COMMAND, mailbox)?;
-        context.instructions.push('\n');
-        context
-            .instructions
-            .push_str(crate::team::tool::HISTORY_LINE);
-        context
-            .instructions
-            .push_str(crate::team::tool::MEMORY_LINE);
-        assert!(context.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
-        Ok(context)
+        self.with_team_server(
+            executable,
+            crate::team::tool::AGENT_SERVER_COMMAND,
+            mailbox,
+            off,
+        )
+        .map(|context| context.with_tools_section(off))
+    }
+
+    fn with_tools_section(mut self, off: &[String]) -> Self {
+        self.instructions.push_str(&team_tools_section(off));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        self
     }
 
     fn with_team_server(
@@ -488,7 +522,11 @@ impl AgentContext {
         executable: &Path,
         subcommand: &str,
         drop: &Path,
+        off: &[String],
     ) -> Result<Self, LaunchError> {
+        if !crate::team::tool::known_tools(off) {
+            return Err(failure("launch_context_team_tool_invalid"));
+        }
         let plain = |path: &Path| {
             path.is_absolute()
                 .then(|| path.to_str())
@@ -512,7 +550,10 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: vec![subcommand.into(), drop],
+                args: [subcommand.to_owned(), drop]
+                    .into_iter()
+                    .chain(off.iter().cloned())
+                    .collect(),
             },
             secrets: Vec::new(),
         });

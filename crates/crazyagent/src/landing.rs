@@ -858,6 +858,26 @@ pub fn retire_blocker(
     }
 }
 
+/// Names a harness's teammate branches and teammate worktrees whose work is not in its
+/// task branch yet (DEC-104), read through the engine's checked fetch of its clone, so
+/// no git runs in it. Inputs: the store, the owner's checkout root, the worktree and its
+/// git folder. Output: the names, none for a linked worktree or a clone without
+/// teammates, or the plain code that kept the clone from being read.
+pub fn unlanded_teammates(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Result<Vec<String>, &'static str>, EngineError> {
+    #[cfg(unix)]
+    return retire::unlanded_teammates(db, repository, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
 /// Removes a finished agent's worktree with the host git, never forcing, or an agent's
 /// own clone as a folder with no git, after checking `retire_blocker` again while no
 /// landing step can run on its repository. Inputs: the store, the owner's checkout root,

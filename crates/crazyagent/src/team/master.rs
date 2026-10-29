@@ -26,20 +26,11 @@ const CHANGES_LISTED_MAX: usize = 20;
 const MASTER_TURNS_KEPT: i64 = 2000;
 const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
-const NOT_WIRED: &str = "Team messaging is not available in this build yet.";
+const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const MASTER_LABEL: &str = "Master";
-const NO_TERMINALS: &str = "Not sent: the engine has no agent terminals right now.";
-const MASTER_ACCEPT: &str = "Not accepted: the owner accepts change sets in Changes.";
 const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
-const ESCALATIONS_PER_HOUR_MAX: i64 = 10;
-const HOUR_MS: i64 = 3_600_000;
-const ESCALATED: &str =
-    "The owner has been notified. Wait for their answer here and do not decide this yourself.";
-const ESCALATIONS_FULL: &str = "Not sent: the owner already has 10 questions from this project within the hour. Wait for their answers here.";
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX == 10);
-const _: () = assert!(ESCALATIONS_PER_HOUR_MAX < super::events::NOTIFICATIONS_PER_PROJECT_MAX);
 
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
@@ -782,45 +773,63 @@ fn keys(bytes: &[u8]) -> (bool, bool) {
 }
 
 /// Answers the calls a live master's team server left in its mailbox, at most
-/// `CALLS_PER_TICK_MAX` per call, each checked again before it takes effect: `delegate`
-/// admits the task at once, `message`, `answer` and `status` go to the team event handlers,
-/// `changes` lists the pending change sets and `escalate` notifies the owner. Takes the
-/// engine database, what the answers need and the mailbox. Returns how many calls were
-/// answered, or a SQLite failure.
+/// `CALLS_PER_TICK_MAX` per call, each checked again and against the owner's tool switches
+/// before it takes effect (DEC-104): the work verbs through `work`, `spawn` admits a lead's
+/// task at once, `stop` stops a sub-agent, `merge` merges a lead's task branch into the
+/// Master's branch, and past conversations and memory. Takes the engine database, what the
+/// answers need, the master and the mailbox. Returns how many calls were answered, or a
+/// SQLite failure.
 pub fn serve_calls(
     connection: &mut Connection,
     answering: &Answering<'_>,
+    master: i64,
     mailbox: &Path,
 ) -> Result<usize, EngineError> {
+    let project = &answering.stored.project_id;
     let taken = tool::take_calls(mailbox, tool::CALLS_PER_TICK_MAX);
     for (id, call) in &taken {
         let (text, error) = match call.clone().map(tool::checked) {
             None => (UNREAD.to_owned(), true),
             Some(Err(refused)) => (refused.to_owned(), true),
-            Some(Ok(call)) => answer(connection, answering, call)?,
+            Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
+                (SWITCHED_OFF.to_owned(), true)
+            }
+            Some(Ok(call)) => {
+                let _ = crate::coord::touch(connection, master, now_ms());
+                answer(connection, answering, master, call)?
+            }
         };
         let _ = tool::answer_call(mailbox, id, &text, error);
     }
     Ok(taken.len())
 }
 
+/// Says whether the owner switched a call's tool off or deleted it for the project
+/// (DEC-104), so the engine refuses it even from a server that still lists it. Takes the
+/// database, the project and the call. Returns the answer, or a SQLite failure.
+pub(super) fn switched_off(
+    connection: &Connection,
+    project: &ProjectId,
+    call: &Call,
+) -> Result<bool, EngineError> {
+    let switch = crate::coord::tool_switches::get(
+        connection,
+        Some(project),
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        call.name(),
+    )?;
+    Ok(switch != crate::coord::tool_switches::Switch::On)
+}
+
 fn answer(
     connection: &mut Connection,
     answering: &Answering<'_>,
+    master: i64,
     call: Call,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
-    let typed =
-        |handler: Option<SendToAgent>, agent: &str, text: &str| match (handler, answering.host) {
-            (None, _) => (NOT_WIRED.to_owned(), true),
-            (Some(_), None) => (NO_TERMINALS.to_owned(), true),
-            (Some(handler), Some(host)) => match handler(connection, host, project, agent, text) {
-                Ok(said) => (said, false),
-                Err(reason) => (reason, true),
-            },
-        };
     Ok(match call {
-        Call::Delegate {
+        Call::Spawn {
             task,
             harness,
             role,
@@ -833,24 +842,8 @@ fn answer(
                 role.as_deref(),
             );
         }
-        Call::Message { agent, text } => typed(
-            answering.events.map(|events| events.send_to_agent),
-            &agent,
-            &text,
-        ),
-        Call::Answer { agent, text } => {
-            typed(answering.events.map(|events| events.answer), &agent, &text)
-        }
-        Call::Wake { agent, text } => return wake(connection, answering, &agent, &text),
-        Call::Status => match answering.events {
-            None => (NOT_WIRED.to_owned(), true),
-            Some(events) => match (events.status)(connection, project) {
-                Ok(text) => (text, false),
-                Err(reason) => (reason, true),
-            },
-        },
-        Call::Changes => changes(answering),
-        Call::Escalate { text } => escalate(connection, project, &text)?,
+        Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
+        Call::Merge { agent } => return merge::merge(connection, answering, &agent),
         call @ (Call::Sessions { .. } | Call::Session { .. }) => {
             super::history::answer(connection, project, answering.agents, call)
                 .expect("a past-conversation call has an answer")
@@ -859,54 +852,111 @@ fn answer(
             return memory_answer(connection, project, MASTER_LABEL, call)
                 .expect("a memory call has an answer");
         }
-        Call::Accept { .. } => (MASTER_ACCEPT.to_owned(), true),
-        Call::Merge { agent } => return merge::merge(connection, answering, &agent),
+        call => return answer_work(connection, answering, master, true, call),
     })
 }
 
-/// Answers one lead call a sub-agent made (N1, N2): `delegate` starts a worker of its own
-/// within the owner's Sub-agent depth setting, `status`, `message`, `answer`, `wake` and
-/// `changes` reach only the workers it started, and `accept` lands one of their change sets
-/// on its own branch under the owner's landing setting. Takes the engine database, what the
-/// answers need, the lead and the call. Returns the text and whether it is an error, none
-/// for a call a sub-agent cannot make, or a SQLite failure.
-pub(super) fn answer_lead(
+/// Answers one call a sub-agent made (DEC-104, N1, N2): the work verbs as for the master,
+/// `spawn` starts a worker of its own within the owner's Sub-agent depth setting, and
+/// `stop` and `merge` reach only the workers it started. Takes the engine database, what
+/// the answers need, the sub-agent and the call. Returns the text and whether it is an
+/// error, none for the past-conversation and memory calls answered elsewhere, or a SQLite
+/// failure.
+pub(super) fn answer_sub(
     connection: &mut Connection,
     answering: &Answering<'_>,
-    lead: i64,
+    agent: i64,
     call: Call,
 ) -> Result<Option<(String, bool)>, EngineError> {
-    let project = &answering.stored.project_id;
     Ok(Some(match call {
-        Call::Delegate {
+        Call::Spawn {
             task,
             harness,
             role,
         } => lead_delegate(
             connection,
             answering,
-            lead,
+            agent,
             &task,
             harness.as_deref(),
             role.as_deref(),
         )?,
-        Call::Status => lead_status(connection, project, lead)?,
-        Call::Message { agent, text } => {
-            type_to_worker(connection, answering, lead, &agent, &text, "Sent to")?
-        }
-        Call::Answer { agent, text } => {
-            type_to_worker(connection, answering, lead, &agent, &text, "Answered")?
-        }
-        Call::Wake { agent, text } => lead_wake(connection, answering, lead, &agent, &text)?,
-        Call::Changes => lead_changes(connection, answering, lead)?,
-        Call::Accept { change_set } => lead_accept(connection, answering, lead, &change_set)?,
-        Call::Escalate { .. }
-        | Call::Sessions { .. }
+        Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
+        Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
+        Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }
-        | Call::Recall { .. }
-        | Call::Merge { .. } => return Ok(None),
+        | Call::Recall { .. } => {
+            return Ok(None);
+        }
+        call => answer_work(connection, answering, agent, false, call)?,
     }))
+}
+
+/// Answers one work verb of the master or a sub-agent through `work`. Takes the engine
+/// database, what the answers need, the caller, whether it is the master and the call,
+/// one of the five work verbs. Returns the text and whether it is an error, or a SQLite
+/// failure.
+fn answer_work(
+    connection: &mut Connection,
+    answering: &Answering<'_>,
+    agent: i64,
+    master: bool,
+    call: Call,
+) -> Result<(String, bool), EngineError> {
+    match call {
+        Call::StartWork { title, claims } => {
+            work::start_work(connection, answering, agent, &title, &claims)
+        }
+        Call::InspectWork => work::inspect_work(connection, answering, agent, master),
+        Call::UpdateWork {
+            kind,
+            text,
+            to,
+            question_for,
+            severity,
+            reply_to,
+            work: about,
+            key,
+        } => work::update_work(
+            connection,
+            answering,
+            agent,
+            master,
+            work::Sending {
+                kind,
+                text: &text,
+                to: to.as_deref(),
+                question: question_for.zip(severity),
+                reply_to,
+                work: about,
+                key: key.as_deref(),
+            },
+        ),
+        Call::TransferWork {
+            work: about,
+            version,
+            action,
+            to,
+        } => work::transfer_work(
+            connection,
+            answering,
+            agent,
+            about,
+            version,
+            action,
+            to.as_deref(),
+        ),
+        Call::FinishWork {
+            work: about,
+            version,
+            outcome,
+            evidence,
+        } => work::finish_work(
+            connection, answering, agent, master, about, version, outcome, &evidence,
+        ),
+        other => unreachable!("{} is not a work verb", other.name()),
+    }
 }
 
 /// The workers a lead started, newest first, at most `WORKERS_LISTED_MAX`. Takes the
@@ -1041,7 +1091,7 @@ fn lead_status(
         return Ok((
             format!(
                 "You have started no workers. Start one with {}(task).",
-                tool::TOOL_NAME
+                tool::SPAWN_TOOL
             ),
             false,
         ));
@@ -1055,55 +1105,6 @@ fn lead_status(
         .map(|(_, line)| line)
         .collect();
     Ok((format!("Your workers:\n{}", status.text()), false))
-}
-
-/// Types a lead's text into one of its own running workers. Takes the database, what the
-/// answers need, the lead, the worker's name, the text and the verb the reply starts with.
-/// Returns the sentence the lead reads and whether it is a refusal, or a SQLite failure.
-fn type_to_worker(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    agent: &str,
-    text: &str,
-    said: &str,
-) -> Result<(String, bool), EngineError> {
-    let Some(host) = answering.host else {
-        return Ok((NO_TERMINALS.to_owned(), true));
-    };
-    let project = &answering.stored.project_id;
-    let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
-    let not_yours = format!(
-        "Not sent: none of your own workers is called {shown}. Call {}() for their names.",
-        tool::STATUS_TOOL
-    );
-    let Some(found) = super::events::resolve(connection, project, agent)? else {
-        return Ok((not_yours, true));
-    };
-    if !is_worker(connection, project, lead, found)? {
-        return Ok((not_yours, true));
-    }
-    Ok(
-        match super::events::send_to(connection, host, Some(found), text)? {
-            Ok(id) => (
-                format!("{said} {}.", super::events::label(connection, id)?),
-                false,
-            ),
-            Err("team_message_invalid") => (
-                format!(
-                    "Not sent: give plain text up to {} bytes.",
-                    super::events::SEND_BYTES_MAX
-                ),
-                true,
-            ),
-            Err("team_agent_not_running") => (format!("Not sent: {shown} is not running."), true),
-            Err("team_agent_unreachable") => (
-                format!("Not sent: the terminal of {shown} could not be reached."),
-                true,
-            ),
-            Err(_) => (not_yours, true),
-        },
-    )
 }
 
 /// Wakes one of a lead's own finished workers as `wake` does for the master, found by the
@@ -1132,7 +1133,7 @@ fn lead_wake(
                 format!(
                     "Not woken: none of your own workers is called {}. Call {}() for their names.",
                     super::bound_text(agent, AGENT_SHOWN_MAX),
-                    tool::STATUS_TOOL
+                    tool::INSPECT_WORK_TOOL
                 ),
                 true,
             ));
@@ -1151,7 +1152,7 @@ fn lead_wake(
     Ok((said, false))
 }
 
-/// Lists a lead's own workers' change sets that wait to land, with the id `accept` takes.
+/// Lists a lead's own workers' change sets that wait to land, which `merge` lands.
 /// Takes the database, what the answers need and the lead. Returns the text and whether it
 /// is an error, or a SQLite failure.
 fn lead_changes(
@@ -1208,8 +1209,8 @@ fn lead_changes(
     }
     Ok((
         format!(
-            "Your workers' change sets, accept one with {}(change_set):\n{}",
-            tool::ACCEPT_TOOL,
+            "Your workers' change sets, merge one with {}(agent):\n{}",
+            tool::MERGE_TOOL,
             waiting.join("\n")
         ),
         false,
@@ -1241,7 +1242,7 @@ fn lead_accept(
     }
     let not_yours = format!(
         "Not accepted: no change set of your own workers has that id. Call {}() for them.",
-        tool::CHANGES_TOOL
+        tool::INSPECT_WORK_TOOL
     );
     let Ok(id) = crate::landing::ChangeSetId::new(change_set) else {
         return Ok((not_yours, true));
@@ -1512,7 +1513,7 @@ pub(super) fn wake_in(
     let unknown = if live {
         format!(
             "Not woken: no finished sub-agent of this project is called {shown}. Call {}() for their names.",
-            tool::STATUS_TOOL
+            tool::INSPECT_WORK_TOOL
         )
     } else {
         format!(
@@ -1548,12 +1549,12 @@ pub(super) fn wake_in(
         }
         Err("team_agent_running") if live => format!(
             "{label} is running. Reach it with {}().",
-            tool::MESSAGE_TOOL
+            tool::UPDATE_WORK_TOOL
         ),
         Err("team_agent_running") => format!("{label} is running."),
         Err("team_agent_no_worktree") if live => format!(
             "the worktree of {label} was cleaned up. Hand the work out with {}() instead.",
-            tool::TOOL_NAME
+            tool::SPAWN_TOOL
         ),
         Err("team_agent_no_worktree") => format!(
             "the worktree of {label} was cleaned up. Hand the work out with a {} line instead.",
@@ -1562,36 +1563,6 @@ pub(super) fn wake_in(
         Err(code) => format!("{}.", super::runtime::refusal(code)),
     };
     Ok((format!("Not woken: {reason}"), true))
-}
-
-/// Raises an app notification for a decision only the owner makes, at most
-/// `ESCALATIONS_PER_HOUR_MAX` per project within an hour. Takes the database, the master's
-/// project and the question. Returns the sentence the master reads, or a SQLite failure.
-fn escalate(
-    connection: &Connection,
-    project: &ProjectId,
-    text: &str,
-) -> Result<(String, bool), EngineError> {
-    let now = now_ms();
-    let recent: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='escalation' AND created_ms>?2",
-            params![project.as_str(), now - HOUR_MS],
-            |row| row.get(0),
-        )
-        .map_err(state)?;
-    if recent >= ESCALATIONS_PER_HOUR_MAX {
-        return Ok((ESCALATIONS_FULL.to_owned(), true));
-    }
-    Ok(
-        match super::events::escalate(connection, project, text, now)? {
-            Ok(_) => (ESCALATED.to_owned(), false),
-            Err(_) => (
-                "Not sent: give the owner one plain question of up to 2000 bytes.".to_owned(),
-                true,
-            ),
-        },
-    )
 }
 
 fn changes(answering: &Answering<'_>) -> (String, bool) {
@@ -1701,7 +1672,7 @@ fn type_to_agent(
             "Not sent: the terminal of {shown} could not be reached."
         )),
         Err(_) => Err(format!(
-            "Not sent: no running sub-agent of this project is called {shown}. Call status() for their names."
+            "Not sent: no running sub-agent of this project is called {shown}. Call inspect_work() for their names."
         )),
     }
 }
@@ -1728,3 +1699,4 @@ fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, S
 mod tests;
 
 mod merge;
+mod work;

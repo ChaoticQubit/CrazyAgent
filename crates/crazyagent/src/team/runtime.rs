@@ -70,7 +70,7 @@ const TIME_LIMIT_NOTE: &str = "stopped by a time limit";
 /// How streams, leads and their branches work, given to every master (N3).
 const MASTER_NESTING_RULES: &str = "\n## Streams and leads\n\nEach agent works in its own git worktree and branch. The sub-agent you start for a stream of work leads it and may start workers of its own, up to the owner's Sub-agent depth setting. Workers' work lands on their lead's branch; the owner accepts a lead's work onto any branch. One harness per stream means one lead agent per stream, on the harness and model the owner chose or the settings default. Never ask the owner how streams share a branch.\n";
 /// What a sub-agent that may lead its own workers is told with each task (N3).
-const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with delegate(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. status(), message(), answer(), wake() and changes() reach only your workers, and accept(change_set) lands a worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
+const LEAD_LINES: &str = "\nYou lead this stream. Start workers of your own with spawn(task) in the crazyagent-team MCP server, each in its own worktree and branch cut from your current commit, up to the owner's Sub-agent depth setting. inspect_work() shows your workers, their work and their change sets, update_work(to, text) reaches one of them and wakes a finished one, stop(agent) stops one, and merge(agent) lands a finished worker's change set on your branch. The owner accepts your own work onto any branch. Never ask the owner how streams share a branch.";
 /// What a lead's worker is told with each task (N3).
 const WORKER_LINE: &str =
     "\nYou are a worker of a lead agent: your lead accepts your change set onto its branch.";
@@ -2752,13 +2752,14 @@ impl TeamRuntime {
             events: self.events.as_ref(),
             host: self.terminal.as_deref(),
         };
-        super::master::serve_calls(&mut self.connection, &answering, &mailbox).map(drop)
+        super::master::serve_calls(&mut self.connection, &answering, id, &mailbox).map(drop)
     }
 
     /// Answers the team calls a project's sub-agents made since the last tick, from each
-    /// running sub-agent's own mailbox, with the sub-agent's label as the origin of what it
-    /// saves: past conversations and memory, and the lead calls that reach only the
-    /// workers it started (N1, N2). Takes the setup and live access.
+    /// running sub-agent's own mailbox, which names the caller, with the sub-agent's label
+    /// as the origin of what it saves: past conversations and memory, the work verbs and
+    /// the lead calls that reach only the workers it started (DEC-104, N1, N2). Takes the
+    /// setup and live access.
     fn serve_agent_calls(&mut self, stored: &StoredSetup, access: &ModelAccess) {
         if self.delegation_tool.is_none() {
             return;
@@ -2788,11 +2789,11 @@ impl TeamRuntime {
             super::history::serve_agent_calls(
                 &mut self.connection,
                 project,
-                &label,
+                (id, &label),
                 &agents,
                 &mailbox,
                 &mut |connection, call| {
-                    super::master::answer_lead(connection, &answering, id, call)
+                    super::master::answer_sub(connection, &answering, id, call)
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
             );
@@ -4437,8 +4438,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_live_team_tool(engine, &self.mailbox(id))
+                    .with_live_team_tool(engine, &self.mailbox(id), &off)
                     .map_err(unread)
             }
             Some(engine) if master && tools => {
@@ -4456,8 +4460,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_agent_team_tool(engine, &self.mailbox(id))
+                    .with_agent_team_tool(engine, &self.mailbox(id), &off)
                     .map_err(unread)
             }
             _ => Ok(context),
@@ -4510,6 +4517,38 @@ impl TeamRuntime {
         let mode = crate::coord::settings::mode(&self.connection, project, kind)
             .map_err(|e| with_code("the project's sub-agent mode could not be read", Some(&e.0)))?;
         Ok(mode == crate::coord::settings::SubagentMode::Native)
+    }
+
+    /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
+    /// off or deleted for the project, and for a sub-agent the owner's Sub-agent depth
+    /// setting keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway. Takes
+    /// the project, the agent and its role. Returns the names, or a SQLite failure.
+    fn off_tools(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+    ) -> Result<Vec<String>, EngineError> {
+        let mut off: Vec<String> = crate::coord::tool_switches::off_tools(
+            &self.connection,
+            project,
+            crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        )?
+        .into_iter()
+        .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
+        .collect();
+        let leads = role == AgentRole::Master
+            || super::agent_depth(&self.connection, id)?
+                < super::nesting(&self.connection, project)?.depth;
+        if !leads {
+            for name in tool::LEAD_TOOLS {
+                if !off.iter().any(|tool| tool == name) {
+                    off.push(name.to_owned());
+                }
+            }
+        }
+        assert!(tool::known_tools(&off));
+        Ok(off)
     }
 
     /// Records one team agent in the engine's agent register, continuing the register
@@ -5442,30 +5481,20 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 /// The instructions a live master's harness reads at launch as system context, never as a
 /// typed message: who it is, how team events arrive, its team tools or the DELEGATE line,
 /// when to ask the owner and how the team's work lands. The team is not listed; with its
-/// tools the master reads it through the status tool when it needs it. The project name,
+/// tools the master reads it through `inspect_work` when it needs it. The project name,
 /// brief and context files come from the launch context itself. Takes the setup and whether
 /// it has the engine's team tools. Returns at most `LIVE_RULES_BYTES_MAX` bytes.
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server: {}(task, harness?, role?) hands a task to a sub-agent at once, {}(agent, text) and {}(agent, text) type into a sub-agent's terminal, {}(agent, text) wakes a finished sub-agent by its name or its Sub-agent number in its own worktree with your text as its next task, {}() reads the team, {}() lists the change sets waiting for the owner and {}(text) notifies the owner when a decision is theirs. Name sub-agents by their @role handle. Prefer waking a finished sub-agent that knows the work over starting a new one. The team is not listed here: call {}() whenever you need to know who is on it, what each sub-agent is doing and which finished sub-agents you can wake.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
-            tool::TOOL_NAME,
-            tool::MESSAGE_TOOL,
-            tool::ANSWER_TOOL,
-            tool::WAKE_TOOL,
-            tool::STATUS_TOOL,
-            tool::CHANGES_TOOL,
-            tool::ESCALATE_TOOL,
-            tool::STATUS_TOOL
+            tool::SPAWN_TOOL,
+            tool::UPDATE_WORK_TOOL,
+            tool::INSPECT_WORK_TOOL
         )
     } else {
         "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
-    };
-    let how = if team_tool {
-        how + tool::HISTORY_LINE + tool::MEMORY_LINE
-    } else {
-        how
     };
     let text = format!(
         "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",
