@@ -200,10 +200,14 @@ pub fn checkout_folder(setup: &Path, repo: &str, commit: &str) -> PathBuf {
     setup.join("pack").join(format!("{key}-{commit}"))
 }
 
-/// Names the plugin folder of an entry whose source is a pinned git checkout: the checkout
-/// itself, where a Claude Code plugin keeps its hooks. Inputs: the setup folder and the
-/// entry. Output: the folder once it is checked out, or none for a bundled source.
+/// Names the plugin folder an entry's hooks come from: the hook folder this build ships for
+/// it once unpacked, else for a pinned git checkout the checkout itself, where a Claude Code
+/// plugin keeps its hooks. Inputs: the setup folder and the entry. Output: the folder, or
+/// none when neither is present.
 pub fn plugin_folder(setup: &Path, entry: &PackManifestEntry) -> Option<PathBuf> {
+    if let Some(folder) = crate::setup::bundled::hook_folder(setup, &entry.id) {
+        return Some(folder);
+    }
     let PackSource::Git { repo, commit, .. } = &entry.source else {
         return None;
     };

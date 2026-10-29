@@ -113,12 +113,39 @@ impl OwnerClient {
     /// Returns the session with the size, the screen then live output, and the controls.
     #[cfg(unix)]
     pub async fn terminal_attach(&self, agent: AgentId) -> Result<TerminalSession, EngineError> {
+        let request = TerminalRequest::Attach {
+            agent_id: agent.clone(),
+        };
+        self.attach_with(agent, &request).await
+    }
+
+    /// Opens a live view of one pane of an agent terminal's own window, such as a native
+    /// teammate's, over the owner socket; typing, prompts and resizes then go to that pane.
+    /// Takes the terminal name and a pane id the team lists for it; fails like
+    /// `terminal_attach`, or with `terminal_pane_unknown` for a pane of another window.
+    /// Returns the session.
+    #[cfg(unix)]
+    pub async fn terminal_attach_pane(
+        &self,
+        agent: AgentId,
+        pane: String,
+    ) -> Result<TerminalSession, EngineError> {
+        let request = TerminalRequest::AttachPane {
+            agent_id: agent.clone(),
+            pane,
+        };
+        self.attach_with(agent, &request).await
+    }
+
+    #[cfg(unix)]
+    async fn attach_with(
+        &self,
+        agent: AgentId,
+        request: &TerminalRequest,
+    ) -> Result<TerminalSession, EngineError> {
         let unavailable = || failure("terminal_owner_unavailable");
         let (stream, cols, rows) = tokio::time::timeout(self.timeout, async {
-            let frame = encode_frame(&TerminalRequest::Attach {
-                agent_id: agent.clone(),
-            })
-            .map_err(|_| failure("terminal_request_bounds"))?;
+            let frame = encode_frame(request).map_err(|_| failure("terminal_request_bounds"))?;
             self.root.verify()?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
@@ -247,7 +274,9 @@ async fn act(
         TerminalRequest::Input { bytes } => host.input(&agent, &bytes),
         TerminalRequest::Prompt { text } => type_prompt(host.as_ref(), &agent, &text).map(drop),
         TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows),
-        TerminalRequest::Attach { .. } | TerminalRequest::Detach => Ok(()),
+        TerminalRequest::Attach { .. }
+        | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::Detach => Ok(()),
     })
     .await
     .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
@@ -263,29 +292,38 @@ async fn prompt(host: &Arc<dyn Host>, agent: &AgentId, text: String) -> Result<b
 }
 
 /// The attach handshake, all of it bounded by the attach deadline: checks the peer and the
-/// owner grant, reads the `Attach` request and attaches to the agent terminal. Takes the
-/// connection, its packet, the engine and the authority. Writes nothing, so a refusal can
-/// still be sent whole. Returns the admission, the attached viewer and its host.
+/// owner grant, reads the `Attach` or `AttachPane` request and attaches to the agent
+/// terminal or that one pane of its window. Takes the connection, its packet, the engine and
+/// the authority. Writes nothing, so a refusal can still be sent whole. Returns the
+/// admission, the attached viewer, its host and the team agent the owner's prompts and
+/// typing count for, none for a pane, which is not that agent's own app.
 async fn open(
     stream: &mut UnixStream,
     packet: &[u8; 37],
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
-) -> Result<(Admission, TerminalStream, Arc<dyn Host>), EngineError> {
+) -> Result<(Admission, TerminalStream, Arc<dyn Host>, Option<i64>), EngineError> {
     verify_peer(stream)?;
     let admission = granted(engine, authority, packet).await?;
     let frame = read_frame(stream).await?;
-    let TerminalRequest::Attach { agent_id } =
-        serde_json::from_slice(&frame[4..]).map_err(|_| failure("terminal_request_invalid"))?
-    else {
-        return Err(failure("terminal_request_invalid"));
+    let (agent_id, pane) = match serde_json::from_slice(&frame[4..])
+        .map_err(|_| failure("terminal_request_invalid"))?
+    {
+        TerminalRequest::Attach { agent_id } => (agent_id, None),
+        TerminalRequest::AttachPane { agent_id, pane } => (agent_id, Some(pane)),
+        _ => return Err(failure("terminal_request_invalid")),
     };
-    let host = engine.terminal(&engine_root(authority)?)?;
+    let member = agent_id.team_agent().filter(|_| pane.is_none());
+    let engine_host = engine.terminal(&engine_root(authority)?)?;
+    let host = match &pane {
+        Some(pane) => crate::terminal::pane_view(engine_host, pane)?,
+        None => engine_host,
+    };
     let attaching = host.clone();
     let viewer = tokio::task::spawn_blocking(move || attaching.attach(&agent_id))
         .await
         .map_err(|_| failure("terminal_unavailable"))??;
-    Ok((admission, viewer, host))
+    Ok((admission, viewer, host, member))
 }
 
 /// Starts an attached view: the `Attached` frame, then the pane's history and screen, each
@@ -359,17 +397,29 @@ impl OwnerClient {
     pub async fn terminal_attach(&self, _agent: AgentId) -> Result<TerminalSession, EngineError> {
         Err(failure("terminal_owner_unavailable"))
     }
+
+    /// Refuses a pane view for the same reason. Takes the terminal name and pane id, unused.
+    /// Returns `terminal_owner_unavailable`.
+    pub async fn terminal_attach_pane(
+        &self,
+        _agent: AgentId,
+        _pane: String,
+    ) -> Result<TerminalSession, EngineError> {
+        Err(failure("terminal_owner_unavailable"))
+    }
 }
 
 /// Never runs where no Unix domain socket can exist: its stream has no value, so there is
 /// no viewer to serve. Takes the same inputs as the Unix version, all unused.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 async fn watch(
     stream: UnixStream,
     _packet: &[u8; 37],
     _admission: Admission,
     _viewer: TerminalStream,
     _host: Arc<dyn Host>,
+    _member: Option<i64>,
     _engine: &Engine,
     _authority: &Authority,
 ) {
@@ -377,17 +427,18 @@ async fn watch(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn watch(
     stream: UnixStream,
     packet: &[u8; 37],
     admission: Admission,
     mut viewer: TerminalStream,
     host: Arc<dyn Host>,
+    member: Option<i64>,
     engine: &Engine,
     authority: &Authority,
 ) {
     let agent = viewer.agent.clone();
-    let member = agent.team_agent();
     let database = engine_root(authority)
         .ok()
         .map(|root| root.join("engine.db"));
@@ -419,7 +470,9 @@ async fn watch(
                 },
                 request = asked.recv() => match request {
                     None | Some(TerminalRequest::Detach) => break "terminal_detached",
-                    Some(TerminalRequest::Attach { .. }) => break "terminal_request_invalid",
+                    Some(TerminalRequest::Attach { .. } | TerminalRequest::AttachPane { .. }) => {
+                        break "terminal_request_invalid";
+                    }
                     Some(_) if !still_granted(authority, packet, &admission) => {
                         break GRANT_ENDED;
                     }
@@ -478,9 +531,9 @@ pub(super) async fn serve(
         .await
         .unwrap_or_else(|_| Err(failure("terminal_attach_timeout")));
     match opened {
-        Ok((admission, viewer, host)) => {
+        Ok((admission, viewer, host, member)) => {
             watch(
-                stream, &packet, admission, viewer, host, &engine, &authority,
+                stream, &packet, admission, viewer, host, member, &engine, &authority,
             )
             .await;
         }

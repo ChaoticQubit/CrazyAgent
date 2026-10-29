@@ -1775,9 +1775,10 @@ impl TeamView {
         (rows, Some(cursor))
     }
 
-    /// Draws the Team view for the body of the project's Agents tab.
+    /// Draws the Team view like `draw` without the typing cursor.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
+    #[cfg(test)]
     pub fn rows(
         &self,
         content: usize,
@@ -1789,7 +1790,7 @@ impl TeamView {
         (lines, help)
     }
 
-    /// Draws the Team view like `rows` and also places the typing cursor.
+    /// Draws the Team view for the Team screen's settings box and places the typing cursor.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -2291,7 +2292,10 @@ impl TeamView {
             .collect()
     }
 
-    fn help(&self) -> Help {
+    /// The help keys of the view in its current state, most used first.
+    /// Takes the view. Returns key and label pairs; Esc goes back to the Team screen
+    /// once nothing inside the view is open.
+    pub fn help(&self) -> Help {
         if self.draft.is_some() {
             return vec![
                 ("Enter", "Hand over"),
@@ -2392,7 +2396,7 @@ impl TeamView {
         if unseen {
             help.push(("s", "Seen"));
         }
-        help.extend([TABS, ("Esc", "Home")]);
+        help.push(("Esc", "Back"));
         help
     }
 }
