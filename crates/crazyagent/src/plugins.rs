@@ -284,6 +284,23 @@ pub struct EffectiveServer {
     pub secrets: Vec<EffectiveSecret>,
 }
 
+/// One tool with its switches, as Settings lists it: a CrazyAgent built-in tool (`server_id`
+/// none, `server` the CrazyAgent server name) or one checked tool of an MCP server, keyed by
+/// the server's name as agents see it. `global` is the every-project switch, On when never
+/// set; `here` is the project's own stored switch, none in global settings or when the project
+/// follows the global one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolView {
+    pub server: String,
+    pub server_id: Option<String>,
+    pub tool: String,
+    pub description: String,
+    pub builtin: bool,
+    pub global: crate::coord::tool_switches::Switch,
+    pub here: Option<crate::coord::tool_switches::Switch>,
+}
+
 /// One hook as Settings lists it: the plugin it came from, the Claude Code event and
 /// matcher it runs on, its command, where it applies and whether it is on. `follows` names
 /// the skill or MCP server the hook came with; the hook runs only while that item is on.
@@ -553,6 +570,18 @@ const PROBLEMS: &[(&str, &str)] = &[
         "These hooks were already added here.",
     ),
     ("hook_limit", "There are already 100 hooks here."),
+    (
+        "tool_unknown",
+        "That tool is not on this server. Check the server again to list its tools.",
+    ),
+    (
+        "tool_delete_builtin_only",
+        "Only a CrazyAgent tool can be deleted. Turn an MCP server's tool off instead.",
+    ),
+    (
+        "coord_tool_invalid",
+        "This tool's name has characters a switch can't hold. Only letters, digits, _, - and . work.",
+    ),
 ];
 
 /// Turns a plugins refusal code into the sentence shown to the owner.

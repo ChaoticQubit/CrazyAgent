@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// The most agent folders the engine reads when it looks for native-mode leads whose own
 /// servers still run, such as after an engine restart.
@@ -176,6 +177,10 @@ impl Host for Servers {
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.on(agent, |server| server.input_live(agent))
+    }
+
+    fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
+        self.on(agent, |server| server.quiet(agent))
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {

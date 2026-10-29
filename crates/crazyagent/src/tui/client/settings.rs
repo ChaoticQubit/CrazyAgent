@@ -3,6 +3,7 @@ use super::app_setup::{AppSetupEvent, AppSetupJob};
 use super::*;
 use crate::accounts::AccountView;
 use crate::config::ModelAccessEdit;
+use crate::coord::tool_switches::Switch;
 use crate::engine::EngineError;
 use crate::engine::owner::{
     AccountSecret, ClaudeAuthInput, ModelAccessCollection, ModelAccessRecord, NativeAuthAccount,
@@ -14,7 +15,7 @@ use crate::memory::library::{
     SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
-use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView};
+use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
 use crate::protocol::CredentialRef;
 use crate::usage::report::UsageReport;
 
@@ -93,6 +94,20 @@ pub(in crate::tui) enum SettingsJob {
         project: Option<ProjectId>,
     },
     Plugin(PluginChange),
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
     AppSetup(AppSetupJob),
     Schedule,
     SetSchedule {
@@ -190,6 +205,9 @@ impl std::fmt::Debug for SettingsJob {
             Self::ImportSkills { .. } => "ImportSkills",
             Self::Hooks { .. } => "Hooks",
             Self::Plugin(_) => "Plugin",
+            Self::Tools { .. } => "Tools",
+            Self::SetTool { .. } => "SetTool",
+            Self::RestoreTools { .. } => "RestoreTools",
             Self::AppSetup(job) => job.name(),
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
@@ -305,6 +323,12 @@ pub(in crate::tui) enum SettingsEvent {
     Imported(Result<ImportOutcomes, String>),
     Hooks(Option<ProjectId>, Result<Vec<HookView>, String>),
     PluginChanged(Result<Option<ServerView>, String>),
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        changed: bool,
+        result: Result<Vec<ToolView>, String>,
+    },
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(u64, Result<(), String>),
@@ -345,6 +369,21 @@ impl SettingsEvent {
             SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
             SettingsJob::Hooks { project } => Self::Hooks(project.clone(), Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
+            SettingsJob::Tools { project, server } => Self::Tools {
+                project: project.clone(),
+                server: server.clone(),
+                changed: false,
+                result: Err(problem),
+            },
+            SettingsJob::SetTool {
+                project, server, ..
+            }
+            | SettingsJob::RestoreTools { project, server } => Self::Tools {
+                project: project.clone(),
+                server: server.clone(),
+                changed: true,
+                result: Err(problem),
+            },
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
             SettingsJob::SetSchedule { generation, .. } => {
@@ -539,6 +578,56 @@ impl NativeOwner {
             ),
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
+            }
+            SettingsJob::Tools { project, server } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .tool_switches(project.clone(), server.clone())
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: false,
+                    result,
+                }
+            }
+            SettingsJob::SetTool {
+                project,
+                server,
+                tool,
+                switch,
+            } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .set_tool_switch(project.clone(), server.clone(), tool, switch)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: true,
+                    result,
+                }
+            }
+            SettingsJob::RestoreTools { project, server } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .restore_tool_switches(project.clone(), server.clone())
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: true,
+                    result,
+                }
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
             SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {

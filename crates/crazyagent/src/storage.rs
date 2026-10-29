@@ -2451,6 +2451,12 @@ fn owner_read(
                 &stored_setup(&tx, project_id)?,
             )?),
         },
+        OwnerRead::CoordQuestions { project_id } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::CoordQuestions {
+                inbox: Box::new(crate::team::questions::inbox(&tx, project_id)?),
+            }
+        }
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,

@@ -24,7 +24,8 @@ pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES, ProcessSaved,
+    Adoption, AgentInstructions, InstructionRecord, InstructionSettings, PROCESS_CODES,
+    ProcessSaved,
 };
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::usage::USAGE_CODES;
@@ -618,6 +619,9 @@ pub enum OwnerRead {
         limit: u16,
     },
     TeamEvents,
+    CoordQuestions {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -722,6 +726,7 @@ impl OwnerRead {
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
             | Self::TeamEvents
+            | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -1093,6 +1098,9 @@ pub enum OwnerData {
     },
     TeamEvents {
         events: Box<crate::team::events::AppEvents>,
+    },
+    CoordQuestions {
+        inbox: Box<crate::team::questions::Inbox>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,

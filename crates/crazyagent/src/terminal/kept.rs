@@ -132,6 +132,10 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_live(agent)
     }
 
+    fn quiet(&self, agent: &AgentId) -> Result<Option<std::time::Duration>, HostError> {
+        self.inner.quiet(agent)
+    }
+
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         self.inner.resize(agent, cols, rows)
     }

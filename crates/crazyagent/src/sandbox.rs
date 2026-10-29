@@ -71,9 +71,6 @@ pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
 
-/// The longest Unix socket path macOS binds or reaches.
-const SOCKET_PATH_MAX: usize = 104;
-
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -81,6 +78,10 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 const HIDDEN_MAX: usize = 4;
+/// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
+const SOCKETS_MAX: usize = 2;
+/// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
+const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
@@ -606,7 +607,7 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
-    tmux_socket: Option<PathBuf>,
+    sockets: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -658,8 +659,42 @@ impl ProjectSandbox {
             engine_secrets: Vec::new(),
             checkout: None,
             clone: None,
-            tmux_socket: None,
+            sockets: Vec::new(),
         })
+    }
+
+    /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
+    /// file and its `<path>.lock`, and read its folder's metadata, nothing else there: its
+    /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
+    /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
+    /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
+    pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(invalid("unix socket grants need Seatbelt"));
+        }
+        if self.sockets.len() >= SOCKETS_MAX {
+            return Err(invalid("too many unix sockets"));
+        }
+        let text = socket
+            .to_str()
+            .ok_or_else(|| invalid("the unix socket path is not plain"))?;
+        let plain = socket.is_absolute()
+            && text.len() <= SOCKET_PATH_BYTES_MAX
+            && !text.ends_with('/')
+            && !text.contains("//")
+            && text.split('/').all(|part| part != "." && part != "..")
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'));
+        let folder = socket
+            .parent()
+            .filter(|folder| std::fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()));
+        if !plain || folder.is_none() {
+            return Err(invalid("the unix socket path is not plain"));
+        }
+        self.sockets.push(socket.to_path_buf());
+        assert!(self.sockets.len() <= SOCKETS_MAX);
+        Ok(self)
     }
 
     /// Keeps the ports of the owner's configured local model endpoints free of this agent's
@@ -943,27 +978,31 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets a native-mode lead run its own tmux server (DEC-104): bind, accept and connect
-    /// on exactly its own socket, which sits in its short temp folder, and read the tmux
-    /// program's folder when no system root covers it. No other Unix socket becomes
-    /// reachable, the engine's own tmux server included, and the server, the teammate panes
-    /// it forks and every engine client on it stay inside this profile. Only Seatbelt holds
-    /// it. Input: the socket (`terminal::harness_socket`) and the canonical tmux program.
-    /// Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
+    /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
+    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
+    /// access to the tmux program's folder when no system root covers it. No other Unix
+    /// socket becomes reachable, the engine's own tmux server included, and the server, the
+    /// teammate panes it forks and every engine client on it stay inside this profile. Only
+    /// Seatbelt holds it. Input: the socket (`terminal::harness_socket`) and the canonical
+    /// tmux program. Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
     pub fn allow_tmux_server(mut self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
         if !cfg!(target_os = "macos") {
             return Err(SandboxError::Unavailable(TMUX_SERVER_NEEDS_SEATBELT.into()));
-        }
-        if self.tmux_socket.is_some() {
-            return Err(invalid("the sandbox already has a tmux server"));
         }
         let scratch = self
             .scratch
             .clone()
             .ok_or_else(|| invalid("a tmux server needs the agent temp folder"))?;
+        if self
+            .sockets
+            .iter()
+            .any(|known| known.parent() == Some(scratch.as_path()))
+        {
+            return Err(invalid("the sandbox already has a tmux server"));
+        }
         if !clean_absolute(socket)
             || socket.parent() != Some(scratch.as_path())
-            || socket.as_os_str().len() > SOCKET_PATH_MAX
+            || socket.as_os_str().len() > SOCKET_PATH_BYTES_MAX
         {
             return Err(invalid("the tmux socket must sit in the agent temp folder"));
         }
@@ -981,7 +1020,7 @@ impl ProjectSandbox {
         if !covered {
             self = self.allow_read(folder)?;
         }
-        self.tmux_socket = Some(socket.to_path_buf());
+        self = self.allow_unix_socket(socket)?;
         assert!(self.writes(socket.parent().unwrap_or(socket)));
         Ok(self)
     }
@@ -1157,12 +1196,14 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
-        if let Some(socket) = &self.tmux_socket {
-            let socket = socket.display();
+        for socket in &self.sockets {
+            let path = socket.display();
+            let folder = socket.parent().unwrap_or(socket).display();
             text.push_str(&format!(
-                "(allow network-bind network-inbound\n  (local unix-socket (path-literal \"{socket}\")))\n(allow network-outbound\n  (remote unix-socket (path-literal \"{socket}\")))\n"
+                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
             ));
         }
+        assert_eq!(text.matches("unix-socket").count(), 2 * self.sockets.len());
         let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {
@@ -1208,11 +1249,6 @@ impl ProjectSandbox {
         );
         assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
-        assert_eq!(
-            text.matches("unix-socket").count(),
-            2 * usize::from(self.tmux_socket.is_some()),
-            "only a native-mode lead's own tmux socket is a reachable Unix socket path rule"
-        );
         assert!(
             MACH_SERVICES
                 .iter()
