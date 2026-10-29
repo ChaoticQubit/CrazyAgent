@@ -786,7 +786,7 @@ pub fn serve_calls(
 ) -> Result<usize, EngineError> {
     let project = &answering.stored.project_id;
     let taken = tool::take_calls(mailbox, tool::CALLS_PER_TICK_MAX);
-    for (id, call) in &taken {
+    for (id, call, _) in &taken {
         let (text, error) = match call.clone().map(tool::checked) {
             None => (UNREAD.to_owned(), true),
             Some(Err(refused)) => (refused.to_owned(), true),

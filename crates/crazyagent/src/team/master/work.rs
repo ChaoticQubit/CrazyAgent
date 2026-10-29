@@ -24,6 +24,7 @@ const CLAIMS_SHOWN_MAX: usize = 300;
 const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
+const WAKE_TASK: &str = "A message from your team woke you. It is at the end of this task, under Messages for you. Act on it.";
 
 const _: () = assert!(MESSAGES_SHOWN_MAX <= coord::PENDING_MAX);
 const _: () = assert!(SENT_SHOWN_MAX <= coord::PENDING_MAX);
@@ -293,11 +294,12 @@ pub(super) fn inspect_work(
 }
 
 /// Sends what an `update_work` call asks for (DEC-104): a reply to the message it names,
-/// a question its tags route (Q14b), a high one for the owner also raising the owner's
-/// notification, or a message or note to the agent it names. A message to a finished
-/// agent the caller leads wakes that agent with the text as its next task, as `wake` did.
-/// Delivery to a running agent is the coordination layer's. Takes the database, what the
-/// answers need, the caller, whether it is the master and the call. Returns the sentence.
+/// a question its tags route (Q14b), whose owner alert K7's tick raises, or a message or
+/// note to the agent it names. A message to a finished agent the caller leads wakes that
+/// agent with a short task, and the message itself reaches it once, with the waiting
+/// messages that task's prompt carries; delivery to a running agent is the coordination
+/// layer's too. Takes the database, what the answers need, the caller, whether it is the
+/// master and the call. Returns the sentence.
 pub(super) fn update_work(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -375,7 +377,7 @@ pub(super) fn update_work(
         question: None,
         work: sending.work,
         reply_to: sending.reply_to,
-        body: text.clone(),
+        body: text,
         idempotency_key: sending.key.map(str::to_owned),
     };
     let id = match coord::send(connection, message, now) {
@@ -394,13 +396,10 @@ pub(super) fn update_work(
     }
     let shown = target.to_string();
     let (said, refusal) = if master {
-        super::wake(connection, answering, &shown, &text)?
+        super::wake(connection, answering, &shown, WAKE_TASK)?
     } else {
-        super::lead_wake(connection, answering, agent, &shown, &text)?
+        super::lead_wake(connection, answering, agent, &shown, WAKE_TASK)?
     };
-    if !refusal {
-        quiet(coord::mark(connection, id, Receipt::Delivered, now))?;
-    }
     Ok((format!("Sent #{id}. {said}"), refusal))
 }
 

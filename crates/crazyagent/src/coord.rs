@@ -43,7 +43,7 @@ pub use claims::{breadth, covers, overlapping, overlaps_of, path_scopes, release
 pub use messages::{mark, outbox, pending, reply, requeue_dead, send, unread};
 pub use presence::{owner_questions, record_tool, set_waiting, snapshot, touch};
 pub use store::{ensure, forget_project, master_of, message};
-pub use work::{finish, start_assigned, start_work, transfer, work, works};
+pub use work::{finish, start_work, transfer, work, works};
 
 /// A team agent's id, the `team_agents` row id.
 pub type AgentId = i64;
@@ -228,14 +228,6 @@ named!(WorkState {
     Closed => "closed",
     Declined => "declined",
 });
-
-impl WorkState {
-    /// Says whether work in this state still holds its claims: someone is on it or is
-    /// about to be (Concord's claimed statuses). Takes the state. Returns the answer.
-    pub fn claims_scope(self) -> bool {
-        matches!(self, Self::Assigned | Self::Accepted | Self::Active)
-    }
-}
 
 /// One ownership change of a unit of work (Concord's transfer verbs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

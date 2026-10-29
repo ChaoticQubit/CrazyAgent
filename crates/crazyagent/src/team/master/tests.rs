@@ -399,7 +399,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
     let served = mailbox.to_path_buf();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
+        tool::serve_live(Cursor::new(input), &mut output, &served, &[], None).unwrap();
         output
     });
     let access = ModelAccess::default();
