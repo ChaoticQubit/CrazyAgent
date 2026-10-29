@@ -95,6 +95,111 @@ pub(super) fn sub_agents(
     Ok(found)
 }
 
+/// Closes the open change sets of a lead's sub-agents whose work the task tip of the
+/// lead's own clone already holds, however it got there: a merge the lead ran by hand
+/// after a conflict counts as the engine's merge does (F3). Each lands as the lead's tip.
+/// A lead in a linked worktree never merges by hand, so its workers are left as they are.
+/// Inputs: the store, the project and the lead. Output: Ok, or the failure that kept the
+/// lead's tip from being read.
+pub(super) fn settle(db: &Connection, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let mut open = Vec::new();
+    for (_, sub) in sub_agents(db, project, lead)? {
+        if store::open_for(db, path_text(&sub.worktree)?)?.is_some() {
+            open.push(sub);
+        }
+    }
+    if open.is_empty() {
+        return Ok(());
+    }
+    let Some(lead_place) = place(db, project, lead)? else {
+        return Ok(());
+    };
+    let layout = check_places(
+        &lead_place.repository,
+        &lead_place.worktree,
+        &lead_place.git_dir,
+    )?;
+    if layout != Layout::Clone {
+        return Ok(());
+    }
+    let lead_tip = tip(
+        db,
+        &lead_place.repository,
+        &lead_place.worktree,
+        &lead_place.git_dir,
+    )?;
+    for sub in open
+        .iter()
+        .filter(|sub| sub.repository == lead_place.repository)
+    {
+        close_landed(db, sub, &lead_tip, &lead_tip)?;
+    }
+    Ok(())
+}
+
+/// Closes the open change sets of an agent's sub-agents whose work one of its change sets
+/// held when it landed (F3): the lead's Accept carries its workers' work, even when the
+/// lead squashed or resolved it by hand. Each lands where the lead's set landed. The
+/// caller holds [`hold`] on the landed set's repository. Inputs: the store, the landed
+/// change set and the commit it landed as. Output: Ok, or the first failure.
+pub(super) fn settle_landed(
+    db: &Connection,
+    landed_set: &store::Record,
+    landed: &str,
+) -> Result<(), EngineError> {
+    if landed_set.agent.kind != super::AgentKind::Sub {
+        return Ok(());
+    }
+    let Ok(lead) = landed_set.agent.id.parse::<i64>() else {
+        return Ok(());
+    };
+    for (_, sub) in sub_agents(db, &landed_set.project, lead)? {
+        if sub.repository == landed_set.repository {
+            close_covered(db, &sub, &landed_set.head, landed)?;
+        }
+    }
+    Ok(())
+}
+
+/// Tells whether a project's lead merges its workers' change sets, so the owner's lists
+/// leave them out: the owner's Lands setting is Lead. Inputs: the store and the project.
+/// Output: the answer, false where the engine keeps no team tables.
+pub(super) fn leads_merge(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let tables: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('team_agents','team_nesting')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if tables != 2 {
+        return Ok(false);
+    }
+    Ok(crate::team::nesting(db, project)?.lands == crate::team::ChildLanding::Lead)
+}
+
+/// Tells whether a change set's agent is a worker of a lead. Inputs: the store, the
+/// project and the change set's agent. Output: the answer.
+pub(super) fn is_lead_worker(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+) -> Result<bool, EngineError> {
+    let Ok(id) = agent.id.parse::<i64>() else {
+        return Ok(false);
+    };
+    if agent.kind != super::AgentKind::Sub {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub' AND parent IS NOT NULL)",
+        params![id, project.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Lists the branches of a lead's sub-agents whose work is not yet in the lead's task
 /// branch (DEC-104 K5b). For a lead in its own clone, a sub-agent's branch counts as
 /// merged once its tip, read through the engine's checked fetch, is an ancestor of the
@@ -433,11 +538,8 @@ pub(super) fn merge(
     Ok(MergeOutcome::Conflict { branch, files })
 }
 
-/// Closes a sub-agent's open change set once its lead merged the work it holds, as an
-/// Accept closes one it landed, so the owner's Changes no longer offers it: Accepted with
-/// the lead's commit as where it landed, its pending ref dropped and the sub-agent's next
-/// change set opening above it. A set with an owner
-/// action in flight, or holding work past the merged tip, stays open. Inputs: the store,
+/// Closes a sub-agent's open change set once its lead merged the work it holds, as
+/// [`close_covered`] does, under the engine's hold on the repository. Inputs: the store,
 /// the sub-agent's place, the tip that was merged and the lead's commit holding it.
 /// Output: Ok, closed or left open.
 fn close_landed(
@@ -447,6 +549,21 @@ fn close_landed(
     landed: &str,
 ) -> Result<(), EngineError> {
     let _held = hold(&sub.repository);
+    close_covered(db, sub, merged, landed)
+}
+
+/// Closes a sub-agent's open change set whose head a commit holds, as an Accept closes one
+/// it landed, so the owner's Changes no longer offers it: Accepted with `landed` as where
+/// it landed, its pending ref dropped and the sub-agent's next change set opening above
+/// it. A set with an owner action in flight, or holding work past `covering`, stays open.
+/// The caller holds [`hold`] on the sub-agent's repository. Inputs: the store, the
+/// sub-agent's place, the commit that holds its work and the commit it landed as.
+fn close_covered(
+    db: &Connection,
+    sub: &Place,
+    merged: &str,
+    landed: &str,
+) -> Result<(), EngineError> {
     let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
         return Ok(());
     };
