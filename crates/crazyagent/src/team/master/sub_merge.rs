@@ -1,8 +1,9 @@
-use super::{Answering, is_worker, land_on_lead, state, worker_set};
+use super::{Answering, is_worker, land_on_lead, state};
 use crate::engine::EngineError;
-use crate::landing::{ChangeState, LeadGit, MergeOutcome};
+use crate::landing::{LeadGit, MergeOutcome};
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use crate::team::bound_text;
+use crate::team::tool::{FINISH_WORK_TOOL, INSPECT_WORK_TOOL};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -30,7 +31,9 @@ pub(super) fn merge_worker(
         return Ok((OWNER_LANDS.to_owned(), true));
     }
     let shown = bound_text(worker, SHOWN_MAX);
-    let not_yours = format!("Not merged: none of your own sub-agents is called {shown}.");
+    let not_yours = format!(
+        "Not merged: none of your own sub-agents is called {shown}. Call {INSPECT_WORK_TOOL}() for their names."
+    );
     let found = match crate::team::events::resolve(connection, project, worker)? {
         Some(id) => Some(id),
         None => crate::team::names::resolve_finished(connection, project, worker)?,
@@ -52,7 +55,9 @@ pub(super) fn merge_worker(
         .map_err(state)?;
     if matches!(status.as_deref(), Some("starting" | "working")) {
         return Ok((
-            format!("Not merged: {label} is still working. Merge it once it reports done."),
+            format!(
+                "Not merged: {label} is still working. Merge it once it calls {FINISH_WORK_TOOL}()."
+            ),
             true,
         ));
     }
@@ -117,14 +122,7 @@ fn land_linked(
             true,
         );
     };
-    let open = sets.into_iter().find(|set| {
-        worker_set(set, &[id])
-            && matches!(
-                set.state,
-                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
-            )
-    });
-    match open {
+    match super::merge::waiting(sets, id) {
         Some(set) => land_on_lead(&db, &set.id, &set.head, &branch),
         None => (
             format!("Nothing to merge: {label} has no work waiting to land on your branch."),
@@ -189,7 +187,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
             false,
         ),
         Ok(MergeOutcome::Conflict { branch, files }) => refused(format!(
-            "Not merged: {label}'s branch {branch} conflicts with your task branch in {}. The merge was undone. Run git merge {branch} in your worktree and resolve it yourself, or ask {label} to merge your task branch first and report done again.",
+            "Not merged: {label}'s branch {branch} conflicts with your task branch in {}. The merge was undone. Run git merge {branch} in your worktree and resolve it yourself, or ask {label} to merge your task branch first and finish its work again.",
             bound_text(&files.join(", "), FILES_SHOWN_MAX),
             branch = bound_text(&branch, crate::landing::BRANCH_BYTES_MAX)
         )),

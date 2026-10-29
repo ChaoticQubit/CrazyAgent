@@ -4047,7 +4047,8 @@ impl TeamRuntime {
         }
         if self.has_lead(agent) {
             return format!(
-                "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch when you report done."
+                "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
+                finish = super::tool::FINISH_WORK_TOOL
             );
         }
         format!(

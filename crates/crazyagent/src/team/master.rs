@@ -28,7 +28,6 @@ const RECORD_PATH_BYTES_MAX: usize = 4096;
 const UNREAD: &str = "The engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const MASTER_LABEL: &str = "Master";
-const OWNER_LANDS: &str = "Not accepted: the owner's setting keeps your workers' change sets for the owner's own Accept in Changes. Tell the master what is ready.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
 
@@ -1288,67 +1287,6 @@ fn worker_set(set: &crate::landing::ChangeSetView, workers: &[i64]) -> bool {
             .id
             .parse::<i64>()
             .is_ok_and(|agent| workers.contains(&agent))
-}
-
-/// Lands one of a lead's own workers' change sets on the lead's branch (N2), unless the
-/// owner's landing setting keeps it for the owner's Accept. Takes the database, what the
-/// answers need, the lead and the change set id. Returns the sentence the lead reads and
-/// whether it is a refusal, or a SQLite failure.
-fn lead_accept(
-    connection: &Connection,
-    answering: &Answering<'_>,
-    lead: i64,
-    change_set: &str,
-) -> Result<(String, bool), EngineError> {
-    let project = &answering.stored.project_id;
-    if super::nesting(connection, project)?.lands == super::ChildLanding::Owner {
-        return Ok((OWNER_LANDS.to_owned(), true));
-    }
-    let not_yours = format!(
-        "Not accepted: no change set of your own workers has that id. Call {}() for them.",
-        tool::INSPECT_WORK_TOOL
-    );
-    let Ok(id) = crate::landing::ChangeSetId::new(change_set) else {
-        return Ok((not_yours, true));
-    };
-    let workers = workers_of(connection, project, lead)?;
-    let found = crate::landing::open(answering.landing).and_then(|db| {
-        let set = crate::landing::change_set(&db, &id)?;
-        Ok((db, set))
-    });
-    let (db, set) = match found {
-        Ok(found) => found,
-        Err(problem) => {
-            return Ok((
-                format!(
-                    "The change set could not be read ({}).",
-                    super::bound_text(&problem.0, 120)
-                ),
-                true,
-            ));
-        }
-    };
-    let view = match set {
-        Some((owner, view)) if &owner == project && worker_set(&view, &workers) => view,
-        _ => return Ok((not_yours, true)),
-    };
-    let worktree: Option<String> = connection
-        .query_row(
-            "SELECT worktree FROM team_worktrees WHERE agent=?1 AND project=?2",
-            params![lead, project.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(state)?;
-    let branch =
-        worktree.and_then(|worktree| crate::agent_git::linked_branch(Path::new(&worktree)));
-    let Some(branch) = branch else {
-        return Ok((
-            "Not accepted: your worktree has no branch of its own to land on. The owner accepts this change set in Changes.".to_owned(),
-            true,
-        ));
-    };
-    Ok(land_on_lead(&db, &id, &view.head, &branch))
 }
 
 /// Lands a worker's change set on its lead's branch as one squash commit through landing's
