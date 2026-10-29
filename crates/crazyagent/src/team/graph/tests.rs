@@ -222,7 +222,11 @@ fn the_team_graph_is_a_tree_of_who_leads_whom() {
         node("team-7").branch.as_deref(),
         Some("crazyagent/charts--axis")
     );
-    assert_eq!(node("team-8").branch, None, "an agent with no worktree has no branch");
+    assert_eq!(
+        node("team-8").branch,
+        None,
+        "an agent with no worktree has no branch"
+    );
 
     let mate = node("teammate-3-12");
     assert_eq!(mate.label, "Teammate %12");
@@ -238,9 +242,17 @@ fn the_team_graph_is_a_tree_of_who_leads_whom() {
     assert_eq!((mate.agent, mate.pane.as_deref()), (None, Some("%12")));
     assert_eq!(mate.questions, None);
 
-    assert_eq!(node("team-4").terminal, None, "a stopped agent has no live terminal");
+    assert_eq!(
+        node("team-4").terminal,
+        None,
+        "a stopped agent has no live terminal"
+    );
     assert_eq!(node("team-5").label, "Sub-agent 5");
-    assert_eq!(node("team-5").terminal, None, "a failed agent has no live terminal");
+    assert_eq!(
+        node("team-5").terminal,
+        None,
+        "a failed agent has no live terminal"
+    );
 
     let edges: Vec<(i64, &str, &str, EdgeState, Option<&str>)> = graph
         .edges
@@ -262,7 +274,13 @@ fn the_team_graph_is_a_tree_of_who_leads_whom() {
             (10, "master", "team-4", EdgeState::Done, Some("Result 10")),
             (11, "master", "team-3", EdgeState::Running, None),
             (12, "master", "master", EdgeState::Sent, None),
-            (13, "master", "team-5", EdgeState::Failed, Some("Problem 13")),
+            (
+                13,
+                "master",
+                "team-5",
+                EdgeState::Failed,
+                Some("Problem 13")
+            ),
             (14, "master", "master", EdgeState::Sent, None),
             (15, "team-3", "team-7", EdgeState::Running, None),
             (16, "team-7", "team-8", EdgeState::Sent, None),
@@ -461,7 +479,12 @@ fn only_agent_nodes_carry_their_queued_question_count() {
         "a node from a build before these fields still reads"
     );
     assert_eq!(
-        (read.presence, read.waiting, read.owner_questions, read.no_worktree),
+        (
+            read.presence,
+            read.waiting,
+            read.owner_questions,
+            read.no_worktree
+        ),
         (None, None, 0, false)
     );
     let mut old = serde_json::to_value(&graph).unwrap();
@@ -544,7 +567,11 @@ fn branches_come_from_each_agent_worktree_record_with_no_git_run() {
         (
             3,
             &linked,
-            directory.path().join(".git").join("worktrees").join("agent-3"),
+            directory
+                .path()
+                .join(".git")
+                .join("worktrees")
+                .join("agent-3"),
         ),
         (7, &own, crate::agent_git::git_dir(&own)),
         (2, &own, crate::agent_git::git_dir(&own)),
@@ -640,7 +667,11 @@ fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_
                 overlap(claim(1, 3, false), claim(2, 6, false), "same file src/1.rs"),
                 overlap(claim(3, 6, false), claim(4, 3, true), "same folder src"),
                 overlap(claim(5, 7, true), claim(6, 8, true), &"x".repeat(400)),
-                overlap(claim(7, 3, false), claim(8, 99, false), "an agent not shown"),
+                overlap(
+                    claim(7, 3, false),
+                    claim(8, 99, false),
+                    "an agent not shown",
+                ),
             ],
             questions_for_owner: vec![
                 question(1, Party::Agent(7)),
@@ -679,7 +710,14 @@ fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_
     let messages: Vec<(&str, &str, u32, Receipt)> = graph
         .messages
         .iter()
-        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.unread, edge.receipt))
+        .map(|edge| {
+            (
+                edge.from.as_str(),
+                edge.to.as_str(),
+                edge.unread,
+                edge.receipt,
+            )
+        })
         .collect();
     assert_eq!(
         messages,
@@ -698,7 +736,10 @@ fn coordination_shows_presence_waits_unread_messages_and_overlaps_between_shown_
         .collect();
     assert_eq!(
         overlaps,
-        [("team-3", "team-6", 2, false), ("team-7", "team-8", 1, true)],
+        [
+            ("team-3", "team-6", 2, false),
+            ("team-7", "team-8", 1, true)
+        ],
         "one red line per pair either way, stale only when every overlap has a stale side"
     );
     assert_eq!(graph.overlaps[0].reason, "same file src/1.rs");

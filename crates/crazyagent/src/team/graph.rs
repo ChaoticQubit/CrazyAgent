@@ -220,13 +220,10 @@ pub fn branches(
         let Some((worktree, git_dir)) = row else {
             continue;
         };
-        let branch = crate::landing::agent_branch(
-            connection,
-            Path::new(&worktree),
-            Path::new(&git_dir),
-        )
-        .ok()
-        .flatten();
+        let branch =
+            crate::landing::agent_branch(connection, Path::new(&worktree), Path::new(&git_dir))
+                .ok()
+                .flatten();
         if let Some(branch) = branch {
             found.insert(agent.id, branch);
         }
@@ -258,7 +255,11 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         .map(|state| (state.agent, state))
         .collect();
     let mut asked: BTreeMap<i64, u16> = BTreeMap::new();
-    for question in facts.coord.iter().flat_map(|coord| &coord.questions_for_owner) {
+    for question in facts
+        .coord
+        .iter()
+        .flat_map(|coord| &coord.questions_for_owner)
+    {
         if let Party::Agent(agent) = question.from {
             let count = asked.entry(agent).or_default();
             *count = count.saturating_add(1);
@@ -521,7 +522,11 @@ fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
             None => {}
         }
     }
-    assert!(merged.iter().all(|edge| edge.reason.len() <= OVERLAP_REASON_BYTES_MAX));
+    assert!(
+        merged
+            .iter()
+            .all(|edge| edge.reason.len() <= OVERLAP_REASON_BYTES_MAX)
+    );
     merged
 }
 
