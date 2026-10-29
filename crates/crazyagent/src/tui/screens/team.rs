@@ -769,9 +769,10 @@ impl Team {
                 theme,
             ),
             styled(
-                match edge.source {
-                    TaskSource::Master => "Handed out by the master.",
-                    TaskSource::Owner => "Handed off by you.",
+                match (&edge.lead, edge.source) {
+                    (Some(lead), _) => format!("Handed out by {}.", label(graph, lead)),
+                    (None, TaskSource::Master) => "Handed out by the master.".to_owned(),
+                    (None, TaskSource::Owner) => "Handed off by you.".to_owned(),
                 },
                 Role::Muted,
                 theme,

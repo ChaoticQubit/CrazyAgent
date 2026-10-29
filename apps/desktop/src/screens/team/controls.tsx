@@ -372,7 +372,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <span aria-hidden="true">Finished agents</span>
       <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
         options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
-      <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
+      <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Agent branches</span>

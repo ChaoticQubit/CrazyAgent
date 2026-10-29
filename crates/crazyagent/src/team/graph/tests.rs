@@ -50,6 +50,7 @@ fn task(id: i64, harness: &str, status: TaskStatus, agent: Option<i64>) -> TeamT
         created_ms: 1,
         started_ms: None,
         finished_ms: None,
+        parent: None,
     }
 }
 
@@ -378,7 +379,18 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
     assert!(!agent(2, AgentRole::Master, "codex", AgentStatus::Idle).finished_with(0));
     assert!(!agent(1, AgentRole::Master, "codex", AgentStatus::Stopped).finished_with(0));
     let idle = agent(6, AgentRole::Sub, "gemini", AgentStatus::Idle);
-    assert!(idle.finished_with(0));
+    assert!(
+        !idle.finished_with(0),
+        "an idle agent that ran a turn waits for work in view"
+    );
+    assert!(
+        TeamAgent {
+            status: AgentStatus::Stopped,
+            ..idle.clone()
+        }
+        .finished_with(0),
+        "it is finished once it stops"
+    );
     assert!(
         !TeamAgent {
             turns: 0,
@@ -394,7 +406,7 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
 
     let mut status = status();
     for agent in &mut status.agents {
-        agent.finished = agent.finished_with(u16::from(agent.id == 6));
+        agent.finished = agent.finished_with(0);
     }
     let finished: Vec<i64> = status
         .agents
@@ -422,6 +434,25 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
             .all(|edge| edge.to != "team-4" && edge.to != "team-5"),
         "{:#?}",
         hidden.edges
+    );
+    status.tasks[0].parent = Some(3);
+    status.tasks[3].parent = Some(99);
+    let led = graph(&status, &none());
+    let edge = |id: i64| {
+        led.edges
+            .iter()
+            .find(|edge| edge.task_id == id)
+            .map(|edge| (edge.from.as_str(), edge.to.as_str()))
+    };
+    assert_eq!(
+        edge(10),
+        Some(("master", "team-3")),
+        "a hidden agent's task goes to the drawn lead that handed it out"
+    );
+    assert_eq!(
+        edge(13),
+        Some(("master", "master")),
+        "with no drawn lead it waits on the master"
     );
     status.show_finished = true;
     assert_eq!(

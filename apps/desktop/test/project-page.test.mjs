@@ -623,6 +623,12 @@ test("the Team panel names each agent, its account and current task, and lists t
   assert.deepEqual(named.agents.map((row) => [row.name, row.harness, row.rename]), [["Ada (@onboarding-fix)", "Codex", { agent: 5, handle: "onboarding-fix" }], ["Sub-agent 6", "Codex", null]]);
   const stopped = research.teamPanel({ agents: [teamAgent(7, "stopped", { label: "Grace (@docs)", persona: "Grace", handle: "docs" })], tasks: [] }, [], label, "all", 0);
   assert.equal(stopped.agents[0].rename, null);
+  const led = research.teamPanel({
+    agents: [teamAgent(8, "idle", { label: "Grace (@lead-b)" }), teamAgent(9, "working", { task: 21, parent: 8 })],
+    tasks: [teamTask(21, "running", { agent: 9, parent: 8 }), teamTask(22, "queued", { parent: 99 }), teamTask(23, "queued", { source: "owner" }), teamTask(24, "queued", { parent: null })],
+  }, accounts, label, "all", 0);
+  assert.deepEqual(led.tasks.map((row) => row.from), ["From Grace (@lead-b)", "From a lead", "From you", "From the master"],
+    "a task a lead handed out names that lead");
   assert.equal(named.tasks[0].to, "Ada (@onboarding-fix)");
 });
 

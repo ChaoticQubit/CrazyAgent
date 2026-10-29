@@ -212,7 +212,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
     key: `task-${item.id}`,
-    from: item.source === "owner" ? "From you" : "From the master",
+    from: taskFrom(item, names),
     to: (item.agent !== null ? names.get(item.agent) : undefined) ?? harnessLabel(item.harness),
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
@@ -222,6 +222,14 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Names who handed a task out, as "From Grace (@lead-b)" for the lead that started it, "From a
+ * lead" for one the status does not list, else "From the master" or "From you" by its source.
+ * Inputs: the task and the agent names by id. Output: the words. */
+export function taskFrom(task: Pick<TeamStatus["tasks"][number], "source" | "parent">, names: ReadonlyMap<number, string>): string {
+  if (typeof task.parent === "number") return `From ${names.get(task.parent) ?? "a lead"}`;
+  return task.source === "owner" ? "From you" : "From the master";
 }
 
 /** One agent in the Finished fold-out: its name, harness, status word, what it last worked on

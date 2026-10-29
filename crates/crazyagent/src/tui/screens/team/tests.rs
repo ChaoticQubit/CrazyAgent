@@ -116,6 +116,7 @@ fn graph() -> Box<TeamGraph> {
                 text: "Fix the login bug\nThe token expires early.".into(),
                 state: EdgeState::Running,
                 reply: None,
+                lead: None,
             },
             GraphEdge {
                 from: "master".into(),
@@ -125,6 +126,7 @@ fn graph() -> Box<TeamGraph> {
                 text: "Write tests".into(),
                 state: EdgeState::Done,
                 reply: Some("Added 3 tests.".into()),
+                lead: None,
             },
         ],
         messages: Vec::new(),
@@ -887,6 +889,7 @@ fn finished_team() -> crate::team::TeamStatus {
             created_ms: 1,
             started_ms: Some(1),
             finished_ms: Some(2),
+            parent: None,
         }],
         messages: Vec::new(),
         plan: Vec::new(),
@@ -1170,6 +1173,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 created_ms: 1,
                 started_ms: Some(1),
                 finished_ms: Some(2),
+                parent: None,
             })
             .collect(),
         messages: Vec::new(),

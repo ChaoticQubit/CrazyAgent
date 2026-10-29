@@ -101,6 +101,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         created_ms: NOW - 15 * MINUTE,
         started_ms: None,
         finished_ms: None,
+        parent: None,
     }
 }
 
@@ -1571,4 +1572,48 @@ fn a_shortened_team_view_says_older_history_is_hidden() {
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
     assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
+}
+
+#[test]
+fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
+    let read = |status: TeamStatus| {
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        frame(&view, 120, 36)
+    };
+    let mut status = team();
+    status.agents[1].label = "Grace (@lead-b)".into();
+    status.agents[2].finished = true;
+    let mut added = task(13, TaskSource::Master, "Add add(a, b)", TaskStatus::Queued);
+    added.parent = Some(2);
+    let mut merged = task(
+        14,
+        TaskSource::Master,
+        "Merge the calc work",
+        TaskStatus::Queued,
+    );
+    merged.parent = Some(99);
+    status.tasks.push(added);
+    status.tasks.push(merged);
+
+    let hidden = read(status.clone());
+    assert!(
+        hidden.iter().all(|row| !row.contains("Sub-agent 4")),
+        "a finished agent leaves the list under Hide:\n{}",
+        hidden.join("\n")
+    );
+    assert!(find(&hidden, "1 finished agent is in Finished").contains("press Esc, then f."));
+    assert!(find(&hidden, "Add add(a, b)").contains("Grace (@lead-b)"));
+    assert!(find(&hidden, "Merge the calc work").contains("A lead"));
+    assert!(find(&hidden, "    Build the charts component").contains("Master"));
+    assert!(find(&hidden, "Write the readings API").contains("You"));
+
+    status.show_finished = true;
+    let shown = read(status);
+    assert!(find(&shown, "Sub-agent 4").contains("Stopped"));
+    assert!(
+        shown.iter().all(|row| !row.contains("in Finished")),
+        "Show keeps finished agents in the list with no pointer"
+    );
 }

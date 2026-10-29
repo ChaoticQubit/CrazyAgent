@@ -205,9 +205,9 @@ Not a WAKE Ada: line";
     assert!(parse_delegations(reply).is_empty());
 }
 
-/// Finished agents (DEC-102) are the stopped and failed sub-agents and the idle ones that ran
-/// a turn since they last started; each says whether the owner's Wake can wake it and, when
-/// not, why. A Wake of a finished agent with a kept worktree is recorded once for the team
+/// Finished agents (DEC-102, narrowed after the DEC-104 trial) are the stopped and failed
+/// sub-agents; an idle one stays in view, one that ran a turn too. Each finished agent says
+/// whether the owner's Wake can wake it and, when not, why. A Wake of a finished agent with a kept worktree is recorded once for the team
 /// runtime to serve; a running agent, one without a worktree or an unknown one is refused.
 #[test]
 fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
@@ -258,12 +258,13 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
         .filter(|a| a.finished)
         .map(|a| a.id)
         .collect();
-    assert_eq!(finished, [stopped, idle, cleaned], "{read:#?}");
+    assert_eq!(finished, [stopped, cleaned], "{read:#?}");
     assert!(
         read.agents
             .iter()
-            .filter(|a| a.id == ready || a.id == busy)
-            .all(|a| !a.finished && !a.wakeable && a.wake_note.is_none())
+            .filter(|a| a.id == ready || a.id == idle || a.id == busy)
+            .all(|a| !a.finished && !a.wakeable && a.wake_note.is_none()),
+        "an idle agent that ran a turn waits for work in view, with no Wake"
     );
     let wake = |read: &TeamStatus, id: i64| {
         let agent = read.agents.iter().find(|a| a.id == id).unwrap();
@@ -274,7 +275,6 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
         wake(&read, stopped),
         (unavailable.is_none(), unavailable.map(str::to_owned))
     );
-    assert_eq!(wake(&read, idle), (false, Some("Already running.".into())));
     assert_eq!(
         wake(&read, cleaned),
         (
