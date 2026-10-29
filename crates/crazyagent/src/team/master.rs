@@ -849,8 +849,9 @@ fn answer(
 
 /// Answers one lead call a sub-agent made (N1, N2): `delegate` starts a worker of its own
 /// within the owner's Sub-agent depth setting, `status`, `message`, `answer`, `wake` and
-/// `changes` reach only the workers it started, and `accept` lands one of their change sets
-/// on its own branch under the owner's landing setting. Takes the engine database, what the
+/// `changes` reach only the workers it started, `accept` lands one of their change sets
+/// on its own branch under the owner's landing setting, and `merge` merges one finished
+/// worker's branch into its task branch (DEC-104 K5b). Takes the engine database, what the
 /// answers need, the lead and the call. Returns the text and whether it is an error, none
 /// for a call a sub-agent cannot make, or a SQLite failure.
 pub(super) fn answer_lead(
@@ -883,12 +884,12 @@ pub(super) fn answer_lead(
         Call::Wake { agent, text } => lead_wake(connection, answering, lead, &agent, &text)?,
         Call::Changes => lead_changes(connection, answering, lead)?,
         Call::Accept { change_set } => lead_accept(connection, answering, lead, &change_set)?,
+        Call::Merge { agent } => sub_merge::merge_worker(connection, answering, lead, &agent)?,
         Call::Escalate { .. }
         | Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }
-        | Call::Recall { .. }
-        | Call::Merge { .. } => return Ok(None),
+        | Call::Recall { .. } => return Ok(None),
     }))
 }
 
@@ -959,6 +960,25 @@ fn lead_delegate(
         return Ok((
             format!(
                 "Not started: the owner's Sub-agent depth setting is {limit}, so {reason}. Do the work yourself or tell the master."
+            ),
+            true,
+        ));
+    }
+    let lead_harness: String = tx
+        .query_row(
+            "SELECT harness FROM team_agents WHERE id=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(state)?;
+    if let Some(kind) = crate::coord::settings::HarnessKind::from_harness(&lead_harness)
+        && crate::coord::settings::mode(&tx, project, kind)?
+            == crate::coord::settings::SubagentMode::Native
+    {
+        return Ok((
+            format!(
+                "Not started: the owner set {} leads to run sub-agents as native teammates. Start them in your own agent team instead.",
+                super::bound_text(&lead_harness, AGENT_SHOWN_MAX)
             ),
             true,
         ));
@@ -1754,3 +1774,4 @@ fn status_text(connection: &Connection, project: &ProjectId) -> Result<String, S
 mod tests;
 
 mod merge;
+mod sub_merge;

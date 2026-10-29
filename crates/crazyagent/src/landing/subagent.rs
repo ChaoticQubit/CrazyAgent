@@ -1,6 +1,6 @@
-use super::flow::{check_places, hold, shared, tip};
+use super::flow::{check_places, hold, now_ms, pending_ref, set_engine_ref, shared, tip};
 use super::git::{failure, object_id};
-use super::{LeadGit, MergeOutcome, clone, store};
+use super::{ChangeState, LeadGit, MergeOutcome, clone, store};
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -294,6 +294,7 @@ pub(super) fn merge(
     )?;
     let shared = shared(&lead_place.repository)?;
     if shared.test(&["merge-base", "--is-ancestor", &sub_tip, &lead_tip])? {
+        close_landed(db, &sub_place, &sub_tip, &lead_tip)?;
         return Ok(MergeOutcome::AlreadyMerged { branch });
     }
     let home = crate::projects_home::owner_home()?;
@@ -408,6 +409,7 @@ pub(super) fn merge(
         }
         let commit = object_id(&head.stdout)?;
         assert_ne!(commit, sub_tip);
+        close_landed(db, &sub_place, &sub_tip, &commit)?;
         return Ok(MergeOutcome::Merged { commit, branch });
     }
     if run(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], ID_BYTES_MAX)?.code != Some(0) {
@@ -429,4 +431,40 @@ pub(super) fn merge(
         .collect();
     assert!(files.len() <= CONFLICTS_SHOWN_MAX);
     Ok(MergeOutcome::Conflict { branch, files })
+}
+
+/// Closes a sub-agent's open change set once its lead merged the work it holds, as an
+/// Accept closes one it landed, so the owner's Changes no longer offers it: Accepted with
+/// the lead's commit as where it landed, its pending ref dropped and the sub-agent's next
+/// change set opening above it. A set with an owner
+/// action in flight, or holding work past the merged tip, stays open. Inputs: the store,
+/// the sub-agent's place, the tip that was merged and the lead's commit holding it.
+/// Output: Ok, closed or left open.
+fn close_landed(
+    db: &Connection,
+    sub: &Place,
+    merged: &str,
+    landed: &str,
+) -> Result<(), EngineError> {
+    let _held = hold(&sub.repository);
+    let Some(mut record) = store::open_for(db, path_text(&sub.worktree)?)? else {
+        return Ok(());
+    };
+    let shared = shared(&record.repository)?;
+    let covered = record.head == merged
+        || (shared.commit_of(&record.head)?.is_some()
+            && shared.test(&["merge-base", "--is-ancestor", &record.head, merged])?);
+    if record.intent.is_some() || !covered {
+        return Ok(());
+    }
+    record.state = ChangeState::Accepted;
+    record.landed = Some(landed.to_owned());
+    record.conflicts.clear();
+    record.waiting = false;
+    record.updated_ms = now_ms()?;
+    store::save(db, &record)?;
+    set_engine_ref(&shared, &record.repository, &pending_ref(&record.id), None)?;
+    store::set_base(db, &record.worktree, &record.head)?;
+    assert!(!record.is_open());
+    Ok(())
 }
