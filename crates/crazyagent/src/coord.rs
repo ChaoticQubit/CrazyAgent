@@ -26,12 +26,17 @@ macro_rules! named {
     };
 }
 
+pub mod adoption;
 mod claims;
+pub mod delivery;
+pub mod hook;
 mod messages;
 mod presence;
+pub mod relay;
 pub mod settings;
 mod store;
 pub mod tool_switches;
+pub mod watch;
 mod work;
 
 pub use claims::{breadth, covers, overlapping, overlaps_of, path_scopes, release_claims};

@@ -11,17 +11,13 @@ use std::collections::BTreeMap;
 const LIVE_MS: i64 = 5 * 60_000;
 const IDLE_MS: i64 = 30 * 60_000;
 const AWAY_MS: i64 = 60 * 60_000;
-/// How long an agent works with no graphify and no context-mode call before it is
-/// flagged (Q18).
-const UNGROUNDED_MS: i64 = 10 * 60_000;
 /// The most agents, owner questions and unread messages one snapshot reads.
 const AGENTS_SHOWN_MAX: usize = 256;
 const QUESTIONS_SHOWN_MAX: usize = 100;
 const UNREAD_SCAN_MAX: usize = 4096;
-/// The tool names that edit files, for the "edits without start_work" flag.
-const EDIT_TOOLS: [&str; 4] = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
-const _: () = assert!(LIVE_MS < IDLE_MS && IDLE_MS < AWAY_MS && UNGROUNDED_MS < IDLE_MS);
+const _: () =
+    assert!(LIVE_MS < IDLE_MS && IDLE_MS < AWAY_MS && super::adoption::UNGROUNDED_MS < IDLE_MS);
 
 /// Records activity of an agent now (Concord presence): its last activity becomes `now`
 /// unless a later one is stored. Takes the database, the agent and the time in ms.
@@ -192,43 +188,17 @@ fn agent_state(
             |found| found.get(0),
         )
         .map_err(state)?;
-    let used: Vec<(String, i64)> = {
-        let mut statement = db
-            .prepare("SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool")
-            .map_err(state)?;
-        let rows = statement
-            .query_map([id], |found| Ok((found.get(0)?, found.get(1)?)))
-            .map_err(state)?;
-        rows.collect::<Result<_, _>>().map_err(state)?
-    };
+    let used = super::adoption::used(db, id)?;
     let count = |name: &(String, i64)| u32::try_from(name.1.max(0)).unwrap_or(u32::MAX);
     let tool_counts: Vec<(String, u32)> = used
         .iter()
         .filter(|tool| counted.iter().any(|pattern| counts(pattern, &tool.0)))
         .map(|tool| (tool.0.clone(), count(tool)))
         .collect();
-    let mut flags = Vec::new();
-    let edited = used
-        .iter()
-        .any(|tool| EDIT_TOOLS.contains(&short(&tool.0)) && tool.1 > 0);
-    let started: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM coord_audit WHERE by_kind='agent' AND by_agent=?1
-             AND action='start')",
-            [id],
-            |found| found.get(0),
-        )
-        .map_err(state)?;
-    if edited && !started {
-        flags.push("edits_without_start_work".to_owned());
-    }
-    let grounded = used.iter().any(|tool| {
-        let name = short(&tool.0);
-        name == "graphify" || name.starts_with("ctx_")
-    });
-    if row.live() && now.saturating_sub(row.created) >= UNGROUNDED_MS && !grounded {
-        flags.push("no_graphify_or_context_mode".to_owned());
-    }
+    let flags = super::adoption::flags(db, id, &row, &used, now)?
+        .into_iter()
+        .map(|flag| flag.name().to_owned())
+        .collect();
     Ok(AgentState {
         agent: id,
         presence,
@@ -241,7 +211,7 @@ fn agent_state(
 }
 
 /// The tool name after an MCP server prefix (`mcp__<server>__<tool>`), else the name.
-fn short(tool: &str) -> &str {
+pub(super) fn short(tool: &str) -> &str {
     match tool.strip_prefix("mcp__") {
         Some(rest) => rest.rsplit("__").next().unwrap_or(rest),
         None => tool,
@@ -250,7 +220,7 @@ fn short(tool: &str) -> &str {
 
 /// Says whether a counted-tools entry covers a tool: the entry equals the name or its
 /// short form, or ends in `*` and starts one of them.
-fn counts(pattern: &str, tool: &str) -> bool {
+pub(super) fn counts(pattern: &str, tool: &str) -> bool {
     let matches = |name: &str| match pattern.strip_suffix('*') {
         Some(stem) => name.starts_with(stem),
         None => name == pattern,

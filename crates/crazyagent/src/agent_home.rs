@@ -615,7 +615,7 @@ fn real_folder(folder: &Path) -> Result<(), AgentHomeError> {
     Ok(())
 }
 
-fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
+pub(crate) fn remove_entry(path: &Path) -> Result<(), AgentHomeError> {
     let removed = match fs::symlink_metadata(path) {
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => return Err(failure("agent_home_unwritable")),
@@ -672,7 +672,7 @@ fn read_text(file: File) -> Result<String, AgentHomeError> {
     Ok(text)
 }
 
-fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeError> {
+pub(crate) fn write_whole(folder: &Path, name: &str, bytes: &[u8]) -> Result<(), AgentHomeError> {
     assert!(!name.contains('/') && !name.starts_with('.'));
     let temporary = folder.join(format!(
         ".{name}.{}.{}",

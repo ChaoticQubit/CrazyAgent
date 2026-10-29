@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod caps;
 pub mod cleanup;
 pub mod direct;
 pub mod events;
@@ -13,6 +14,7 @@ pub mod graph;
 pub mod history;
 pub mod master;
 pub mod names;
+pub mod questions;
 pub mod runtime;
 pub mod tool;
 
@@ -405,13 +407,7 @@ pub const BUDGET_CHOICES: [u64; 7] = [
 pub const TEAMMATES_SHOWN_MAX: usize = 16;
 const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
 
-/// A project's limits on the agents it runs at once: harnesses, the sub-agents the master
-/// starts, and teammates each harness splits off in its own terminal. None is No limit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Caps {
-    pub harnesses: Option<u8>,
-    pub teammates: Option<u8>,
-}
+pub use caps::Caps;
 
 /// A project's token budget: the tokens its agents may use, the tokens they used since the
 /// owner set it or last started the team again, and whether reaching it stopped the team.
@@ -611,6 +607,77 @@ pub enum TeamAction {
         project_id: ProjectId,
         tokens: Option<u64>,
     },
+    AnswerQuestion {
+        project_id: ProjectId,
+        message: i64,
+        text: String,
+    },
+    SpreadAccounts {
+        project_id: ProjectId,
+        on: bool,
+    },
+    CoordSettings {
+        project_id: ProjectId,
+        settings: crate::coord::settings::CoordSettings,
+    },
+    HarnessMode {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        mode: crate::coord::settings::SubagentMode,
+    },
+    HarnessDelivery {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        delivery: crate::coord::settings::Delivery,
+    },
+}
+
+/// One harness kind's coordination choices as the team settings show them: how its sub-agents
+/// start, how messages reach its agents, and whether it has native teammates at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessCoordination {
+    pub harness: crate::coord::settings::HarnessKind,
+    pub mode: crate::coord::settings::SubagentMode,
+    pub delivery: crate::coord::settings::Delivery,
+    pub native: bool,
+}
+
+/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinationView {
+    pub settings: crate::coord::settings::CoordSettings,
+    pub harnesses: Vec<HarnessCoordination>,
+}
+
+/// Reads a project's coordination settings and each harness kind's sub-agent mode and delivery,
+/// with the plan defaults for anything the owner never set.
+/// Takes a connection and the project. Returns the view, one row per harness kind.
+pub fn coordination(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<CoordinationView, EngineError> {
+    use crate::coord::settings;
+    let mut harnesses = Vec::with_capacity(settings::HarnessKind::ALL.len());
+    for harness in settings::HarnessKind::ALL {
+        harnesses.push(HarnessCoordination {
+            harness,
+            mode: settings::mode(connection, project, harness)?,
+            delivery: settings::delivery(connection, project, harness)?,
+            native: settings::native_supported(harness),
+        });
+    }
+    let view = CoordinationView {
+        settings: settings::read(connection, project)?,
+        harnesses,
+    };
+    assert!(
+        view.harnesses
+            .iter()
+            .all(|row| row.native || row.mode != settings::SubagentMode::Native)
+    );
+    Ok(view)
 }
 
 impl TeamAction {
@@ -691,6 +758,12 @@ impl TeamAction {
                 }
                 Ok(())
             }
+            Self::CoordSettings { settings, .. } => settings.validate(),
+            Self::HarnessMode { harness, mode, .. } => (*mode
+                != crate::coord::settings::SubagentMode::Native
+                || crate::coord::settings::native_supported(*harness))
+            .then_some(())
+            .ok_or_else(|| failure("coord_native_unsupported")),
             Self::StopTeammate { agent, pane, .. } => (*agent > 0
                 && crate::terminal::pane_id_valid(pane))
             .then_some(())
@@ -712,13 +785,23 @@ impl TeamAction {
                 .is_none_or(plain_branch_name)
                 .then_some(())
                 .ok_or_else(|| failure("team_master_branch_invalid")),
+            Self::AnswerQuestion { message, text, .. } => {
+                if *message <= 0 {
+                    return Err(failure("coord_question_missing"));
+                }
+                text_valid(text, crate::coord::BODY_BYTES_MAX)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_answer_invalid"))
+            }
             Self::KeepWarm { .. }
+            | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
             | Self::LiveMaster { .. }
+            | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
         }
@@ -757,7 +840,12 @@ impl TeamAction {
             | Self::StopTeammate { project_id, .. }
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
-            | Self::TokenBudget { project_id, .. } => Some(project_id),
+            | Self::TokenBudget { project_id, .. }
+            | Self::AnswerQuestion { project_id, .. }
+            | Self::SpreadAccounts { project_id, .. }
+            | Self::CoordSettings { project_id, .. }
+            | Self::HarnessMode { project_id, .. }
+            | Self::HarnessDelivery { project_id, .. } => Some(project_id),
         }
     }
 }
@@ -1202,6 +1290,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 baseline INTEGER NOT NULL CHECK(baseline >= 0),
                 reached_ms INTEGER
             );
+            CREATE TABLE IF NOT EXISTS team_account_spread (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_teammates (
                 agent INTEGER NOT NULL,
                 project TEXT NOT NULL,
@@ -1234,6 +1326,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
+    questions::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1970,6 +2063,25 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::CoordSettings { settings, .. } => {
+            crate::coord::settings::write(tx, project, settings)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessMode { harness, mode, .. } => {
+            if *mode == crate::coord::settings::SubagentMode::Native
+                && !crate::coord::settings::native_supported(*harness)
+            {
+                return Ok(rejected("coord_native_unsupported"));
+            }
+            crate::coord::settings::set_mode(tx, project, *harness, *mode)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessDelivery {
+            harness, delivery, ..
+        } => {
+            crate::coord::settings::set_delivery(tx, project, *harness, *delivery)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2012,16 +2124,12 @@ pub fn execute(
                 )
                 .optional()
                 .map_err(error)?;
-            match role.as_deref().and_then(AgentRole::parse) {
-                Some(AgentRole::Sub) => {}
-                Some(AgentRole::Master) => return Ok(rejected("team_stop_master")),
-                None => return Ok(rejected("team_agent_not_found")),
+            match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
+                (None, _) => return Ok(rejected("team_agent_not_found")),
+                (_, Some(AgentRole::Master)) => return Ok(rejected("team_stop_master")),
+                _ => {}
             }
-            tx.execute(
-                "INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms) VALUES (?1,?2,?3)",
-                params![agent, project.as_str(), now],
-            )
-            .map_err(error)?;
+            owner_stop(tx, project, *agent, now)?;
             Ok(Outcome::Applied)
         }
         TeamAction::StopTeammate { agent, pane, .. } => {
@@ -2037,6 +2145,21 @@ pub fn execute(
             } else {
                 Outcome::Applied
             })
+        }
+        TeamAction::SpreadAccounts { on, .. } => {
+            if *on {
+                tx.execute(
+                    "INSERT OR IGNORE INTO team_account_spread(project,since_ms) VALUES (?1,?2)",
+                    params![project.as_str(), now],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM team_account_spread WHERE project=?1",
+                    [project.as_str()],
+                )
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
         }
         TeamAction::MaxHarnesses { max, .. } => {
             tx.execute(
@@ -2117,6 +2240,9 @@ pub fn execute(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::AnswerQuestion { message, text, .. } => {
+            questions::answer(tx, project, *message, text, now)
+        }
     }
 }
 
@@ -2474,6 +2600,8 @@ pub struct TeamStatus {
     #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default)]
+    pub coordination: Option<CoordinationView>,
+    #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
     #[serde(default)]
@@ -2486,6 +2614,8 @@ pub struct TeamStatus {
     pub budget_used: Option<u64>,
     #[serde(default)]
     pub budget_reached: bool,
+    #[serde(default)]
+    pub spread_accounts: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
     #[serde(default)]
@@ -2940,36 +3070,6 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
         .map_err(error)
 }
 
-/// Reads the project's limits on running agents, No limit for each the owner left unset.
-/// Takes a connection and the project. Returns the limits, or a SQLite failure.
-pub fn caps(connection: &Connection, project: &ProjectId) -> Result<Caps, EngineError> {
-    let row: Option<(Option<i64>, Option<i64>)> = connection
-        .query_row(
-            "SELECT harnesses,teammates FROM team_caps WHERE project=?1",
-            [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some((harnesses, teammates)) = row else {
-        return Ok(Caps::default());
-    };
-    let cap = |value: Option<i64>| -> Result<Option<u8>, EngineError> {
-        value
-            .map(|value| {
-                u8::try_from(value)
-                    .ok()
-                    .filter(|value| (1..=CAP_CHOICES[8]).contains(value))
-                    .ok_or_else(|| error("team_cap_invalid"))
-            })
-            .transpose()
-    };
-    Ok(Caps {
-        harnesses: cap(harnesses)?,
-        teammates: cap(teammates)?,
-    })
-}
-
 /// The owner's Max teammates per harness for the project, for a lead's instructions and the
 /// engine's own check. Takes a connection and the project. Returns the cap, None for No
 /// limit, or a SQLite failure.
@@ -2977,7 +3077,68 @@ pub fn teammate_cap(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Option<u8>, EngineError> {
-    caps(connection, project).map(|caps| caps.teammates)
+    caps::read(connection, project).map(|caps| caps.teammates)
+}
+
+/// Tells whether the owner turned on Spread harnesses across accounts for the project, so a
+/// new or woken agent prefers a pool account no running agent of the project uses. Takes a
+/// connection and the project. Returns the switch, Off when unset, or a SQLite failure.
+pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_account_spread WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
+/// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
+/// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
+pub(crate) fn owner_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
+             )
+             INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms)
+             SELECT id, ?2, ?3 FROM led",
+            params![agent, project.as_str(), now, DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a
+/// woken harness brings its stopped sub-agents back with it: their held tasks wake them.
+/// Takes a connection, the project and the agent. Returns any SQLite failure.
+pub(crate) fn owner_start(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?3
+             )
+             DELETE FROM team_owner_stops WHERE agent IN (SELECT id FROM led)",
+            params![agent, project.as_str(), DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 /// The start of the usage hour that holds a time, as usage rows record it. Takes ms since
@@ -3445,7 +3606,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
-    let limited = caps(connection, project)?;
+    let limited = caps::read(connection, project)?;
     let spend = budget(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
@@ -3460,6 +3621,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent_branches: agent_branches(connection, project)?,
         master_branch: master_branch_choice(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
+        coordination: Some(coordination(connection, project)?),
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,
@@ -3467,6 +3629,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         token_budget: spend.map(|spend| spend.tokens),
         budget_used: spend.map(|spend| spend.used),
         budget_reached: spend.is_some_and(|spend| spend.reached),
+        spread_accounts: spread_accounts(connection, project)?,
         live_master,
         live_problem,
         min_agents: plan.min_agents,
