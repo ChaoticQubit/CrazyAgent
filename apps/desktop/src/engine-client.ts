@@ -296,6 +296,9 @@ export function errorMessage(error: unknown): string {
     hook_plugin_name_invalid: "The plugin name must be 1 to 32 letters, digits, ., - or _.",
     hooks_already_added: "These hooks were already added here.",
     hook_limit: "There are already 100 hooks here.",
+    tool_unknown: "That tool is not on this server. Check the server again to list its tools.",
+    tool_delete_builtin_only: "Only a CrazyAgent tool can be deleted. Turn an MCP server's tool off instead.",
+    coord_tool_invalid: "This tool's name has characters a switch can't hold. Only letters, digits, _, - and . work.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
     setup_busy: "Setup is already running.",
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
@@ -795,6 +798,40 @@ export type ChildLanding = "lead" | "owner";
 /** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
 export type BranchMode = "named" | "detached";
 
+/** A harness kind the coordination settings are kept for, by its catalog id. */
+export type CoordHarness = "claude-code" | "codex" | "rcli";
+/** How a lead's sub-agents start: app-spawned processes, or the harness's native teammates. */
+export type SubagentMode = "app_spawned" | "native";
+/** How messages reach an agent: native channels with typing as fallback, native only, or typing only. */
+export type Delivery = "auto" | "native_only" | "typing_only";
+/** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
+export type QuestionsTo = "lead" | "me";
+/** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
+export type Overlaps = "warn" | "block" | "off";
+
+/** A project's coordination settings: question routing, claim overlaps, workflow nudges and the
+ * tool names the adoption counts include. */
+export interface CoordSettings {
+  questions_to: QuestionsTo;
+  overlaps: Overlaps;
+  nudges: boolean;
+  counted_tools: string[];
+}
+
+/** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
+export interface HarnessCoordination {
+  harness: CoordHarness;
+  mode: SubagentMode;
+  delivery: Delivery;
+  native: boolean;
+}
+
+/** A project's coordination settings with each harness kind's mode and delivery. */
+export interface CoordinationView {
+  settings: CoordSettings;
+  harnesses: HarnessCoordination[];
+}
+
 export interface SessionSwitch {
   harness: string;
   mode: SwitchMode;
@@ -814,6 +851,7 @@ export interface TeamStatus {
   agent_branches?: BranchMode;
   master_branch?: string | null;
   ask_before_merge?: boolean;
+  coordination?: CoordinationView | null;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -822,6 +860,7 @@ export interface TeamStatus {
   token_budget?: number | null;
   budget_used?: number | null;
   budget_reached?: boolean;
+  spread_accounts?: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
   min_agents: number;
@@ -867,10 +906,48 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped";
+  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped" | "urgent_question" | "question" | "waiting_on_you";
   text: string;
   created_ms: number;
   seen_ms: number | null;
+}
+
+/** How urgent a question to the owner is (Q14b): high pauses the asker, normal makes it wait
+ * for the answer and low lets it carry on with the assumption it stated. */
+export type QuestionSeverity = "high" | "normal" | "low";
+
+/** One open question an agent put to the owner: who asked, how urgent it is, whom the asker
+ * meant it for, the question, what the asker assumes until answered, when it was asked and
+ * the asker's terminal while it runs. */
+export interface OwnerQuestion {
+  id: number;
+  agent: number;
+  label: string;
+  severity: QuestionSeverity;
+  asked_for: "me" | "master" | "lead";
+  text: string;
+  assumption: string | null;
+  created_ms: number;
+  terminal: string | null;
+}
+
+/** One running agent that waits on the owner in its own terminal (Q14): a permission prompt
+ * or a question asked there, which only that terminal can answer. */
+export interface WaitingAgent {
+  agent: number;
+  label: string;
+  waiting: "question" | "permission";
+  since_ms: number;
+  terminal: string | null;
+}
+
+/** One project's Questions inbox: open questions to the owner, most urgent and then oldest
+ * first, how many more are open than it lists, and the agents waiting in their terminal. */
+export interface QuestionsInbox {
+  project_id: string;
+  questions: OwnerQuestion[];
+  more: number;
+  waiting: WaitingAgent[];
 }
 
 export interface TeamEventsView {
@@ -1688,6 +1765,22 @@ export interface McpServerView {
   checks: number;
   secrets: { name: string; saved: boolean }[];
   on_here: boolean | null;
+}
+
+/** A tool's switch: on, off, or deleted (hidden; built-in tools only). */
+export type ToolSwitch = "on" | "off" | "hidden";
+
+/** One tool with its switches: the CrazyAgent built-in tools, or one MCP server's tools.
+ * `global` is the every-project switch; `here` is the project's own switch, null when the
+ * project follows the global one or in global settings. */
+export interface ToolView {
+  server: string;
+  server_id: string | null;
+  tool: string;
+  description: string;
+  builtin: boolean;
+  global: ToolSwitch;
+  here: ToolSwitch | null;
 }
 
 export interface EffectivePlugins {

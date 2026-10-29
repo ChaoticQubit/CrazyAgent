@@ -1,7 +1,7 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessSaved,
+    Adoption, AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessSaved,
 };
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
@@ -122,6 +122,18 @@ impl NativeBridge {
                 .instruction_settings(project)
                 .await
                 .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's workflow adoption, run without the bridge lock. Input: the
+    /// project id. Output: whether nudges are on, the counted tools and each recent agent's
+    /// counts, flags and reminders.
+    pub fn adoption(&self, project_id: String) -> Result<Unlocked<Adoption>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.adoption(project).await.map_err(process_error)
         }))
     }
 
