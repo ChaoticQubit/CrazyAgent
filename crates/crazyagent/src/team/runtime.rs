@@ -817,7 +817,8 @@ impl TeamRuntime {
     /// Runs one step for every project with team work: applies agent reports and the
     /// owner's stop and restart from the agent register, sends pending messages to the
     /// master, delivers finished results, starts or reuses sub-agents within the plan's
-    /// limits, stops idle or cancelled agents and ends team panes no agent owns.
+    /// limits, stops idle or cancelled agents, ends team panes no agent owns, then alerts
+    /// the owner to new questions and terminal waits by severity.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.collect()?;
         self.owner_controls()?;
@@ -832,7 +833,8 @@ impl TeamRuntime {
         self.note_conversations()?;
         self.watch_questions()?;
         self.watch_teammates()?;
-        self.sweep()
+        self.sweep()?;
+        super::questions::tick(&mut self.connection, now_ms())
     }
 
     /// Holds each running lead to the owner's Max teammates per harness in both modes, at most

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Button } from "./button";
 import { Icon, type IconName } from "./icon";
 
 export type Tone = "ok" | "warn" | "danger" | "info" | "neutral";
@@ -63,9 +64,14 @@ export function Banner({ children, action }: { children: ReactNode; action?: Rea
   return <div className="banner" role="status"><span className="row"><Icon name="triangle-alert" size={16} />{children}</span>{action}</div>;
 }
 
-/** The single toast, bottom right, announced politely. Input: the message or nothing. */
-export function Toast({ message }: { message: string }) {
-  return message ? <div className="toast" role="status"><Icon name="circle-check" size={16} />{message}</div> : null;
+/** The single toast, bottom right, announced politely, with Open when it leads somewhere.
+ * Inputs: the message or nothing, and the open action, if any. */
+export function Toast({ message, onOpen }: { message: string; onOpen?: () => void }) {
+  if (!message) return null;
+  return <div className="toast" role="status">
+    <Icon name="circle-check" size={16} />{message}
+    {onOpen && <Button size="small" variant="quiet" onClick={onOpen}>Open</Button>}
+  </div>;
 }
 
 /** An empty state: icon, title, body and one action. Inputs: icon, title, body, action. */

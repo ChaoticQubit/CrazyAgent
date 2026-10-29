@@ -57,6 +57,8 @@ fn main() {
         "desktop_team_events",
         "desktop_team_wake_rule",
         "desktop_team_seen",
+        "desktop_coord_questions",
+        "desktop_coord_answer",
         "desktop_team_attention",
         "desktop_terminal_attach",
         "desktop_terminal_input",
