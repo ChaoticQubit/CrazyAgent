@@ -368,8 +368,13 @@ fn real_dir(path: &Path) -> bool {
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. Takes the transaction, configuration, engine
-/// database path and action. Returns Applied or a plain rejection.
+/// while that folder is still there. A new project's own instruction files
+/// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
+/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// files are kept for the onboarding view; a file or import the engine refuses
+/// stays in place for the owner's later import. Takes the transaction,
+/// configuration, engine database path and action. Returns Applied or a plain
+/// rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -504,6 +509,10 @@ pub(crate) fn execute(
         ],
     )
     .map_err(error)?;
+    let moved = crate::instruction_files::import(&repo).unwrap_or_default();
+    if !moved.is_empty() {
+        crate::instruction_files::record_moved(tx, &project_id, &moved)?;
+    }
     Ok(Outcome::Applied)
 }
 
