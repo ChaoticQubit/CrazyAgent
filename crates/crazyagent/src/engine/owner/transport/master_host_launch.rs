@@ -1020,13 +1020,14 @@ pub(super) fn allocate_master_capture(
 }
 
 /// Writes the master's startup instruction into its private turn directory as the 0600
-/// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
-/// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
-/// file's absolute path, `master_instructions_too_large` past the Claude host's limit
+/// file Claude Code reads through `--append-system-prompt-file` and the rcli host through
+/// `--instructions-file`. Input: the owner root, the turn's runtime reference from
+/// `allocate_master_capture` and the text. Output: the file's absolute path,
+/// `master_instructions_too_large` past the Claude host's limit
 /// before any credential reaches the turn, or a plain refusal when the directory or file
 /// is not the engine's.
 #[cfg(unix)]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
     text: &str,
@@ -1066,7 +1067,7 @@ fn write_master_instructions(
 /// Takes the owner root, turn reference and text, all unused.
 /// Returns `master_capture_unavailable`.
 #[cfg(not(unix))]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     _root: &Root,
     _runtime_ref: &RequestId,
     _text: &str,
