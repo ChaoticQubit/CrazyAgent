@@ -310,16 +310,12 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(masters.len(), 1);
     assert_eq!(masters[0].harness, "codex");
     assert_eq!(masters[0].parent, None);
-    let groups: Vec<_> = graph
-        .nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::HarnessGroup)
-        .collect();
-    assert_eq!(groups.len(), 1);
-    assert_eq!(groups[0].harness, "codex");
-    assert_eq!(groups[0].parent.as_deref(), Some(masters[0].id.as_str()));
-    assert!(groups[0].agents.is_some());
-    assert!(graph.nodes.iter().all(|n| n.kind != NodeKind::Agent));
+    assert_eq!(
+        graph.nodes.len(),
+        1,
+        "a new team is its master alone: {graph:?}"
+    );
+    assert!(graph.nodes.iter().all(|n| !n.kind.agent()));
     assert!(graph.edges.is_empty());
 
     let handed = bridge
@@ -333,14 +329,17 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(graph.edges.len(), 1);
     let edge = &graph.edges[0];
     assert_eq!(edge.from, masters[0].id);
-    assert_eq!(edge.to, groups[0].id);
+    assert_eq!(
+        edge.to, masters[0].id,
+        "a task no agent took yet waits on the master"
+    );
     assert_eq!(edge.source, TaskSource::Owner);
     assert_eq!(edge.state, EdgeState::Sent);
     assert_eq!(edge.text, "Write chores.md");
     assert_eq!(edge.reply, None);
 
     let unknown = bridge
-        .open_terminal(AgentId::team(99)?)
+        .open_terminal(AgentId::team(99)?, None)
         .await
         .err()
         .map(|e| e.code);

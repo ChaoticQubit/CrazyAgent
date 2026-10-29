@@ -33,9 +33,15 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         status: None,
         status_label: None,
         account: None,
-        agents: None,
+        branch: None,
         terminal: None,
         questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        owner_questions: 0,
+        no_worktree: false,
     }
 }
 
@@ -51,7 +57,7 @@ fn agent(
         status: Some(status),
         account: account.map(Into::into),
         terminal: name.map(terminal),
-        ..node(id, NodeKind::Agent, parent, label)
+        ..node(id, NodeKind::Lead, parent, label)
     }
 }
 
@@ -67,49 +73,33 @@ fn graph() -> Box<TeamGraph> {
             Some("team-1"),
         )
     };
-    let claude = GraphNode {
-        agents: Some(2),
-        ..node(
-            "group-claude",
-            NodeKind::HarnessGroup,
-            Some("master"),
-            "Claude Code",
-        )
-    };
-    let codex = GraphNode {
-        agents: Some(1),
-        ..node(
-            "group-codex",
-            NodeKind::HarnessGroup,
-            Some("master"),
-            "Codex",
+    let worker = GraphNode {
+        kind: NodeKind::Sub,
+        ..agent(
+            "agent-3",
+            Some("agent-2"),
+            "claude-2",
+            AgentStatus::Idle,
+            None,
+            None,
         )
     };
     Box::new(TeamGraph {
         project_id: project(),
         nodes: vec![
             master,
-            claude,
             agent(
                 "agent-2",
-                Some("group-claude"),
+                Some("master"),
                 "claude-1",
                 AgentStatus::Working,
                 Some("acct-max"),
                 Some("team-2"),
             ),
-            agent(
-                "agent-3",
-                Some("group-claude"),
-                "claude-2",
-                AgentStatus::Idle,
-                None,
-                None,
-            ),
-            codex,
+            worker,
             agent(
                 "agent-5",
-                Some("group-codex"),
+                Some("master"),
                 "codex-1",
                 AgentStatus::Starting,
                 Some("acct-plus"),
@@ -136,6 +126,8 @@ fn graph() -> Box<TeamGraph> {
                 reply: Some("Added 3 tests.".into()),
             },
         ],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     })
 }
 
@@ -213,24 +205,24 @@ fn input(request: &Request) -> Option<(&str, &[u8])> {
 }
 
 #[test]
-fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
+fn the_tree_draws_who_leads_whom_and_the_tasks_from_a_team_graph() {
     let mut shell = team();
     let rows = render(&mut shell);
     let mut expected = vec![format!("┌─ Team {}┐", "─".repeat(21))];
     for line in [
         "> ▸ Master  Working",
         "  │  ChatGPT Pro - main",
-        "  ├─ Claude Code (2)",
-        "  │  ├─ ▸ claude-1  Working",
+        "  ├─ ▸ claude-1  Working",
         "  │  │  Claude Max - work",
         "  │  └─ ◌ claude-2  Waiting…",
-        "  └─ Codex (1)",
-        "     └─ ▸ codex-1  Starting",
-        "        ChatGPT Plus",
+        "  └─ ▸ codex-1  Starting",
+        "     ChatGPT Plus",
         "",
         "  Tasks",
         "  ▸ claude-1  Fix the login…",
         "  ✓ codex-1  Write tests",
+        "",
+        "",
         "",
         "",
         "",
@@ -248,8 +240,8 @@ fn the_tree_draws_the_master_groups_agents_and_tasks_from_a_team_graph() {
 #[test]
 fn long_names_and_task_text_are_cut_with_an_ellipsis_behind_the_status_glyph() {
     let mut team = graph();
-    team.nodes[2].label = "Ada Lovelace (@onboarding-fix-for-reused-ids)".into();
-    team.nodes[2].status = Some(AgentStatus::Failed);
+    team.nodes[1].label = "Ada Lovelace (@onboarding-fix-for-reused-ids)".into();
+    team.nodes[1].status = Some(AgentStatus::Failed);
     team.edges[0].text = "\n  Fix\tthe   login\u{7} bug\u{1b}[31m now\nsecond line".into();
     let mut shell = fresh(80, 24);
     shell.arrive(Arrival::TeamGraph {
@@ -258,10 +250,10 @@ fn long_names_and_task_text_are_cut_with_an_ellipsis_behind_the_status_glyph() {
     });
     let rows = render(&mut shell);
     let tree: Vec<String> = rows[3..21].iter().map(|row| chars(row, 3, 31)).collect();
-    assert!(tree[3].starts_with("  │  ├─ ✗ Ada Lovelace"), "{}", tree[3]);
-    assert!(tree[3].ends_with('…'), "{}", tree[3]);
-    assert!(tree[11].starts_with("  ▸ Ada Lovelace"), "{}", tree[11]);
-    assert!(tree[11].ends_with('…'), "{}", tree[11]);
+    assert!(tree[2].starts_with("  ├─ ✗ Ada Lovelace"), "{}", tree[2]);
+    assert!(tree[2].ends_with('…'), "{}", tree[2]);
+    assert!(tree[9].starts_with("  ▸ Ada Lovelace"), "{}", tree[9]);
+    assert!(tree[9].ends_with('…'), "{}", tree[9]);
     assert!(
         rows.iter()
             .all(|row| row.chars().all(|character| !character.is_control())),
@@ -446,7 +438,7 @@ fn enter_on_a_task_shows_its_route_status_source_text_and_reply() {
         assert_eq!(chars(&rows[3 + offset], 34, 77), format!("{line:<43}"));
     }
     assert_eq!(
-        chars(&rows[14], 2, 32),
+        chars(&rows[12], 2, 32),
         format!("│{:<28}│", "> ▸ claude-1  Fix the login…")
     );
 
@@ -1185,7 +1177,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
     let mut shell = fresh(160, 40);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
-        result: Ok(Box::new(crate::team::graph(&status))),
+        result: Ok(Box::new(crate::team::graph(&status, &Default::default()))),
     });
     let rows = render(&mut shell);
     let text = rows.join("\n");
@@ -1229,7 +1221,7 @@ fn asked(shell: &mut Shell) -> Vec<ProcessQuery> {
 #[test]
 fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
     let mut team = graph();
-    team.nodes[5].id = "team-5".into();
+    team.nodes[3].id = "team-5".into();
     team.edges[1].to = "team-5".into();
     let mut shell = fresh(100, 30);
     shell.arrive(Arrival::TeamGraph {
@@ -1363,7 +1355,7 @@ fn i_shows_what_the_selected_agent_or_the_master_received_at_its_last_launch() {
 #[test]
 fn the_instructions_box_scrolls_a_long_text_and_a_task_or_terminal_closes_it() {
     let mut team = graph();
-    team.nodes[5].id = "team-5".into();
+    team.nodes[3].id = "team-5".into();
     let mut shell = fresh(100, 30);
     shell.arrive(Arrival::TeamGraph {
         project: project(),

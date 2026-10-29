@@ -49,6 +49,7 @@ fn main() {
         "desktop_team_wake_agent",
         "desktop_team_stop_agent",
         "desktop_team_stop_teammate",
+        "desktop_coord_send",
         "desktop_team_max_harnesses",
         "desktop_team_max_teammates",
         "desktop_team_spread_accounts",

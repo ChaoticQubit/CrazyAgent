@@ -249,10 +249,12 @@ const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;
 
 /** Names the team agent whose instructions a graph card shows. Input: the card's node.
  * Output: null for the master card, which the engine reads as the project's newest master,
- * the agent id for an agent card, or undefined for a card with no agent. */
-export function agentOf(node: Pick<GraphNode, "id" | "kind">): number | null | undefined {
+ * the agent id for a lead, sub-agent or teammate card, or undefined for a card with no agent,
+ * such as a native teammate known only by its pane. */
+export function agentOf(node: Pick<GraphNode, "id" | "kind" | "agent">): number | null | undefined {
   if (node.kind === "master") return null;
-  const id = node.kind === "agent" ? TEAM_AGENT.exec(node.id)?.[1] : undefined;
+  if (typeof node.agent === "number" && Number.isSafeInteger(node.agent) && node.agent > 0) return node.agent;
+  const id = node.kind === "teammate" ? undefined : TEAM_AGENT.exec(node.id)?.[1];
   return id === undefined ? undefined : Number(id);
 }
 

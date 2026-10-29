@@ -18,7 +18,10 @@ pub mod questions;
 pub mod runtime;
 pub mod tool;
 
-pub use graph::{EdgeState, GraphEdge, GraphNode, NodeKind, TeamGraph, graph};
+pub use graph::{
+    EdgeState, GraphEdge, GraphFacts, GraphNode, MessageEdge, NodeKind, OverlapEdge, TeamGraph,
+    graph,
+};
 
 pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
@@ -599,6 +602,11 @@ pub enum TeamAction {
         agent: i64,
         pane: String,
     },
+    MessageAgent {
+        project_id: ProjectId,
+        agent: i64,
+        text: String,
+    },
     MaxHarnesses {
         project_id: ProjectId,
         max: Option<u8>,
@@ -772,6 +780,10 @@ impl TeamAction {
                 && crate::terminal::pane_id_valid(pane))
             .then_some(())
             .ok_or_else(|| failure("team_teammate_not_found")),
+            Self::MessageAgent { agent, text, .. } => (*agent > 0
+                && text_valid(text, crate::coord::BODY_BYTES_MAX))
+            .then_some(())
+            .ok_or_else(|| failure("team_agent_message_invalid")),
             Self::MaxHarnesses { max, .. } | Self::MaxTeammates { max, .. } => max
                 .is_none_or(|max| CAP_CHOICES.contains(&max))
                 .then_some(())
@@ -842,6 +854,7 @@ impl TeamAction {
             | Self::WakeAgent { project_id, .. }
             | Self::StopAgent { project_id, .. }
             | Self::StopTeammate { project_id, .. }
+            | Self::MessageAgent { project_id, .. }
             | Self::MaxHarnesses { project_id, .. }
             | Self::MaxTeammates { project_id, .. }
             | Self::TokenBudget { project_id, .. }
@@ -2138,6 +2151,24 @@ pub fn execute(
             owner_stop(tx, project, *agent, now)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MessageAgent { agent, text, .. } => {
+            let message = crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(*agent),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: text.clone(),
+                idempotency_key: None,
+            };
+            match crate::coord::send(tx, message, now) {
+                Ok(_) => Ok(Outcome::Applied),
+                Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+                Err(problem) => Ok(rejected(&problem.0)),
+            }
+        }
         TeamAction::StopTeammate { agent, pane, .. } => {
             let changed = tx
                 .execute(
@@ -3345,16 +3376,17 @@ pub fn owner_status(
 }
 
 /// The project's team graph as the owner reads it, built from a status `fit_status` fitted
-/// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
-/// the graph, or `team_status_bounds` when even an empty view does not fit.
+/// until the graph fits one owner reply, with the branches and coordination state
+/// `graph::facts` reads now. Takes a connection and the stored setup. Returns the graph, or
+/// `team_status_bounds` when even an empty view does not fit.
 pub fn owner_graph(
     connection: &Connection,
     stored: &StoredSetup,
 ) -> Result<TeamGraph, EngineError> {
-    let status = fit_status(status(connection, stored)?, |status| {
-        encoded_len(&graph(status))
-    })?;
-    Ok(graph(&status))
+    let status = status(connection, stored)?;
+    let facts = graph::facts(connection, &status, now_ms())?;
+    let status = fit_status(status, |status| encoded_len(&graph(status, &facts)))?;
+    Ok(graph(&status, &facts))
 }
 
 /// Fits a status to one owner reply. First every free-form text is cut to one shared cap,

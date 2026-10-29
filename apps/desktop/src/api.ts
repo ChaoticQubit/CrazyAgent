@@ -1068,10 +1068,11 @@ export function answerQuestion(id: string, message: number, text: string): Promi
 }
 
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
- * then live output. Inputs: the terminal name and the channel. Output: the view's serial
- * once attached, which its detach names. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<number>> {
-  return call<number>("desktop_terminal_attach", { agent, output });
+ * then live output. With a pane, the view is that one pane of the terminal's window, such as
+ * a native teammate's. Inputs: the terminal name, the channel and the pane id, if any.
+ * Output: the view's serial once attached, which its detach names. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, pane, output });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and

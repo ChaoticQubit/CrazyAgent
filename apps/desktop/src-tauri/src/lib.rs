@@ -1071,6 +1071,22 @@ async fn desktop_team_stop_agent(
 }
 
 #[tauri::command]
+async fn desktop_coord_send(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    text: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .coord_send(&id, agent, text, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_stop_teammate(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -1225,12 +1241,14 @@ async fn desktop_terminal_attach(
     state: State<'_, NativeState>,
     terminals: State<'_, TerminalState>,
     agent: String,
+    pane: Option<String>,
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     main_window(&window)?;
     let agent = bridge::terminal::agent(&agent)?;
+    let pane = pane.as_deref().map(bridge::terminal::pane).transpose()?;
     let room = terminals.0.room(&agent)?;
-    let session = lock(&state).await?.open_terminal(agent).await?;
+    let session = lock(&state).await?.open_terminal(agent, pane).await?;
     room.attach(session, output)
 }
 
@@ -2928,6 +2946,7 @@ pub fn run() {
             desktop_team_rename,
             desktop_team_wake_agent,
             desktop_team_stop_agent,
+            desktop_coord_send,
             desktop_team_stop_teammate,
             desktop_team_max_harnesses,
             desktop_team_max_teammates,

@@ -132,6 +132,7 @@ fn database() -> (tempfile::TempDir, Connection) {
     let connection = Connection::open(directory.path().join("engine.db")).unwrap();
     initialize(&connection).unwrap();
     crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
     (directory, connection)
 }
 
@@ -1134,10 +1135,10 @@ fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
         ]
     );
     assert_eq!(
-        graph(&team)
+        graph(&team, &Default::default())
             .nodes
             .iter()
-            .filter(|node| node.kind == NodeKind::Agent)
+            .filter(|node| node.kind == NodeKind::Lead)
             .map(|node| node.label.clone())
             .collect::<Vec<_>>(),
         [
@@ -2917,11 +2918,11 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     };
     let expected_edges: Vec<String> = shape.iter().map(|agent| format!("team-{agent}")).collect();
 
-    let live = graph(&status(&connection, &setup).unwrap());
+    let live = graph(&status(&connection, &setup).unwrap(), &Default::default());
     let nodes: Vec<&GraphNode> = live
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind == NodeKind::Lead)
         .collect();
     assert_eq!(nodes.len(), 4, "{live:#?}");
     for (node, id) in nodes.iter().zip(&ids) {
@@ -2931,7 +2932,7 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
             node.terminal,
             Some(crate::terminal::AgentId::team(*id).unwrap())
         );
-        assert_eq!(node.parent.as_deref(), Some("group:codex"));
+        assert_eq!(node.parent.as_deref(), Some("master"));
     }
     assert_eq!(edges(&live), expected_edges);
 
@@ -2956,9 +2957,9 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
         stopped.agents.iter().all(|agent| agent.finished),
         "{stopped:#?}"
     );
-    let hidden = graph(&stopped);
+    let hidden = graph(&stopped, &Default::default());
     assert!(
-        hidden.nodes.iter().all(|node| node.kind != NodeKind::Agent),
+        hidden.nodes.iter().all(|node| !node.kind.agent()),
         "finished sub-agents leave the team tree while Finished agents is Hide, the default (DEC-102): {hidden:#?}"
     );
     let tx = connection.transaction().unwrap();
@@ -2977,11 +2978,11 @@ fn an_owner_shaped_codex_team_reads_the_same_in_the_status_graph_and_register_li
     tx.commit().unwrap();
     let stopped = status(&connection, &setup).unwrap();
     assert!(stopped.show_finished);
-    let stopped = graph(&stopped);
+    let stopped = graph(&stopped, &Default::default());
     let nodes: Vec<&GraphNode> = stopped
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind == NodeKind::Lead)
         .collect();
     assert_eq!(
         nodes.len(),

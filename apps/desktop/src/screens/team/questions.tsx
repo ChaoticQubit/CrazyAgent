@@ -23,13 +23,13 @@ export function urgency(severity: QuestionSeverity): { word: string; tone: Tone;
 }
 
 /** The terminal panel node for the agent behind one inbox row, made from the inbox's own read:
- * its terminal name and label. Input: the row. Output: the node, or null while the agent has
- * no terminal. */
-export function terminalNode(row: Pick<OwnerQuestion | WaitingAgent, "label" | "terminal">): GraphNode | null {
+ * its agent, terminal name and label. Input: the row. Output: the node, or null while the
+ * agent has no terminal. */
+export function terminalNode(row: Pick<OwnerQuestion | WaitingAgent, "agent" | "label" | "terminal">): GraphNode | null {
   if (row.terminal === null) return null;
   return {
-    id: row.terminal, kind: "agent", parent: null, label: row.label, harness: "", status: null,
-    status_label: null, account: null, agents: null, terminal: row.terminal,
+    id: row.terminal, kind: "sub", parent: null, label: row.label, harness: "", status: null,
+    status_label: null, account: null, terminal: row.terminal, agent: row.agent,
   };
 }
 
@@ -78,7 +78,7 @@ export function useQuestions(projectId: string): [InboxState, () => void] {
   return [state, () => setRound((value) => value + 1)];
 }
 
-function OpenTerminal({ row, onOpen }: { row: Pick<OwnerQuestion | WaitingAgent, "label" | "terminal">; onOpen: (node: GraphNode) => void }) {
+function OpenTerminal({ row, onOpen }: { row: Pick<OwnerQuestion | WaitingAgent, "agent" | "label" | "terminal">; onOpen: (node: GraphNode) => void }) {
   const node = terminalNode(row);
   if (!node) return <span className="pj-muted pj-small">Not running</span>;
   return <Button size="small" variant="quiet" icon="square-terminal" onClick={() => onOpen(node)}>Open terminal</Button>;

@@ -159,13 +159,14 @@ export function toHandle(text: string): string | null {
   return kept ? kept : null;
 }
 
-/** The agents `@` completes: the master, then each sub-agent by its role handle from a label
- * such as "Ada (@onboarding-fix)", or by its name made into a handle; a handle shared by two
- * agents is offered once. Input: the team graph's nodes. Output: the mentions. */
+/** The agents `@` completes: the master, then each lead, sub-agent and teammate with its own
+ * agent row by its role handle from a label such as "Ada (@onboarding-fix)", or by its name
+ * made into a handle; a handle shared by two agents is offered once, and a native teammate
+ * known only by its pane is left out. Input: the team graph's nodes. Output: the mentions. */
 export function agentMentions(nodes: readonly GraphNode[]): Mention[] {
   const mentions: Mention[] = [{ handle: MASTER_HANDLE, label: "Master", kind: "agent" }];
   for (const node of nodes) {
-    if (node.kind !== "agent") continue;
+    if (node.kind === "master" || (node.kind === "teammate" && typeof node.agent !== "number")) continue;
     const handle = /\(@([a-z0-9-]+)\)\s*$/.exec(node.label)?.[1] ?? toHandle(node.label);
     if (handle && !mentions.some((mention) => mention.handle === handle)) mentions.push({ handle, label: node.label, kind: "agent" });
   }

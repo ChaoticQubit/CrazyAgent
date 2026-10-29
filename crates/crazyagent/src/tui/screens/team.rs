@@ -26,6 +26,7 @@ use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
+use std::collections::BTreeSet;
 
 mod cleanup;
 mod finished;
@@ -66,9 +67,11 @@ enum Item {
 
 enum Body {
     Master(usize),
-    Group { node: usize, count: usize },
     Agent(usize),
-    Account(String),
+    Detail {
+        account: Option<String>,
+        branch: Option<String>,
+    },
     Heading(&'static str),
     Blank,
     Edge(usize),
@@ -91,6 +94,7 @@ struct LiveSwitch {
 
 struct Attached {
     agent: AgentId,
+    teammate: Option<String>,
     node: String,
     label: String,
     pane: TerminalPane,
@@ -107,9 +111,10 @@ struct Instructions {
     top: usize,
 }
 
-/// A project's live team: a boxed tree of the master, one group per harness
-/// and each agent with its status and account, the tasks the master handed out
-/// under it, and the selected agent's live terminal beside it.
+/// A project's live team: a boxed tree of who leads whom, the master over its
+/// harness leads and each lead over its sub-agents and native teammates, each
+/// with its status, account and branch, the tasks handed out under it, and the
+/// selected agent's live terminal beside it.
 /// Input: TeamGraph reads, terminal frames and keys; while the terminal has
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
@@ -427,22 +432,32 @@ impl Team {
             ));
             return;
         };
+        let teammate = target
+            .pane
+            .clone()
+            .filter(|_| target.kind == NodeKind::Teammate && target.agent.is_none());
+        if teammate
+            .as_deref()
+            .is_some_and(|pane| !crate::terminal::pane_id_valid(pane))
+        {
+            ctx.say(Message::warning(
+                "This teammate's pane can't be opened.",
+                "Press r to read the team again.",
+            ));
+            return;
+        }
         let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
         self.instructions = None;
-        if self
-            .attached
-            .as_ref()
-            .is_some_and(|attached| attached.agent == agent && attached.closed.is_none())
-        {
+        if self.attached.as_ref().is_some_and(|attached| {
+            attached.agent == agent && attached.teammate == teammate && attached.closed.is_none()
+        }) {
             self.focus = Focus::Terminal;
             return;
         }
         self.detach(ctx);
         let (rows, cols) = pane_size(ctx, self.master);
-        ctx.request(Request::TerminalAttach {
-            agent: agent.clone(),
-        });
+        ctx.request(attach_request(&agent, teammate.as_deref()));
         ctx.request(Request::TerminalResize {
             agent: agent.clone(),
             cols,
@@ -450,6 +465,7 @@ impl Team {
         });
         self.attached = Some(Attached {
             agent,
+            teammate,
             node: id,
             label,
             pane: TerminalPane::new(rows, cols),
@@ -485,9 +501,10 @@ impl Team {
         };
         attached.closed = None;
         attached.size = (rows, cols);
-        ctx.request(Request::TerminalAttach {
-            agent: attached.agent.clone(),
-        });
+        ctx.request(attach_request(
+            &attached.agent,
+            attached.teammate.as_deref(),
+        ));
         ctx.request(Request::TerminalResize {
             agent: attached.agent.clone(),
             cols,
@@ -1206,89 +1223,47 @@ impl Screen for Team {
 /// agents whose parent is no group last, then a blank row and the tasks.
 /// Inputs: the graph and glyphs. Output: rows in display order; master,
 /// agent and task rows are selectable.
+/// The rows of the team tree: each master, then the agents it leads depth first, each
+/// with a detail row for its account and branch, then the task rows. An agent whose lead
+/// is not in the graph hangs under the master, or starts the tree when there is none.
+/// Inputs: the graph and glyphs. Output: the rows, at least the blank and heading rows.
 fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
-    let branch = |last: bool| {
-        format!(
-            "{}{} ",
-            if last { glyphs.bottom_left } else { glyphs.tee },
-            glyphs.hline
-        )
-    };
-    let stem = |last: bool| {
-        if last {
-            "   ".to_owned()
-        } else {
-            format!("{}  ", glyphs.vline)
-        }
-    };
-    let of = |kind: NodeKind| -> Vec<usize> {
-        graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| node.kind == kind)
-            .map(|(index, _)| index)
-            .collect()
-    };
-    let groups = of(NodeKind::HarnessGroup);
-    let agents = of(NodeKind::Agent);
-    let under = |agent: usize, group: usize| {
-        graph.nodes[agent].parent.as_deref() == Some(graph.nodes[group].id.as_str())
-    };
-    let orphans: Vec<usize> = agents
-        .iter()
-        .copied()
-        .filter(|agent| !groups.iter().any(|group| under(*agent, *group)))
+    let known: BTreeSet<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    let masters: Vec<usize> = (0..graph.nodes.len())
+        .filter(|index| graph.nodes[*index].kind == NodeKind::Master)
         .collect();
-    let branches = groups.len() + orphans.len();
+    let orphans: Vec<usize> = (0..graph.nodes.len())
+        .filter(|index| {
+            let node = &graph.nodes[*index];
+            node.kind.agent()
+                && node
+                    .parent
+                    .as_deref()
+                    .is_none_or(|parent| !known.contains(parent))
+        })
+        .collect();
     let mut out = Vec::new();
-    for master in of(NodeKind::Master) {
-        out.push(TreeRow {
-            item: Some(Item::Node(master)),
-            prefix: String::new(),
-            body: Body::Master(master),
-        });
-        account_row(&mut out, &graph.nodes[master], stem(branches == 0));
-    }
-    for (position, group) in groups.iter().enumerate() {
-        let last = position + 1 == branches;
-        let members: Vec<usize> = agents
-            .iter()
-            .copied()
-            .filter(|agent| under(*agent, *group))
-            .collect();
-        out.push(TreeRow {
-            item: None,
-            prefix: branch(last),
-            body: Body::Group {
-                node: *group,
-                count: graph.nodes[*group]
-                    .agents
-                    .map_or(members.len(), usize::from),
-            },
-        });
-        for (index, member) in members.iter().enumerate() {
-            let member_last = index + 1 == members.len();
-            out.push(TreeRow {
-                item: Some(Item::Node(*member)),
-                prefix: format!("{}{}", stem(last), branch(member_last)),
-                body: Body::Agent(*member),
-            });
-            account_row(
-                &mut out,
-                &graph.nodes[*member],
-                format!("{}{}", stem(last), stem(member_last)),
-            );
+    let mut seen = BTreeSet::new();
+    for (position, master) in masters.iter().enumerate() {
+        let mut kids = children(graph, *master);
+        if position == 0 {
+            kids.extend(&orphans);
         }
-    }
-    for (index, orphan) in orphans.iter().enumerate() {
-        let last = groups.len() + index + 1 == branches;
+        seen.insert(*master);
         out.push(TreeRow {
-            item: Some(Item::Node(*orphan)),
-            prefix: branch(last),
-            body: Body::Agent(*orphan),
+            item: Some(Item::Node(*master)),
+            prefix: String::new(),
+            body: Body::Master(*master),
         });
-        account_row(&mut out, &graph.nodes[*orphan], stem(last));
+        detail_row(
+            &mut out,
+            &graph.nodes[*master],
+            stem(glyphs, kids.is_empty()),
+        );
+        lead_rows(graph, glyphs, &kids, "", &mut seen, &mut out);
+    }
+    if masters.is_empty() {
+        lead_rows(graph, glyphs, &orphans, "", &mut seen, &mut out);
     }
     out.push(TreeRow {
         item: None,
@@ -1309,16 +1284,87 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
         prefix: String::new(),
         body: Body::Edge(edge),
     }));
+    assert!(seen.len() <= graph.nodes.len());
     assert!(out.len() >= 2);
     out
 }
 
-fn account_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
-    if let Some(account) = &node.account {
+fn children(graph: &TeamGraph, lead: usize) -> Vec<usize> {
+    let id = graph.nodes[lead].id.as_str();
+    (0..graph.nodes.len())
+        .filter(|index| {
+            graph.nodes[*index].kind.agent() && graph.nodes[*index].parent.as_deref() == Some(id)
+        })
+        .collect()
+}
+
+fn branch_glyph(glyphs: &Glyphs, last: bool) -> String {
+    format!(
+        "{}{} ",
+        if last { glyphs.bottom_left } else { glyphs.tee },
+        glyphs.hline
+    )
+}
+
+fn stem(glyphs: &Glyphs, last: bool) -> String {
+    if last {
+        "   ".to_owned()
+    } else {
+        format!("{}  ", glyphs.vline)
+    }
+}
+
+/// Adds the rows of agents that share one lead, each followed by its detail row and the
+/// agents it leads in turn. A node already drawn is skipped, so a cycle in the parent
+/// links cannot loop. Inputs: the graph, glyphs, the agents, the indent their branches
+/// hang from, the drawn nodes and the rows. Output: none; rows are appended.
+fn lead_rows(
+    graph: &TeamGraph,
+    glyphs: &Glyphs,
+    members: &[usize],
+    indent: &str,
+    seen: &mut BTreeSet<usize>,
+    out: &mut Vec<TreeRow>,
+) {
+    let members: Vec<usize> = members
+        .iter()
+        .copied()
+        .filter(|member| !seen.contains(member))
+        .collect();
+    for (index, member) in members.iter().enumerate() {
+        if !seen.insert(*member) {
+            continue;
+        }
+        let last = index + 1 == members.len();
+        out.push(TreeRow {
+            item: Some(Item::Node(*member)),
+            prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
+            body: Body::Agent(*member),
+        });
+        let base = format!("{indent}{}", stem(glyphs, last));
+        let kids: Vec<usize> = children(graph, *member)
+            .into_iter()
+            .filter(|kid| !seen.contains(kid))
+            .collect();
+        let detail = if kids.is_empty() {
+            base.clone()
+        } else {
+            format!("{base}{}", stem(glyphs, false))
+        };
+        detail_row(out, &graph.nodes[*member], detail);
+        lead_rows(graph, glyphs, &kids, &base, seen, out);
+    }
+}
+
+fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
+    if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
             prefix,
-            body: Body::Account(account.clone()),
+            body: Body::Detail {
+                account: node.account.clone(),
+                branch: node.branch.clone(),
+            },
         });
     }
 }
@@ -1347,21 +1393,32 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                         Span::styled(format!("  {word}"), theme.style(kind.role())),
                     ])
                 }
-                None => Line::raw(node.label.clone()),
+                None => match &node.status_label {
+                    Some(word) => Line::from(vec![
+                        Span::raw(node.label.clone()),
+                        Span::styled(format!("  {word}"), theme.muted),
+                    ]),
+                    None => Line::raw(node.label.clone()),
+                },
             }
         }
-        Body::Group { node, count } => Line::from(vec![
-            Span::styled(graph.nodes[*node].label.clone(), theme.heading),
-            Span::styled(format!(" ({count})"), theme.muted),
-        ]),
-        Body::Account(account) => styled(
-            account_name(
-                Some(account),
-                ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
-            ),
-            Role::Muted,
-            theme,
-        ),
+        Body::Detail { account, branch } => {
+            let account = account.as_ref().map(|account| {
+                account_name(
+                    Some(account),
+                    ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
+                )
+            });
+            styled(
+                account
+                    .into_iter()
+                    .chain(branch.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join("  "),
+                Role::Muted,
+                theme,
+            )
+        }
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {
@@ -1386,6 +1443,21 @@ fn dead(code: &str) -> bool {
 /// Says whether a terminal code means the engine connection dropped, so the
 /// terminal opens again once the engine is back.
 /// Input: a Closed or Rejected code. Output: true for connection losses.
+/// The request that opens a terminal view: the agent's own terminal, or one pane of its
+/// window, such as a native teammate's, through `OwnerClient::terminal_attach_pane`.
+/// Takes the terminal name and the pane. Returns the request.
+fn attach_request(agent: &AgentId, teammate: Option<&str>) -> Request {
+    match teammate {
+        Some(pane) => Request::TerminalAttachPane {
+            agent: agent.clone(),
+            pane: pane.to_owned(),
+        },
+        None => Request::TerminalAttach {
+            agent: agent.clone(),
+        },
+    }
+}
+
 fn lost(code: &str) -> bool {
     matches!(
         code,

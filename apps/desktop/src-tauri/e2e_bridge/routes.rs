@@ -878,6 +878,22 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_stop_agent(&id, agent, generation) .await }.await;
             routed(result)
         }
+        "desktop_coord_send" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                agent: i64,
+                text: String,
+                generation: u64,
+            }
+            let Args { id, agent, text, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .coord_send(&id, agent, text, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_stop_teammate" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

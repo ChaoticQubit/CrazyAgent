@@ -61,7 +61,11 @@ impl Terminals {
     /// failure comes back from `poll` as a Closed or Rejected frame.
     pub fn handle(&mut self, request: Request) {
         match request {
-            Request::TerminalAttach { agent } => self.attach(agent),
+            Request::TerminalAttach { agent } => self.attach(agent, None),
+            Request::TerminalAttachPane { agent, pane } => {
+                assert!(crate::terminal::pane_id_valid(&pane));
+                self.attach(agent, Some(pane));
+            }
             Request::TerminalInput { agent, bytes } => {
                 assert!(!bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX);
                 self.command(&agent, Command::Input(bytes));
@@ -116,7 +120,7 @@ impl Terminals {
         self.session.is_some() || !self.notices.is_empty()
     }
 
-    fn attach(&mut self, agent: AgentId) {
+    fn attach(&mut self, agent: AgentId, pane: Option<String>) {
         self.session = None;
         self.threads.retain(|thread| !thread.is_finished());
         if self.threads.len() >= THREADS_MAX {
@@ -130,7 +134,7 @@ impl Terminals {
         let target = agent.clone();
         let spawned = std::thread::Builder::new()
             .name("tui-terminal".into())
-            .spawn(move || stream(socket, timeout, target, receiver, sender));
+            .spawn(move || stream(socket, timeout, target, pane, receiver, sender));
         match spawned {
             Ok(thread) => {
                 self.threads.push(thread);
@@ -180,12 +184,14 @@ impl Terminals {
 
 /// Runs one terminal session on its own thread: attaches, forwards frames
 /// and sends queued keys and sizes until the screens let go, then detaches.
-/// Inputs: engine socket, timeout, agent, command and frame channels.
+/// Inputs: engine socket, timeout, agent, the pane of its window to view
+/// instead of its own, command and frame channels.
 /// Output: none; the thread ends once the session is over.
 fn stream(
     socket: PathBuf,
     timeout: Duration,
     agent: AgentId,
+    pane: Option<String>,
     mut commands: mpsc::Receiver<Command>,
     frames: mpsc::Sender<TerminalFrame>,
 ) {
@@ -205,7 +211,7 @@ fn stream(
             rows,
             output,
             mut control,
-        } = match open(socket, timeout, agent).await {
+        } = match open(socket, timeout, agent, pane).await {
             Ok(session) => session,
             Err(code) => {
                 let _ = frames.send(TerminalFrame::Rejected { code }).await;
@@ -235,13 +241,15 @@ fn stream(
     });
 }
 
-/// Opens an owner connection and attaches to the agent's terminal.
-/// Inputs: engine socket, timeout and agent. Output: the session, or a plain
-/// bounded code such as `terminal_agent_unknown`.
+/// Opens an owner connection and attaches to the agent's terminal, or to one
+/// pane of its window such as a native teammate's.
+/// Inputs: engine socket, timeout, agent and the pane, if any. Output: the
+/// session, or a plain bounded code such as `terminal_agent_unknown`.
 async fn open(
     socket: PathBuf,
     timeout: Duration,
     agent: AgentId,
+    pane: Option<String>,
 ) -> Result<TerminalSession, String> {
     let problem = |error: crate::engine::EngineError| bounded_problem(&error.0);
     let client = Client::new(socket, timeout).map_err(problem)?;
@@ -249,7 +257,11 @@ async fn open(
         .with_owner(OwnerClientKind::Tui)
         .await
         .map_err(problem)?;
-    owner.terminal_attach(agent).await.map_err(problem)
+    match pane {
+        Some(pane) => owner.terminal_attach_pane(agent, pane).await,
+        None => owner.terminal_attach(agent).await,
+    }
+    .map_err(problem)
 }
 
 /// Forwards engine frames to the screens in order until the terminal closes
