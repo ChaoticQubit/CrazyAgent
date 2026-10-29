@@ -266,6 +266,21 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets the most files one new top-level folder, a folder the owner's branch does not
+    /// have, may gain in a project's change set before the engine refuses the set (DEC-107).
+    /// Takes the project id, the limit and the client generation. Returns the actual commit
+    /// receipt.
+    pub async fn team_new_folder_limit(
+        &mut self,
+        id: &str,
+        files: u32,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::NewFolderLimit { project_id, files }, generation)
+            .await
+    }
+
     /// Saves a project's coordination settings: where sub-agent questions go, what overlapping
     /// claims do, workflow nudges and the counted tools. Takes the project id, the settings and
     /// the client generation. Returns the actual commit receipt.

@@ -39,6 +39,7 @@ fn main() {
         "desktop_team_agent_branches",
         "desktop_team_master_branch",
         "desktop_team_ask_before_merge",
+        "desktop_team_new_folder_limit",
         "desktop_team_coordination",
         "desktop_team_harness_mode",
         "desktop_team_harness_delivery",

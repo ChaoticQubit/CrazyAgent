@@ -27,6 +27,10 @@ mod tests;
 /// How long a discarded change set stays restorable before its ref is deleted.
 pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+/// The plain code of a change set refused because one new top-level folder gains more
+/// files than the owner's limit (DEC-107 rule 3).
+pub const NEW_FOLDER_REFUSED: &str = "changes_new_folder_too_large";
+
 /// The most change sets one list reply carries, newest first.
 pub const LIST_MAX: usize = 32;
 /// The most bytes an owner-edited Accept message may hold.
@@ -655,6 +659,36 @@ pub fn record_turn_end(
     }
 }
 
+/// The plain code of a turn-end refusal as an owner window shows it: a refusal carrying
+/// text for the agent (see [`refusal_for_agent`]) shows its code alone. Input: the
+/// refusal. Output: the plain code.
+pub fn refusal_code(problem: &EngineError) -> &str {
+    crate::protocol::plain_code(problem.0.split('\n').next().unwrap_or_default())
+}
+
+/// What a turn-end refusal tells the agent whose work it refused, so the agent can fix its
+/// work and finish again: for a new folder past the owner's limit, the folder, how many
+/// files it adds and the limit (DEC-107 rule 3). Input: the refusal. Output: the text,
+/// None for a refusal the agent cannot fix.
+pub fn refusal_for_agent(problem: &EngineError) -> Option<String> {
+    let mut parts = problem.0.splitn(4, '\n');
+    if parts.next() != Some(NEW_FOLDER_REFUSED) {
+        return None;
+    }
+    let files: u32 = parts.next()?.parse().ok()?;
+    let limit: u32 = parts.next()?.parse().ok()?;
+    let folder = parts
+        .next()
+        .filter(|folder| !folder.is_empty() && !folder.contains('\n'))?;
+    Some(format!(
+        "CrazyAgent did not keep your work for review: the new top-level folder {folder}/ \
+         adds {files} files, more than this project's limit of {limit} files for a folder \
+         the owner's branch does not have. Delete that folder from your work (commit the \
+         removal if you commit yourself), keep only the files the task needs, and finish \
+         again."
+    ))
+}
+
 /// The plain prompt for the task that resolves the conflict markers an update left.
 /// Inputs: the store and the change set. Output: the prompt, or `changes_stale` when
 /// the change set is not waiting for its resolve task.
@@ -762,23 +796,24 @@ pub fn open_change_set(
 
 /// Reads one page of a change set's diff, produced by the engine with no external diff or
 /// text conversion: for an open set, first noticed against the owner's branch, only what
-/// is not yet on that branch when the owner landed part of it outside the app, else the
-/// whole change between its base and head. Inputs: the store, the change set and the page.
-/// Output: the page.
+/// would change on that branch (DEC-107), from the merge base of its tip and the set's
+/// head, or only what is not yet on it when the owner landed part of it outside the app;
+/// else the whole change between its base and head. Inputs: the store, the change set and
+/// the page. Output: the page.
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
-        let remainder = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
+        let shown = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
             eprintln!(
                 "landing_observe_failed cause={}",
                 crate::protocol::plain_code(&error.0)
             );
             None
         });
-        match remainder {
-            Some((tip, tree)) => diff::page(&record.repository, &tip, &tree, page),
+        match shown {
+            Some((from, to)) => diff::page(&record.repository, &from, &to, page),
             None => diff::page(&record.repository, &record.base, &record.head, page),
         }
     }

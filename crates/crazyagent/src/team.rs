@@ -431,6 +431,12 @@ pub const DEPTH_CHOICES: [u8; 3] = [1, 2, 3];
 /// The Sub-agent depth a project has until the owner picks another.
 pub const DEPTH_DEFAULT: u8 = 2;
 const _: () = assert!(DEPTH_DEFAULT >= DEPTH_CHOICES[0] && DEPTH_DEFAULT <= DEPTH_CHOICES[2]);
+/// The choices for the most files one new top-level folder, a folder the owner's branch
+/// does not have, may gain in a change set before the engine refuses the set (DEC-107).
+pub const NEW_FOLDER_FILES_CHOICES: [u32; 4] = [100, 1_000, 10_000, 100_000];
+/// The new-folder limit a project has until the owner picks another.
+pub const NEW_FOLDER_FILES_DEFAULT: u32 = 1_000;
+const _: () = assert!(NEW_FOLDER_FILES_DEFAULT == NEW_FOLDER_FILES_CHOICES[1]);
 
 /// The owner's setting for where a lead's worker lands its change set: `Lead` lets the lead
 /// accept it onto the lead's own branch, `Owner` keeps every change set for the owner's own
@@ -588,6 +594,10 @@ pub enum TeamAction {
     AskBeforeMerge {
         project_id: ProjectId,
         on: bool,
+    },
+    NewFolderLimit {
+        project_id: ProjectId,
+        files: u32,
     },
     WakeAgent {
         project_id: ProjectId,
@@ -796,6 +806,10 @@ impl TeamAction {
                 .contains(depth)
                 .then_some(())
                 .ok_or_else(|| failure("team_depth_invalid")),
+            Self::NewFolderLimit { files, .. } => NEW_FOLDER_FILES_CHOICES
+                .contains(files)
+                .then_some(())
+                .ok_or_else(|| failure("team_new_folder_limit_invalid")),
             Self::MasterBranch { branch, .. } => branch
                 .as_deref()
                 .is_none_or(plain_branch_name)
@@ -840,6 +854,7 @@ impl TeamAction {
             | Self::AgentBranches { project_id, .. }
             | Self::MasterBranch { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
+            | Self::NewFolderLimit { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -1237,6 +1252,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
                 lands TEXT NOT NULL CHECK(lands IN ('lead','owner'))
+            );
+            CREATE TABLE IF NOT EXISTS team_new_folder_limit (
+                project TEXT PRIMARY KEY,
+                files INTEGER NOT NULL CHECK(files > 0)
             );
             CREATE TABLE IF NOT EXISTS team_master_switch (
                 project TEXT PRIMARY KEY,
@@ -2085,6 +2104,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::NewFolderLimit { files, .. } => {
+            tx.execute(
+                "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET files=excluded.files",
+                params![project.as_str(), files],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::CoordSettings { settings, .. } => {
             crate::coord::settings::write(tx, project, settings)?;
             Ok(Outcome::Applied)
@@ -2620,6 +2648,11 @@ pub struct PlanStep {
     pub task: Option<i64>,
 }
 
+/// The new-folder limit a team status read without one shows. Output: the default.
+fn new_folder_default() -> u32 {
+    NEW_FOLDER_FILES_DEFAULT
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
@@ -2645,6 +2678,8 @@ pub struct TeamStatus {
     pub master_branch: Option<String>,
     #[serde(default)]
     pub ask_before_merge: bool,
+    #[serde(default = "new_folder_default")]
+    pub new_folder_files_max: u32,
     #[serde(default)]
     pub coordination: Option<CoordinationView>,
     #[serde(default)]
@@ -3107,6 +3142,25 @@ pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<
         .optional()
         .map_err(error)?;
     Ok(ask.unwrap_or(false))
+}
+
+/// The most files one new top-level folder, a folder the owner's branch does not have,
+/// may gain in one of the project's change sets before the engine refuses the set
+/// (DEC-107); `NEW_FOLDER_FILES_DEFAULT` until the owner picks another. Takes a connection
+/// and the project. Returns the limit.
+pub fn new_folder_files_max(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<u32, EngineError> {
+    let files: Option<u32> = connection
+        .query_row(
+            "SELECT files FROM team_new_folder_limit WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(files.unwrap_or(NEW_FOLDER_FILES_DEFAULT))
 }
 
 /// Tells whether the owner chose to show finished agents (stopped and failed sub-agents)
@@ -3746,6 +3800,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent_branches: agent_branches(connection, project)?,
         master_branch: master_branch_choice(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
+        new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
