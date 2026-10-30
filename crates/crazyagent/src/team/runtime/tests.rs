@@ -2845,6 +2845,13 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
             .iter()
             .all(|line| !line.contains("resume"))
     );
+    host.input(&AgentId::team(master).unwrap(), b"in two\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's turn in the second session ends",
+        |f| live_turns(&f.connection) == (2, false),
+    );
 
     switch_session(&fixture.connection, "s-one");
     fixture.until(&mut team, "the first session's master starts again", |f| {
@@ -2858,18 +2865,18 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     idle_ticks(&mut team);
     assert_eq!(
         live_turns(&fixture.connection),
-        (1, false),
+        (2, false),
         "no briefing turn on resume"
     );
     host.input(&AgentId::team(master).unwrap(), b"again\r")
         .unwrap();
     fixture.until(&mut team, "the resumed conversation's new turn ends", |f| {
-        live_turns(&f.connection) == (2, false)
+        live_turns(&f.connection) == (3, false)
     });
     idle_ticks(&mut team);
     assert_eq!(
         live_turns(&fixture.connection).0,
-        2,
+        3,
         "earlier turns are not read again"
     );
     assert_eq!(
@@ -2899,7 +2906,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
                 && live_agent(&f.connection).is_some()
         },
     );
-    assert_eq!(live_turns(&fixture.connection), (2, false));
+    assert_eq!(live_turns(&fixture.connection), (3, false));
     assert!(!launches(&fixture, master)[3].contains("resume"));
     let seeded = codex_instructions(&fixture, master);
     assert!(
@@ -2920,7 +2927,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
                 && live_agent(&f.connection).is_some()
         },
     );
-    assert_eq!(live_turns(&fixture.connection), (2, false));
+    assert_eq!(live_turns(&fixture.connection), (3, false));
     assert!(!launches(&fixture, master)[4].contains("resume"));
     assert_eq!(masters(&fixture.connection), [master]);
     team.shutdown().unwrap();
@@ -4681,7 +4688,8 @@ fn a_master_harness_switch_carries_the_conversation_over_by_default() {
 }
 
 /// With Start fresh, a session whose master harness changed starts the new harness without
-/// its earlier conversation, and the conversation's note says so.
+/// its earlier conversation, and the conversation's note says so; once the owner's first
+/// line starts the new harness's conversation, the session keeps that one.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
@@ -4729,22 +4737,22 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
             record.starts_with(f.base.join("team/agents").join(format!("agent-{agent}")))
         })
     };
-    fixture.until(
-        &mut team,
-        "the Claude Code master starts fresh and the session keeps its conversation",
-        |f| {
-            let all = masters(&f.connection);
-            noted(f, &note) == 1
-                && all.len() == 2
-                && instructions_file(f, all[1]).is_some()
-                && kept_by(f, all[1])
-        },
-    );
+    fixture.until(&mut team, "the Claude Code master starts fresh", |f| {
+        let all = masters(&f.connection);
+        noted(f, &note) == 1 && all.len() == 2 && instructions_file(f, all[1]).is_some()
+    });
     let second = masters(&fixture.connection)[1];
     let briefed = instructions_file(&fixture, second).unwrap();
     assert!(!briefed.contains("The owner switched"), "{briefed}");
     assert!(!briefed.contains("You: Done."), "{briefed}");
     assert_eq!(typed(&fixture, second), "");
+    host.input(&AgentId::team(second).unwrap(), b"hello again\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's first line to Claude Code keeps the session's conversation",
+        |f| kept_by(f, second),
+    );
     assert_eq!(
         fixture.status().live_switch,
         Some(crate::team::SessionSwitch {
