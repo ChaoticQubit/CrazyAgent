@@ -10,7 +10,7 @@ use super::{
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
@@ -966,8 +966,8 @@ enum Judged {
 }
 
 /// The change set judgements made for a repository, base, head and tip, newest last, so a
-/// Changes read whose owner branch and change set did not move runs only its head commit
-/// check.
+/// Changes read whose owner branch and change sets did not move runs one head check for
+/// the whole repository and no git for each set.
 type JudgedKey = (PathBuf, String, String, String);
 static JUDGED: Mutex<VecDeque<(JudgedKey, Shown)>> = Mutex::new(VecDeque::new());
 
@@ -1028,10 +1028,19 @@ fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError
 }
 
 /// Judges a change set: removed when its head commit is gone, else the judgement made for
-/// the same repository, base, head and tip when one is kept. Inputs: the owner repository,
-/// the change set and the tip. Output: the judgement.
-fn judged(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
-    if owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str()) {
+/// the same repository, base, head and tip when one is kept. A head the repository's one
+/// batch check found is not checked again; any other head is checked on its own. Inputs:
+/// the owner repository, the change set, the tip and the heads found. Output: the
+/// judgement.
+fn judged(
+    owner: &Repo,
+    record: &Record,
+    tip: &str,
+    present: &BTreeSet<String>,
+) -> Result<Judged, EngineError> {
+    if !present.contains(&record.head)
+        && owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str())
+    {
         return Ok(Judged::Removed);
     }
     let key = (
@@ -1090,13 +1099,15 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
 /// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
 /// owner's branch tip, when one is readable, a pending or conflicting set the tip holds
 /// closes as landed outside like an Accept onto that tip, and otherwise its counts become
-/// what is not yet on the tip. Inputs: the store, the change set and the owner repository
-/// with its tip, None while the owner's HEAD is detached, busy or unreadable. Output: the
-/// two trees its diff shows against the tip (DEC-107), None to show its stored change.
+/// what is not yet on the tip. Inputs: the store, the change set, the owner repository
+/// with its tip, None while the owner's HEAD is detached, busy or unreadable, and the
+/// heads its batch check found. Output: the two trees its diff shows against the tip
+/// (DEC-107), None to show its stored change.
 fn observe_one(
     db: &Connection,
     id: &ChangeSetId,
     owner: Option<&(Repo, String)>,
+    present: &BTreeSet<String>,
 ) -> Result<Option<(String, String)>, EngineError> {
     let mut record = settled(db, id)?;
     if !record.is_open() {
@@ -1112,7 +1123,7 @@ fn observe_one(
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict) {
         return Ok(None);
     }
-    match judged(owner, &record, tip)? {
+    match judged(owner, &record, tip, present)? {
         Judged::Removed => {
             close_removed(db, &mut record)?;
             Ok(None)
@@ -1159,21 +1170,21 @@ fn owner_tip(repository: &Path) -> Option<(Repo, String)> {
 }
 
 /// Notices what the owner did outside the app to every open change set of one project, or
-/// of every project, one repository at a time under its hold, reading each owner tip once,
-/// after closing lead workers' sets their lead's closed set left open (DEC-107).
+/// of every project, one repository at a time under its hold, reading each owner tip once
+/// and checking every open head with one git run, after closing lead workers' sets their
+/// lead's closed set left open (DEC-107).
 /// A change set that cannot be judged now is logged by its plain code and left as it was.
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
 pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
     store::initialize(db)?;
-    let mut by_repository: BTreeMap<PathBuf, Vec<ChangeSetId>> = BTreeMap::new();
+    let mut by_repository: BTreeMap<PathBuf, (Vec<ChangeSetId>, Vec<String>)> = BTreeMap::new();
     for record in store::open_of(db, project)? {
-        by_repository
-            .entry(record.repository)
-            .or_default()
-            .push(record.id);
+        let (ids, heads) = by_repository.entry(record.repository).or_default();
+        ids.push(record.id);
+        heads.push(record.head);
     }
-    for (repository, ids) in by_repository {
+    for (repository, (ids, heads)) in by_repository {
         let _held = hold(&repository);
         if let Err(error) = super::subagent::close_orphaned(db, &ids) {
             eprintln!(
@@ -1182,8 +1193,21 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
             );
         }
         let owner = owner_tip(&repository);
+        let present = match &owner {
+            Some((repo, _)) => {
+                let asked: Vec<&str> = heads.iter().map(String::as_str).collect();
+                repo.commits_among(&asked).unwrap_or_else(|error| {
+                    eprintln!(
+                        "landing_observe_failed cause={}",
+                        crate::protocol::plain_code(&error.0)
+                    );
+                    BTreeSet::new()
+                })
+            }
+            None => BTreeSet::new(),
+        };
         for id in ids {
-            if let Err(error) = observe_one(db, &id, owner.as_ref()) {
+            if let Err(error) = observe_one(db, &id, owner.as_ref(), &present) {
                 eprintln!(
                     "landing_observe_failed cause={}",
                     crate::protocol::plain_code(&error.0)
@@ -1204,5 +1228,5 @@ pub(super) fn observe_for_diff(
     let repository = store::load(db, id)?.repository;
     let _held = hold(&repository);
     let owner = owner_tip(&repository);
-    observe_one(db, id, owner.as_ref())
+    observe_one(db, id, owner.as_ref(), &BTreeSet::new())
 }

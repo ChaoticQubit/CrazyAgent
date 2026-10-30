@@ -398,7 +398,14 @@ fn a_bare_repository_layout_an_agent_leaves_is_refused_when_its_turn_is_committe
 /// current branch tip, as the engine adds one for a sibling sub-agent. Input: the case.
 /// Output: the second agent's workspace.
 fn second_agent(case: &Case) -> Workspace {
-    let worktree = case.repo.parent().unwrap().join("agent-2");
+    numbered_agent(case, 2)
+}
+
+/// Adds sub-agent `number` with its own linked detached worktree of the owner repository.
+/// Inputs: the case and the agent number. Output: the agent's workspace.
+fn numbered_agent(case: &Case, number: usize) -> Workspace {
+    let name = format!("agent-{number}");
+    let worktree = case.repo.parent().unwrap().join(&name);
     case.owner(&[
         "worktree",
         "add",
@@ -410,11 +417,11 @@ fn second_agent(case: &Case) -> Workspace {
     Workspace {
         agent: ChangeAgent {
             kind: AgentKind::Sub,
-            id: "agent-2".into(),
-            label: "Agent 2".into(),
+            id: name.clone(),
+            label: format!("Agent {number}"),
         },
         worktree,
-        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        git_dir: case.repo.join(".git/worktrees").join(&name),
         ..case.workspace.clone()
     }
 }
@@ -3648,6 +3655,70 @@ fn a_change_set_whose_commit_is_gone_closes_as_removed_outside() {
     std::fs::remove_file(&object).unwrap();
     case.observe();
     case.removed_outside(&id, &head);
+}
+
+#[test]
+fn a_poll_checks_every_open_head_with_one_git_run_for_the_repository() {
+    let case = Case::new();
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    case.edit("agent-1.txt", "one\n");
+    let mut ids = vec![case.turn(TurnOutcome::Succeeded).unwrap()];
+    let open = |number: usize| {
+        let agent = numbered_agent(&case, number);
+        write(
+            &agent.worktree.join(format!("agent-{number}.txt")),
+            &format!("{number}\n"),
+        );
+        record_turn_end(&case.db, &agent, &turn)
+            .unwrap()
+            .expect("the agent's work opens a change set")
+    };
+    let runs = || {
+        case.observe();
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        case.observe();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    ids.push(open(2));
+    let two = runs();
+    assert!(two >= 1, "the poll checks the heads");
+    ids.extend((3..=6).map(open));
+    assert_eq!(runs(), two, "six open sets cost the git runs two do");
+    let heads: Vec<String> = ids.iter().map(|id| case.view(id).head).collect();
+    assert_eq!(
+        heads
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        6
+    );
+    assert!(
+        ids.iter()
+            .all(|id| case.view(id).state == ChangeState::Pending)
+    );
+
+    let gone = &heads[3];
+    std::fs::remove_file(
+        case.repo
+            .join(".git/objects")
+            .join(&gone[..2])
+            .join(&gone[2..]),
+    )
+    .unwrap();
+    case.observe();
+    for (id, head) in ids.iter().zip(&heads) {
+        let view = case.view(id);
+        let expected = if head == gone {
+            (ChangeState::Discarded, true)
+        } else {
+            (ChangeState::Pending, false)
+        };
+        assert_eq!((view.state, view.outside), expected, "{view:?}");
+    }
 }
 
 #[test]
