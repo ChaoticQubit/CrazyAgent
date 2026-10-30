@@ -7067,7 +7067,10 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
     assert!(host.alive().unwrap().contains(&agent));
     fixture
         .connection
-        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [teammate])
+        .execute(
+            "UPDATE team_agents SET status='idle' WHERE id=?1",
+            [teammate],
+        )
         .unwrap();
     past_limit(&mut team);
     team.reap_idle(&fixture.setup).unwrap();
