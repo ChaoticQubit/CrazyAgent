@@ -83,6 +83,19 @@ test("before the master's terminal opens, and when the engine can't start it, th
   }
 });
 
+test("a live master that waits for this run's sign-in re-checks shows the engine's wait line where the terminal opens", async () => {
+  const wait = "Checking account sign-ins after the restart. The live master starts once an account in this project's pool passes its check.";
+  const status = { kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], live_master: true, live_problem: wait } };
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("waiting", "", ${JSON.stringify(status)})`);
+    return evaluate("Fixture.shown()");
+  });
+  assert.equal(seen.terminal, false);
+  assert.ok(seen.text.includes(wait), seen.text);
+  assert.doesNotMatch(seen.text, /Waiting for the master's terminal\./);
+  assert.ok(seen.buttons.includes("Earlier conversation"), seen.buttons.join(", "));
+});
+
 test("Earlier conversation opens the old engine-driven conversation read-only in the console, and the live master comes back", async () => {
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate('Fixture.mountView("running")');

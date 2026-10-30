@@ -1032,6 +1032,45 @@ fn the_team_status_tells_the_live_master_switch_and_why_it_could_not_start() {
     assert_eq!(switch(&connection), (Some(false), None));
 }
 
+/// DEC-108: turning the live master on clears why it last could not start, whatever the
+/// line; turning it off clears only the line that it waits for this run's sign-in re-checks,
+/// and keeps any other reason it stopped.
+#[test]
+fn set_live_on_clears_problem_and_off_clears_only_wait_line() {
+    let (_directory, connection) = database();
+    let setup = stored("live-wait-line", Vec::new());
+    let project = &setup.project_id;
+    let switch = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        (team.live_master, team.live_problem)
+    };
+    let stopped = "The live master was turned off: it could not start: Sign in to an account in this project's pool to run codex. Start it again from the master view.";
+    master::set_live(&connection, project, true).unwrap();
+    for line in [master::SIGN_INS_CHECKING, stopped] {
+        assert!(master::problem(&connection, project, Some(line)).unwrap());
+        master::set_live(&connection, project, true).unwrap();
+        assert_eq!(
+            switch(&connection),
+            (Some(true), None),
+            "turning it on clears {line:?}"
+        );
+    }
+    assert!(master::problem(&connection, project, Some(master::SIGN_INS_CHECKING)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    assert_eq!(
+        switch(&connection),
+        (Some(false), None),
+        "a sign-in wait line no longer applies once the master is off"
+    );
+    assert!(master::problem(&connection, project, Some(stopped)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    assert_eq!(
+        switch(&connection),
+        (Some(false), Some(stopped.to_owned())),
+        "turning it off keeps why it stopped"
+    );
+}
+
 #[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();
