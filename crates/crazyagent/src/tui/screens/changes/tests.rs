@@ -18,7 +18,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         agent: ChangeAgent {
             kind: AgentKind::Sub,
             id: "agent-1".into(),
-            label: "Agent 1".into(),
+            label: crate::team::AgentRole::Sub.agent_label(1),
         },
         state,
         base: "b".repeat(40),
@@ -87,13 +87,17 @@ fn a_pending_change_set_shows_its_agent_size_and_that_crazyagent_did_not_check_i
     let view = listed(vec![set('1', ChangeState::Pending)]);
     let shown = text(&view);
     for want in [
-        "Sub-agent Agent 1",
+        "Sub-agent 1",
         "Ready to review",
         "1 file, 1 line added, 0 removed",
         "Not checked by CrazyAgent. Any test results in it are reported by the agent.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
+    assert!(
+        !shown.contains("Sub-agent Sub-agent"),
+        "the engine's label is shown as given: {shown}"
+    );
     let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
     assert!(help.contains(&("a", "Accept")) && help.contains(&("d", "Discard")));
     assert!(!help.iter().any(|(key, _)| *key == "u" || *key == "r"));
@@ -144,7 +148,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
     );
 
     assert!(view.key(key(KeyCode::Char('a')), NOW));
-    assert!(text(&view).contains("Accept the changes of Sub-agent Agent 1?"));
+    assert!(text(&view).contains("Accept the changes of Sub-agent 1?"));
     assert!(view.key(key(KeyCode::Enter), NOW));
     let landed = AcceptOutcome::Landed {
         commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
@@ -480,7 +484,8 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
 /// Inputs: the digit and the state. Output: the change set.
 fn named(digit: char, state: ChangeState) -> ChangeSetView {
     let mut set = set(digit, state);
-    set.agent.label = format!("Agent {digit}");
+    set.agent.label =
+        crate::team::AgentRole::Sub.agent_label(i64::from(digit.to_digit(10).unwrap()));
     set
 }
 
@@ -503,7 +508,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         named('3', ChangeState::Pending),
     ]);
     assert!(view.key(key(KeyCode::Down), NOW));
-    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    assert!(text(&view).contains("> Sub-agent 2"));
     reordered(
         &mut view,
         vec![
@@ -513,7 +518,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         ],
     );
     assert!(
-        text(&view).contains("> Sub-agent Agent 2"),
+        text(&view).contains("> Sub-agent 2"),
         "the highlight follows the chosen set, not its old place"
     );
     assert!(view.key(key(KeyCode::Char('d')), NOW));
@@ -538,7 +543,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
             named('1', ChangeState::Pending),
         ],
     );
-    assert!(text(&view).contains("> Sub-agent Agent 3"));
+    assert!(text(&view).contains("> Sub-agent 3"));
     assert!(view.key(key(KeyCode::Char('u')), NOW));
     assert_eq!(
         view.next_query(NOW),
@@ -559,7 +564,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         ],
     );
     assert!(
-        text(&view).contains("> Sub-agent Agent 2"),
+        text(&view).contains("> Sub-agent 2"),
         "an open question keeps the highlight and details on its own set"
     );
     assert!(view.key(key(KeyCode::Char('y')), NOW));
@@ -686,7 +691,7 @@ fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its
         named('3', ChangeState::Conflict),
     ]);
     assert!(view.key(key(KeyCode::Down), NOW));
-    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    assert!(text(&view).contains("> Sub-agent 2"));
     reordered(
         &mut view,
         vec![
@@ -724,7 +729,7 @@ fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its
 
     assert!(view.key(key(KeyCode::Down), NOW));
     assert!(
-        text(&view).contains("> Sub-agent Agent 3"),
+        text(&view).contains("> Sub-agent 3"),
         "the first move picks the set now in that place"
     );
     assert!(view.key(key(KeyCode::Char('u')), NOW));
@@ -744,7 +749,7 @@ fn accept_and_discard_name_the_set_they_ask_about() {
     assert!(view.key(key(KeyCode::Char('d')), NOW));
     let shown = text(&view);
     for want in [
-        "Discard the changes of Sub-agent Agent 2?",
+        "Discard the changes of Sub-agent 2?",
         "1 file, 1 line added, 0 removed, at 2222222.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
@@ -753,7 +758,7 @@ fn accept_and_discard_name_the_set_they_ask_about() {
     assert!(view.key(key(KeyCode::Char('a')), NOW));
     let shown = text(&view);
     for want in [
-        "Accept the changes of Sub-agent Agent 2?",
+        "Accept the changes of Sub-agent 2?",
         "1 file, 1 line added, 0 removed, at 2222222.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
@@ -863,5 +868,57 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
             "Only the first {FILES_MAX} changed files are listed."
         )),
         "{shown}"
+    );
+}
+
+#[test]
+fn an_action_notice_shows_only_while_the_set_it_was_about_is_chosen() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Accepted),
+    ]);
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    let until = u64::try_from(NOW + 7 * DAY).unwrap();
+    let query = reply(
+        &mut view,
+        Ok(ChangesView::Discarded {
+            restorable_until_ms: until,
+        }),
+    );
+    assert_eq!(
+        query,
+        ChangesQuery::Discard {
+            id: id('1'),
+            expected_head: "1".repeat(40)
+        }
+    );
+    let discarded = "Discarded. You can restore these changes for 7 days.";
+    assert!(text(&view).contains(discarded), "{}", text(&view));
+    let mut gone = named('1', ChangeState::Discarded);
+    gone.restorable_until_ms = Some(until);
+    reply(
+        &mut view,
+        Ok(ChangesView::List(vec![
+            gone.clone(),
+            named('2', ChangeState::Accepted),
+        ])),
+    );
+    assert!(text(&view).contains(discarded), "{}", text(&view));
+
+    assert!(view.key(key(KeyCode::Down), NOW));
+    let shown = text(&view);
+    assert!(shown.contains("> Sub-agent 2"), "{shown}");
+    assert!(
+        !shown.contains(discarded),
+        "the accepted set never shows the other set's discard\n{shown}"
+    );
+    assert!(shown.contains("Accepted"), "{shown}");
+
+    assert!(view.key(key(KeyCode::Up), NOW));
+    assert!(
+        text(&view).contains(discarded),
+        "the notice comes back with its own set\n{}",
+        text(&view)
     );
 }
