@@ -891,3 +891,92 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// Starts a private host with one agent in a fresh 0700 folder, then ends its server from
+/// outside with kill-server, as another tmux client or a crash would. Takes the temp home
+/// and the agent. Returns the host, still holding the control it read with, and its server.
+#[cfg(target_os = "macos")]
+fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(agent, &command).unwrap();
+    assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
+    assert!(
+        host.open_control().is_some(),
+        "the host holds a reading control"
+    );
+    let ended = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ended.success(), "tmux ended the server");
+    (host, server)
+}
+
+/// A server ended from outside leaves its socket file behind. Once its control saw it end
+/// and nothing listens, the host has no live agents, forgets the socket and starts no server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
+    let home = tempfile::tempdir().unwrap();
+    let agent = AgentId::team(1).unwrap();
+    let (host, _server) = ended_from_outside(home.path(), &agent);
+    let until = Instant::now() + REPLY_TIME;
+    while host.open_control().is_some()
+        || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
+    {
+        assert!(
+            Instant::now() < until,
+            "the server ended and its control saw it"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(host.running(), "tmux leaves its socket file behind");
+    assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+    assert!(
+        !host.running(),
+        "the ended server's socket file is forgotten"
+    );
+    assert!(
+        crate::spawn_gate::connect_unix_std(host.socket()).is_err(),
+        "no server was started again"
+    );
+}
+
+/// Asks for the live agents at once after an outside kill-server, while the held control may
+/// still read, the server may still be ending, or both are gone. Every round has no live
+/// agents, never a closed or unavailable terminal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_ended_from_outside_has_no_live_agents_while_its_control_still_reads() {
+    const ROUNDS: usize = 20;
+    let mut answers = Vec::new();
+    for _ in 0..ROUNDS {
+        let home = tempfile::tempdir().unwrap();
+        let agent = AgentId::team(1).unwrap();
+        let (host, _server) = ended_from_outside(home.path(), &agent);
+        answers.push(host.alive().map_err(|error| error.0));
+    }
+    assert_eq!(answers, vec![Ok(Vec::new()); ROUNDS]);
+}

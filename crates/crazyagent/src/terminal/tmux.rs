@@ -200,6 +200,41 @@ impl Tmux {
         }
     }
 
+    /// Gives the control connection the host already holds while it still reads.
+    /// Output: that control, or none when there is none or it closed.
+    fn open_control(&self) -> Option<Arc<Control>> {
+        let slot = self.control.lock().ok()?;
+        slot.as_ref().filter(|control| !control.closed()).cloned()
+    }
+
+    /// Lists the live agents when no open control holds the server, or one closed under
+    /// the query, as after kill-server or a crash, so the server may be ended, still
+    /// ending or alive. A server that no longer listens is forgotten and has none; a
+    /// listening one is asked through a fresh control, again every 10 ms while an ending
+    /// server drops it, for at most `REPLY_TIME`. Output: the names in order, or the
+    /// refusal still given at the deadline.
+    fn alive_reconnecting(&self) -> Result<Vec<AgentId>, HostError> {
+        let deadline = Instant::now() + REPLY_TIME;
+        loop {
+            if !self.running() {
+                return Ok(Vec::new());
+            }
+            if crate::spawn_gate::connect_unix_std(&self.socket()).is_err() {
+                self.forget_server()?;
+                return Ok(Vec::new());
+            }
+            match self.control().and_then(|control| windows(&control)) {
+                Err(error)
+                    if matches!(error.0.as_str(), "terminal_closed" | "terminal_unavailable")
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                listed => return listed,
+            }
+        }
+    }
+
     fn live_control(&self) -> Result<Arc<Control>, HostError> {
         if self.executable.is_none() {
             return Err(failure("terminal_unavailable"));
@@ -1485,8 +1520,13 @@ impl Host for Tmux {
         if !self.running() {
             return Ok(Vec::new());
         }
-        let control = self.control()?;
-        windows(&control)
+        if let Some(control) = self.open_control() {
+            match windows(&control) {
+                Err(error) if error.0 == "terminal_closed" => {}
+                listed => return listed,
+            }
+        }
+        self.alive_reconnecting()
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
