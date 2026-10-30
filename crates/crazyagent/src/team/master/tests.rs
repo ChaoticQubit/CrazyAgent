@@ -2054,17 +2054,18 @@ fn the_master_merges_a_finished_harness_locally_unless_the_owner_asks_first() {
         )
     );
     assert_eq!(alerts(&fixture).len(), 1, "a merge raises no owner alert");
-    assert_ne!(
+    assert_eq!(
         set_state(&fixture, &id),
-        crate::landing::ChangeState::Pending
+        crate::landing::ChangeState::Accepted
     );
-    let (again, refused) = merge(&mut fixture);
-    assert!(
-        refused
-            && again.starts_with(&format!(
-                "Nothing to merge: {label} has no change set waiting."
-            )),
-        "{again}"
+    assert_eq!(
+        merge(&mut fixture),
+        (
+            format!(
+                "Nothing to merge: {label} has no change set waiting. Its work becomes one when its turn ends; call inspect_work() to see what waits."
+            ),
+            true
+        )
     );
     assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), tip);
 }
@@ -2129,12 +2130,14 @@ fn the_master_merge_refuses_what_it_must_not_land() {
     std::fs::write(repo.join("README"), "one\nowner\n").unwrap();
     git_at(&fixture, &repo, &["commit", "-q", "-am", "Owner's README"]);
     let owner_tip = git_at(&fixture, &repo, &["rev-parse", "main"]);
-    let (said, refused) = merge(&mut fixture, "@docs-writer");
-    assert!(
-        refused
-            && said.starts_with(&format!("Not merged: {label}'s work conflicts with "))
-            && said.contains("README"),
-        "{said}"
+    assert_eq!(
+        merge(&mut fixture, "@docs-writer"),
+        (
+            format!(
+                "Not merged: {label}'s work conflicts with main in README. Ask {label} to merge main into its branch crazyagent/docs, resolve it and report done again."
+            ),
+            true
+        )
     );
     assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), owner_tip);
     assert_eq!(

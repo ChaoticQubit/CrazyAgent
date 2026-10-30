@@ -838,7 +838,7 @@ fn a_renumbered_master_lease_requalifies_on_the_first_send() {
         }
     }
     let mut case = case.restart();
-    assert_ne!(case.lease_state(), LeaseState::Ready);
+    assert_eq!(case.lease_state(), LeaseState::RecoveryRequired);
     assert_eq!(case.submit("send-after-renumber"), OwnerResult::Applied);
     assert_eq!(case.lease_state(), LeaseState::Ready);
     let lease = leases(&case.db, &case.session).remove(0);

@@ -2477,10 +2477,9 @@ fn an_agent_head_naming_another_branch_is_refused_and_its_own_branch_takes_the_t
     std::fs::remove_file(case.workspace.worktree.join("other.txt")).unwrap();
     case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
     case.edit("lease.txt", "lease\n");
-    assert!(
-        record_turn_end(&case.db, &case.workspace, &turn)
-            .unwrap()
-            .is_some(),
+    assert_eq!(
+        record_turn_end(&case.db, &case.workspace, &turn).unwrap(),
+        Some(id.clone()),
         "a sub-agent may commit on its own branch (B1)"
     );
     let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"]);

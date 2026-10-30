@@ -797,7 +797,10 @@ mod tests {
             }
         );
         let unknown = ChangeSetId::new("0".repeat(32)).unwrap();
-        assert!(controller.change_branches(unknown).await.is_err());
+        assert_eq!(
+            controller.change_branches(unknown).await.unwrap_err().0,
+            "changes_not_found"
+        );
         drop(controller);
         tokio::time::timeout(Duration::from_secs(10), service.shutdown())
             .await
