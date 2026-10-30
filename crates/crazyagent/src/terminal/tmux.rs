@@ -744,8 +744,10 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// Builds the new-window line that starts a native-mode lead in its own server. The server
 /// already runs inside the lead's profile, so the command's leading `sandbox-exec -f
 /// <profile>` must name that same profile and is dropped, and the environment comes from the
-/// server (see `Tmux::lead_environment`). Takes the agent, the command and the server's
-/// profile. Returns the line, or `terminal_command_invalid` for any other command.
+/// server (see `Tmux::lead_environment`). The lead's window becomes the session's current
+/// one, since tmux puts a split the lead's app runs without a target into the current
+/// window, which would otherwise be the holder. Takes the agent, the command and the
+/// server's profile. Returns the line, or `terminal_command_invalid` for any other command.
 fn confined_line(
     agent: &AgentId,
     command: &InteractiveCommand,
@@ -769,7 +771,7 @@ fn confined_line(
         return Err(invalid());
     }
     let mut line = format!(
-        "new-window -d -P -F '{PLACED}{FORMAT_END}' -n {agent} -c {} -t {SESSION}: -- {PANE_PROGRAM}",
+        "new-window -P -F '{PLACED}{FORMAT_END}' -n {agent} -c {} -t {SESSION}: -- {PANE_PROGRAM}",
         quote(cwd)
     );
     for arg in program {

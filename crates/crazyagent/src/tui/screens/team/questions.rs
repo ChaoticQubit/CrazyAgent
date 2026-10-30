@@ -16,6 +16,8 @@ use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use ratatui::text::Line;
 
+type QuestionLines = (String, Vec<Line<'static>>, Option<(usize, usize)>);
+
 /// The most lines one question's text takes in the box when it is not the picked one.
 pub(super) const QUESTION_LINES_MAX: usize = 3;
 
@@ -341,12 +343,7 @@ impl Questions {
     /// one "and N more" line. Inputs: the line width, the box's inner height and the
     /// context. Output: the title, at most `room` lines (one when `room` is zero) and the
     /// answer's cursor as line and column, or None while closed.
-    pub(super) fn lines(
-        &self,
-        limit: usize,
-        room: usize,
-        ctx: &Ctx,
-    ) -> Option<(String, Vec<Line<'static>>, Option<(usize, usize)>)> {
+    pub(super) fn lines(&self, limit: usize, room: usize, ctx: &Ctx) -> Option<QuestionLines> {
         if !self.open {
             return None;
         }

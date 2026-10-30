@@ -553,6 +553,46 @@ fn layout_is_created_once_and_each_git_exclude_line_is_written_exactly_once() {
 }
 
 #[test]
+fn every_layout_preparation_keeps_an_existing_instructions_file_and_refuses_a_link_there() {
+    let case = case();
+    let repo = case.home.join("instructed");
+    fs::create_dir(&repo).unwrap();
+    let root = prepare_layout(&repo).unwrap();
+    let instructions = root.join("instructions.md");
+    assert_eq!(
+        fs::read_to_string(&instructions).unwrap(),
+        "",
+        "a new project gets an empty instructions file"
+    );
+    assert_eq!(
+        fs::metadata(&instructions).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    fs::write(&instructions, "OWNER-PROJECT-RULE-85\n").unwrap();
+    for _ in 0..2 {
+        assert_eq!(prepare_layout(&repo).unwrap(), root);
+        assert_eq!(
+            fs::read_to_string(&instructions).unwrap(),
+            "OWNER-PROJECT-RULE-85\n"
+        );
+    }
+    let linked = case.home.join("linked-instructions");
+    fs::create_dir_all(linked.join(CRAZYAGENT_DIRECTORY)).unwrap();
+    let target = case.root.join("elsewhere.md");
+    fs::write(&target, "untouched").unwrap();
+    symlink(
+        &target,
+        linked.join(CRAZYAGENT_DIRECTORY).join("instructions.md"),
+    )
+    .unwrap();
+    assert_eq!(
+        prepare_layout(&linked).unwrap_err().0,
+        "crazyagent_folder_invalid"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+}
+
+#[test]
 fn folder_size_adds_file_bytes_without_following_links() {
     let case = case();
     let folder = case.sources.join("sized");

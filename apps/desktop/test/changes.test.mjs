@@ -207,3 +207,15 @@ test("a change set that moved on while open goes back to review: Accept and Disc
   assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "discard", set: asked \}\)\}/);
   assert.match(source, /const asked = \{ \.\.\.set, head \};/);
 });
+
+test("a change set closed outside the app says how, keeps its note and offers no action", () => {
+  const landed = set({ state: "accepted", outside: true });
+  const removed = set({ state: "discarded", outside: true, restorable_until_ms: null });
+  assert.deepEqual(model.stateBadge(landed), { word: "Landed outside the app", tone: "ok" });
+  assert.deepEqual(model.stateBadge(removed), { word: "Removed outside the app", tone: "neutral" });
+  assert.equal(model.restoreNote(landed, NOW), "Your branch already has these changes. They were landed outside the app.");
+  assert.equal(model.restoreNote(removed, NOW), "The agent's copy of these changes was removed outside the app, so they cannot be restored.");
+  const none = { accept: false, discard: false, update: false, restore: false };
+  assert.deepEqual(model.actions(landed, NOW), none);
+  assert.deepEqual(model.actions(removed, NOW), none);
+});

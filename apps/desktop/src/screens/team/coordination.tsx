@@ -16,7 +16,7 @@ export const COORD_HARNESSES: CoordHarness[] = ["claude-code", "codex", "rcli"];
 export const COORD_DEFAULTS: CoordSettings = {
   questions_to: "lead",
   overlaps: "warn",
-  nudges: true,
+  nudges: false,
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
 };
 
@@ -110,7 +110,7 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     <div className="pj-row">
       <span aria-hidden="true">Workflow nudges</span>
       <Segmented label="Workflow nudges" value={view.settings.nudges ? "on" : "off"} onValue={(value) => void save({ nudges: value === "on" }, "workflow nudges")}
-        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools.</span>
     </div>
     <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>

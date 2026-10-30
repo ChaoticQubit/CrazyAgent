@@ -782,3 +782,198 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
         .unwrap();
     assert_eq!(tasks, 0);
 }
+
+/// Inserts a working app-spawned sub-agent with team tools, started by `lead` or by the
+/// master when none. Takes the fixture, its role and the lead. Returns its id.
+fn worker(fixture: &Fixture, role: &str, lead: Option<i64>) -> i64 {
+    let agent = named_sub(fixture, role, "working");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2, tools=1, mode='app_spawned', stopped_ms=NULL WHERE id=?1",
+            params![agent, lead],
+        )
+        .unwrap();
+    agent
+}
+
+/// Stores the fixture's setup as the engine does, for the team changes that read it.
+fn store_setup(fixture: &Fixture) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+}
+
+/// A lead starts a worker only while its depth under the master is below the owner's
+/// Sub-agent depth setting (N1): under each setting 1, 2 and 3 a lead at that depth or
+/// deeper is refused in plain words naming the setting, a shallower one passes that check,
+/// and no refused start leaves a task queued.
+#[test]
+fn delegate_refuses_past_sub_agent_depth() {
+    let mut fixture = Fixture::new();
+    store_setup(&fixture);
+    let first = worker(&fixture, "notes-lead", None);
+    let second = worker(&fixture, "notes-worker", Some(first));
+    let third = worker(&fixture, "notes-helper", Some(second));
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let project = ProjectId::new(PROJECT).unwrap();
+    for limit in crate::team::DEPTH_CHOICES {
+        let tx = fixture.connection.transaction().unwrap();
+        let outcome = crate::team::execute(
+            &tx,
+            &access,
+            &crate::team::TeamAction::SubAgentDepth {
+                project_id: project.clone(),
+                depth: limit,
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, crate::protocol::Outcome::Applied);
+        tx.commit().unwrap();
+        assert_eq!(
+            crate::team::nesting(&fixture.connection, &project)
+                .unwrap()
+                .depth,
+            limit
+        );
+        let reason = if limit == 1 {
+            "only the master starts sub-agents"
+        } else {
+            "workers this deep cannot start more of their own"
+        };
+        for (depth, lead) in [(1, first), (2, second), (3, third)] {
+            assert_eq!(
+                crate::team::agent_depth(&fixture.connection, lead).unwrap(),
+                depth
+            );
+            let (text, refused) = answer_sub(
+                &mut fixture.connection,
+                &answering,
+                lead,
+                Call::Spawn {
+                    task: "Write the notes page.".into(),
+                    harness: None,
+                    role: None,
+                    mode: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            if depth >= limit {
+                assert!(refused, "depth {depth} under setting {limit}");
+                assert_eq!(
+                    text,
+                    format!(
+                        "Not started: the owner's Sub-agent depth setting is {limit}, so {reason}. Do the work yourself or tell the master."
+                    )
+                );
+            } else {
+                assert!(
+                    !text.contains("Sub-agent depth setting"),
+                    "depth {depth} under setting {limit}: {text}"
+                );
+            }
+        }
+    }
+    let queued: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE parent IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 0, "a refused start queues nothing");
+}
+
+/// A lead's `stop` reaches only the workers it started (N2): a sibling lead's worker and
+/// the sibling itself are refused by name and keep working, while its own worker stops,
+/// and its status lists only its own workers.
+#[test]
+fn lead_tools_reach_only_its_workers() {
+    let mut fixture = Fixture::new();
+    store_setup(&fixture);
+    let lead = worker(&fixture, "notes-lead", None);
+    let mine = worker(&fixture, "notes-page", Some(lead));
+    let sibling = worker(&fixture, "search-lead", None);
+    let theirs = worker(&fixture, "search-index", Some(sibling));
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let status_of = |connection: &Connection, agent: i64| -> String {
+        connection
+            .query_row(
+                "SELECT status FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    for name in ["@search-index", "@search-lead"] {
+        let (text, refused) = answer_sub(
+            &mut fixture.connection,
+            &answering,
+            lead,
+            Call::Stop { agent: name.into() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(refused, "{name}: {text}");
+        assert_eq!(
+            text,
+            format!(
+                "Not stopped: no agent you lead is called {name}. Call {}() for their names.",
+                tool::INSPECT_WORK_TOOL
+            )
+        );
+    }
+    assert_eq!(status_of(&fixture.connection, theirs), "working");
+    assert_eq!(status_of(&fixture.connection, sibling), "working");
+
+    let (listed, _) =
+        lead_status(&fixture.connection, &ProjectId::new(PROJECT).unwrap(), lead).unwrap();
+    assert!(listed.starts_with("Your workers:\n"), "{listed}");
+    assert!(listed.contains("notes-page"), "{listed}");
+    for other in ["search-index", "search-lead", "notes-lead"] {
+        assert!(!listed.contains(other), "{other}: {listed}");
+    }
+
+    let (text, refused) = answer_sub(
+        &mut fixture.connection,
+        &answering,
+        lead,
+        Call::Stop {
+            agent: "@notes-page".into(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!refused, "{text}");
+    assert!(text.starts_with("Stopping "), "{text}");
+    assert!(crate::team::owner_stopped(&fixture.connection, mine).unwrap());
+    for other in [theirs, sibling, lead] {
+        assert!(!crate::team::owner_stopped(&fixture.connection, other).unwrap());
+    }
+}

@@ -710,3 +710,6 @@ pub fn remove_tmp(_home: &Path) -> io::Result<()> {
 pub fn prepare_cargo_home(_home: &Path, _homes: &ToolHomes) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
+
+#[cfg(all(test, unix))]
+mod tests;
