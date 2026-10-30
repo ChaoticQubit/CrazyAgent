@@ -12,6 +12,11 @@ const status = (extra = {}) => ({
   harnesses: [harness("codex", "master"), harness("codex", "sub"), harness("claude", "sub"), harness("codex", "sub", { tools: false })],
   agents: [], tasks: [], messages: [], plan: [], ...extra,
 });
+const selectedIn = (html, id) => {
+  const select = html.match(new RegExp(`<select[^>]*id="${id}"[^>]*>(.*?)</select>`))?.[1];
+  assert.ok(select, `${id} is drawn`);
+  return select.match(/<option value="([^"]*)" selected="">([^<]*)<\/option>/)?.slice(1);
+};
 
 test("a task can go to any sub-agent or to one sub-agent harness of the plan, each once", () => {
   const name = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
@@ -65,7 +70,7 @@ test("each time limit offers Off and 30 min to 8 h, with Off the default", () =>
   const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.match(html, /<label for="tg-turn-limit-chores">Each task may run<\/label>/);
   assert.match(html, /<label for="tg-session-limit-chores">Each agent session may run<\/label>/);
-  assert.equal(html.match(/<option value="off" selected="">Off<\/option>/g)?.length, 2, "both limits are Off until the owner sets one");
+  assert.deepEqual(["tg-turn-limit-chores", "tg-session-limit-chores"].map((id) => selectedIn(html, id)), [["off", "Off"], ["off", "Off"]], "both limits are Off until the owner sets one");
   const set = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ turn_limit_secs: 3600, session_limit_secs: 14_400 }), reload() {} }));
   assert.match(set, /<option value="3600" selected="">1 h<\/option>/);
   assert.match(set, /<option value="14400" selected="">4 h<\/option>/);
@@ -79,7 +84,7 @@ test("the idle stop offers Off, 2 min, 10 min and 1 h, and shows the engine's 10
   assert.match(html, /<label for="tg-idle-stop-chores">Stop an idle sub-agent after<\/label>/);
   assert.match(html, /<option value="600" selected="">10 min<\/option>/);
   const off = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ idle_stop_secs: null }), reload() {} }));
-  assert.equal(off.match(/<option value="off" selected="">Off<\/option>/g)?.length, 3, "the idle stop Off with both time limits Off");
+  assert.deepEqual(["tg-turn-limit-chores", "tg-session-limit-chores", "tg-idle-stop-chores"].map((id) => selectedIn(off, id)), [["off", "Off"], ["off", "Off"], ["off", "Off"]], "the idle stop Off with both time limits Off");
 });
 
 test("a changed limit keeps the session limit not below the task limit", () => {
