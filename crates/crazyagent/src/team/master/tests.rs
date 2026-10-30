@@ -798,7 +798,7 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
     assert_eq!(
         text(&answers[0]),
         (
-            format!("The owner stopped {label}. Only the owner can wake it.").as_str(),
+            format!("Not sent: the owner stopped {label}. Only the owner can wake it.").as_str(),
             true
         )
     );
@@ -1748,7 +1748,8 @@ fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owne
     assert_eq!(
         (said.as_str(), refused),
         (
-            format!("The owner stopped {worker_label}. Only the owner can wake it.").as_str(),
+            format!("Not sent: the owner stopped {worker_label}. Only the owner can wake it.")
+                .as_str(),
             true
         )
     );
@@ -1783,7 +1784,7 @@ fn a_message_to_a_finished_agent_that_cannot_wake_is_refused_and_not_stored() {
         ),
         (
             format!(
-                "Not woken: the worktree of {label} was cleaned up. Hand the work out with spawn() instead."
+                "Not sent: the worktree of {label} was cleaned up. Hand the work out with spawn() instead."
             ),
             true
         )

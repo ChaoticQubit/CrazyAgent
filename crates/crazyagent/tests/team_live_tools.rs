@@ -304,7 +304,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         "a running agent's messages wait for its next turn"
     );
     let gone = format!(
-        "Not woken: the worktree of {stopped_label} was cleaned up. Hand the work out with spawn() instead."
+        "Not sent: the worktree of {stopped_label} was cleaned up. Hand the work out with spawn() instead."
     );
     assert_eq!(answer(5), (gone.clone(), true));
     assert_eq!(answer(6), (gone, true));
