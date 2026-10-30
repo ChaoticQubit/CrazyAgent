@@ -29,7 +29,7 @@ test("the master and each agent card name the team agent the engine reads", () =
   assert.equal(client.agentOf(node("team-9", "teammate", { agent: 9, pane: "%12" })), 9);
   for (const shown of [node("teammate-3-12", "teammate", { agent: null, pane: "%12" }), node("team-3", "teammate"), node("team-0", "sub"), node("team--3", "sub"), node("team-1x", "lead"),
     node("team:12", "sub"), node("team-012", "sub"), node("team-99999999999999999999", "sub"), node("master", "lead"), node("team-5", "sub", { agent: 0 }),
-    node("team-5x", "sub", { agent: 1.5 }), node("team-5y", "sub", { agent: -2 })]) {
+    node("team-5x", "sub", { agent: 1.5 }), node("team-5y", "sub", { agent: -2 }), node("team-5", "sub", { agent: null })]) {
     assert.equal(client.agentOf(shown), undefined, shown.id);
   }
 });
@@ -77,7 +77,7 @@ test("the view lists each instruction file the engine recorded with its size and
   const markup = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "Use tdd.\n", skills: [], sessions: 0, loaded: [], skills_used: [], files } });
   for (const shown of [
     /CLAUDE\.md<\/span> 1\.2 KB, given/,
-    /AGENTS\.md<\/span> 300 bytes, left out: the same text as a file above/,
+    /AGENTS\.md<\/span> 300 bytes, left out: the same text as the instructions or a file above/,
     /CLAUDE\.local\.md<\/span> 0 bytes, left out: a link or not a plain file/,
     /~\/\.claude\/CLAUDE\.md<\/span> 39\.1 KB, left out: larger than CrazyAgent gives/,
     /~\/\.codex\/AGENTS\.md<\/span> 12 bytes, left out: not plain text/,

@@ -169,7 +169,11 @@ test("a master turn names its account, and a turn no account could run names eac
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
-  const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  const { SessionContext, useSession } = await import("../src/state.ts");
+  function InApp() {
+    return createElement(SessionContext.Provider, { value: useSession() }, createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  }
+  const markup = renderToStaticMarkup(createElement(InApp));
   assert.match(markup, /role="tablist"/);
   for (const tab of ["Overview", "Conversation", "Agents", "Changes", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
   assert.match(markup, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true" tabindex="0"><svg[\s\S]*?<\/svg>Overview</);
@@ -598,16 +602,20 @@ test("the Team panel names each agent, its account and current task, and lists t
   const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
-    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null },
-    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null },
-    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null },
-  ]);
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null,
+      depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [] },
+    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null,
+      depth: 0, lead: null, stop: { agent: 2 }, stoppedByYou: false, teammates: [] },
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null,
+      depth: 0, lead: null, stop: { agent: 3 }, stoppedByYou: false, teammates: [] },
+  ], "the master has no Stop; each live sub-agent has its own");
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null,
+    depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [] }, "a failed sub-agent has nothing left to stop");
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
@@ -629,6 +637,8 @@ test("the Team panel names each agent, its account and current task, and lists t
   }, accounts, label, "all", 0);
   assert.deepEqual(led.tasks.map((row) => row.from), ["From Grace (@lead-b)", "From a lead", "From you", "From the master"],
     "a task a lead handed out names that lead");
+  assert.deepEqual(led.agents.map((row) => [row.name, row.depth, row.lead]), [["Grace (@lead-b)", 0, null], ["Sub-agent 9", 1, "Grace (@lead-b)"]],
+    "a worker sits one level under the lead that started it and names it");
   assert.equal(named.tasks[0].to, "Ada (@onboarding-fix)");
 });
 
