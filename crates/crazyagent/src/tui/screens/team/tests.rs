@@ -2339,3 +2339,149 @@ fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
         "{none}"
     );
 }
+
+fn paused_read(on: Option<bool>) -> Arrival {
+    let mut arrival = switch(on, None);
+    let Arrival::Owner(event) = &mut arrival else {
+        unreachable!()
+    };
+    let OwnerEvent::Setup(setup) = event.as_mut() else {
+        unreachable!()
+    };
+    let Ok(crate::project_setup::SetupView::Team(status)) = &mut setup.result else {
+        unreachable!()
+    };
+    status.paused = true;
+    arrival
+}
+
+fn resumed(result: Result<(), &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::Resume {
+                    project_id: project(),
+                },
+                generation: 1,
+            },
+            result: result
+                .map(|()| {
+                    crate::project_setup::SetupView::Changed(
+                        crate::engine::owner::OwnerResult::Applied,
+                    )
+                })
+                .map_err(str::to_owned),
+        },
+    ))))
+}
+
+fn resume_sent(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::TeamChange {
+            action: crate::team::TeamAction::Resume { project_id },
+            ..
+        }) if *project_id == project()
+    )
+}
+
+#[test]
+fn master_view_on_a_paused_team_offers_start_all() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a stopped team's switch already on is not turned on again"
+    );
+    let rows = render(&mut shell);
+    assert!(rows[2].contains("Team stopped."), "{}", rows[2]);
+    assert!(!rows[2].contains("Live master on"), "{}", rows[2]);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "The team is stopped (Stop all). Start the team to run the master."
+        )
+    );
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!(
+            "│{:<74}│",
+            "S starts every agent of this project again; the master starts with them."
+        )
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Starting the master's terminal")),
+        "{rows:#?}"
+    );
+    assert!(rows[23].contains("S Start all"), "{}", rows[23]);
+
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "{sent:?}"
+    );
+    shell.arrive(resumed(Ok(())));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [read] if switch_read(read)),
+        "an accepted Start all reads the team again: {sent:?}"
+    );
+    shell.arrive(switch(Some(true), None));
+    assert!(requests(&mut shell).is_empty());
+    let rows = render(&mut shell);
+    assert!(rows[2].contains("Live master on"), "{}", rows[2]);
+    assert!(!rows[2].contains("Team stopped."), "{}", rows[2]);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "Starting the master's terminal. It opens once the master signs in and"
+        )
+    );
+    assert!(!rows[23].contains("S Start all"), "{}", rows[23]);
+    shell.key(Key::Char('S'));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "S starts nothing once the team runs"
+    );
+}
+
+#[test]
+fn a_refused_start_all_from_the_master_view_says_why_and_keeps_the_offer() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "{sent:?}"
+    );
+    shell.arrive(resumed(Err("trusted_connection_unavailable")));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused change reads nothing"
+    );
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        "trusted_connection_unavailable"
+    );
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "The team is stopped (Stop all). Start the team to run the master."
+        )
+    );
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "S asks again after a refusal: {sent:?}"
+    );
+}

@@ -248,3 +248,33 @@ test("the terminal hands Shift+Enter to the key override, after only the copy ke
   const panel = readFileSync(new URL("../src/screens/team/terminal-panel.tsx", import.meta.url), "utf8");
   assert.match(panel, /attachCustomKeyEventHandler\(\(event\) => \{\s*if \(copyKey\(event, terminal\.hasSelection\(\), mac\)\) \{(?:(?!keyOverride)[\s\S])*?return false;\s*\}\s*const override = keyOverride\(event\);/);
 });
+
+test("a stopped team (Stop all) says the master needs the team and offers Start all, never the terminal wait", async () => {
+  const { failureCopy } = await import("../src/api-projects.ts");
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate('Fixture.mountView("paused")');
+    const paused = await evaluate("Fixture.shown()");
+    const clicked = await evaluate('Fixture.click("Start all")');
+    await evaluate("new Promise((done) => setTimeout(done, 300))");
+    return { paused, clicked, refused: await evaluate("Fixture.shown()"), alerts: await evaluate('[...document.querySelectorAll(".pj-note [role=alert]")].map((line) => line.textContent)') };
+  });
+  assert.equal(seen.paused.state, "Team stopped");
+  assert.ok(seen.paused.text.includes("The team is stopped (Stop all). Start the team to run the master."), seen.paused.text);
+  assert.ok(seen.paused.buttons.includes("Start all"), seen.paused.buttons.join(", "));
+  assert.doesNotMatch(seen.paused.text, /Waiting for the master's terminal/);
+  assert.equal(seen.paused.terminal, false);
+  assert.equal(seen.clicked, true);
+  assert.deepEqual(seen.alerts, [failureCopy("engine_unreachable")], "a Start all the engine never took is shown under the offer");
+  assert.ok(seen.refused.buttons.includes("Start all"), "Start all stays offered after a refusal");
+});
+
+test("the head word for a stopped team warns, and only a good read of the same project counts as stopped", () => {
+  assert.deepEqual(live.liveWord({ kind: "paused" }), { word: "Team stopped", tone: "warn" });
+  const status = (patch) => ({ kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: true, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], ...patch } });
+  assert.equal(live.teamPaused(status({}), "alpha"), true);
+  assert.equal(live.teamPaused(status({ paused: false }), "alpha"), false);
+  assert.equal(live.teamPaused(status({}), "beta"), false, "another project's stopped team is not this one");
+  assert.equal(live.teamPaused({ kind: "error", code: "engine_unavailable" }, "alpha"), false, "a failed read is not a stopped team");
+  assert.equal(live.teamPaused({ kind: "not_ready" }, "alpha"), false);
+  assert.equal(live.teamPaused(undefined, "alpha"), false, "no read yet");
+});
