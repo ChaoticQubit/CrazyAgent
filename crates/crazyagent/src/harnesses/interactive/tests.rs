@@ -1008,3 +1008,239 @@ fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
     }
     toolchains::remove_tmp(&case.home()).unwrap();
 }
+
+/// Builds the real project context `for_project` gives the case's project: an engine
+/// database in its own data folder of the case with the project and its setup, whose folder
+/// is the case's working folder. Inputs: the case and the data folder name.
+/// Output: the context.
+fn project_context(case: &Case, data: &str) -> crate::launch_context::AgentContext {
+    use crate::project_setup::{StoredSetup, TeamPlan};
+    let data = case.path().join(data);
+    std::fs::create_dir(&data).unwrap();
+    let connection = rusqlite::Connection::open(data.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let project = crate::protocol::ProjectId::new("interactive-launch").unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+            [project.as_str()],
+        )
+        .unwrap();
+    let setup = StoredSetup {
+        project_id: project.clone(),
+        name: "Interactive".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: case.path().join("work").display().to_string(),
+        created_ms: 1,
+        revision: 1,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",
+            [
+                project.as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            ],
+        )
+        .unwrap();
+    crate::launch_context::for_project(&connection, &project, crate::agent_git::Layout::Linked)
+        .unwrap()
+}
+
+/// Reads the Claude settings a built command passes with `--settings`.
+/// Input: the command. Output: the settings.
+fn claude_settings(built: &InteractiveCommand) -> serde_json::Value {
+    let at = built
+        .argv
+        .iter()
+        .position(|argument| argument == "--settings")
+        .unwrap();
+    serde_json::from_str(&built.argv[at + 1]).unwrap()
+}
+
+#[test]
+fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+
+    assert!(
+        built
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["--teammate-mode", "tmux"])
+    );
+    let denied: Vec<&String> = built
+        .argv
+        .iter()
+        .skip_while(|argument| *argument != CLAUDE_DENY_FLAG)
+        .skip(1)
+        .take_while(|argument| !argument.starts_with('-'))
+        .collect();
+    assert!(denied.iter().any(|tool| *tool == "Workflow"), "{denied:?}");
+    assert!(
+        !denied
+            .iter()
+            .any(|tool| CLAUDE_NATIVE_TEAM_TOOLS.contains(&tool.as_str())),
+        "a native lead keeps Agent and TeamCreate: {denied:?}"
+    );
+    let script = crate::launch_context::teammate_command(&case.home());
+    let variable = |name: &str| {
+        built
+            .env
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        variable("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        variable("CLAUDE_CODE_TEAMMATE_COMMAND"),
+        Some(script.to_str().unwrap().to_owned())
+    );
+    let folder = case.path().join("bin");
+    assert_eq!(
+        variable("PATH")
+            .unwrap()
+            .split(':')
+            .filter(|entry| *entry == folder.to_str().unwrap())
+            .count(),
+        1
+    );
+
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let written = std::fs::read_to_string(&script).unwrap();
+    assert_eq!(
+        std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert!(written.starts_with("#!/bin/sh\nexec '/usr/bin/env' "));
+    assert!(written.ends_with(" '--disallowedTools' 'Agent' 'TeamCreate' \"$@\"\n"));
+    let instructions = installed.native().unwrap().instructions.clone();
+    assert!(written.contains(&format!(
+        " '{}' '--append-system-prompt-file' '{}'",
+        request.executable.display(),
+        instructions.display()
+    )));
+    for inherited in [
+        "--mcp-config",
+        "--plugin-dir",
+        "--settings",
+        "--strict-mcp-config",
+    ] {
+        assert!(
+            !written.contains(inherited),
+            "Claude Code passes {inherited} to each teammate itself"
+        );
+    }
+    drop(installed);
+}
+
+#[test]
+fn a_relayed_claude_launch_allows_hooks_and_a_plain_one_disables_them() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), false);
+    let plain = project_context(&case, "data-plain")
+        .install("claude-code", &case.home(), false)
+        .unwrap();
+    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    assert_eq!(
+        claude_settings(&built)["disableAllHooks"],
+        serde_json::Value::Bool(true)
+    );
+    drop(plain);
+
+    let relayed = project_context(&case, "data-relayed")
+        .with_relay(
+            &case.path().join("bin").join("crazyagent"),
+            &case.path().join("mailbox"),
+        )
+        .install("claude-code", &case.home(), false)
+        .unwrap();
+    assert!(relayed.runs_hooks());
+    let built = command(&request, Some(&relayed), &run(None)).unwrap();
+    let settings = claude_settings(&built);
+    assert!(settings.get("disableAllHooks").is_none(), "{settings}");
+    assert_eq!(
+        settings["includeCoAuthoredBy"],
+        serde_json::Value::Bool(false)
+    );
+    drop(relayed);
+}
+
+#[test]
+fn the_tmux_folder_is_added_to_path_once_and_a_folder_with_a_colon_is_refused() {
+    let tmux = Path::new("/opt/homebrew/bin/tmux");
+    let mut env = vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned())];
+    tmux_on_path(&mut env, tmux).unwrap();
+    assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
+    tmux_on_path(&mut env, tmux).unwrap();
+    assert_eq!(env[0].1, "/usr/bin:/bin:/opt/homebrew/bin");
+
+    let mut named = vec![("PATH".to_owned(), "/opt/homebrew/bin:/usr/bin".to_owned())];
+    tmux_on_path(&mut named, tmux).unwrap();
+    assert_eq!(named[0].1, "/opt/homebrew/bin:/usr/bin");
+
+    let mut env = vec![("PATH".to_owned(), "/usr/bin".to_owned())];
+    assert_eq!(
+        tmux_on_path(&mut env, Path::new("/opt/odd:folder/tmux"))
+            .unwrap_err()
+            .0,
+        "launch_path_invalid"
+    );
+    assert_eq!(env[0].1, "/usr/bin");
+    let mut none = vec![("HOME".to_owned(), "/private/tmp/home".to_owned())];
+    assert_eq!(
+        tmux_on_path(&mut none, tmux).unwrap_err().0,
+        "launch_path_invalid"
+    );
+}
+
+#[test]
+fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
+    let case = Case::new();
+    let path_of = |tools: bool| -> String {
+        let request = case.request("claude-code", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let paths: Vec<&String> = built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "PATH")
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(paths.len(), 1);
+        paths[0].clone()
+    };
+    assert_eq!(path_of(true), tools_on_path());
+    assert_eq!(path_of(false), TOOLS_OFF_PATH);
+    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    let bin = tmp.join("bin");
+    assert_eq!(
+        path_of(true),
+        format!("{}:{}", bin.display(), tools_on_path())
+    );
+    assert_eq!(
+        path_of(false),
+        format!("{}:{TOOLS_OFF_PATH}", bin.display())
+    );
+    toolchains::remove_tmp(&case.home()).unwrap();
+}

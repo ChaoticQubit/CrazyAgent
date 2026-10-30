@@ -869,7 +869,8 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             unread_edges: vec![(Party::Owner, Party::Agent(9), 1, Receipt::Sent)],
         }),
     };
-    let mates = |graph: &TeamGraph| -> Vec<(String, Option<String>, Option<i64>, Option<String>)> {
+    type MateRow = (String, Option<String>, Option<i64>, Option<String>);
+    let mates = |graph: &TeamGraph| -> Vec<MateRow> {
         graph
             .nodes
             .iter()
@@ -938,5 +939,46 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             .iter()
             .all(|mate| mate.0 != "teammate-3-12"),
         "a shown finished row still stands for its pane"
+    );
+}
+
+/// The agents list orders each lead's workers under it, depth first and in the given order
+/// among siblings (N2): a worker whose lead is not listed starts a tree of its own, and two
+/// agents that name each other as lead are each listed once, at the top.
+#[test]
+fn lead_tree_orders_workers_under_their_leads() {
+    let with = |id, parent| TeamAgent {
+        parent,
+        ..agent(id, AgentRole::Sub, "codex", AgentStatus::Working)
+    };
+    let agents = [
+        with(1, None),
+        with(2, None),
+        with(3, Some(1)),
+        with(4, Some(3)),
+        with(5, Some(2)),
+        with(6, Some(1)),
+        with(7, Some(99)),
+        with(8, Some(9)),
+        with(9, Some(8)),
+    ];
+    let listed: Vec<&TeamAgent> = agents.iter().collect();
+    let tree: Vec<(i64, usize)> = crate::team::lead_tree(&listed)
+        .into_iter()
+        .map(|(agent, depth)| (agent.id, depth))
+        .collect();
+    assert_eq!(
+        tree,
+        vec![
+            (1, 0),
+            (3, 1),
+            (4, 2),
+            (6, 1),
+            (2, 0),
+            (5, 1),
+            (7, 0),
+            (8, 0),
+            (9, 0)
+        ]
     );
 }

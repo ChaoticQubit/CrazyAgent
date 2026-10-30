@@ -165,7 +165,8 @@ mod wire {
 
     impl Wire {
         fn open(socket: &Path) -> Result<Self, &'static str> {
-            let stream = UnixStream::connect(socket).map_err(|_| "codex_bridge_not_running")?;
+            let stream = crate::spawn_gate::connect_unix_std(socket)
+                .map_err(|_| "codex_bridge_not_running")?;
             let (uid, _) =
                 nix::unistd::getpeereid(&stream).map_err(|_| "codex_bridge_peer_unknown")?;
             if uid.as_raw() != rustix::process::getuid().as_raw() {

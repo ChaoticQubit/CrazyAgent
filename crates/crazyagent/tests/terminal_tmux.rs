@@ -1268,3 +1268,287 @@ fn pane_process_writes_its_environment() {
     std::fs::write(&partial, text).unwrap();
     std::fs::rename(&partial, &out).unwrap();
 }
+
+/// One engine root with team agent 1 ready to lead in its own server: its home, its short
+/// private temp folder that holds the socket and an allow-default installed profile.
+struct Lead {
+    root: tempfile::TempDir,
+    tmux: PathBuf,
+    home: PathBuf,
+    profile: PathBuf,
+    socket: PathBuf,
+}
+
+impl Lead {
+    fn new() -> Self {
+        let root = root();
+        let tmux = tmux(root.path());
+        let path = root.path().canonicalize().unwrap();
+        let team = path.join("team");
+        let home = crazyagent::team::runtime::agent_home(&team, 1);
+        std::fs::create_dir_all(&home).unwrap();
+        crazyagent::sandbox::toolchains::make_tmp(&home).unwrap();
+        let profile = crazyagent::team::runtime::agent_profile(&team, 1);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        let socket =
+            crazyagent::terminal::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
+        Self {
+            root,
+            tmux,
+            home,
+            profile,
+            socket,
+        }
+    }
+
+    fn path(&self) -> PathBuf {
+        self.root.path().canonicalize().unwrap()
+    }
+
+    fn shell(&self, prompt: &str, argv: &[&str]) -> InteractiveCommand {
+        shell(
+            &self.path(),
+            vec![
+                ("PS1".into(), prompt.into()),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+            ],
+            argv,
+        )
+    }
+
+    /// The lead's own command: the shell started under its installed profile, as the team
+    /// runtime starts a native lead. Takes the prompt and the argv. Returns the command.
+    fn confined(&self, prompt: &str, argv: &[&str]) -> InteractiveCommand {
+        let profile = self.profile.to_str().unwrap();
+        let mut confined = vec![crazyagent::sandbox::SANDBOX_EXEC, "-f", profile];
+        confined.extend_from_slice(argv);
+        self.shell(prompt, &confined)
+    }
+
+    /// Types a tmux command into the lead's pane that prints the new pane's id into a file,
+    /// and waits for it. Takes the host, the lead, the tmux arguments before `-P` and the
+    /// command the new pane runs. Returns the new pane id.
+    fn new_pane(&self, host: &dyn Host, lead: &AgentId, how: &str, run: &str) -> String {
+        let out = self
+            .path()
+            .join(format!("pane-{}.txt", how.replace(' ', "-")));
+        let _ = std::fs::remove_file(&out);
+        let line = format!(
+            "{} {how} -P -F '#{{pane_id}}' '{run}' > {}\n",
+            self.tmux.display(),
+            out.display()
+        );
+        host.input(lead, line.as_bytes()).unwrap();
+        let id = wait_text(&out).trim().to_owned();
+        assert!(crazyagent::terminal::pane_id_valid(&id), "{id:?}");
+        id
+    }
+}
+
+impl Drop for Lead {
+    fn drop(&mut self) {
+        for socket in [self.socket.clone(), self.path().join(FOLDER).join(SOCKET)] {
+            let _ = crazyagent::spawn_gate::status(
+                Command::new(&self.tmux)
+                    .arg("-S")
+                    .arg(&socket)
+                    .arg("kill-server")
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
+        }
+        let _ = crazyagent::sandbox::toolchains::remove_tmp(&self.home);
+    }
+}
+
+fn wait_text(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+        {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never written",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let engine_agent = AgentId::team(2).unwrap();
+    let command = lead.confined("lead$ ", &["/bin/sh"]);
+    host.spawn_own_server(&leader, &command).unwrap();
+    assert!(
+        std::fs::symlink_metadata(&lead.socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    host.spawn(&engine_agent, &lead.shell("engine$ ", &["/bin/sh"]))
+        .unwrap();
+    let engine_only = Tmux::open(Some(lead.tmux.clone()), &root.join(FOLDER));
+    assert_eq!(
+        engine_only.alive().unwrap(),
+        std::slice::from_ref(&engine_agent)
+    );
+    assert_eq!(
+        host.alive().unwrap(),
+        [leader.clone(), engine_agent.clone()]
+    );
+    assert_eq!(
+        host.spawn(&leader, &command).unwrap_err().0,
+        "terminal_agent_running"
+    );
+    assert_eq!(
+        host.spawn_own_server(&engine_agent, &command)
+            .unwrap_err()
+            .0,
+        "terminal_agent_running"
+    );
+    let own_pane = host.panes(&leader).unwrap();
+    assert_eq!(own_pane.len(), 1);
+
+    let split_out = root.join("split.txt");
+    let split = lead.new_pane(
+        host.as_ref(),
+        &leader,
+        "split-window",
+        &format!("cat > {}", split_out.display()),
+    );
+    let routed = root.join("routed.txt");
+    host.input(
+        &leader,
+        format!("echo routed-$((40 + 2)) > {}\n", routed.display()).as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(wait_text(&routed), "routed-42\n");
+    assert!(
+        !std::fs::read_to_string(&split_out)
+            .unwrap_or_default()
+            .contains("routed")
+    );
+    let panes = host.panes(&leader).unwrap();
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert!(panes.iter().any(|pane| pane.id == split));
+    let snapshot = host.snapshot(&leader).unwrap();
+    assert!(
+        contains(&snapshot.screen, b"lead$"),
+        "the snapshot shows the lead's own pane, not the active split: {:?}",
+        String::from_utf8_lossy(&snapshot.screen)
+    );
+    drop(host.attach_pane(&leader, &split).unwrap());
+    let window = lead.new_pane(host.as_ref(), &leader, "new-window -d", "sleep 600");
+    assert_eq!(
+        host.attach_pane(&leader, &window).unwrap_err().0,
+        "terminal_pane_unknown"
+    );
+    assert!(host.attach_pane(&leader, &own_pane[0].id).is_ok());
+
+    host.close(&[]).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert!(
+        !std::fs::symlink_metadata(&lead.socket)
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_restart() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let [ann, bob, missing] = [2, 3, 9].map(|id| AgentId::team(id).unwrap());
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let own_pane = host.panes(&leader).unwrap()[0].id.clone();
+    let ann_out = root.join("ann.txt");
+    let ann_pane = lead.new_pane(
+        host.as_ref(),
+        &leader,
+        "split-window -d",
+        &format!("cat > {}", ann_out.display()),
+    );
+    let bob_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    let window = lead.new_pane(host.as_ref(), &leader, "new-window -d", "sleep 600");
+
+    for (pane, code) in [
+        (&own_pane, "terminal_pane_unknown"),
+        (&window, "terminal_pane_unknown"),
+    ] {
+        assert_eq!(host.adopt_pane(&ann, &leader, pane).unwrap_err().0, code);
+    }
+    assert_eq!(
+        host.adopt_pane(&ann, &missing, &ann_pane).unwrap_err().0,
+        "terminal_own_server_unavailable"
+    );
+    assert_eq!(
+        host.adopt_pane(&leader, &leader, &ann_pane).unwrap_err().0,
+        "terminal_agent_running"
+    );
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    host.adopt_pane(&bob, &leader, &bob_pane).unwrap();
+
+    host.input(&ann, b"to-ann\n").unwrap();
+    assert_eq!(wait_text(&ann_out), "to-ann\n");
+    host.kill(&ann).unwrap();
+    let left: Vec<String> = host
+        .panes(&leader)
+        .unwrap()
+        .into_iter()
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(left, [own_pane.clone(), bob_pane.clone()]);
+
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    restarted.kill(&bob).unwrap();
+    let left: Vec<String> = restarted
+        .panes(&leader)
+        .unwrap()
+        .into_iter()
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(left, [own_pane]);
+    assert_eq!(restarted.alive().unwrap(), std::slice::from_ref(&leader));
+    assert_eq!(
+        restarted.kill(&missing).unwrap_err().0,
+        "terminal_agent_unknown"
+    );
+    restarted.close(&[]).unwrap();
+}
+
+#[test]
+fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let path = root.path().canonicalize().unwrap();
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: path.join(FOLDER).join(SOCKET),
+    };
+    let host = crazyagent::terminal::tmux_host(&path, Some(tmux));
+    let agent = AgentId::team(4).unwrap();
+    host.spawn(&agent, &shell(&path, Vec::new(), &["/bin/sh"]))
+        .unwrap();
+    let quiet = host.quiet(&agent).unwrap();
+    assert!(
+        quiet.is_some_and(|quiet| quiet < Duration::from_secs(60)),
+        "{quiet:?}"
+    );
+    host.close(&[]).unwrap();
+}

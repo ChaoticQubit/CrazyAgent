@@ -122,6 +122,9 @@ pub fn answer(
     }
 }
 
+type CallerFinder<'a> = dyn FnMut(&Connection, Option<&str>) -> Option<(i64, String)> + 'a;
+type LeadAnswerer<'a> = dyn FnMut(&mut Connection, i64, Call) -> Option<(String, bool)> + 'a;
+
 /// Answers the calls a sub-agent's team server left in its mailbox, at most
 /// `AGENT_CALLS_PER_TICK_MAX`, each checked again and against the owner's tool switches
 /// (DEC-104): `who` names the caller from the pane its server stamped, the mailbox's own
@@ -137,8 +140,8 @@ pub fn serve_agent_calls(
     (id, agent): (i64, &str),
     agents: &Path,
     mailbox: &Path,
-    who: &mut dyn FnMut(&Connection, Option<&str>) -> Option<(i64, String)>,
-    lead: &mut dyn FnMut(&mut Connection, i64, Call) -> Option<(String, bool)>,
+    who: &mut CallerFinder<'_>,
+    lead: &mut LeadAnswerer<'_>,
 ) -> usize {
     let taken = tool::take_calls(mailbox, AGENT_CALLS_PER_TICK_MAX);
     for (call_id, call, pane) in &taken {
@@ -433,7 +436,7 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
             });
         }
     }
-    records.sort_by(|one, other| other.at_ms.cmp(&one.at_ms));
+    records.sort_by_key(|one| std::cmp::Reverse(one.at_ms));
     let mut seen = std::collections::HashSet::new();
     records.retain(|record| seen.insert(record.id.clone()));
     records.truncate(RECORDS_MAX);

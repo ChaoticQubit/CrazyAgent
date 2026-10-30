@@ -12,7 +12,7 @@ const names = new Map([["project-harbor", "Harbor Notes"]]);
 const saved = (patch = {}) => ({ id: "memory-1", text: "The owner prefers Rust for engines.", scope: "global", project_id: null, origin: "written", from_project_id: null, ...patch });
 const suggestion = (patch = {}) => ({ project_id: "project-harbor", project_name: "Harbor Notes", id: "entry-1", version: 3, text: "Competitors charge per seat.", ...patch });
 const props = (patch = {}) => ({ saved: { kind: "ok", value: { items: [saved()], next: null } }, suggested: { kind: "ok", value: [] }, scope: "", projects: [{ id: "project-harbor", name: "Harbor Notes" }],
-  search: "", failure: "", busy: null, onSearch: forbidden, onScope: forbidden, onAdd: forbidden, onSave: forbidden, onSaveEdited: forbidden, onDismiss: forbidden, onDelete: forbidden, onMore: forbidden, onRetry: forbidden, ...patch });
+  search: "", failure: "", busy: null, onSearch: forbidden, onScope: forbidden, onAdd: forbidden, onSave: forbidden, onSaveEdited: forbidden, onDismiss: forbidden, onDelete: forbidden, onMore: forbidden, onRetry: forbidden, onImport: forbidden, ...patch });
 const render = (patch) => renderToStaticMarkup(createElement(MemoryView, props(patch)));
 
 test("each saved memory says where it applies and where it came from, in plain words", () => {
@@ -111,4 +111,30 @@ test("an edited memory follows the engine's text rules", () => {
 test("saving an edited suggestion refuses bad text before the engine and needs the desktop shell", async () => {
   assert.deepEqual(await api.saveEditedSuggestion(suggestion(), " "), { kind: "error", code: "invalid_knowledge_text", message: "Write something to remember." });
   assert.equal((await api.saveEditedSuggestion(suggestion(), "Competitors charge per team.")).code, "engine_unreachable");
+});
+
+test("the Import memory panel picks a project, or asks for a project first", () => {
+  const markup = render();
+  const text = markup.replace(/<[^>]*>/gu, " ");
+  assert.match(text, /Import memory/);
+  assert.match(text, /Each file becomes one memory of the chosen project/);
+  assert.match(markup, /id="memory-import-project"/);
+  assert.match(text, /Into project/);
+  assert.match(text, /Harbor Notes/);
+  assert.match(markup, />Import memory<\/button>/);
+  assert.doesNotMatch(text, /Add a project first/);
+  const empty = render({ projects: [] });
+  assert.match(empty, /Add a project first\. Imported memories belong to one project\./);
+  assert.doesNotMatch(empty, /memory-import-project/);
+  assert.doesNotMatch(empty, />Import memory<\/button>/);
+});
+
+test("an imported project memory names its file", () => {
+  assert.equal(memorySource(saved({ scope: "project", project_id: "project-harbor", origin: "imported", source_path: "meals.md" }), names), "Harbor Notes only, imported from meals.md");
+  assert.equal(memorySource(saved({ scope: "project", project_id: "project-harbor", origin: "imported", source_path: null }), names), "Harbor Notes only");
+});
+
+test("memory import refusals read as plain sentences, never as codes", () => {
+  assert.equal(api.plainError("memory_import_folder_invalid"), "Choose a folder that exists. A link to a folder can't be imported.");
+  assert.equal(api.plainError("memory_import_invalid"), "A file in this folder can't be imported.");
 });

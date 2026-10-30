@@ -190,24 +190,19 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       const waiting = "Waiting for the master's terminal. It opens once the master signs in and starts.";
       const live = await me.waitFor("the live master waiting for its sign-in", (text) => /Master: [^\n,]+, live/.test(text) && text.includes(waiting), STEP_MS);
       await me.capture("live-master");
-      assert.match(live, /Live master starts when you open this tab\./, "the header says when the live master starts");
-      assert.match(live, /Stop live master/, "the header can stop the live master");
+      for (const gone of ["Stop live master", "Start live master", "Earlier conversation"]) {
+        assert.ok(!live.includes(gone), `the master area offers no ${gone}`);
+      }
+      assert.match(live, /New session/, "the master area offers New session");
       assert.doesNotMatch(live, /couldn't start/i, "the engine took the live master switch");
       const switches = () => log.trail.filter((entry) => entry.cmd === "desktop_team_live_master").map((entry) => [entry.args?.on, entry.answer?.value?.outcome]);
       assert.deepEqual(switches(), [[true, "applied"]], "the first open turned the live master on once and the engine applied it");
 
-      await me.click("Earlier conversation");
-      const earlier = await me.waitFor("the earlier conversation, read only", (text) => text.includes("Read-only: the master runs live in its terminal now."));
-      await me.capture("earlier-conversation");
-      assert.match(earlier, /No earlier conversation\. Messages sent to the master before it ran live stay here to read\./, "a fresh project has no earlier conversation");
-      await me.click("Back to the live master");
+      await me.click("Agents", "a, button, [role=tab]");
+      await me.waitFor("the team graph again", (text) => /Master/.test(text));
+      await me.click("Conversation", "a, button, [role=tab]");
       await me.waitFor("the live master again", (text) => text.includes(waiting), STEP_MS);
-
-      await me.click("Stop live master");
-      const stopped = await me.waitFor("the live master stopped", (text) => /Master: [^\n,]+, stopped/.test(text) && text.includes("The live master is stopped. Its terminal opens again once you start it."), STEP_MS);
-      await me.capture("live-master-stopped");
-      assert.match(stopped, /Start live master/, "a stopped live master can be started again");
-      assert.deepEqual(switches(), [[true, "applied"], [false, "applied"]], "Stop live master turned it off once and the engine applied it");
+      assert.deepEqual(switches(), [[true, "applied"]], "leaving the tab and opening it again neither stops nor starts a live master that is on");
 
       const remove = async () => {
         await me.follow("#tab-settings");

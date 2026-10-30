@@ -1553,3 +1553,6 @@ fn public_code(error: EngineError) -> String {
         "plugins_outcome_unknown".into()
     }
 }
+
+#[cfg(test)]
+mod tests;

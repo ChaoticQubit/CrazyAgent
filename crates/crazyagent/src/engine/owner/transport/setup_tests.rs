@@ -76,3 +76,89 @@ async fn a_pack_removal_that_does_not_commit_puts_its_skill_folders_back() {
     assert!(stored[0].join("SKILL.md").is_file());
     owner.stop().await;
 }
+
+#[cfg(unix)]
+fn pack_checkout(setup: &std::path::Path, id: &str) -> std::path::PathBuf {
+    let manifest = crate::setup::pack::default_pack().unwrap();
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == id)
+        .unwrap();
+    let crate::setup::pack::PackSource::Git { repo, commit, .. } = &entry.source else {
+        panic!("{id} is a git entry");
+    };
+    let checkout = crate::setup::fetch::checkout_folder(setup, repo, commit);
+    std::fs::create_dir_all(checkout.join("hooks")).unwrap();
+    std::fs::create_dir_all(checkout.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        checkout.join(".claude-plugin/plugin.json"),
+        format!("{{\"name\":\"{id}\"}}"),
+    )
+    .unwrap();
+    std::fs::write(
+        checkout.join("hooks/hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(checkout.join("hooks/start.sh"), "exit 0\n").unwrap();
+    checkout
+}
+
+#[cfg(unix)]
+fn stored_hooks(root: &std::path::Path) -> Vec<String> {
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let mut names: Vec<String> = db
+        .prepare("SELECT name FROM plugin_items WHERE kind='hook'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    names.sort();
+    names
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_seeds_hooks_from_cached_checkouts_of_installed_entries_once() {
+    let owner = Usage::start().await;
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("caveman");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: caveman\ndescription: The caveman skill.\n---\n",
+    )
+    .unwrap();
+    let sender = owner.runtime().engine.storage.sender.clone();
+    let (send, installed) = oneshot::channel();
+    sender
+        .send(crate::storage::Job::Setup(
+            crate::storage::setup::Command::Install {
+                id: "caveman".into(),
+                source: "https://example.invalid/caveman@1".into(),
+                skills: vec![source],
+                server: None,
+            },
+            send,
+        ))
+        .await
+        .unwrap();
+    installed.await.unwrap().unwrap();
+    let setup = owner.engine_root.join("setup");
+    pack_checkout(&setup, "caveman");
+    pack_checkout(&setup, "superpowers");
+
+    setup::backfill_hooks(sender.clone(), owner.engine_root.clone()).await;
+    let seeded = stored_hooks(&owner.engine_root);
+    assert_eq!(seeded.len(), 1, "{seeded:?}");
+    assert_eq!(seeded, ["caveman/SessionStart/1"]);
+    setup::backfill_hooks(sender, owner.engine_root.clone()).await;
+    assert_eq!(
+        stored_hooks(&owner.engine_root),
+        seeded,
+        "a second start adds nothing, and an entry not installed gets no hooks"
+    );
+    owner.stop().await;
+}

@@ -899,10 +899,385 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     pane.kill_server();
     assert_eq!(
         pane.adopt().err().map(|refused| refused.0).as_deref(),
-        Some("terminal_closed")
+        Some("launch_closed")
     );
     assert!(
         !pane.config.exists(),
         "a pane that is gone keeps no file that holds its MCP secret"
     );
+}
+
+/// Builds the context a project launch gets, with no app or project text, the given
+/// plugins and switched-off tools, as `for_project` builds it. Inputs: the temp root, the
+/// plugins and the switched-off tools by stored server name. Output: the context.
+fn context_with(
+    root: &Path,
+    plugins: LaunchPlugins,
+    off_tools: Vec<(String, Vec<String>)>,
+) -> AgentContext {
+    let data = root.join("data");
+    let folder = root.join("project");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    AgentContext {
+        plugins,
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data,
+                id: ProjectId::new("launch").unwrap(),
+                folder: Some(folder),
+                mode: crate::instruction_files::Mode::Both,
+            },
+            hooks: Vec::new(),
+        })),
+        transcripts: true,
+        off_tools,
+        native_team: None,
+        relay: None,
+    }
+}
+
+/// Makes one 0700 agent home under the temp root. Inputs: the root and a name.
+/// Output: the home.
+fn private_home(root: &Path, name: &str) -> PathBuf {
+    let home = root.join(name);
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    home
+}
+
+/// A command MCP server with no secrets. Input: its stored name. Output: the server.
+fn command_server(name: &str) -> LaunchServer {
+    LaunchServer {
+        name: name.into(),
+        spec: ServerSpec::Stdio {
+            command: "/usr/bin/true".into(),
+            args: Vec::new(),
+        },
+        secrets: Vec::new(),
+    }
+}
+
+/// Reads the MCP server names a Codex launch declared in its `config.toml`.
+/// Input: the Codex home. Output: the declared names.
+fn codex_servers(home: &Path) -> toml::Table {
+    let config: toml::Table = fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    config["mcp_servers"].as_table().unwrap().clone()
+}
+
+#[test]
+fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_codex() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let plugins = || LaunchPlugins {
+        skills: Vec::new(),
+        servers: vec![command_server("context-mode"), command_server("graph")],
+    };
+
+    let claude = private_home(&root, "claude");
+    let installed = context_with(&root, plugins(), Vec::new())
+        .install("claude-code", &claude, true)
+        .unwrap();
+    let mcp: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(claude.join(STATE).join("mcp.json")).unwrap())
+            .unwrap();
+    let declared = mcp["mcpServers"].as_object().unwrap();
+    assert!(declared.contains_key("plugin_context-mode_context-mode"));
+    assert!(declared.contains_key("graph"));
+    assert!(!declared.contains_key("context-mode"));
+    drop(installed);
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(), Vec::new())
+        .install("codex", &codex, true)
+        .unwrap();
+    let declared = codex_servers(&codex);
+    assert!(declared.contains_key("plugin_context-mode_context-mode"));
+    assert!(declared.contains_key("graph"));
+    assert!(!declared.contains_key("context-mode"));
+    drop(installed);
+}
+
+#[test]
+fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let plugins = || LaunchPlugins {
+        skills: Vec::new(),
+        servers: vec![command_server("context-mode"), command_server("graph")],
+    };
+    let off = || {
+        vec![
+            ("context-mode".to_owned(), vec!["ctx_purge".to_owned()]),
+            (
+                "graph".to_owned(),
+                vec!["write".to_owned(), "delete".to_owned()],
+            ),
+        ]
+    };
+
+    let claude = private_home(&root, "claude");
+    let installed = context_with(&root, plugins(), off())
+        .install("claude-code", &claude, true)
+        .unwrap();
+    assert_eq!(
+        installed.denied_tools(),
+        [
+            "mcp__plugin_context-mode_context-mode__ctx_purge",
+            "mcp__graph__write",
+            "mcp__graph__delete"
+        ]
+    );
+    drop(installed);
+
+    let off_claude = private_home(&root, "claude-off");
+    let installed = context_with(&root, plugins(), off())
+        .install("claude-code", &off_claude, false)
+        .unwrap();
+    assert!(
+        installed.denied_tools().is_empty(),
+        "a tools-off launch declares no server, so it denies none"
+    );
+    drop(installed);
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(), off())
+        .install("codex", &codex, true)
+        .unwrap();
+    assert!(installed.denied_tools().is_empty());
+    let declared = codex_servers(&codex);
+    let disabled = |name: &str| -> Vec<String> {
+        declared[name]["disabled_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool.as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(disabled("plugin_context-mode_context-mode"), ["ctx_purge"]);
+    assert_eq!(disabled("graph"), ["write", "delete"]);
+    drop(installed);
+}
+
+#[test]
+fn every_claude_launch_gets_the_message_relay_plugin_and_codex_gets_none() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let engine = root.join("bin").join("crazyagent");
+    for tools in [true, false] {
+        let claude = private_home(&root, &format!("claude-{tools}"));
+        let mailbox = root.join(format!("mailbox-claude-{tools}"));
+        let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+            .with_relay(&engine, &mailbox)
+            .install("claude-code", &claude, tools)
+            .unwrap();
+        let relay = claude.join(crate::coord::relay::PLUGIN_FOLDER);
+        let arguments: Vec<&OsString> = installed.arguments().iter().collect();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair[0] == "--plugin-dir" && pair[1] == relay.as_os_str()),
+            "{arguments:?}"
+        );
+        assert!(installed.runs_hooks());
+        assert!(relay.join(".claude-plugin").join("plugin.json").is_file());
+        assert!(relay.join("hooks").join("hooks.json").is_file());
+        drop(installed);
+    }
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_relay(&engine, &root.join("mailbox-codex"))
+        .install("codex", &codex, true)
+        .unwrap();
+    assert!(installed.arguments().is_empty());
+    assert!(!installed.runs_hooks());
+    assert!(!codex.join(crate::coord::relay::PLUGIN_FOLDER).exists());
+    drop(installed);
+}
+
+#[test]
+fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let worktree = root.join("lead-worktree");
+    fs::create_dir_all(&worktree).unwrap();
+    let tmux = root.join("bin").join("tmux");
+    let lead = private_home(&root, "lead");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_team(&tmux, &worktree)
+        .install("claude-code", &lead, true)
+        .unwrap();
+    let team = installed.native().unwrap();
+    assert_eq!(team.tmux, tmux);
+    assert_eq!(
+        team.instructions,
+        lead.join(STATE).join(TEAMMATE_INSTRUCTIONS)
+    );
+    let own = fs::read_to_string(lead.join(STATE).join("instructions.md")).unwrap();
+    let mate = fs::read_to_string(&team.instructions).unwrap();
+    assert!(mate.starts_with(&own));
+    assert!(
+        mate.trim_end().ends_with(&format!(
+            "run graphify with `--graph {}/graphify-out/graph.json`.",
+            worktree.display()
+        )),
+        "{mate}"
+    );
+    drop(installed);
+
+    let off = private_home(&root, "lead-tools-off");
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .with_native_team(&tmux, &worktree)
+        .install("claude-code", &off, false)
+        .unwrap();
+    assert!(installed.native().is_none());
+    assert!(!off.join(STATE).join(TEAMMATE_INSTRUCTIONS).exists());
+    drop(installed);
+}
+
+#[test]
+fn the_skills_index_names_each_skill_once_under_one_path_pattern_within_its_bound() {
+    let folder = Path::new("/private/tmp/home/crazyagent/plugin/skills");
+    let skills: Vec<EffectiveSkill> = (0..400)
+        .map(|index| EffectiveSkill {
+            name: format!("skill-{index:03}"),
+            folder: PathBuf::from(format!("/private/tmp/sources/skill-{index:03}")),
+        })
+        .collect();
+    let index = skills_index(folder, &skills[..3]);
+    assert_eq!(
+        index,
+        "\n## Skills\n\nThe owner approved these skills for this project. Before you use one, read `/private/tmp/home/crazyagent/plugin/skills/NAME/SKILL.md`, with the skill's name in place of NAME.\n\n- skill-000\n- skill-001\n- skill-002\n"
+    );
+    let index = skills_index(folder, &skills);
+    assert!(index.len() <= SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
+    assert_eq!(index.matches("SKILL.md").count(), 1);
+    let listed = index
+        .lines()
+        .filter(|line| line.starts_with("- skill-"))
+        .count();
+    assert!(listed > 0 && listed < skills.len());
+    assert!(index.ends_with(&format!(
+        "- and {} more skills in the same folder\n",
+        skills.len() - listed
+    )));
+}
+
+#[test]
+fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_its_own_copy() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let folder = root.join("project");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    crate::agent_home::save_app(&data, "APP-RULE-51\n").unwrap();
+    crate::agent_home::save_project(&folder, "PROJECT-RULE-52\n").unwrap();
+    let stored = root.join("hook-store").join("hk-caveman");
+    fs::create_dir_all(stored.join("hooks")).unwrap();
+    let script = "printf 'root=%s\\n' \"$CLAUDE_PLUGIN_ROOT\"\n";
+    fs::write(stored.join("hooks").join("start.sh"), script).unwrap();
+    let hook = |event: &str, matcher: Option<&str>, timeout: Option<u32>| EffectiveHook {
+        plugin: "caveman".into(),
+        event: event.into(),
+        matcher: matcher.map(str::to_owned),
+        command: "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\"".into(),
+        timeout,
+        folder: stored.clone(),
+    };
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data,
+                id: ProjectId::new("hooked").unwrap(),
+                folder: Some(folder),
+                mode: crate::instruction_files::Mode::Both,
+            },
+            hooks: vec![
+                hook("SessionStart", None, None),
+                hook("PreToolUse", Some("Grep|Glob"), Some(5)),
+            ],
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+    };
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+
+    let claude = home("claude");
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    assert!(installed.runs_hooks());
+    let plugin = claude.join(STATE).join("plugin");
+    assert!(
+        installed
+            .arguments()
+            .windows(2)
+            .any(|pair| pair[0] == "--plugin-dir" && pair[1] == plugin.as_os_str())
+    );
+    let copy = plugin.join(HOOK_PLUGINS).join("hk-caveman");
+    assert_eq!(
+        fs::read_to_string(copy.join("hooks").join("start.sh")).unwrap(),
+        script
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(plugin.join("hooks").join("hooks.json")).unwrap())
+            .unwrap();
+    let events = written["hooks"].as_object().unwrap();
+    assert_eq!(
+        events.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["PreToolUse", "SessionStart"]
+    );
+    let start = &events["SessionStart"][0];
+    assert!(start.get("matcher").is_none());
+    let command = start["hooks"][0]["command"].as_str().unwrap();
+    assert!(!command.contains(stored.to_str().unwrap()), "{command}");
+    let ran = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CLAUDE_PLUGIN_ROOT", &plugin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(
+        String::from_utf8(ran.stdout).unwrap(),
+        format!("root={}\n", copy.display()),
+        "the hook runs from its own copy with the plugin root moved there"
+    );
+    let search = &events["PreToolUse"][0];
+    assert_eq!(search["matcher"], "Grep|Glob");
+    assert_eq!(search["hooks"][0]["timeout"], 5);
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    let app = prompt.find("APP-RULE-51").unwrap();
+    assert!(prompt.starts_with("# Project context from CrazyAgent\n"));
+    assert!(app < prompt.find("PROJECT-RULE-52").unwrap());
+    drop(installed);
+
+    let off = home("claude-off");
+    let installed = context.install("claude-code", &off, false).unwrap();
+    assert!(!installed.runs_hooks(), "tools off gives no hooks");
+    assert!(!off.join(STATE).join("plugin").exists());
+    drop(installed);
+
+    let codex = home("codex");
+    let installed = context.install("codex", &codex, true).unwrap();
+    assert!(!installed.runs_hooks(), "Codex launches get no hooks");
+    assert!(!codex.join(STATE).join("plugin").exists());
+    drop(installed);
 }

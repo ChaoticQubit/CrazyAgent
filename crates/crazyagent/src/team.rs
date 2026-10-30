@@ -3439,7 +3439,7 @@ pub fn token_words(tokens: u64) -> String {
         return format!("{tokens} tokens");
     }
     let tenths = tokens / 100_000;
-    if tenths % 10 == 0 {
+    if tenths.is_multiple_of(10) {
         format!("{}M tokens", tenths / 10)
     } else {
         format!("{}.{}M tokens", tenths / 10, tenths % 10)

@@ -102,6 +102,8 @@ const COPY: Record<string, string> = {
   memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
   memory_duplicate: "This memory is already saved.",
   memory_full: "Memory is full. Delete an old memory first.",
+  memory_import_folder_invalid: "Choose a folder that exists. A link to a folder can't be imported.",
+  memory_import_invalid: "A file in this folder can't be imported.",
   memory_missing: "That memory no longer exists.",
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
