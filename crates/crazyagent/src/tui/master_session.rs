@@ -3187,3 +3187,6 @@ mod turn_line_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;
