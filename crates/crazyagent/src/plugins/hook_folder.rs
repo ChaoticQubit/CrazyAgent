@@ -439,3 +439,6 @@ fn read_small(path: &Path, max: u64) -> Result<Option<String>, &'static str> {
     }
     Ok(Some(text))
 }
+
+#[cfg(all(test, unix))]
+mod tests;

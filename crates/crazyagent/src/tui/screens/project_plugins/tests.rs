@@ -525,6 +525,11 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
         ))
     );
     assert!(
+        matches!(view.next_job(), Some(SettingsJob::Hooks { project: Some(ref asked) }) if *asked == project()),
+        "the hooks read follows each plugins read once"
+    );
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(Vec::new())));
+    assert!(
         view.next_job().is_none(),
         "a failed read waits for a change"
     );
@@ -535,6 +540,8 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
     );
 
     let mut view = loaded();
+    assert!(matches!(view.next_job(), Some(SettingsJob::Hooks { .. })));
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(Vec::new())));
     assert!(view.next_job().is_none());
     sent(view.key(press(KeyCode::Char(' '))));
     view.apply(&SettingsEvent::PluginChanged(Err(
