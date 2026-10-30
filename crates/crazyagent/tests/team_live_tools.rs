@@ -348,18 +348,35 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
             false
         )
     );
-    let mut notifications = connection
-        .prepare("SELECT kind,text FROM team_notifications WHERE project=?1")
-        .unwrap();
-    let raised: Vec<(String, String)> = notifications
-        .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
-    assert!(
-        raised.is_empty(),
-        "the urgent alert is raised by the team tick, not by update_work: {raised:?}"
+    let raised = |connection: &Connection| -> Vec<(String, String)> {
+        connection
+            .prepare("SELECT kind,text FROM team_notifications WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        raised(&connection),
+        Vec::<(String, String)>::new(),
+        "the urgent alert is raised by the team tick, not by update_work"
     );
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let urgent = [(
+        "urgent_question".to_owned(),
+        "Master asks you, urgent: Ada wants to force-push main. Allow it?".to_owned(),
+    )];
+    crazyagent::team::questions::tick(&mut connection, now).unwrap();
+    assert_eq!(raised(&connection), urgent);
+    crazyagent::team::questions::tick(&mut connection, now + 1).unwrap();
+    assert_eq!(raised(&connection), urgent, "a second tick raises no second alert");
     assert_eq!(answers.len(), 9, "{output}");
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
     drop(terminals);
