@@ -1026,8 +1026,8 @@ fn a_result_line_posing_as_the_owner_reaches_the_live_master_only_as_quoted_text
     let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     fixture
@@ -1471,8 +1471,10 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
     }
 }
 
+/// The per-turn master framing names the harnesses an empty plan can use, and the live
+/// master's launch instructions list no team at all (IMP-QUIET-1).
 #[test]
-fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
+fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let folder = root.path().canonicalize().unwrap().join("project");
     std::fs::create_dir_all(folder.join("context")).unwrap();
@@ -1498,8 +1500,11 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
         revision: 1,
     };
     let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
-    for text in [framing(&setup, true, &["codex", "claude-code"], &[])] {
-        assert!(text.contains(listed), "{text}");
+    let text = framing(&setup, true, &["codex", "claude-code"], &[]);
+    assert!(text.contains(listed), "{text}");
+    let live = live_instructions(&setup, true);
+    for team in ["Your sub-agents", "- codex", "- claude-code"] {
+        assert!(!live.contains(team), "{team}: {live}");
     }
 }
 
@@ -2394,8 +2399,8 @@ fn a_live_master_that_ends_by_itself_turns_off_and_starts_again_in_its_own_workt
     let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     let worktree = |f: &Fixture| -> Vec<String> {
@@ -2423,9 +2428,10 @@ fn a_live_master_that_ends_by_itself_turns_off_and_starts_again_in_its_own_workt
     );
 
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the master starts again and is briefed", |f| {
-        live_turns(&f.connection) == (2, false)
+    fixture.until(&mut team, "the master starts again", |f| {
+        live_agent(&f.connection) == Some(master)
     });
+    assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
     assert_eq!(
         masters(&fixture.connection),
         [master],
@@ -2537,8 +2543,8 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
             .unwrap()
     };
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     let first = account(&fixture, master);
@@ -2552,10 +2558,11 @@ fn a_rate_limited_live_master_stops_and_starts_again_on_another_pool_account() {
         .unwrap();
     fixture.until(
         &mut team,
-        "the rate-limited master starts again on the other pool account and is briefed",
+        "the rate-limited master starts again on the other pool account",
         |f| {
             account(f, master) == other
-                && live_turns(&f.connection) == (3, false)
+                && live_turns(&f.connection) == (1, false)
+                && live_agent(&f.connection) == Some(master)
                 && host.alive().unwrap() == names(&[master])
         },
     );
@@ -2596,8 +2603,8 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
     let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
 
@@ -2752,12 +2759,13 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(
         &mut team,
-        "the first session's master is briefed and kept",
+        "the first session's master runs and is kept",
         |f| {
-            live_turns(&f.connection) == (1, false)
+            live_agent(&f.connection).is_some()
                 && kept_conversation(&f.connection, "s-one").is_some()
         },
     );
+    assert_eq!(live_turns(&fixture.connection), (0, false));
     let master = masters(&fixture.connection)[0];
     let (first, first_record) = kept_conversation(&fixture.connection, "s-one").unwrap();
     assert!(crate::harnesses::interactive::resumable(&first), "{first}");
@@ -2766,7 +2774,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     fixture.until(
         &mut team,
         "the owner's turn in the first session ends",
-        |f| live_turns(&f.connection) == (2, false),
+        |f| live_turns(&f.connection) == (1, false),
     );
 
     switch_session(&fixture.connection, "s-two");
@@ -2774,10 +2782,11 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         &mut team,
         "a new session starts its own conversation",
         |f| {
-            live_turns(&f.connection) == (3, false)
+            live_agent(&f.connection).is_some()
                 && kept_conversation(&f.connection, "s-two").is_some()
         },
     );
+    assert_eq!(live_turns(&fixture.connection), (1, false));
     let (second, _) = kept_conversation(&fixture.connection, "s-two").unwrap();
     assert_ne!(second, first);
     assert_eq!(launches(&fixture, master).len(), 2);
@@ -2799,18 +2808,18 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     idle_ticks(&mut team);
     assert_eq!(
         live_turns(&fixture.connection),
-        (3, false),
+        (1, false),
         "no briefing turn on resume"
     );
     host.input(&AgentId::team(master).unwrap(), b"again\r")
         .unwrap();
     fixture.until(&mut team, "the resumed conversation's new turn ends", |f| {
-        live_turns(&f.connection) == (4, false)
+        live_turns(&f.connection) == (2, false)
     });
     idle_ticks(&mut team);
     assert_eq!(
         live_turns(&fixture.connection).0,
-        4,
+        2,
         "earlier turns are not read again"
     );
     assert_eq!(
@@ -2837,23 +2846,18 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         |f| {
             noted(f, crate::master_sessions::FRESH_NOTE) == 1
                 && kept_conversation(&f.connection, "s-two").is_some_and(|(id, _)| id != second)
-                && live_turns(&f.connection) == (5, false)
+                && live_agent(&f.connection).is_some()
         },
     );
+    assert_eq!(live_turns(&fixture.connection), (2, false));
     assert!(!launches(&fixture, master)[3].contains("resume"));
-    let typed = std::fs::read_to_string(
-        fixture
-            .base
-            .join("team/agents")
-            .join(format!("agent-{master}"))
-            .join("home/typed"),
-    )
-    .unwrap();
+    let seeded = codex_instructions(&fixture, master);
     assert!(
-        typed.contains("Your earlier harness conversation in this session"),
-        "{typed}"
+        seeded.contains("Your earlier harness conversation in this session"),
+        "{seeded}"
     );
-    assert!(typed.contains("You: Done."), "{typed}");
+    assert!(seeded.contains("You: Done."), "{seeded}");
+    assert_eq!(typed(&fixture, master), "", "the seed is never typed");
 
     std::fs::remove_file(&first_record).unwrap();
     switch_session(&fixture.connection, "s-one");
@@ -2862,9 +2866,11 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         "a session whose record is gone starts fresh",
         |f| {
             noted(f, crate::master_sessions::LOST_NOTE) == 1
-                && live_turns(&f.connection) == (6, false)
+                && launches(f, master).len() == 5
+                && live_agent(&f.connection).is_some()
         },
     );
+    assert_eq!(live_turns(&fixture.connection), (2, false));
     assert!(!launches(&fixture, master)[4].contains("resume"));
     assert_eq!(masters(&fixture.connection), [master]);
     team.shutdown().unwrap();
@@ -2886,18 +2892,17 @@ fn a_resume_the_reader_refuses_starts_fresh_with_the_lost_note() {
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(
         &mut team,
-        "the first session's master is briefed and kept",
+        "the first session's master runs and is kept",
         |f| {
-            live_turns(&f.connection) == (1, false)
+            live_agent(&f.connection).is_some()
                 && kept_conversation(&f.connection, "s-one").is_some()
         },
     );
     let master = masters(&fixture.connection)[0];
     let (first, record) = kept_conversation(&fixture.connection, "s-one").unwrap();
     switch_session(&fixture.connection, "s-two");
-    fixture.until(&mut team, "the second session's master is briefed", |f| {
-        live_turns(&f.connection) == (2, false)
-            && kept_conversation(&f.connection, "s-two").is_some()
+    fixture.until(&mut team, "the second session's master runs", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-two").is_some()
     });
 
     let text = std::fs::read_to_string(&record).unwrap();
@@ -2915,7 +2920,7 @@ fn a_resume_the_reader_refuses_starts_fresh_with_the_lost_note() {
         "the refused resume starts fresh with the lost note",
         |f| {
             noted(f, crate::master_sessions::LOST_NOTE) == 1
-                && live_turns(&f.connection) == (3, false)
+                && live_turns(&f.connection) == (0, false)
                 && kept_conversation(&f.connection, "s-one").is_some_and(|(id, _)| {
                     id != first && crate::harnesses::interactive::resumable(&id)
                 })
@@ -2959,9 +2964,9 @@ fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(
         &mut team,
-        "the first session's master is briefed and kept",
+        "the first session's master runs and is kept",
         |f| {
-            live_turns(&f.connection) == (1, false)
+            live_agent(&f.connection).is_some()
                 && kept_conversation(&f.connection, "s-one").is_some()
         },
     );
@@ -3002,9 +3007,9 @@ fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
     switch_session(&fixture.connection, "s-new");
     fixture.until(
         &mut team,
-        "the new session's master is briefed and kept",
+        "the new session's master runs and is kept",
         |f| {
-            live_turns(&f.connection) == (2, false)
+            live_agent(&f.connection).is_some()
                 && kept_conversation(&f.connection, "s-new").is_some()
         },
     );
@@ -3058,14 +3063,14 @@ fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
     let mut team = live_runtime(&fixture, &host, CRASHING_CODEX);
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     host.input(&AgentId::team(master).unwrap(), b"crash now\r")
         .unwrap();
     fixture.until(&mut team, "the turn opens", |f| {
-        live_turns(&f.connection) == (1, true)
+        live_turns(&f.connection) == (0, true)
     });
     let landing = crate::landing::open(&fixture.base).unwrap();
     fixture.until(&mut team, "the ended pane's open turn lands", |_| {
@@ -3076,11 +3081,11 @@ fn a_live_master_turn_cut_short_by_its_pane_ending_still_lands() {
     assert_eq!(sets[0].agent.id, master.to_string());
     assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
     assert_eq!(sets[0].files, 1);
-    assert_eq!(live_turns(&fixture.connection), (2, false));
+    assert_eq!(live_turns(&fixture.connection), (1, false));
     let outcome: String = fixture
         .connection
         .query_row(
-            "SELECT outcome FROM team_master_turns WHERE agent=?1 AND turn=2",
+            "SELECT outcome FROM team_master_turns WHERE agent=?1 AND turn=1",
             [master],
             |row| row.get(0),
         )
@@ -3102,8 +3107,8 @@ fn live_turns(connection: &Connection) -> (i64, bool) {
         .unwrap()
 }
 
-/// The live master runs as its harness's own app in a kept pane: the engine types the
-/// briefing, every turn counts and lands, the owner's typed turns included, engine input
+/// The live master runs as its harness's own app in a kept pane: the engine types nothing
+/// before the owner's first line, every turn counts and lands, the owner's typed turns included, engine input
 /// waits for an idle master, and the next engine takes the same pane over.
 #[cfg(target_os = "macos")]
 #[test]
@@ -3140,9 +3145,11 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
         "no live master starts before the owner turns it on"
     );
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the live master's briefing turn ends", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
     });
+    assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
     let master: i64 = fixture
         .connection
         .query_row(
@@ -3157,7 +3164,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     host.input(&AgentId::team(master).unwrap(), b"write page\r")
         .unwrap();
     fixture.until(&mut team, "the owner's own turn is counted", |f| {
-        live_turns(&f.connection) == (2, false)
+        live_turns(&f.connection) == (1, false)
     });
     let landing = crate::landing::open(&fixture.base).unwrap();
     let sets = crate::landing::list(&landing, &project).unwrap();
@@ -3183,7 +3190,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
         "engine input waits while its last input settles"
     );
     fixture.until(&mut team, "the engine's input turn is counted", |f| {
-        live_turns(&f.connection) == (3, false)
+        live_turns(&f.connection) == (2, false)
     });
 
     assert_eq!(team.shutdown().unwrap(), names(&[master]));
@@ -3197,7 +3204,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
     host.input(&AgentId::team(master).unwrap(), b"after the restart\r")
         .unwrap();
     fixture.until(&mut again, "a turn after the restart is counted", |f| {
-        live_turns(&f.connection) == (4, false)
+        live_turns(&f.connection) == (3, false)
     });
     let turns: Vec<(i64, String)> = fixture
         .connection
@@ -3209,7 +3216,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
         .unwrap();
     assert_eq!(
         turns.iter().map(|turn| turn.0).collect::<Vec<_>>(),
-        [1, 2, 3, 4]
+        [1, 2, 3]
     );
     assert_eq!(
         count(
@@ -3930,12 +3937,11 @@ fn a_woken_sub_agent_continues_only_a_conversation_its_harness_and_account_can_r
     host.close(&[]).unwrap();
 }
 
-/// A live master with team tools is told the newest twenty finished sub-agents it can
+/// The finished sub-agents a master's status and framing list are the newest twenty it can
 /// wake, each with its name and Sub-agent number, harness, last task on one line and when
-/// it finished; running
-/// agents, agents whose worktree is gone and masters are left out.
+/// it finished; running agents, agents whose worktree is gone and masters are left out.
 #[test]
-fn the_live_master_instructions_list_the_newest_twenty_finished_sub_agents() {
+fn the_master_status_lists_the_newest_twenty_finished_sub_agents() {
     let fixture = Fixture::new(1);
     let project = fixture.setup.project_id.clone();
     let now = 100 * 24 * 60 * 60 * 1000;
@@ -4077,6 +4083,7 @@ printf '\033[?2004hClaude stand-in ready\n'
 e=$(printf '\033')
 open=0
 while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/input"
   case "$line" in
     *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed" ;;
     *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue ;;
@@ -4180,8 +4187,8 @@ fn renaming_the_master_harness_to_its_catalog_id_keeps_the_same_master() {
     let project = fixture.setup.project_id.clone();
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the master on the alias is briefed", |f| {
-        live_turns(&f.connection) == (1, false)
+    fixture.until(&mut team, "the master on the alias runs", |f| {
+        live_agent(&f.connection).is_some()
     });
     let master = masters(&fixture.connection)[0];
     stop_live(&fixture, &mut team);
@@ -4224,15 +4231,14 @@ fn a_master_harness_switch_carries_the_conversation_over_by_default() {
     let project = fixture.setup.project_id.clone();
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
-        live_turns(&f.connection) == (1, false)
-            && kept_conversation(&f.connection, "s-one").is_some()
+    fixture.until(&mut team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
     });
     let first = masters(&fixture.connection)[0];
     host.input(&AgentId::team(first).unwrap(), b"hello\r")
         .unwrap();
     fixture.until(&mut team, "the owner's turn ends", |f| {
-        live_turns(&f.connection) == (2, false)
+        live_turns(&f.connection) == (1, false)
     });
     stop_live(&fixture, &mut team);
     assert_eq!(
@@ -4245,10 +4251,14 @@ fn a_master_harness_switch_carries_the_conversation_over_by_default() {
     let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
     fixture.until(&mut team, "the Claude Code master gets the handoff", |f| {
         let all = masters(&f.connection);
-        noted(f, &note) == 1 && all.len() == 2 && typed(f, all[1]).contains("newest first")
+        noted(f, &note) == 1
+            && all.len() == 2
+            && instructions_file(f, all[1]).is_some_and(|text| text.contains("newest first"))
     });
     let second = masters(&fixture.connection)[1];
-    let handed = typed(&fixture, second);
+    idle_ticks(&mut team);
+    assert_eq!(typed(&fixture, second), "", "the handoff is never typed");
+    let handed = instructions_file(&fixture, second).unwrap();
     assert!(
         handed.contains(
             "The owner switched this conversation's master from Codex to you. Its earlier turns, newest first:"
@@ -4313,15 +4323,14 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
     );
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
-        live_turns(&f.connection) == (1, false)
-            && kept_conversation(&f.connection, "s-one").is_some()
+    fixture.until(&mut team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
     });
     let first = masters(&fixture.connection)[0];
     host.input(&AgentId::team(first).unwrap(), b"hello\r")
         .unwrap();
     fixture.until(&mut team, "the owner's turn ends", |f| {
-        live_turns(&f.connection) == (2, false)
+        live_turns(&f.connection) == (1, false)
     });
     stop_live(&fixture, &mut team);
 
@@ -4340,14 +4349,15 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
             let all = masters(&f.connection);
             noted(f, &note) == 1
                 && all.len() == 2
-                && !typed(f, all[1]).is_empty()
+                && instructions_file(f, all[1]).is_some()
                 && kept_by(f, all[1])
         },
     );
     let second = masters(&fixture.connection)[1];
-    let briefed = typed(&fixture, second);
+    let briefed = instructions_file(&fixture, second).unwrap();
     assert!(!briefed.contains("The owner switched"), "{briefed}");
     assert!(!briefed.contains("You: Done."), "{briefed}");
+    assert_eq!(typed(&fixture, second), "");
     assert_eq!(
         fixture.status().live_switch,
         Some(crate::team::SessionSwitch {
@@ -4361,6 +4371,199 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
         [first, second],
         "a new master on the new harness"
     );
+}
+
+/// The `developer_instructions` a Codex master's own `config.toml` holds. Takes the fixture
+/// and the master. Returns the text.
+#[cfg(target_os = "macos")]
+fn codex_instructions(fixture: &Fixture, master: i64) -> String {
+    let config = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{master}"))
+        .join("home/config.toml");
+    let document: toml_edit::DocumentMut =
+        std::fs::read_to_string(config).unwrap().parse().unwrap();
+    document["developer_instructions"]
+        .as_str()
+        .expect("developer_instructions is a string")
+        .to_owned()
+}
+
+/// The live master whose pane runs now, as `team_live_masters` records it once the runtime
+/// started it. Takes the connection. Returns the agent id, or none before the pane runs.
+#[cfg(target_os = "macos")]
+fn live_agent(connection: &Connection) -> Option<i64> {
+    connection
+        .query_row(
+            "SELECT agent FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+        .flatten()
+}
+
+/// The text of the instructions file a Claude Code master was last launched with, read from
+/// the `--append-system-prompt-file` argument its stand-in logged. Takes the fixture and the
+/// master. Returns the file's text, or none before the master launched.
+#[cfg(target_os = "macos")]
+fn instructions_file(fixture: &Fixture, master: i64) -> Option<String> {
+    let launch = launches(fixture, master).pop()?;
+    let file = launch
+        .split_whitespace()
+        .skip_while(|word| *word != "--append-system-prompt-file")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no instructions file in: {launch}"));
+    Some(std::fs::read_to_string(file).unwrap())
+}
+
+/// Writes the project brief the launch context reads, `context/brief.md`. Takes the fixture
+/// and the brief text.
+#[cfg(target_os = "macos")]
+fn write_brief(fixture: &Fixture, text: &str) {
+    let context = fixture.base.join("project").join("context");
+    std::fs::create_dir_all(&context).unwrap();
+    std::fs::write(context.join("brief.md"), text).unwrap();
+}
+
+/// Checks a live master's launch instructions (IMP-QUIET-1): its role and the rule to wait
+/// for the owner's first line, how it hands out work, how the team's work lands and the
+/// brief, and no list of the team. Takes the text.
+#[cfg(target_os = "macos")]
+fn assert_live_master_instructions(text: &str) {
+    assert!(
+        text.contains("You are the master agent of the project \"Panes\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("Wait for the owner's first line before you start any work."),
+        "{text}"
+    );
+    assert!(text.contains("DELEGATE: <the task>"), "{text}");
+    assert!(
+        text.contains(crate::launch_context::MASTER_LANDING_RULES),
+        "{text}"
+    );
+    assert!(text.contains("## Brief\n\nShip the notes page."), "{text}");
+    for listed in ["Your sub-agents", "- codex: up to"] {
+        assert!(!text.contains(listed), "lists the team ({listed}): {text}");
+    }
+}
+
+/// A live master starts quiet (IMP-QUIET-1): the engine types nothing into its pane, so it
+/// waits idle with no turn until the owner's first line, which is then its first turn.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_types_nothing_before_the_owners_first_line() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    set_master(&fixture, "claude-code");
+    let mut team = switching_runtime(&fixture, &host);
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = live_agent(&fixture.connection).unwrap();
+    let input = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{master}"))
+        .join("home/input");
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    assert_eq!(
+        std::fs::read_to_string(&input).unwrap_or_default(),
+        "",
+        "nothing reaches the master before the owner types"
+    );
+    assert_eq!(typed(&fixture, master), "");
+    assert_eq!(live_turns(&fixture.connection), (0, false));
+
+    host.input(&AgentId::team(master).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(&mut team, "the owner's first line is the first turn", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), "hello\n");
+    assert_eq!(typed(&fixture, master), "");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A live Claude Code master gets its instructions through the file it is launched with
+/// (`--append-system-prompt-file`), never typed: its role, rules, the landing rules and the
+/// brief, and no team list. With team tools the master is told to read the team through
+/// `inspect_work()` instead of a list.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_live_master_instructions_file_holds_the_rules_and_brief_but_no_team_list() {
+    let fixture = Fixture::new(1);
+    write_brief(&fixture, "Ship the notes page.\n");
+    let host = fixture.host();
+    set_master(&fixture, "claude-code");
+    let mut team = switching_runtime(&fixture, &host);
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master launches", |f| {
+        live_agent(&f.connection).is_some_and(|master| !launches(f, master).is_empty())
+    });
+    let master = live_agent(&fixture.connection).unwrap();
+    assert_live_master_instructions(&instructions_file(&fixture, master).unwrap());
+    idle_ticks(&mut team);
+    assert_eq!(
+        typed(&fixture, master),
+        "",
+        "the instructions are never typed"
+    );
+
+    let mut setup = fixture.setup.clone();
+    setup.team.master_tools = true;
+    let tools = live_instructions(&setup, true);
+    assert!(
+        tools.contains(&format!(
+            "call {}() whenever you need to know who is on it",
+            super::super::tool::INSPECT_WORK_TOOL
+        )),
+        "{tools}"
+    );
+    for listed in ["Your sub-agents", "- codex: up to"] {
+        assert!(
+            !tools.contains(listed),
+            "lists the team ({listed}): {tools}"
+        );
+    }
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// A live Codex master gets the same instructions as `developer_instructions` in the
+/// `config.toml` of its own Codex home, and nothing is typed into its pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_codex_live_master_gets_its_instructions_as_developer_instructions() {
+    let fixture = Fixture::new(1);
+    write_brief(&fixture, "Ship the notes page.\n");
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    let config = |f: &Fixture, master: i64| {
+        f.base
+            .join("team/agents")
+            .join(format!("agent-{master}"))
+            .join("home/config.toml")
+    };
+    fixture.until(&mut team, "the live Codex master runs", |f| {
+        live_agent(&f.connection).is_some_and(|master| config(f, master).is_file())
+    });
+    let master = live_agent(&fixture.connection).unwrap();
+    assert_live_master_instructions(&codex_instructions(&fixture, master));
+    idle_ticks(&mut team);
+    assert_eq!(live_turns(&fixture.connection), (0, false), "no typed turn");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
 }
 
 #[cfg(target_os = "macos")]
