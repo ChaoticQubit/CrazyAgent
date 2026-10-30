@@ -4,6 +4,9 @@ use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
 use crazyagent::spawn_gate;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+const NC_LIMIT: Duration = Duration::from_secs(20);
 
 struct Case {
     _temp: tempfile::TempDir,
@@ -44,6 +47,8 @@ fn sandbox(case: &Case) -> ProjectSandbox {
 
 /// Connects to a Unix socket from inside the agent sandbox with the system `nc`. Takes
 /// the sandbox, the profile path and the socket. Returns whether the connection worked.
+/// A refused connect ends nc at once, so nc still running after `NC_LIMIT` reached a
+/// listener that never answers: it is killed and the test fails with that.
 fn connects(sandbox: &ProjectSandbox, profile: &Path, socket: &Path) -> bool {
     sandbox.install(profile).unwrap();
     let mut command = sandbox.command(profile, Path::new("/usr/bin/nc"));
@@ -52,11 +57,23 @@ fn connects(sandbox: &ProjectSandbox, profile: &Path, socket: &Path) -> bool {
         .arg(socket)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command)
-        .unwrap()
-        .status
-        .success()
+        .stderr(Stdio::null());
+    let mut child = spawn_gate::spawn(&mut command).unwrap();
+    let deadline = Instant::now() + NC_LIMIT;
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status.success();
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!(
+                "nc was still connected to {} after {NC_LIMIT:?}: the sandbox let it reach a socket that never answers",
+                socket.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// K2b: a socket grant takes only a plain absolute path of ASCII letters, digits, `/`, `.`,
