@@ -300,7 +300,7 @@ fn wanted(name: &OsStr, hooks: &[HookSpec]) -> bool {
 }
 
 fn named(command: &str, name: &str) -> bool {
-    let after = [b'/', b'"', b'\'', b' ', b';', b')'];
+    let after = *b"/\"' ;)";
     command.match_indices(name).any(|(at, _)| {
         let before = at.checked_sub(1).map(|index| command.as_bytes()[index]);
         let next = command.as_bytes().get(at + name.len()).copied();

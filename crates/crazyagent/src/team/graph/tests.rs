@@ -869,7 +869,8 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             unread_edges: vec![(Party::Owner, Party::Agent(9), 1, Receipt::Sent)],
         }),
     };
-    let mates = |graph: &TeamGraph| -> Vec<(String, Option<String>, Option<i64>, Option<String>)> {
+    type MateRow = (String, Option<String>, Option<i64>, Option<String>);
+    let mates = |graph: &TeamGraph| -> Vec<MateRow> {
         graph
             .nodes
             .iter()
