@@ -157,6 +157,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("project files");
                     connection.project_files(project, query).unwrap();
                 }
+                Request::Process(query) => {
+                    sent.push("process");
+                    connection.process(*query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -1803,4 +1807,304 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
     assert!(shown.contains("No changes yet."), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut first = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut first,
+    );
+    let mut settings = Shell::with(first, screen);
+    pump(&mut settings, &mut connection).await;
+    settings.key(Key::Enter);
+    settings.key(Key::Enter);
+    pump(&mut settings, &mut connection).await;
+    let shown = render(&mut settings, 120, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    drop(settings);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 24);
+    assert!(shown.contains("No messages yet."), "{shown}");
+    let conversation = shell.place();
+    for character in "start the sync".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert_eq!(
+        shell.place(),
+        conversation,
+        "t types while the input is focused"
+    );
+    let shown = render(&mut shell, 120, 24);
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
+    assert!(shown.contains("Ctrl-T Team"), "{shown}");
+
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+    assert_eq!(shell.depth(), 2);
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), conversation);
+    let shown = render(&mut shell, 120, 24);
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
+}
+
+fn cell_reads(shown: &str, text: &str) -> bool {
+    shown
+        .lines()
+        .any(|line| line.split('│').any(|cell| cell.trim() == text))
+}
+
+fn team_shell(project: &ProjectId) -> Shell {
+    let mut ctx = ctx(200, 40);
+    let screen = open(
+        &Place::Team {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    Shell::with(ctx, screen)
+}
+
+async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
+    shell.key(Key::Char('s'));
+    let sent = pump(shell, connection).await;
+    assert_eq!(sent, ["team"]);
+    let shown = render(shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+}
+
+fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
+             VALUES (?1, 'sub', 'codex', 0, 'stopped', 1, 1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    crate::coord::send(
+        &connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(agent),
+            to: crate::coord::Party::Owner,
+            kind: crate::coord::MessageKind::Question,
+            question: Some((
+                crate::coord::QuestionFor::Me,
+                crate::coord::Severity::Normal,
+            )),
+            work: None,
+            reply_to: None,
+            body: text.into(),
+            idempotency_key: None,
+        },
+        2,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_team_screen_opens_its_settings_on_s_and_esc_returns_to_the_tree() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team graph"), "{sent:?}");
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("s Settings"), "{shown}");
+    assert!(!shown.contains("Team settings"), "{shown}");
+
+    team_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Keep warm  Off"), "{shown}");
+    assert!(shown.contains("Spread accounts  Off"), "{shown}");
+
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+    assert!(shown.contains("s Settings"), "{shown}");
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_settings_key_on_the_team_screen_sends_a_team_change() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+    assert!(
+        !engine
+            .controller
+            .team_status(notes.clone())
+            .await
+            .unwrap()
+            .keep_warm
+    );
+
+    shell.key(Key::Char('w'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["team change", "team"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Keep warm  On"), "{shown}");
+    assert!(
+        engine
+            .controller
+            .team_status(notes)
+            .await
+            .unwrap()
+            .keep_warm
+    );
+}
+
+#[tokio::test]
+async fn a_paste_on_the_team_settings_goes_into_the_task_draft_and_quit_warns_it_is_lost() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('n'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("New task from you"), "{shown}");
+    shell.key(Key::Paste("Fix the flaky sync test".into()));
+    shell.key(Key::Char('s'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Fix the flaky sync tests"), "{shown}");
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+
+    shell.key(Key::Ctrl('q'));
+    assert!(!shell.quitting());
+    let shown = render(&mut shell, 200, 40);
+    assert!(
+        shown.contains("The task you are writing will be lost."),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn the_team_settings_reach_the_coordination_editor_and_spread_accounts() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('c'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Workflow nudges"), "{shown}");
+    assert!(shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+    assert!(shown.contains("s Settings"), "{shown}");
+
+    team_settings(&mut shell, &mut connection).await;
+    assert!(
+        !engine
+            .controller
+            .team_status(notes.clone())
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+    shell.key(Key::Char('P'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["team change", "team"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Spread accounts  On"), "{shown}");
+    assert!(
+        engine
+            .controller
+            .team_status(notes)
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+}
+
+#[tokio::test]
+async fn the_team_settings_and_questions_do_not_take_each_others_keys() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    seed_question(&engine, &notes, "Which port does the buoy feed use?");
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('q'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Which port"), "{shown}");
+
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["coord questions"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(
+        shown.contains("Which port does the buoy feed use?"),
+        "{shown}"
+    );
+    shell.key(Key::Char('s'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+
+    shell.key(Key::Enter);
+    for character in "use 4000 so?[]".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(cell_reads(&shown, "use 4000 so?[]"), "{shown}");
+    assert!(!shown.contains("Team settings"), "{shown}");
 }

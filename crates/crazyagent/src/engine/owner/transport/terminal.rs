@@ -595,3 +595,6 @@ pub(super) async fn serve(
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;
