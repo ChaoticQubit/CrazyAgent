@@ -551,6 +551,11 @@ fn hookless_agent_raises_no_flags() {
     );
     assert!(!row(hooked).hookless);
 
+    let nudges = crate::coord::settings::CoordSettings {
+        nudges: true,
+        ..Default::default()
+    };
+    crate::coord::settings::write(&db, &project, &nudges).unwrap();
     tick(&db, &project, now).unwrap();
     let notes = |id: AgentId| -> i64 {
         db.query_row(
