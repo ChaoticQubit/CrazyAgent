@@ -248,6 +248,25 @@ fn another_projects_agent_records_are_never_listed_found_or_read() {
     );
 }
 
+/// S1, project scope: another project's team activity never lists this project's team
+/// conversation, and once this project's team has written, its entry carries this
+/// project's last team time, never the other project's newer one.
+#[test]
+fn another_projects_team_activity_never_lists_or_dates_this_projects_team() {
+    const DAY_MS: i64 = 86_400_000;
+    let fixture = Fixture::new();
+    fixture.team_message_of(OTHER, "engine", "Their note", 3 * DAY_MS);
+    let listed = fixture.sessions("");
+    assert!(listed_ids(&listed).is_empty(), "{listed}");
+    fixture.team_message("engine", "Our note", DAY_MS);
+    let listed = fixture.sessions("");
+    assert_eq!(
+        hit_lines(&listed),
+        ["- team (team messages and engine notes, last active 1970-01-02 00:00 UTC)"],
+        "{listed}"
+    );
+}
+
 /// S1: a search finds every word in one message of a master session's engine turns, the
 /// team's messages and both harnesses' records in the agents' homes, any case, at most
 /// `HITS_PER_CONVERSATION_MAX` hits from one conversation.
