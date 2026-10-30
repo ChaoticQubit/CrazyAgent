@@ -15,7 +15,7 @@ let menuRoot = null;
 let terminal = null;
 export const notes = [];
 export const typed = [];
-const switched = [];
+const started = [];
 
 function page() {
   root?.unmount();
@@ -26,7 +26,7 @@ function page() {
   terminal?.dispose();
   terminal = null;
   typed.length = 0;
-  switched.length = 0;
+  started.length = 0;
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
     const style = document.createElement("style");
@@ -37,7 +37,7 @@ function page() {
   return document.getElementById("panel");
 }
 
-function data(master) {
+function data(master, team) {
   const setup = master === undefined ? undefined : {
     kind: "ok",
     value: { project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: null, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 1,
@@ -46,18 +46,19 @@ function data(master) {
   return {
     id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: undefined, at: 0 }, reloadTeam: () => {},
+    team: { result: team, at: 0 }, reloadTeam: () => {},
   };
 }
 
 const node = { id: "team-1", kind: "master", parent: null, label: "Master", harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: "team-1" };
 
 /** Mounts the project's master area for a team plan whose master is the given harness, or
- * whose setup is still loading when it is undefined. */
-export function mountArea(master) {
+ * whose setup is still loading when it is undefined, with the given team status read, none
+ * when it is undefined. */
+export function mountArea(master, team) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master) })));
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, team) })));
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
@@ -71,12 +72,12 @@ export function mountView(state, code = "") {
     : state === "stopped" ? { kind: "stopped", problem: code || null }
     : { kind: state };
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onSwitch: (on) => switched.push(on) })));
+  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onStart: async () => { started.push(true); } })));
 }
 
-/** The switch changes the view asked for, in order. */
-export function switchedTo() {
-  return [...switched];
+/** How many times the view asked to start the live master. */
+export function starts() {
+  return started.length;
 }
 
 /** Clicks the button with this exact text and lets React render. */
@@ -88,10 +89,11 @@ export function click(text) {
 }
 
 /** What the master area shows: which views are mounted, the buttons, and how much of the
- * area the terminal fills. */
+ * area the terminal fills below the Sessions bar. */
 export function shown() {
   const area = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   const box = document.querySelector(".pj-master-live > .tg-terminal")?.getBoundingClientRect();
+  const sessions = document.querySelector(".pj-master-live > .pj-sessions")?.getBoundingClientRect();
   return {
     live: Boolean(document.querySelector(".pj-master-live")),
     terminal: Boolean(document.querySelector(".tg-terminal")),
@@ -109,6 +111,7 @@ export function shown() {
     viewport: window.innerHeight,
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
+    sessions: sessions ? { top: Math.round(sessions.top), bottom: Math.round(sessions.bottom) } : null,
   };
 }
 
