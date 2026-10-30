@@ -3606,3 +3606,299 @@ fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
         assert!(!budget_stop(&connection, &project, now_ms()).unwrap());
     }
 }
+
+/// Inserts one agent row. Takes the connection, the project, the role, its lead and its
+/// status. Returns its id.
+fn agent_row(
+    connection: &Connection,
+    project: &ProjectId,
+    role: AgentRole,
+    parent: Option<i64>,
+    status: AgentStatus,
+) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES (?1,?2,'codex',1,?3,1,1,?4)",
+            params![project.as_str(), role.name(), status.name(), parent],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
+/// Records a teammate pane the engine saw in a lead's terminal. Takes the connection, the
+/// project, the lead and the pane id.
+fn teammate_pane(connection: &Connection, project: &ProjectId, lead: i64, pane: &str) {
+    connection
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (?1,?2,?3,1)",
+            params![lead, project.as_str(), pane],
+        )
+        .unwrap();
+}
+
+/// A sub-agent lead is admitted another sub-agent until it runs the owner's Max teammates
+/// per harness, for every choice (DEC-104 K8): its running app-spawned workers count, a
+/// stopped one does not, and the refusal names the cap and the count.
+#[test]
+fn admit_sub_agent_refuses_a_lead_at_each_max_teammates_choice() {
+    for cap in CAP_CHOICES {
+        let (_directory, mut connection, project) = team_database("team-caps");
+        let lead = agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            None,
+            AgentStatus::Working,
+        );
+        assert_eq!(caps::admit_sub_agent(&connection, &project, lead), Ok(()));
+        applied(
+            &mut connection,
+            TeamAction::MaxTeammates {
+                project_id: project.clone(),
+                max: Some(cap),
+            },
+        );
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            Some(lead),
+            AgentStatus::Stopped,
+        );
+        for running in 0..cap {
+            assert_eq!(
+                caps::admit_sub_agent(&connection, &project, lead),
+                Ok(()),
+                "cap {cap} with {running} running"
+            );
+            agent_row(
+                &connection,
+                &project,
+                AgentRole::Sub,
+                Some(lead),
+                AgentStatus::Working,
+            );
+        }
+        assert_eq!(
+            caps::admit_sub_agent(&connection, &project, lead),
+            Err(format!(
+                "The owner allows at most {cap} sub-agents per harness, and this harness already runs {cap}. Wait for one to finish, or ask the owner to raise Max teammates per harness."
+            ))
+        );
+    }
+}
+
+/// A lead's native teammates count once (DEC-104 K8): as the larger of their agent rows and
+/// the teammate panes the engine saw, never their sum, next to its app-spawned workers; an
+/// ended or stopped pane does not count.
+#[test]
+fn admit_sub_agent_counts_native_teammates_as_rows_or_panes_not_both() {
+    let (_directory, mut connection, project) = team_database("team-native");
+    let lead = agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        None,
+        AgentStatus::Working,
+    );
+    applied(
+        &mut connection,
+        TeamAction::MaxTeammates {
+            project_id: project.clone(),
+            max: Some(3),
+        },
+    );
+    for _ in 0..2 {
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Teammate,
+            Some(lead),
+            AgentStatus::Working,
+        );
+    }
+    teammate_pane(&connection, &project, lead, "%4");
+    teammate_pane(&connection, &project, lead, "%5");
+    teammate_pane(&connection, &project, lead, "%6");
+    connection
+        .execute("UPDATE team_teammates SET ended_ms=2 WHERE pane='%6'", [])
+        .unwrap();
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        2
+    );
+    assert_eq!(caps::admit_sub_agent(&connection, &project, lead), Ok(()));
+    teammate_pane(&connection, &project, lead, "%7");
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        3,
+        "three live panes outnumber two rows"
+    );
+    assert!(caps::admit_sub_agent(&connection, &project, lead).is_err());
+    connection
+        .execute("UPDATE team_teammates SET stopped_ms=3 WHERE pane='%7'", [])
+        .unwrap();
+    agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        Some(lead),
+        AgentStatus::Working,
+    );
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        3,
+        "one app-spawned worker plus two teammates"
+    );
+    assert!(caps::admit_sub_agent(&connection, &project, lead).is_err());
+}
+
+/// The master as lead is held to Max harnesses per project, counting only the harnesses it
+/// started and never their own workers (DEC-104 K8), and a stopped team, a teammate as lead
+/// and an agent of no project are each refused in plain words.
+#[test]
+fn admit_sub_agent_holds_the_master_to_max_harnesses_and_refuses_the_rest() {
+    let (_directory, mut connection, project) = team_database("team-harnesses");
+    let master = agent_row(
+        &connection,
+        &project,
+        AgentRole::Master,
+        None,
+        AgentStatus::Working,
+    );
+    applied(
+        &mut connection,
+        TeamAction::MaxHarnesses {
+            project_id: project.clone(),
+            max: Some(2),
+        },
+    );
+    let first = agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        None,
+        AgentStatus::Working,
+    );
+    for _ in 0..3 {
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            Some(first),
+            AgentStatus::Working,
+        );
+    }
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, master),
+        Ok(()),
+        "a lead's workers are not harnesses"
+    );
+    agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        Some(master),
+        AgentStatus::Idle,
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, master),
+        Err("The owner allows at most 2 harnesses in this project, and 2 already run. Wait for one to finish, or ask the owner to raise Max harnesses per project.".into())
+    );
+
+    let teammate = agent_row(
+        &connection,
+        &project,
+        AgentRole::Teammate,
+        Some(first),
+        AgentStatus::Working,
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, teammate),
+        Err("A teammate does not start sub-agents. Its lead starts them.".into())
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, 9_999),
+        Err("That lead is not an agent of this project.".into())
+    );
+    applied(
+        &mut connection,
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, first),
+        Err("The owner stopped every agent of this project, so no sub-agent starts until they start the team again.".into())
+    );
+}
+
+/// Stop harness stops the lead and every agent it leads, down the whole tree and nobody
+/// else, for any role but the master (DEC-104 K8), and waking the lead clears each of those
+/// stops while another stop stays.
+#[test]
+fn a_stopped_harness_stops_its_whole_lead_tree_and_its_wake_clears_it() {
+    let (_directory, mut connection, project) = team_database("team-cascade");
+    let row = |connection: &Connection, role, parent| {
+        agent_row(connection, &project, role, parent, AgentStatus::Working)
+    };
+    let master = row(&connection, AgentRole::Master, None);
+    let lead = row(&connection, AgentRole::Sub, None);
+    let worker = row(&connection, AgentRole::Sub, Some(lead));
+    let helper = row(&connection, AgentRole::Sub, Some(worker));
+    let teammate = row(&connection, AgentRole::Teammate, Some(lead));
+    let sibling = row(&connection, AgentRole::Sub, None);
+    let theirs = row(&connection, AgentRole::Sub, Some(sibling));
+    let stopped = |connection: &Connection| -> Vec<i64> {
+        connection
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1 ORDER BY agent")
+            .unwrap()
+            .query_map([project.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    applied(
+        &mut connection,
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent: lead,
+        },
+    );
+    assert_eq!(stopped(&connection), vec![lead, worker, helper, teammate]);
+    for (agent, code) in [
+        (master, "team_stop_master"),
+        (9_999, "team_agent_not_found"),
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &ModelAccess::default(),
+                &TeamAction::StopAgent {
+                    project_id: project.clone(),
+                    agent,
+                },
+            )
+            .unwrap(),
+            rejected(code)
+        );
+    }
+    applied(
+        &mut connection,
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent: theirs,
+        },
+    );
+    assert_eq!(
+        stopped(&connection),
+        vec![lead, worker, helper, teammate, theirs]
+    );
+    owner_start(&connection, &project, lead).unwrap();
+    assert_eq!(
+        stopped(&connection),
+        vec![theirs],
+        "waking the lead brings back its whole tree, and only it"
+    );
+}

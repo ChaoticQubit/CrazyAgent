@@ -7045,3 +7045,120 @@ fn max_harnesses_each_choice_holds_the_next_harness_until_the_cap_rises() {
     }
     team.shutdown().unwrap();
 }
+
+/// Spread harnesses across accounts (DEC-104 K8) with two signed-in pool accounts, the
+/// owner's ranking putting the first ahead: Off, every harness takes the account the
+/// strategy picks; On, the second harness takes the account no running harness uses, and
+/// once both are used the next one falls back to the strategy's pick.
+#[cfg(target_os = "macos")]
+#[test]
+fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
+    for (spread, wanted) in [
+        (false, [ENDPOINT, ENDPOINT, ENDPOINT]),
+        (true, [ENDPOINT, "local-b", ENDPOINT]),
+    ] {
+        let mut fixture = Fixture::new(3);
+        let mut second = fixture.access.connections[0].clone();
+        second.id = reference("local-b");
+        fixture.access.connections.push(second);
+        fixture.access.pools[0].members.push(reference("local-b"));
+        let project = fixture.setup.project_id.clone();
+        {
+            let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+            let tx = connection.transaction().unwrap();
+            assert_eq!(
+                crate::scheduling::apply(
+                    &tx,
+                    &fixture.access,
+                    &crate::scheduling::ScheduleChange::Account {
+                        connection: reference(ENDPOINT),
+                        plan: crate::scheduling::AccountPlan {
+                            rank: Some(1),
+                            reserve_percent: 0,
+                            pin: None,
+                        },
+                    },
+                )
+                .unwrap(),
+                crate::protocol::Outcome::Applied
+            );
+            tx.commit().unwrap();
+        }
+        owner(
+            &fixture,
+            &[
+                crate::team::TeamAction::TimeLimits {
+                    project_id: project.clone(),
+                    turn_secs: None,
+                    session_secs: None,
+                    idle_secs: None,
+                },
+                crate::team::TeamAction::SpreadAccounts {
+                    project_id: project.clone(),
+                    on: spread,
+                },
+            ],
+        );
+        assert_eq!(
+            crate::team::spread_accounts(&fixture.connection, &project).unwrap(),
+            spread
+        );
+        let host = fixture.host();
+        let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+        let mut taken = Vec::new();
+        for page in 1..=3 {
+            let prompt = format!("Write page {page}.");
+            owner(&fixture, &[hand_off(&fixture, &prompt)]);
+            fixture.until(&mut team, "the harness works on its page", |f| {
+                task_of(f, &prompt).0 == "running"
+            });
+            let agent = task_and_agent(&fixture, &prompt).1.unwrap();
+            let account: String = fixture
+                .connection
+                .query_row(
+                    "SELECT connection FROM team_agents WHERE id=?1",
+                    [agent],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            taken.push(account);
+        }
+        assert_eq!(taken, wanted, "spread {spread}");
+        assert_eq!(subs(&fixture).len(), 3);
+        team.shutdown().unwrap();
+    }
+}
+
+/// Max harnesses counts only the master's harnesses, never a lead's workers (DEC-104 K8):
+/// at a cap of one, a busy lead still starts its worker, while the master's next task
+/// waits.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_harnesses_does_not_count_a_leads_sub_agents() {
+    let fixture = Fixture::new(3);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = busy_harness(&fixture, &mut team);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::MaxHarnesses {
+            project_id: fixture.setup.project_id.clone(),
+            max: Some(1),
+        }],
+    );
+    lead_spawns(&fixture, lead, "Write the notes page.");
+    fixture.until(&mut team, "the lead's worker finishes past the cap", |f| {
+        task_of(f, "Write the notes page.").0 == "done"
+    });
+    let worker = task_and_agent(&fixture, "Write the notes page.").1.unwrap();
+    assert_eq!(parent_of(&fixture, worker), Some(lead));
+    owner(&fixture, &[hand_off(&fixture, "Write the help page.")]);
+    idle_ticks(&mut team);
+    assert_eq!(
+        task_of(&fixture, "Write the help page.").0,
+        "queued",
+        "the master's next harness waits for the cap"
+    );
+    assert_eq!(subs(&fixture), vec![lead, worker]);
+    team.shutdown().unwrap();
+}
