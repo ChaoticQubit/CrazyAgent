@@ -3600,11 +3600,14 @@ fn set_lands(case: &Case, lands: &str) {
         .unwrap();
 }
 
+/// A change set's files, added lines and removed lines, as its view counts them.
+type Counts = (u32, u32, u32);
+
 /// Reads the counts a change set holds after its turn end and after a poll, and every path
 /// its diff pages show. Inputs: the case and the change set. Output: both counts and the
 /// paths.
-fn measured(case: &Case, id: &ChangeSetId) -> ((u32, u32, u32), (u32, u32, u32), Vec<String>) {
-    let counts = |view: ChangeSetView| (view.files, view.added, view.removed);
+fn measured(case: &Case, id: &ChangeSetId) -> (Counts, Counts, Vec<String>) {
+    let counts = |view: ChangeSetView| -> Counts { (view.files, view.added, view.removed) };
     let recorded = counts(case.view(id));
     observe(&case.db, None).unwrap();
     let view = case.view(id);
