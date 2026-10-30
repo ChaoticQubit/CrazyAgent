@@ -307,7 +307,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_promote: "promoting a memory",
   memory_delete: "deleting a memory",
   memory_approve: "approving a memory",
-  memory_agent_writes: "saving Agent memory writes",
+  memory_agent_writes: "saving agent memory writes",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
