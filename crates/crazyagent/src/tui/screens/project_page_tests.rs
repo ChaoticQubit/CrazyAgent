@@ -1314,6 +1314,7 @@ async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
     let before = engine.controller.team_status(notes.clone()).await.unwrap();
     assert_ne!(before.live_master, Some(true), "the switch starts off");
 
+    shell.key(Key::Esc);
     shell.key(Key::Char('n'));
     let mut sent = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(30);
