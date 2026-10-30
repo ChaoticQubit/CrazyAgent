@@ -269,9 +269,10 @@ fn whatever_is_left_incomplete_at_the_install_path_is_removed_under_the_lock() {
     );
 }
 
+/// Finds the folder holding the real `npm` and `node` on PATH. Output: the folder; a run
+/// without npm on PATH is reported unavailable.
 #[cfg(target_os = "macos")]
-#[test]
-fn npm_starts_under_the_install_sandbox_profile() {
+fn system_bin() -> PathBuf {
     let Some(npm) = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|folder| folder.join("npm"))
@@ -279,12 +280,18 @@ fn npm_starts_under_the_install_sandbox_profile() {
     }) else {
         panic!("UNAVAILABLE: npm and node on PATH");
     };
-    let bin = npm.parent().unwrap();
+    npm.parent().unwrap().to_path_buf()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn npm_starts_under_the_install_sandbox_profile() {
+    let bin = system_bin();
     let case = case("/usr/bin/false");
     let prefix = format!("context-mode@{VERSION}");
     let staged = staging_folder(&case.npm(), &prefix).unwrap();
     let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
-    let mut command = npm_command(&case.root, &staged, &work, bin, VERSION).unwrap();
+    let mut command = npm_command(&case.root, &staged, &work, &bin, VERSION).unwrap();
     command.arg("--version");
     let (ok, output) = run_command(command, Duration::from_secs(60)).unwrap();
     let version = String::from_utf8(output).unwrap();
@@ -298,4 +305,100 @@ fn npm_starts_under_the_install_sandbox_profile() {
     );
     let profile = fs::read_to_string(case.npm().join(PROFILE)).unwrap();
     assert!(profile.contains("(remote ip \"*:443\")"));
+}
+
+#[cfg(target_os = "macos")]
+const FORGER: &str = r#"const fs = require("node:fs");
+const path = require("node:path");
+const { spawn } = require("node:child_process");
+const staged = path.resolve("../..");
+if (process.argv[2] !== "later") {
+  fs.writeFileSync(path.join(staged, "script-ran"), "");
+  spawn(process.execPath, [__filename, "later"], { detached: true, stdio: "ignore" }).unref();
+} else {
+  const lock = path.join(staged, "node_modules", ".package-lock.json");
+  const end = Date.now() + 20000;
+  const forge = () => {
+    if (Date.now() > end || !fs.existsSync(staged)) return;
+    try {
+      const data = JSON.parse(fs.readFileSync(lock, "utf8"));
+      const entry = data.packages["node_modules/context-mode"];
+      if (entry.integrity !== "PINNED_HASH") {
+        entry.integrity = "PINNED_HASH";
+        fs.writeFileSync(lock + ".forged", JSON.stringify(data));
+        fs.renameSync(lock + ".forged", lock);
+      }
+    } catch {}
+    setTimeout(forge, 1);
+  };
+  forge();
+}
+"#;
+
+/// Packs a real npm package with the pinned context-mode name and version but other
+/// bytes. Its postinstall marks that it ran, then starts a detached process outside npm's
+/// process group that rewrites npm's record of the tarball hash to the pinned hash once
+/// npm writes it. Input: the folder to pack in. Output: the tarball path.
+#[cfg(target_os = "macos")]
+fn forging_tarball(folder: &Path) -> PathBuf {
+    let package = folder.join("package");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("package.json"),
+        format!(
+            "{{\"name\":\"context-mode\",\"version\":\"{VERSION}\",\"scripts\":{{\"postinstall\":\"node forge.cjs\"}}}}"
+        ),
+    )
+    .unwrap();
+    fs::write(package.join("cli.bundle.mjs"), "").unwrap();
+    fs::write(
+        package.join("forge.cjs"),
+        FORGER.replace("PINNED_HASH", PINNED),
+    )
+    .unwrap();
+    let tarball = folder.join(format!("context-mode-{VERSION}.tgz"));
+    let packed = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/tar")
+            .env("COPYFILE_DISABLE", "1")
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(folder)
+            .arg("package"),
+    )
+    .unwrap();
+    assert!(packed.success());
+    tarball
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn no_package_script_runs_before_npm_s_record_of_the_tarball_hash_is_checked_against_the_pin() {
+    let bin = system_bin();
+    let case = case("/usr/bin/false");
+    let prefix = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &prefix).unwrap();
+    let work = staging_folder(&case.npm(), &format!("{prefix}-work")).unwrap();
+    let packing = work.join("tmp");
+    private_folder(&packing).unwrap();
+    let tarball = forging_tarball(&packing);
+    let result = fill(
+        &case.root,
+        &staged,
+        &work,
+        &bin,
+        VERSION,
+        tarball.as_os_str(),
+    )
+    .and_then(|()| checked(&staged, VERSION).map_err(InstallError));
+    match result {
+        Err(InstallError(code)) => assert_eq!(code, "context_mode_integrity_mismatch"),
+        Ok(()) => panic!(
+            "a tarball other than the pinned one passed the pin check: its script rewrote npm's record of the hash"
+        ),
+    }
+    assert!(
+        !staged.join("script-ran").exists(),
+        "no package script runs before the pin is checked"
+    );
 }
