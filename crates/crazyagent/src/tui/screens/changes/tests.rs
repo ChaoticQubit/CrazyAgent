@@ -377,6 +377,14 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
     assert_eq!(shown[line - 2].trim_end(), "  Add a main");
     assert_eq!(cursor, Some((2 + "- Add the fourth line".len(), line)));
     assert!(help.contains(&("Enter", "Accept")) && help.contains(&("Esc", "Keep reviewing")));
+    let asked = reply(
+        &mut view,
+        Ok(ChangesView::Branches(crate::landing::TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+        })),
+    );
+    assert_eq!(asked, ChangesQuery::Branches { id: id('1') });
 
     view.key(
         KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
