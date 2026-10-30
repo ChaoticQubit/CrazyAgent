@@ -7,7 +7,7 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,8 @@ const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
 /// The most facts of turns the app started by itself that wait to be taken at once.
 const OWN_FACTS_MAX: usize = 4096;
+/// The most background commands of the app one session follows at once.
+const BACKGROUND_MAX: usize = 64;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
@@ -48,6 +50,7 @@ pub struct TerminalSession {
     live: bool,
     own: bool,
     facts: VecDeque<TranscriptEvent>,
+    background: BTreeSet<String>,
     exited: bool,
     stopped: bool,
     record: Option<PaneRecord>,
@@ -223,6 +226,7 @@ impl TerminalSession {
             live: false,
             own: false,
             facts: VecDeque::new(),
+            background: BTreeSet::new(),
             exited: false,
             stopped: false,
             record: PaneRecord::new(
@@ -254,6 +258,14 @@ impl TerminalSession {
     /// Returns the pane's first process, which leads the process group of the harness.
     pub fn process_group(&self) -> u32 {
         self.pid
+    }
+
+    /// Counts the commands the app started in the background whose end it has not reported
+    /// yet. An engine-typed turn that ends while any runs stays open until the app's turn on
+    /// their end notification finishes, so the task sees their result instead of their being
+    /// ended with it. Output: the count, at most `BACKGROUND_MAX`.
+    pub fn background_running(&self) -> usize {
+        self.background.len()
     }
 
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
@@ -459,7 +471,9 @@ impl TerminalSession {
         for fact in facts {
             if self.live {
                 match fact {
-                    TranscriptEvent::ToolUse { .. } => {}
+                    TranscriptEvent::ToolUse { .. }
+                    | TranscriptEvent::BackgroundStarted { .. }
+                    | TranscriptEvent::BackgroundEnded { .. } => {}
                     TranscriptEvent::TurnStarted => {
                         self.turn = true;
                         self.facts.push_back(fact);
@@ -472,6 +486,20 @@ impl TerminalSession {
                 }
                 continue;
             }
+            match fact {
+                TranscriptEvent::BackgroundStarted { id } => {
+                    if self.background.len() < BACKGROUND_MAX {
+                        self.background.insert(id);
+                    }
+                    continue;
+                }
+                TranscriptEvent::BackgroundEnded { id } => {
+                    self.background.remove(&id);
+                    continue;
+                }
+                _ => {}
+            }
+            assert!(self.background.len() <= BACKGROUND_MAX);
             if !self.turn {
                 if self.own
                     && self.facts.len() < OWN_FACTS_MAX
@@ -489,10 +517,16 @@ impl TerminalSession {
                     LaunchEvent::TurnError { rate_limited }
                 }
                 TranscriptEvent::TurnFinished { success } => {
+                    if success && !self.background.is_empty() {
+                        continue;
+                    }
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
-                TranscriptEvent::TurnStarted | TranscriptEvent::Waiting => continue,
+                TranscriptEvent::TurnStarted
+                | TranscriptEvent::Waiting
+                | TranscriptEvent::BackgroundStarted { .. }
+                | TranscriptEvent::BackgroundEnded { .. } => continue,
             };
             self.queue.push_back(event);
         }
@@ -599,6 +633,15 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.process_group(),
             Self::Terminal(session) => session.process_group(),
+        }
+    }
+
+    /// Counts the commands a pane app started in the background that still run; a headless
+    /// session reports none. Output: the count.
+    pub fn background_running(&self) -> usize {
+        match self {
+            Self::Piped(_) => 0,
+            Self::Terminal(session) => session.background_running(),
         }
     }
 

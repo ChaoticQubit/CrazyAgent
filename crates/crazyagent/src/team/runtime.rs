@@ -6046,7 +6046,7 @@ fn sub_agent_prompt(
         }
     };
     format!(
-        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}Your task: {task}\n{lands}\nWhen you finish, reply with a short summary of what you did.",
+        "You are a sub-agent of the project \"{name}\". Work only inside {}.\n{earlier}Your task: {task}\n{lands}\n{BACKGROUND_LINE}\nWhen you finish, reply with a short summary of what you did.",
         worktree.display()
     )
 }
@@ -6524,7 +6524,15 @@ fn live_serve(
                     break;
                 }
             }
-            Ok(Some(TranscriptEvent::ToolUse { .. } | TranscriptEvent::Waiting) | None) => {}
+            Ok(
+                Some(
+                    TranscriptEvent::ToolUse { .. }
+                    | TranscriptEvent::Waiting
+                    | TranscriptEvent::BackgroundStarted { .. }
+                    | TranscriptEvent::BackgroundEnded { .. },
+                )
+                | None,
+            ) => {}
             Err(closed) => {
                 problem = Some(with_code(PROCESS_CLOSED, Some(&closed.0)));
                 break;
@@ -7066,6 +7074,10 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+/// What every sub-agent task says about commands the agent runs in the background.
+const BACKGROUND_LINE: &str = "A command you start in the background keeps your task open until it ends, and you see its result; stop any server you started before you finish.";
+/// What a task cut by a time limit says when commands its agent started still ran.
+const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// The task line a kept native lead's own turn is recorded under: a turn its app started
 /// by itself, such as after messages from its teammates, with no task given to it.
 const OWN_TURN_TASK: &str =
@@ -7588,7 +7600,10 @@ fn turn(
             Ok(Some(_)) => {}
         }
     };
-    assert!(text.len() <= super::RESULT_BYTES_MAX * 4);
+    if end == TurnEnd::TimedOut && session.background_running() > 0 {
+        text = format!("{BACKGROUND_CUT}\n{text}");
+    }
+    assert!(text.len() <= super::RESULT_BYTES_MAX * 4 + BACKGROUND_CUT.len() + 1);
     (text, end, cause)
 }
 
