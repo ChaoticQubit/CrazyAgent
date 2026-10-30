@@ -642,3 +642,111 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
     let all: Vec<AgentId> = (1..=STARTED).map(|id| AgentId::team(id).unwrap()).collect();
     assert_eq!(host.alive().unwrap(), all);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let socket = host.socket();
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let shell = |script: &str| InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let lead = AgentId::team(1).unwrap();
+    let other = AgentId::team(2).unwrap();
+    host.spawn(&lead, &shell("echo lead-own-screen; exec /bin/cat"))
+        .unwrap();
+    host.spawn(&other, &shell("echo other-lead-screen; exec /bin/sleep 30"))
+        .unwrap();
+    let client = |args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new(&tmux)
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "tmux {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let teammate = client(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &target(&lead),
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo teammate-pane-ready; exec /bin/cat",
+    ]);
+    assert!(
+        pane_id_valid(&teammate),
+        "tmux names the split pane: {teammate}"
+    );
+    let elsewhere = client(&["list-panes", "-t", &target(&other), "-F", "#{pane_id}"]);
+    assert!(
+        pane_id_valid(&elsewhere) && elsewhere != teammate,
+        "{elsewhere}"
+    );
+    let host: Arc<dyn Host> = Arc::new(host);
+    let shows = |terminal: &dyn Host, wanted: &str| -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let screen =
+                String::from_utf8_lossy(&terminal.attach(&lead).unwrap().screen).into_owned();
+            if screen.contains(wanted) {
+                return screen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pane showed {wanted} in time: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let view = crate::terminal::pane_view(host.clone(), &teammate).unwrap();
+    let screen = shows(&*view, "teammate-pane-ready");
+    assert!(
+        !screen.contains("lead-own-screen"),
+        "the view shows the teammate's pane, not its lead's: {screen}"
+    );
+    view.input(&lead, b"typed-to-teammate\r").unwrap();
+    shows(&*view, "typed-to-teammate");
+    let own = shows(&*host, "lead-own-screen");
+    assert!(
+        !own.contains("typed-to-teammate") && !own.contains("teammate-pane-ready"),
+        "typing went to the teammate's pane only, and the lead's view stays its own: {own}"
+    );
+    for pane in [elsewhere.as_str(), "%99999", "lead"] {
+        let refused = crate::terminal::pane_view(host.clone(), pane)
+            .and_then(|view| view.attach(&lead).map(drop));
+        assert_eq!(
+            refused.map_err(|problem| problem.0),
+            Err("terminal_pane_unknown".to_owned()),
+            "a pane its lead's window does not list is refused: {pane}"
+        );
+    }
+}
