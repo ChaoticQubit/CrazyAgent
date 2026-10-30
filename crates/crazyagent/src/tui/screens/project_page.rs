@@ -787,16 +787,29 @@ impl ProjectPage {
     }
 
     /// Carries on after the engine confirmed a master request: an opened master takes the
-    /// waiting message, a conversation ended for a renewal opens a new one, and a session
-    /// switch the owner started from the live master view opens that view again.
-    /// Takes the confirmed action.
+    /// waiting message, a conversation ended for a renewal opens a new one, a session
+    /// switch the owner started from the live master view opens that view again, and a new
+    /// session of a master that runs live turns the live switch on, so the live master
+    /// starts on the fresh session. Takes the confirmed action and the context.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
-            MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. }
-                if self.from_master =>
-            {
-                self.from_master = false;
-                self.reopen_master = true;
+            MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. } => {
+                if self.from_master {
+                    self.from_master = false;
+                    self.reopen_master = true;
+                }
+                if matches!(action, MasterOwnerAction::NewSession { .. })
+                    && self.screen.live_master()
+                {
+                    let generation = ctx.next_generation();
+                    ctx.request(Request::Setup(SetupQuery::TeamChange {
+                        action: crate::team::TeamAction::LiveMaster {
+                            project_id: self.screen.project.clone(),
+                            on: true,
+                        },
+                        generation,
+                    }));
+                }
             }
             MasterOwnerAction::Open { .. } => {
                 let Some(waiting) = self.waiting.take() else {
@@ -1168,17 +1181,6 @@ impl ProjectPage {
             ProjectReply::Session(action) => {
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
-                } else if matches!(action, super::sessions::SessionsAction::New { .. })
-                    && self.screen.live_master()
-                {
-                    let generation = ctx.next_generation();
-                    ctx.request(Request::Setup(SetupQuery::TeamChange {
-                        action: crate::team::TeamAction::LiveMaster {
-                            project_id: self.screen.project.clone(),
-                            on: true,
-                        },
-                        generation,
-                    }));
                 }
                 Flow::Handled
             }
