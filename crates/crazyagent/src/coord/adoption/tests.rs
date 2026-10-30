@@ -437,7 +437,35 @@ fn view_keeps_newest_agents_within_budget() {
     assert_eq!(view.skills.len(), SKILLS_SHOWN_MAX.min(200));
     let bytes = serde_json::to_vec(&view).unwrap().len();
     assert!(bytes <= VIEW_BYTES_MAX, "{bytes}");
-    assert!(view.hidden > 0, "the byte budget left some out");
+    let row = serde_json::to_vec(&view.agents[0]).unwrap().len() + 1;
+    assert!(
+        view.agents
+            .iter()
+            .all(|agent| serde_json::to_vec(agent).unwrap().len() + 1 == row),
+        "rows of one shape encode to one size"
+    );
+    let header = serde_json::to_vec(&Adoption {
+        agents: Vec::new(),
+        hidden: 0,
+        ..view.clone()
+    })
+    .unwrap()
+    .len();
+    let fits = (VIEW_BYTES_MAX - header) / row;
+    assert!(
+        fits < AGENTS_SHOWN_MAX,
+        "the byte budget, not the row cap, decides here"
+    );
+    assert_eq!(
+        view.agents.len(),
+        fits,
+        "rows fill the budget until the next one would pass it"
+    );
+    assert_eq!(
+        usize::try_from(view.hidden).unwrap(),
+        AGENTS_SHOWN_MAX - fits,
+        "every newer agent the budget left out is counted"
+    );
     assert_eq!(
         view.agents.len() + usize::try_from(view.hidden).unwrap(),
         AGENTS_SHOWN_MAX,
