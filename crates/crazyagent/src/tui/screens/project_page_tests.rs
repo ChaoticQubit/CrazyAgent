@@ -2507,6 +2507,9 @@ async fn owner_ready_after(connection: &mut Connection) {
     }
 }
 
+/// The top border of the box that lists moved instruction files, as the modal draws its title.
+const MOVED_BOX: &str = "─ Moved to .crazyagent/imported/ ─";
+
 /// The one project folder the engine made under its projects home.
 fn only_folder(engine: &Engine) -> std::path::PathBuf {
     let folders: Vec<std::path::PathBuf> = std::fs::read_dir(engine.home.path())
@@ -2588,7 +2591,10 @@ async fn pending_import_prompt_moves_files_on_confirm_and_asks_again_after_not_n
     assert!(sent.contains(&"confirm import"), "{sent:?}");
     let shown = render(&mut shell, 100, 40);
     assert!(!shown.contains("Instruction files found"), "{shown}");
-    assert!(shown.contains("Moved to .crazyagent/imported/"), "{shown}");
+    assert!(
+        shown.contains(MOVED_BOX),
+        "the moved files show in their own box\n{shown}"
+    );
     assert!(
         shown.contains("- CLAUDE.md (git shows it as deleted)"),
         "{shown}"
@@ -2622,8 +2628,8 @@ async fn untracked_only_move_shows_message_and_no_banner() {
     assert_eq!(message.rest, "AGENTS.md");
     let shown = render(&mut shell, 100, 40);
     assert!(
-        !shown.contains("Moved to .crazyagent/imported/\n"),
-        "{shown}"
+        !shown.contains(MOVED_BOX),
+        "an untracked-only move says so in the message line, not a box\n{shown}"
     );
     assert!(!shown.contains("Commit the move"), "{shown}");
     assert!(!shown.contains("Git still shows"), "{shown}");
