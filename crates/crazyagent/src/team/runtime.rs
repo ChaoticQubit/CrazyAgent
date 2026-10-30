@@ -7655,7 +7655,7 @@ impl Drop for TeamService {
 /// nobody. Every other mailbox names its own agent. Inputs: the database, the terminal host,
 /// the engine's runtime folder, the project, the mailbox's agent with its label and the
 /// stamped pane. Output: the caller's id and label, or none.
-fn team_caller(
+pub fn team_caller(
     connection: &Connection,
     host: Option<&dyn Host>,
     runtime: Option<&Path>,

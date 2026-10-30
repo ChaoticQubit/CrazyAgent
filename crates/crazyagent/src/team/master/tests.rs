@@ -951,6 +951,7 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let agents = fixture.base.join("agents");
+        let runtime = fixture.base.clone();
         while !server.is_finished() {
             assert!(Instant::now() < deadline, "the server never finished");
             super::super::history::serve_agent_calls(
@@ -959,7 +960,16 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
                 (sub, &label),
                 &agents,
                 &mailbox,
-                &mut |_, _| Some((sub, label.clone())),
+                &mut |connection, pane| {
+                    super::super::runtime::team_caller(
+                        connection,
+                        None,
+                        Some(runtime.as_path()),
+                        &project,
+                        (sub, &label),
+                        pane,
+                    )
+                },
                 &mut |_, _, _| None,
             );
             std::thread::sleep(Duration::from_millis(20));
