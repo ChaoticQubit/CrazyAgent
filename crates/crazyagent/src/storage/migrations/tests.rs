@@ -822,3 +822,67 @@ fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
         "a live project keeps its skill folder"
     );
 }
+
+#[test]
+fn an_upgrade_from_six_lets_items_hold_hooks_and_the_trash_hold_hook_folders_keeping_every_row() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE plugin_items (
+             id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+             kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+             scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+             body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
+             UNIQUE(kind, scope, name));
+         CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    for row in [
+        ["sk-guide", "skill", "global", "guide", "{\"on\":true}"],
+        ["sv-notes", "server", "project:live", "notes", "{}"],
+    ] {
+        db.execute("INSERT INTO plugin_items VALUES (?1,?2,?3,?4,?5)", row)
+            .unwrap();
+    }
+    db.execute(
+        "INSERT INTO file_trash VALUES ('skill_folder','pending-folder')",
+        [],
+    )
+    .unwrap();
+    let hook = "INSERT INTO plugin_items VALUES ('hk-start','hook','global','start','{}')";
+    let hook_folder = "INSERT INTO file_trash VALUES ('hook_folder','hk-start')";
+    assert!(db.execute(hook, []).is_err(), "version 6 refuses a hook");
+    assert!(db.execute(hook_folder, []).is_err());
+    let before = rows(&db);
+    db.execute_batch("PRAGMA user_version = 6").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let after = rows(&db);
+    for table in ["plugin_items", "file_trash"] {
+        assert_eq!(after[table], before[table], "{table} keeps every row");
+    }
+    db.execute(hook, []).unwrap();
+    db.execute(hook_folder, []).unwrap();
+    let hooks: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE kind='hook'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hooks, 1);
+    assert!(
+        db.execute(
+            "INSERT INTO plugin_items VALUES ('xx','widget','global','x','{}')",
+            [],
+        )
+        .is_err(),
+        "the widened check still refuses an unknown kind"
+    );
+}

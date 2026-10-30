@@ -1106,3 +1106,33 @@ fn the_tmux_folder_is_added_to_path_once_and_a_folder_with_a_colon_is_refused() 
         "launch_path_invalid"
     );
 }
+
+#[test]
+fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
+    let case = Case::new();
+    let path_of = |tools: bool| -> String {
+        let request = case.request("claude-code", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let paths: Vec<&String> = built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "PATH")
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(paths.len(), 1);
+        paths[0].clone()
+    };
+    assert_eq!(path_of(true), tools_on_path());
+    assert_eq!(path_of(false), TOOLS_OFF_PATH);
+    let tmp = toolchains::make_tmp(&case.home()).unwrap();
+    let bin = tmp.join("bin");
+    assert_eq!(
+        path_of(true),
+        format!("{}:{}", bin.display(), tools_on_path())
+    );
+    assert_eq!(
+        path_of(false),
+        format!("{}:{TOOLS_OFF_PATH}", bin.display())
+    );
+    toolchains::remove_tmp(&case.home()).unwrap();
+}

@@ -134,7 +134,11 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     screen.arrive(&done, &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "frontend-design is off.");
     assert!(
-        matches!(ctx.next_request(), Some(Request::Settings(_))),
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Hooks { project: None })),
+        "the hooks reload"
+    );
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Plugins)),
         "the lists reload"
     );
     for _ in 0..4 {

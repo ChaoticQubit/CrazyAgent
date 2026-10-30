@@ -561,9 +561,12 @@ impl ProjectPlugins {
             return (self.approval(server, content, room, look), self.help());
         }
         let footer = self.footer(look);
+        let floor = 6 + footer.len();
+        let spaced = room > 9 + footer.len();
+        let reserve = if spaced { 9 } else { 6 };
         let mut panel = self.panel(content, look);
-        panel.truncate(room.saturating_sub(8 + footer.len()));
-        let fixed = 8 + panel.len() + footer.len();
+        panel.truncate(room.saturating_sub(reserve + footer.len()));
+        let fixed = reserve + panel.len() + footer.len();
         let free = room.saturating_sub(fixed).max(3);
         let hook_rows = self.hooks.len().max(1).min((free / 3).max(1));
         let free = free.saturating_sub(hook_rows).max(2);
@@ -619,7 +622,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("MCP servers", self.servers.len(), content, look));
         if self.servers.is_empty() {
@@ -656,7 +661,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("Hooks", self.hooks.len(), content, look));
         if self.hooks.is_empty() {
@@ -687,9 +694,12 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
         lines.extend(panel);
         lines.extend(footer);
+        assert!(lines.len() <= room.max(floor));
         (lines, self.help())
     }
 

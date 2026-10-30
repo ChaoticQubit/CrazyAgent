@@ -899,7 +899,7 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     pane.kill_server();
     assert_eq!(
         pane.adopt().err().map(|refused| refused.0).as_deref(),
-        Some("terminal_closed")
+        Some("launch_closed")
     );
     assert!(
         !pane.config.exists(),
@@ -1165,4 +1165,119 @@ fn the_skills_index_names_each_skill_once_under_one_path_pattern_within_its_boun
         "- and {} more skills in the same folder\n",
         skills.len() - listed
     )));
+}
+
+#[test]
+fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_its_own_copy() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let folder = root.join("project");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+    crate::agent_home::save_app(&data, "APP-RULE-51\n").unwrap();
+    crate::agent_home::save_project(&folder, "PROJECT-RULE-52\n").unwrap();
+    let stored = root.join("hook-store").join("hk-caveman");
+    fs::create_dir_all(stored.join("hooks")).unwrap();
+    let script = "printf 'root=%s\\n' \"$CLAUDE_PLUGIN_ROOT\"\n";
+    fs::write(stored.join("hooks").join("start.sh"), script).unwrap();
+    let hook = |event: &str, matcher: Option<&str>, timeout: Option<u32>| EffectiveHook {
+        plugin: "caveman".into(),
+        event: event.into(),
+        matcher: matcher.map(str::to_owned),
+        command: "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\"".into(),
+        timeout,
+        folder: stored.clone(),
+    };
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: Some(Box::new(Process {
+            project: crate::agent_home::AgentProject {
+                data,
+                id: ProjectId::new("hooked").unwrap(),
+                folder: Some(folder),
+                mode: crate::instruction_files::Mode::Both,
+            },
+            hooks: vec![
+                hook("SessionStart", None, None),
+                hook("PreToolUse", Some("Grep|Glob"), Some(5)),
+            ],
+        })),
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+    };
+    let home = |name: &str| {
+        let home = root.join(name);
+        fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+        home
+    };
+
+    let claude = home("claude");
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    assert!(installed.runs_hooks());
+    let plugin = claude.join(STATE).join("plugin");
+    assert!(
+        installed
+            .arguments()
+            .windows(2)
+            .any(|pair| pair[0] == "--plugin-dir" && pair[1] == plugin.as_os_str())
+    );
+    let copy = plugin.join(HOOK_PLUGINS).join("hk-caveman");
+    assert_eq!(
+        fs::read_to_string(copy.join("hooks").join("start.sh")).unwrap(),
+        script
+    );
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(plugin.join("hooks").join("hooks.json")).unwrap())
+            .unwrap();
+    let events = written["hooks"].as_object().unwrap();
+    assert_eq!(
+        events.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["PreToolUse", "SessionStart"]
+    );
+    let start = &events["SessionStart"][0];
+    assert!(start.get("matcher").is_none());
+    let command = start["hooks"][0]["command"].as_str().unwrap();
+    assert!(!command.contains(stored.to_str().unwrap()), "{command}");
+    let ran = crate::spawn_gate::output(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CLAUDE_PLUGIN_ROOT", &plugin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(ran.status.success(), "{ran:?}");
+    assert_eq!(
+        String::from_utf8(ran.stdout).unwrap(),
+        format!("root={}\n", copy.display()),
+        "the hook runs from its own copy with the plugin root moved there"
+    );
+    let search = &events["PreToolUse"][0];
+    assert_eq!(search["matcher"], "Grep|Glob");
+    assert_eq!(search["hooks"][0]["timeout"], 5);
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    let app = prompt.find("APP-RULE-51").unwrap();
+    assert!(prompt.starts_with("# Project context from CrazyAgent\n"));
+    assert!(app < prompt.find("PROJECT-RULE-52").unwrap());
+    drop(installed);
+
+    let off = home("claude-off");
+    let installed = context.install("claude-code", &off, false).unwrap();
+    assert!(!installed.runs_hooks(), "tools off gives no hooks");
+    assert!(!off.join(STATE).join("plugin").exists());
+    drop(installed);
+
+    let codex = home("codex");
+    let installed = context.install("codex", &codex, true).unwrap();
+    assert!(!installed.runs_hooks(), "Codex launches get no hooks");
+    assert!(!codex.join(STATE).join("plugin").exists());
+    drop(installed);
 }
