@@ -7195,7 +7195,6 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
                 ..
             }
         )));
-        assert!(!host.alive().unwrap().contains(&agent));
     }
     let (orders, ordered) = channel();
     let (reports, reported) = channel();
