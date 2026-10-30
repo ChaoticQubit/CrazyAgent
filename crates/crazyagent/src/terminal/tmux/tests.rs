@@ -892,6 +892,17 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
     }
 }
 
+/// Says whether a host still holds a control connection that reads. Input: the host.
+/// Output: true while its held control has not seen its server end.
+#[cfg(target_os = "macos")]
+fn holds_reading_control(host: &Tmux) -> bool {
+    host.control
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|control| !control.closed())
+}
+
 /// Starts a private host with one agent in a fresh 0700 folder, then ends its server from
 /// outside with kill-server, as another tmux client or a crash would. Takes the temp home
 /// and the agent. Returns the host, still holding the control it read with, and its server.
@@ -916,7 +927,7 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
     host.spawn(agent, &command).unwrap();
     assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
     assert!(
-        host.open_control().is_some(),
+        holds_reading_control(&host),
         "the host holds a reading control"
     );
     let ended = crate::spawn_gate::status(
@@ -943,8 +954,7 @@ fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
     let agent = AgentId::team(1).unwrap();
     let (host, _server) = ended_from_outside(home.path(), &agent);
     let until = Instant::now() + REPLY_TIME;
-    while host.open_control().is_some()
-        || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
+    while holds_reading_control(&host) || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
     {
         assert!(
             Instant::now() < until,

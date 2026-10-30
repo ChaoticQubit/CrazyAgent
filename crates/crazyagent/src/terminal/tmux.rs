@@ -219,7 +219,7 @@ impl Tmux {
             if !self.running() {
                 return Ok(Vec::new());
             }
-            if crate::spawn_gate::connect_unix_std(&self.socket()).is_err() {
+            if crate::spawn_gate::connect_unix_std(self.socket()).is_err() {
                 self.forget_server()?;
                 return Ok(Vec::new());
             }
