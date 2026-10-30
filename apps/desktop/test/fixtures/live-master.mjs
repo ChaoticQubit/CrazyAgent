@@ -9,6 +9,7 @@ import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
 import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
+import { teamStatus } from "./team-status.mjs";
 
 let root = null;
 let menuRoot = null;
@@ -54,7 +55,7 @@ function data(master, on, team = undefined) {
 }
 
 function status(on) {
-  return { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], live_master: on, live_problem: null };
+  return teamStatus({ live_master: on, live_problem: null });
 }
 
 const node = { id: "team-1", kind: "master", parent: null, label: "Master", harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: "team-1" };

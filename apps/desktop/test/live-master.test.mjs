@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import "./load-source.mjs";
 import { bundle, withPage } from "./browser.mjs";
+import { teamStatus } from "./fixtures/team-status.mjs";
 
 const io = await import("../src/screens/team/terminal-io.ts");
 const live = await import("../src/screens/project/live-master.tsx");
@@ -94,7 +95,7 @@ test("before the master's terminal opens, and when the engine can't start it, th
 
 test("a live master that waits for this run's sign-in re-checks shows the engine's wait line where the terminal opens", async () => {
   const wait = "Checking account sign-ins after the restart. The live master starts once an account in this project's pool passes its check.";
-  const status = { kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], live_master: true, live_problem: wait } };
+  const status = { kind: "ok", value: teamStatus({ live_master: true, live_problem: wait }) };
   const seen = await inPage(async ({ evaluate }) => {
     await evaluate(`Fixture.mountView("waiting", "", ${JSON.stringify(status)})`);
     return evaluate("Fixture.shown()");
@@ -149,7 +150,7 @@ test("opening the master area starts a stopped or never-set live master once and
 
 test("the live master switch is read from the team status, and a switch never set reads as null", async () => {
   const { liveSwitch } = await import("../src/screens/project/live-master.tsx");
-  const status = (patch) => ({ kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], ...patch } });
+  const status = (patch) => ({ kind: "ok", value: teamStatus(patch) });
   assert.equal(liveSwitch(undefined, "alpha"), undefined, "not read yet");
   assert.deepEqual(liveSwitch(status({}), "alpha"), { on: null, problem: null }, "an engine without the field reads as never set");
   assert.deepEqual(liveSwitch(status({ live_master: null, live_problem: null }), "alpha"), { on: null, problem: null });
@@ -266,7 +267,7 @@ test("a stopped team (Stop all) says the master needs the team and offers Start 
 
 test("the head word for a stopped team warns, and only a good read of the same project counts as stopped", () => {
   assert.deepEqual(live.liveWord({ kind: "paused" }), { word: "Team stopped", tone: "warn" });
-  const status = (patch) => ({ kind: "ok", value: { project_id: "alpha", keep_warm: false, paused: true, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], ...patch } });
+  const status = (patch) => ({ kind: "ok", value: teamStatus({ paused: true, ...patch }) });
   assert.equal(live.teamPaused(status({}), "alpha"), true);
   assert.equal(live.teamPaused(status({ paused: false }), "alpha"), false);
   assert.equal(live.teamPaused(status({}), "beta"), false, "another project's stopped team is not this one");
