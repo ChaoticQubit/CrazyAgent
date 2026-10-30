@@ -1984,3 +1984,49 @@ async fn a_paste_on_the_team_settings_goes_into_the_task_draft_and_quit_warns_it
         "{shown}"
     );
 }
+
+#[tokio::test]
+async fn the_team_settings_reach_the_coordination_editor_and_spread_accounts() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('c'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Workflow nudges"), "{shown}");
+    assert!(shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+    assert!(shown.contains("s Settings"), "{shown}");
+
+    team_settings(&mut shell, &mut connection).await;
+    assert!(
+        !engine
+            .controller
+            .team_status(notes.clone())
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+    shell.key(Key::Char('P'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["team change", "team"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Spread accounts  On"), "{shown}");
+    assert!(
+        engine
+            .controller
+            .team_status(notes)
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+}
