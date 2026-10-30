@@ -498,3 +498,68 @@ async fn desktop_pauses_and_cancels_a_team_whose_full_status_passes_one_reply() 
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();
 }
+
+/// Sends every New folder limit choice through the desktop bridge to the real engine and
+/// reads each back in the team status the Team controls show; a count outside the choices
+/// is refused and leaves the last choice. Takes the engine root. Returns any failure.
+async fn new_folder_limits(root: &Path) -> Result<(), Box<dyn Error>> {
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Folders".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 1).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    assert_eq!(
+        bridge.team_status(&id).await?.new_folder_files_max,
+        crazyagent::team::NEW_FOLDER_FILES_DEFAULT
+    );
+    let mut generation = 2;
+    for files in crazyagent::team::NEW_FOLDER_FILES_CHOICES {
+        let saved = bridge.team_new_folder_limit(&id, files, generation).await?;
+        generation += 1;
+        assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+        assert_eq!(bridge.team_status(&id).await?.new_folder_files_max, files);
+    }
+    let refused = bridge
+        .team_new_folder_limit(&id, 999, generation)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.code, refused.cause.as_deref()),
+        ("team_action_invalid", Some("team_new_folder_limit_invalid")),
+        "a count outside the choices is refused and names the engine's reason"
+    );
+    assert_eq!(
+        bridge.team_status(&id).await?.new_folder_files_max,
+        crazyagent::team::NEW_FOLDER_FILES_CHOICES[3]
+    );
+    Ok(())
+}
+
+/// Every New folder limit choice the desktop sends is saved and shown (fix/changes-vs-owner-branch
+/// DEC-107 rule 3, every-option rule).
+#[tokio::test]
+async fn desktop_saves_and_shows_every_new_folder_limit_choice() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-folders-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result =
+        tokio::time::timeout(Duration::from_secs(20), new_folder_limits(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}

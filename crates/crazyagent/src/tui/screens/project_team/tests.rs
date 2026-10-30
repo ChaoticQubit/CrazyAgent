@@ -1618,3 +1618,52 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
         "Show keeps finished agents in the list with no pointer"
     );
 }
+
+/// F moves New folder limit from the shown choice to the next, through every choice and
+/// back to the first; each choice shows on the team screen and its saved change says what
+/// is now refused (fix/changes-vs-owner-branch DEC-107 rule 3).
+#[test]
+fn f_moves_the_new_folder_limit_through_every_choice() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('F'))), TeamReply::Handled);
+    let choices = crate::team::NEW_FOLDER_FILES_CHOICES;
+    for (at, shown) in choices.iter().enumerate() {
+        let next = choices[(at + 1) % choices.len()];
+        let mut status = team();
+        status.new_folder_files_max = *shown;
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        let rows = frame(&view, 120, 40);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("New folder limit  {shown} files"))),
+            "{}",
+            rows.join("\n")
+        );
+        let reply = view.key(press(KeyCode::Char('F')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::NewFolderLimit {
+                project_id: project(),
+                files: next
+            })
+        );
+        let TeamReply::Change(action) = reply else {
+            unreachable!();
+        };
+        view.apply(
+            &SetupQuery::TeamChange {
+                action,
+                generation: 9,
+            },
+            Ok(SetupView::Changed(OwnerResult::Applied)),
+        );
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain(format!(
+                "A change set adding more than {next} files in one new folder is now refused."
+            )))
+        );
+    }
+}
