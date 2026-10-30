@@ -99,6 +99,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let base = root.path().canonicalize().unwrap();
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     crazyagent::team::initialize(&connection).unwrap();
+    crazyagent::coord::ensure(&connection).unwrap();
     crazyagent::project_setup::initialize(&connection).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     let folder = base.join("project");
