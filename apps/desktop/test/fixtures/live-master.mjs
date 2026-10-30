@@ -114,6 +114,7 @@ export function shown() {
   const area = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   const box = document.querySelector(".pj-master-live > .tg-terminal")?.getBoundingClientRect();
   const above = document.querySelector(".pj-master-live > .tg-terminal")?.previousElementSibling?.getBoundingClientRect();
+  const sessions = document.querySelector(".pj-master-live > .pj-sessions")?.getBoundingClientRect();
   return {
     live: Boolean(document.querySelector(".pj-master-live")),
     terminal: Boolean(document.querySelector(".tg-terminal")),
@@ -132,6 +133,7 @@ export function shown() {
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
     above: above ? Math.round(above.bottom) : null,
+    sessions: sessions ? { top: Math.round(sessions.top), bottom: Math.round(sessions.bottom) } : null,
   };
 }
 

@@ -38,6 +38,7 @@ test("the project page mounts the master area on one line, where the team activi
 
 const fixture = await bundle(new URL("./fixtures/live-master.mjs", import.meta.url).pathname);
 const GONE_BUTTONS = ["Earlier conversation", "Stop live master", "Start live master"];
+const SESSION_BUTTONS = ["New session", "Sessions"];
 
 async function inPage(check) {
   return withPage(async ({ evaluate, send }) => {
@@ -65,6 +66,12 @@ test("with the live master on, its terminal fills the master area with no close 
   assert.ok(seen.area.bottom - seen.box.bottom <= 1, `terminal reaches the bottom of the area: ${JSON.stringify(seen)}`);
   assert.ok(seen.above !== null && seen.box.top - seen.above <= 12, `terminal starts right below the head and session controls: ${JSON.stringify({ above: seen.above, box: seen.box })}`);
   assert.ok(seen.above - seen.area.top <= 120, `the head and session controls stay a small strip: ${JSON.stringify({ above: seen.above, area: seen.area })}`);
+  for (const offered of SESSION_BUTTONS) assert.ok(seen.buttons.includes(offered), `${offered}: ${seen.buttons.join(", ")}`);
+  assert.ok(seen.sessions !== null, "the Sessions bar sits in the master area");
+  assert.ok(seen.sessions.top - seen.area.top <= 60, `only the head sits above the Sessions bar: ${JSON.stringify(seen)}`);
+  assert.ok(seen.box.top - seen.sessions.bottom <= 13, `the terminal starts right below the Sessions bar: ${JSON.stringify(seen)}`);
+  assert.ok(seen.box.height >= (seen.area.bottom - seen.sessions.bottom) - 13, `the terminal takes the area below the head and the Sessions bar: ${JSON.stringify(seen)}`);
+  assert.deepEqual(Object.values(seen.titles).filter((title) => /live master/i.test(title)), [], JSON.stringify(seen.titles));
 });
 
 test("before the master's terminal opens, and when the engine can't start it, the area says so with no stop or earlier conversation", async () => {
@@ -88,6 +95,8 @@ test("before the master's terminal opens, and when the engine can't start it, th
   for (const [state, view] of Object.entries(states)) {
     assert.equal(view.terminal, false, state);
     for (const gone of GONE_BUTTONS) assert.ok(!view.buttons.includes(gone), `${state}: ${gone}`);
+    const reachable = state !== "not_ready";
+    for (const offered of SESSION_BUTTONS) assert.equal(view.buttons.includes(offered), reachable, `${state}: ${offered} in ${view.buttons.join(", ")}`);
   }
   assert.equal(seen.retried, true);
   assert.equal(seen.asked, 1, "Try again starts the live master once");
@@ -117,6 +126,7 @@ test("a stopped live master says why it stopped, or that opening the tab or a ne
     assert.equal(view.terminal, false);
     assert.equal(view.state, "Stopped");
     for (const gone of GONE_BUTTONS) assert.ok(!view.buttons.includes(gone), `${gone}: ${view.buttons.join(", ")}`);
+    for (const offered of SESSION_BUTTONS) assert.ok(view.buttons.includes(offered), `${offered} starts a stopped live master on a fresh or resumed session: ${view.buttons.join(", ")}`);
   }
   assert.ok(seen.guarded.text.includes(why), seen.guarded.text);
   assert.match(seen.owner.text, /The live master is stopped\. It starts again when you open this tab or start a new session\./);
@@ -140,9 +150,16 @@ test("opening the master area starts a stopped or never-set live master once and
     assert.equal(starts, 1, `${name}: one start on open`);
     assert.match(view.text, /The master terminal couldn't start\./, `${name}: the start reached for the bridge, which this page has not: ${view.text}`);
     assert.doesNotMatch(view.text, /The live master is stopped/, name);
+    assert.equal(view.state, "Couldn't start", name);
+    assert.match(view.text, /The master terminal couldn't start\. CrazyAgent's engine isn't running\./, name);
+    assert.ok(view.buttons.includes("Try again"), `${name}: ${view.buttons.join(", ")}`);
   }
   assert.equal(seen.opened.on.starts, 0, "a running live master is not started again");
   assert.doesNotMatch(seen.opened.on.view.text, /couldn't start/);
+  assert.equal(seen.opened.on.view.state, "Starting", "a switch already on is not turned on again");
+  for (const { view } of Object.values(seen.opened)) {
+    for (const gone of GONE_BUTTONS) assert.ok(!view.buttons.includes(gone), `${gone}: ${view.buttons.join(", ")}`);
+  }
   assert.equal(seen.retried, true);
   assert.equal(seen.starts, 2, "Try again starts it once more, and only then");
   assert.match(seen.again.text, /The master terminal couldn't start\./);
