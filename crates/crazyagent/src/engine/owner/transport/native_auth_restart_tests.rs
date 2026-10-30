@@ -82,6 +82,7 @@ struct Restart {
     global: PathBuf,
     project: PathBuf,
     claude: PathBuf,
+    installed: bool,
 }
 
 fn request(value: &str) -> RequestId {
@@ -106,6 +107,31 @@ impl Restart {
     }
 
     fn with(catalog: &str) -> Self {
+        Self::case(catalog, None)
+    }
+
+    /// Opens a case on the installed Claude Code with no stand-in, so every sign-in, status
+    /// and logout reply comes from the real harness and each sign-in waits for the owner to
+    /// finish it in the browser. Output: the case, or a panic when Claude Code is missing.
+    fn live() -> Self {
+        let entries = crate::harnesses::catalog(&crate::harnesses::Search::from_environment());
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == "claude-code")
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            crate::harnesses::HarnessStatus::Ready,
+            "UNAVAILABLE: Claude Code must be installed for the live restart re-check"
+        );
+        let claude = std::fs::canonicalize(entry.executable.as_ref().unwrap()).unwrap();
+        Self::case(CATALOG, Some(claude))
+    }
+
+    /// Opens a case on a private temp root with the catalog and a Claude executable.
+    /// Inputs: the catalog and the installed Claude Code, or none for the shell stand-in.
+    /// Output: the case.
+    fn case(catalog: &str, installed: Option<PathBuf>) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-rst-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -114,15 +140,26 @@ impl Restart {
         let global = root.path().join("g.toml");
         std::fs::write(&global, catalog).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let claude = root.path().join("claude");
-        std::fs::write(&claude, CLAUDE).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let live = installed.is_some();
+        let claude = installed.unwrap_or_else(|| {
+            let claude = root.path().join("claude");
+            std::fs::write(&claude, CLAUDE).unwrap();
+            std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+            claude
+        });
         Self {
             project: root.path().join("p.toml"),
             root,
             global,
             claude,
+            installed: live,
         }
+    }
+
+    /// How many 100 ms reads a sign-in gets to finish: the stand-in answers at once, a real
+    /// sign-in waits up to ten minutes for the owner in the browser.
+    fn sign_in_reads(&self) -> u32 {
+        if self.installed { 6000 } else { 200 }
     }
 
     async fn start(&self) -> Run {
@@ -379,11 +416,16 @@ impl Restart {
         crate::team::runtime::TeamRuntime,
         crate::project_setup::StoredSetup,
     ) {
-        let install = self.root.path().join("harness");
-        std::fs::create_dir_all(&install).unwrap();
-        let executable = install.join("claude");
-        std::fs::write(&executable, CLAUDE).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = if self.installed {
+            self.claude.clone()
+        } else {
+            let install = self.root.path().join("harness");
+            std::fs::create_dir_all(&install).unwrap();
+            let executable = install.join("claude");
+            std::fs::write(&executable, CLAUDE).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            executable
+        };
         let folder = self.root.path().join("team-project");
         std::fs::create_dir_all(&folder).unwrap();
         let setup = crate::project_setup::StoredSetup {
@@ -708,7 +750,7 @@ impl Run {
             })
             .await
             .unwrap();
-        for _ in 0..200 {
+        for _ in 0..restart.sign_in_reads() {
             let read = client
                 .read_native_auth(NativeAuthQuery {
                     request_id: request(&format!("{name}-read")),
@@ -1427,17 +1469,15 @@ async fn sign_in_rechecking_running_and_settled() {
 }
 
 /// DEC-108, storage: a sign-in proved under an earlier run waits for this run's re-check,
-/// and is settled once proved under this run and once logged out under it. Needs the
-/// account-check host, which on macOS makes a keychain in the temp profile for every Claude
-/// sign-in, so it does not run there while keychain writes are not allowed.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "needs keychain: the account-check host makes a profile keychain for each Claude sign-in"
-)]
+/// and is settled once proved under this run and once logged out under it. Needs a live
+/// Claude account: the installed Claude Code answers every status, and the owner finishes
+/// the real sign-in in the browser, which on macOS also makes a keychain in the temp profile.
+/// Runs only by name with `--ignored` in an owner-approved live window.
+#[ignore = "live: needs a live Claude account; the owner finishes a real sign-in through the installed Claude Code"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sign_in_rechecking_due_after_restart() {
-    let restart = Restart::new();
-    tokio::time::timeout(Duration::from_secs(90), async {
+    let restart = Restart::live();
+    tokio::time::timeout(Duration::from_secs(900), async {
         let model = restart.model();
         let first = restart.start().await;
         first.sign_in(&restart).await;
@@ -1467,7 +1507,7 @@ async fn sign_in_rechecking_due_after_restart() {
         third.stop().await;
     })
     .await
-    .expect("the earlier-run re-check case exceeded 90 seconds");
+    .expect("the earlier-run re-check case exceeded 900 seconds");
 }
 
 /// DEC-108: the engine-start re-proof flag is true before the engine runs, and clears once
@@ -1603,19 +1643,17 @@ async fn live_master_waits_for_restart_recheck() {
 }
 
 /// DEC-108: once the account an earlier run signed in passes this run's re-check, the
-/// waiting live master starts on the next tick and its wait line is cleared. Needs the
-/// account-check host, which on macOS makes a keychain in the temp profile for every Claude
-/// sign-in, so it does not run there while keychain writes are not allowed.
-#[cfg_attr(
-    target_os = "macos",
-    ignore = "needs keychain: the account-check host makes a profile keychain for each Claude sign-in"
-)]
+/// waiting live master starts on the next tick and its wait line is cleared. Needs a live
+/// Claude account: the installed Claude Code answers the re-check and runs the master, and
+/// the owner finishes the real sign-in in the browser, which on macOS also makes a keychain
+/// in the temp profile. Runs only by name with `--ignored` in an owner-approved live window.
+#[ignore = "live: needs a live Claude account; the owner finishes a real sign-in through the installed Claude Code"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_master_starts_once_restart_recheck_passes() {
     use crate::team::TeamAction;
     use std::sync::atomic::Ordering::SeqCst;
-    let restart = Restart::new();
-    tokio::time::timeout(Duration::from_secs(90), async {
+    let restart = Restart::live();
+    tokio::time::timeout(Duration::from_secs(900), async {
         let first = restart.start().await;
         first.sign_in(&restart).await;
         first.create_project().await;
@@ -1651,7 +1689,7 @@ async fn live_master_starts_once_restart_recheck_passes() {
         third.stop().await;
     })
     .await
-    .expect("the live master start case exceeded 90 seconds");
+    .expect("the live master start case exceeded 900 seconds");
 }
 
 /// DEC-108: while this run's re-proof runs and the only pool account's check holds its
