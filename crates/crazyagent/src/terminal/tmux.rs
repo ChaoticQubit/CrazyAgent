@@ -193,10 +193,71 @@ impl Tmux {
         if !self.running() {
             return Ok(());
         }
-        match std::fs::remove_file(&socket) {
+        self.remove_socket()
+    }
+
+    /// Removes the socket file an ended server left behind. Output: Ok once it is gone,
+    /// or `terminal_folder_unsafe` when it cannot be removed.
+    fn remove_socket(&self) -> Result<(), HostError> {
+        match std::fs::remove_file(self.socket()) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(_) => Err(failure("terminal_folder_unsafe")),
+        }
+    }
+
+    /// Probes the server's socket while holding the control slot, under which a spawn
+    /// starts a server, so none binds the path between a refused probe and the removal.
+    /// A refused probe means the server ended: its socket file is removed. Output: true
+    /// while a server listens, false once the socket is gone or removed, or the error a
+    /// connect gives for any other probe failure, such as running out of descriptors.
+    fn listening(&self) -> Result<bool, HostError> {
+        let _slot = self
+            .control
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        match crate::spawn_gate::connect_unix_std(self.address()?) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                self.remove_socket()?;
+                Ok(false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(failure("terminal_unavailable")),
+        }
+    }
+
+    /// Gives the control connection the host already holds while it still reads.
+    /// Output: that control, or none when there is none or it closed.
+    fn open_control(&self) -> Option<Arc<Control>> {
+        let slot = self.control.lock().ok()?;
+        slot.as_ref().filter(|control| !control.closed()).cloned()
+    }
+
+    /// Lists the live agents when no open control holds the server, or one closed under
+    /// the query, as after kill-server or a crash, so the server may be ended, still
+    /// ending or alive. A server that refuses connections is forgotten and has none; a
+    /// listening one is asked through a fresh control that cannot start a server, again
+    /// every 10 ms while an ending server drops it, for at most `REPLY_TIME`. Output: the
+    /// names in order, or the refusal still given at the deadline.
+    fn alive_reconnecting(&self) -> Result<Vec<AgentId>, HostError> {
+        let deadline = Instant::now() + REPLY_TIME;
+        loop {
+            if !self.running() || !self.listening()? {
+                return Ok(Vec::new());
+            }
+            match self
+                .control_with(false)
+                .and_then(|control| windows(&control))
+            {
+                Err(error)
+                    if matches!(error.0.as_str(), "terminal_closed" | "terminal_unavailable")
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                listed => return listed,
+            }
         }
     }
 
@@ -211,6 +272,13 @@ impl Tmux {
     }
 
     fn control(&self) -> Result<Arc<Control>, HostError> {
+        self.control_with(true)
+    }
+
+    /// Gives the held control while it reads, or connects a new one, which starts the
+    /// server only when `may_start` is set. Takes whether it may start one. Output: the
+    /// control, or the code its connect failed with.
+    fn control_with(&self, may_start: bool) -> Result<Arc<Control>, HostError> {
         let mut slot = self
             .control
             .lock()
@@ -221,17 +289,15 @@ impl Tmux {
             return Ok(control.clone());
         }
         *slot = None;
-        let control = Arc::new(self.connect()?);
+        let control = Arc::new(self.connect(may_start)?);
         *slot = Some(control.clone());
         Ok(control)
     }
 
-    fn connect(&self) -> Result<Control, HostError> {
-        let executable = self
-            .executable
-            .as_deref()
-            .ok_or_else(|| failure("terminal_unavailable"))?;
-        private_folder(&self.folder)?;
+    /// The address the host reaches its server at: the socket path, or the short alias of
+    /// one too long for a socket address, which a confined host may not use. Output: the
+    /// address, or `terminal_socket_path_long` or `terminal_folder_unsafe`.
+    fn address(&self) -> Result<PathBuf, HostError> {
         let socket = crate::socket_address::address(&self.socket()).map_err(|error| {
             failure(if error.kind() == std::io::ErrorKind::InvalidInput {
                 "terminal_socket_path_long"
@@ -242,6 +308,19 @@ impl Tmux {
         if self.confined.is_some() && socket != self.socket {
             return Err(failure("terminal_socket_path_long"));
         }
+        Ok(socket)
+    }
+
+    /// Connects a control client to the server, starting the server with its holder
+    /// session only when `may_start` is set; otherwise tmux -N refuses an ended server.
+    /// Takes whether it may start one. Output: the control, or a plain code.
+    fn connect(&self, may_start: bool) -> Result<Control, HostError> {
+        let executable = self
+            .executable
+            .as_deref()
+            .ok_or_else(|| failure("terminal_unavailable"))?;
+        private_folder(&self.folder)?;
+        let socket = self.address()?;
         if let Ok(metadata) = std::fs::symlink_metadata(&socket)
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {
@@ -257,7 +336,9 @@ impl Tmux {
         };
         let mut child = crate::spawn_gate::spawn(
             command
-                .args(["-u", "-f", "/dev/null", "-S"])
+                .args(["-u", "-f", "/dev/null"])
+                .args((!may_start).then_some("-N"))
+                .arg("-S")
                 .arg(&socket)
                 .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
                 .args(HOLDER_SHELL)
@@ -1485,8 +1566,13 @@ impl Host for Tmux {
         if !self.running() {
             return Ok(Vec::new());
         }
-        let control = self.control()?;
-        windows(&control)
+        if let Some(control) = self.open_control() {
+            match windows(&control) {
+                Err(error) if error.0 == "terminal_closed" => {}
+                listed => return listed,
+            }
+        }
+        self.alive_reconnecting()
     }
 
     fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
