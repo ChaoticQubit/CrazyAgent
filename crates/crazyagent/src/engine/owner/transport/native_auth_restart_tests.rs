@@ -126,8 +126,24 @@ impl Restart {
     }
 
     async fn start(&self) -> Run {
+        let (mut service, handle, stop) = self.ready().await;
+        service.register_native_auth_host(&custodian()).unwrap();
+        service.register_claude_executable(&self.claude).unwrap();
+        Run::spawn(service, handle, stop)
+    }
+
+    /// Opens an engine run on this case's database without running it and without an
+    /// account-check host, so it checks no account and makes no profile keychain.
+    /// Output: the engine, its owner handle and its stop switch.
+    async fn ready(
+        &self,
+    ) -> (
+        EngineService,
+        OwnerRuntimeHandle,
+        tokio::sync::watch::Sender<bool>,
+    ) {
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let mut service = EngineService::start_with_settings_sources(
+        let service = EngineService::start_with_settings_sources(
             self.root.path(),
             "e.sock",
             &self.global,
@@ -136,15 +152,102 @@ impl Restart {
         )
         .await
         .unwrap();
-        service.register_native_auth_host(&custodian()).unwrap();
-        service.register_claude_executable(&self.claude).unwrap();
         let running = service.owner_runtime().unwrap();
         let handle = OwnerRuntimeHandle {
             engine: running.engine.clone(),
             authority: running.authority.clone(),
         };
-        let task = tokio::spawn(service.run(stopped));
-        Run { handle, stop, task }
+        (service, handle, stop)
+    }
+
+    /// Runs an engine with no account-check host: no sign-in is checked or re-proved on it.
+    /// Output: the running engine.
+    async fn start_bare(&self) -> Run {
+        let (service, handle, stop) = self.ready().await;
+        Run::spawn(service, handle, stop)
+    }
+
+    /// Tells whether the account's sign-in waits for a re-check of the run, read the way the
+    /// team runtime reads it. Inputs: the run and the account. Output: the storage answer.
+    fn rechecking(&self, run: &Run, model: &crate::config::ModelConnection) -> bool {
+        let mut database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        database.busy_timeout(Duration::from_secs(2)).unwrap();
+        let tx = database.transaction().unwrap();
+        crate::storage::sign_in_rechecking(&tx, &run.handle.identity(), model).unwrap()
+    }
+
+    /// Counts the profile fences sign-in operations hold. Output: the count.
+    fn fences(&self) -> i64 {
+        rusqlite::Connection::open(self.root.path().join("engine.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM native_auth_fences", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Opens the team runtime for project-z with the engine-start re-proof flag it waits on
+    /// and a tmux host of this case for live masters. Input: the flag. Output: the runtime,
+    /// the project's stored setup and the host.
+    fn live_team(
+        &self,
+        reproving: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (
+        crate::team::runtime::TeamRuntime,
+        crate::project_setup::StoredSetup,
+        Arc<dyn crate::terminal::Host>,
+    ) {
+        let (team, setup) = self.team();
+        let base = self.root.path().canonicalize().unwrap();
+        let tmux = crate::terminal::tmux::installed(&base)
+            .expect("tmux must be installed on this machine");
+        let host: Arc<dyn crate::terminal::Host> = Arc::new(crate::terminal::tmux::Tmux::open(
+            Some(tmux),
+            &base.join(crate::terminal::FOLDER),
+        ));
+        let team = team
+            .with_reproof(reproving)
+            .with_terminal(host.clone())
+            .unwrap();
+        (team, setup, host)
+    }
+
+    /// Reads project-z's live master switch and why it last could not start.
+    /// Output: the switch, none when never set, and the reason.
+    fn live_switch(&self) -> (Option<bool>, Option<String>) {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        crate::team::master::switch(&database, &ProjectId::new("project-z").unwrap()).unwrap()
+    }
+
+    /// Lists project-z's team messages in order. Input: its stored setup. Output: each
+    /// message's author, state and text.
+    fn messages(
+        &self,
+        setup: &crate::project_setup::StoredSetup,
+    ) -> Vec<(
+        crate::team::MessageAuthor,
+        crate::team::MessageState,
+        String,
+    )> {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        crate::team::status(&database, setup)
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|message| (message.author, message.state, message.text))
+            .collect()
+    }
+
+    /// Reads project-z's team task states in order. Input: its stored setup. Output: each
+    /// task's status.
+    fn tasks(&self, setup: &crate::project_setup::StoredSetup) -> Vec<crate::team::TaskStatus> {
+        let database = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        crate::team::status(&database, setup)
+            .unwrap()
+            .tasks
+            .into_iter()
+            .map(|task| task.status)
+            .collect()
     }
 
     fn log_out(&self) {
@@ -412,6 +515,67 @@ fn now_ms() -> i64 {
 }
 
 impl Run {
+    /// Runs an opened engine until its stop switch is set. Inputs: the engine, its owner
+    /// handle and the switch. Output: the running engine.
+    fn spawn(
+        service: EngineService,
+        handle: OwnerRuntimeHandle,
+        stop: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
+        let task = tokio::spawn(service.run(stop.subscribe()));
+        Run { handle, stop, task }
+    }
+
+    /// The admission of the owner registration this run holds active.
+    /// Output: that admission.
+    fn admission(&self) -> Admission {
+        self.handle
+            .authority
+            .slots
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|slot| slot.registration.active)
+            .map(|slot| slot.registration.admission.clone())
+            .expect("an active owner registration")
+    }
+
+    /// Begins one check of the account's existing sign-in through the engine's own storage
+    /// job, the step that commits it and fences its profile before the account-check host
+    /// runs it, and holds it there. Input: the case. Output: the admission and the held work.
+    async fn begin_check(&self, restart: &Restart) -> (Admission, crate::storage::NativeAuthWork) {
+        let admission = self.admission();
+        let start = NativeAuthStart {
+            request_id: request("restart-held-check"),
+            scope: self.scope(restart.config().id).await,
+            method: NativeAuthMethod::ClaudeExisting,
+        };
+        let command = crate::engine::owner::native_auth::Command::Start(start);
+        let begun = self
+            .handle
+            .engine
+            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .await
+            .unwrap();
+        assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);
+        (admission, begun.work.expect("the begun check's work"))
+    }
+
+    /// Ends a held check the way the engine ends one no account-check host ran.
+    /// Inputs: its admission and work. Output: the final fact.
+    async fn finish_check(
+        &self,
+        admission: Admission,
+        work: crate::storage::NativeAuthWork,
+    ) -> NativeAuthFact {
+        self.handle
+            .engine
+            .native_auth_job(|reply| Job::NativeAuthFinish(admission, Box::new(work), reply))
+            .await
+            .unwrap()
+            .fact
+    }
+
     fn client(&self) -> OwnerClient {
         OwnerClient::attach(
             &self.handle.authority.root.path,
@@ -1195,4 +1359,413 @@ async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_
     })
     .await
     .expect("the lapsed Claude sign-in check exceeded 120 seconds");
+}
+
+/// Waits up to five seconds for the engine-start re-proof flag to clear.
+/// Input: the flag. Output: true once it reads false.
+async fn cleared(flag: &std::sync::atomic::AtomicBool) -> bool {
+    for _ in 0..100 {
+        if !flag.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+const CHECKING: &str = crate::team::master::SIGN_INS_CHECKING;
+
+const SIGN_IN_TO_RUN: &str = "Sign in to an account in this project's pool to run claude-code";
+
+/// DEC-108, storage: an account's sign-in waits for a re-check while a check of its profile
+/// is begun and still holds the profile, and is settled when nothing ever signed it in, once
+/// that check ended under this run, and for an account that is no managed profile. No
+/// account-check host runs, so no profile keychain is made; the earlier-run case is
+/// `sign_in_rechecking_due_after_restart`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_rechecking_running_and_settled() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start_bare().await;
+        let model = restart.model();
+        assert!(
+            !restart.rechecking(&run, &model),
+            "never signed in and nothing checks it"
+        );
+        let (admission, work) = run.begin_check(&restart).await;
+        assert_eq!(restart.fences(), 1);
+        assert!(
+            restart.rechecking(&run, &model),
+            "a begun check still holds the profile"
+        );
+        let ended = run.finish_check(admission, work).await;
+        assert!(!ended.phase.unfinished(), "{:?}", ended.phase);
+        assert_eq!(
+            ended.binding.engine_epoch,
+            run.handle.identity().engine_epoch
+        );
+        assert_eq!(restart.fences(), 0);
+        assert!(
+            !restart.rechecking(&run, &model),
+            "a check that ended under this run is settled"
+        );
+        let endpoint = crate::config::ModelConnection {
+            endpoint: crate::config::ModelEndpoint::Http {
+                url: "http://127.0.0.1:11434/v1".into(),
+            },
+            auth: crate::config::ModelAuthentication::None {},
+            ..model.clone()
+        };
+        assert!(
+            !restart.rechecking(&run, &endpoint),
+            "an endpoint account has no sign-in to re-check"
+        );
+        run.stop().await;
+    })
+    .await
+    .expect("the re-check storage case exceeded 60 seconds");
+}
+
+/// DEC-108, storage: a sign-in proved under an earlier run waits for this run's re-check,
+/// and is settled once proved under this run and once logged out under it. Needs the
+/// account-check host, which on macOS makes a keychain in the temp profile for every Claude
+/// sign-in, so it does not run there while keychain writes are not allowed.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs keychain: the account-check host makes a profile keychain for each Claude sign-in"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sign_in_rechecking_due_after_restart() {
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let model = restart.model();
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        assert!(!restart.rechecking(&first, &model), "proved under this run");
+        first.stop().await;
+        let second = restart.start_bare().await;
+        assert!(
+            restart.rechecking(&second, &model),
+            "proved under an earlier run and not re-checked on this one"
+        );
+        assert_eq!(restart.fences(), 0, "nothing checks it on this run");
+        second.stop().await;
+        let third = restart.start().await;
+        assert_eq!(
+            settled(&restart, &third, AccountStatus::SignedIn).await,
+            Ok(())
+        );
+        assert!(
+            !restart.rechecking(&third, &model),
+            "re-proved under this run"
+        );
+        third.log_out(&restart).await;
+        assert!(
+            !restart.rechecking(&third, &model),
+            "not signed in under this run"
+        );
+        third.stop().await;
+    })
+    .await
+    .expect("the earlier-run re-check case exceeded 90 seconds");
+}
+
+/// DEC-108: the engine-start re-proof flag is true before the engine runs, and clears once
+/// that re-proof ends: when it finished with nothing to re-check, when it gave up because no
+/// owner registration admits a check, and when the engine stopped it while it still waited.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reproving_clears_when_reproof_ends() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let (service, handle, stop) = restart.ready().await;
+        let flag = handle.reproving();
+        assert!(flag.load(SeqCst), "the flag is set before the engine runs");
+        let run = Run::spawn(service, handle, stop);
+        assert!(cleared(&flag).await, "a re-proof that finished clears it");
+        run.stop().await;
+
+        let (service, handle, stop) = restart.ready().await;
+        let flag = handle.reproving();
+        let registrations: Vec<Registration> = handle
+            .authority
+            .slots
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|slot| slot.registration.clone())
+            .collect();
+        for registration in registrations {
+            handle
+                .authority
+                .publish(Registration {
+                    active: false,
+                    ..registration
+                })
+                .unwrap();
+        }
+        assert!(
+            handle
+                .authority
+                .slots
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|slot| !slot.registration.active)
+        );
+        assert!(flag.load(SeqCst));
+        let run = Run::spawn(service, handle, stop);
+        assert!(
+            cleared(&flag).await,
+            "a re-proof with no owner admission gives up and clears it"
+        );
+        run.stop().await;
+
+        let (service, handle, stop) = restart.ready().await;
+        let flag = handle.reproving();
+        let authority = handle.authority.clone();
+        let serial = authority.reproof.lock().await;
+        let run = Run::spawn(service, handle, stop);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            flag.load(SeqCst),
+            "a re-proof waiting for another one still runs"
+        );
+        run.stop().await;
+        assert!(
+            !flag.load(SeqCst),
+            "the engine's stop aborts the waiting re-proof and clears it"
+        );
+        drop(serial);
+    })
+    .await
+    .expect("the re-proof flag case exceeded 60 seconds");
+}
+
+/// DEC-108: while this run's re-proof runs and the only pool account's check still holds its
+/// profile, the switched-on live master waits: over more ticks than it may start in its
+/// window it stays on, starts nothing, and its problem line and one team note say it checks
+/// sign-ins. Once the re-proof ended with no proof, it is turned off with the sign-in refusal.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_master_waits_for_restart_recheck() {
+    use crate::team::{MessageAuthor, MessageState, TeamAction};
+    use std::sync::atomic::Ordering::SeqCst;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start_bare().await;
+        run.create_project().await;
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (mut team, setup, _host) = restart.live_team(reproving.clone());
+        restart.team_action(TeamAction::LiveMaster {
+            project_id: setup.project_id.clone(),
+            on: true,
+        });
+        let (admission, work) = run.begin_check(&restart).await;
+        for _ in 0..5 {
+            team.tick().unwrap();
+        }
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), Some(CHECKING.to_owned())),
+            "the switch stays on and its problem line says it checks sign-ins"
+        );
+        assert_eq!(
+            restart.messages(&setup),
+            [(
+                MessageAuthor::Engine,
+                MessageState::Note,
+                CHECKING.to_owned()
+            )],
+            "one note"
+        );
+        assert!(
+            restart.team_agents("master").is_empty(),
+            "no live start while it waits"
+        );
+        reproving.store(false, SeqCst);
+        team.tick().unwrap();
+        let (on, problem) = restart.live_switch();
+        assert_eq!(on, Some(false), "{problem:?}");
+        let problem = problem.expect("why it was turned off");
+        assert!(
+            problem.starts_with("The live master was turned off: it could not start: ")
+                && problem.contains(SIGN_IN_TO_RUN),
+            "{problem}"
+        );
+        assert!(restart.team_agents("master").is_empty());
+        run.finish_check(admission, work).await;
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the live master wait case exceeded 60 seconds");
+}
+
+/// DEC-108: once the account an earlier run signed in passes this run's re-check, the
+/// waiting live master starts on the next tick and its wait line is cleared. Needs the
+/// account-check host, which on macOS makes a keychain in the temp profile for every Claude
+/// sign-in, so it does not run there while keychain writes are not allowed.
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs keychain: the account-check host makes a profile keychain for each Claude sign-in"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_master_starts_once_restart_recheck_passes() {
+    use crate::team::TeamAction;
+    use std::sync::atomic::Ordering::SeqCst;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let first = restart.start().await;
+        first.sign_in(&restart).await;
+        first.create_project().await;
+        first.stop().await;
+        let second = restart.start_bare().await;
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (mut team, setup, _host) = restart.live_team(reproving.clone());
+        restart.team_action(TeamAction::LiveMaster {
+            project_id: setup.project_id.clone(),
+            on: true,
+        });
+        team.tick().unwrap();
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), Some(CHECKING.to_owned()))
+        );
+        assert!(restart.team_agents("master").is_empty());
+        second.stop().await;
+        let third = restart.start().await;
+        assert_eq!(
+            settled(&restart, &third, AccountStatus::SignedIn).await,
+            Ok(())
+        );
+        team.tick().unwrap();
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), None),
+            "the master starts and its wait line is cleared"
+        );
+        assert_eq!(restart.team_agents("master").len(), 1);
+        reproving.store(false, SeqCst);
+        team.shutdown().unwrap();
+        third.stop().await;
+    })
+    .await
+    .expect("the live master start case exceeded 90 seconds");
+}
+
+/// DEC-108: while this run's re-proof runs and the only pool account's check holds its
+/// profile, a queued task stays queued rather than needing a pool, and a message to the
+/// master that is not live stays pending. Once the re-proof ended with no proof, the task
+/// needs a pool and the message fails with the sign-in refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_task_stays_queued_while_checking() {
+    use crate::team::{MessageAuthor, MessageState, TaskStatus, TeamAction};
+    use std::sync::atomic::Ordering::SeqCst;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start_bare().await;
+        run.create_project().await;
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (team, setup) = restart.team();
+        let mut team = team.with_reproof(reproving.clone());
+        let project = setup.project_id.clone();
+        let (admission, work) = run.begin_check(&restart).await;
+        restart.team_action(TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        });
+        restart.team_action(TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        });
+        for _ in 0..3 {
+            team.tick().unwrap();
+        }
+        assert_eq!(restart.tasks(&setup), [TaskStatus::Queued]);
+        assert_eq!(
+            restart.messages(&setup),
+            [(
+                MessageAuthor::Owner,
+                MessageState::Pending,
+                "Plan the page".to_owned()
+            )]
+        );
+        assert!(restart.team_agents("master").is_empty());
+        assert!(restart.team_agents("sub").is_empty());
+        reproving.store(false, SeqCst);
+        team.tick().unwrap();
+        assert_eq!(restart.tasks(&setup), [TaskStatus::NeedsPool]);
+        assert_eq!(
+            restart.messages(&setup),
+            [
+                (
+                    MessageAuthor::Owner,
+                    MessageState::Failed,
+                    "Plan the page".to_owned()
+                ),
+                (
+                    MessageAuthor::Engine,
+                    MessageState::Note,
+                    format!("The master could not start: {SIGN_IN_TO_RUN}.")
+                ),
+            ]
+        );
+        run.finish_check(admission, work).await;
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the queued task wait case exceeded 60 seconds");
+}
+
+/// DEC-108: an account whose sign-in the provider rejected is not waited for, even while
+/// this run's re-proof runs and its check holds the profile: the master's message fails
+/// with "Sign in again" and the task needs a pool on the first tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_account_not_waited() {
+    use crate::team::{MessageAuthor, MessageState, TaskStatus, TeamAction};
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start_bare().await;
+        run.create_project().await;
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (team, setup) = restart.team();
+        let mut team = team.with_reproof(reproving);
+        let project = setup.project_id.clone();
+        let (admission, work) = run.begin_check(&restart).await;
+        restart.reject(&restart.model());
+        restart.team_action(TeamAction::Message {
+            project_id: project.clone(),
+            text: "Plan the page".into(),
+        });
+        restart.team_action(TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write page.md".into(),
+        });
+        team.tick().unwrap();
+        assert_eq!(restart.tasks(&setup), [TaskStatus::NeedsPool]);
+        assert_eq!(
+            restart.messages(&setup),
+            [
+                (
+                    MessageAuthor::Owner,
+                    MessageState::Failed,
+                    "Plan the page".to_owned()
+                ),
+                (
+                    MessageAuthor::Engine,
+                    MessageState::Note,
+                    "The master could not start: Sign in again: the provider rejected the sign-in of every account in this project's pool that can run claude-code.".to_owned()
+                ),
+            ]
+        );
+        run.finish_check(admission, work).await;
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the rejected account case exceeded 60 seconds");
 }
