@@ -362,6 +362,65 @@ fn under_typing_only_the_relay_writes_no_letters_and_removes_waiting_ones() {
 }
 
 #[test]
+fn a_master_gets_no_letters_while_a_lead_in_the_same_project_still_does() {
+    let team = Team::new();
+    let master = team.agent("master", None, None);
+    let lead = team.agent("sub_agent", None, None);
+    let to_master = team.note(lead, master, "Done with the parser.");
+    std::fs::write(
+        team.entry(&format!("{}{INBOX}", stem(to_master))),
+        serde_json::to_vec(&Letter {
+            id: to_master,
+            to: "leader".to_owned(),
+            from: "left by an earlier build".to_owned(),
+            kind: MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Done with the parser.".to_owned(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(team.entry(&format!("{LEAD_KEY}{TOUCH}")), "").unwrap();
+
+    team.serve(master, false);
+
+    assert_eq!(team.letter(to_master), None, "a left letter is removed");
+    assert_eq!(team.receipt(to_master), Receipt::Sent);
+    let seen: Option<i64> = team
+        .db
+        .query_row(
+            "SELECT last_seen FROM coord_activity WHERE agent=?1",
+            [master],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert!(seen.is_some(), "a master's activity is still taken");
+
+    let lead_mailbox = team.home.parent().unwrap().join("tmp").join("lead-calls");
+    std::fs::create_dir(&lead_mailbox).unwrap();
+    let to_lead = team.note(master, lead, "Then take the lexer.");
+    serve(
+        &team.db,
+        &team.project,
+        lead,
+        &team.home,
+        &lead_mailbox,
+        false,
+        now(),
+    )
+    .unwrap();
+    assert!(
+        lead_mailbox
+            .join(format!("{}{INBOX}", stem(to_lead)))
+            .is_file(),
+        "a sub-agent lead still gets its letter"
+    );
+}
+
+#[test]
 fn serve_takes_tool_logs_touches_and_waits_and_drops_names_that_are_not_plain() {
     let team = Team::new();
     let lead = team.agent("sub_agent", None, None);
