@@ -131,20 +131,20 @@ test("the device sign-in polls only while its code works and the owner isn't sig
 test("each folder chooser names what the folder is for, and adding a project never asks for a skill folder", () => {
   const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
   assert.match(source("../src/api.ts"), /export function pickFolder\(purpose: FolderPurpose\)[^{]*\{\s*return call<string \| null>\("desktop_pick_folder", \{ purpose \}\);/);
-  for (const [file, purpose, count] of [
-    ["../src/screens/intake/add-folder.tsx", "project", 1],
-    ["../src/screens/intake/home-folder.tsx", "projects_home", 1],
-    ["../src/screens/settings/projects-home.tsx", "projects_home", 1],
-    ["../src/screens/settings/plugins.tsx", "skill", 2],
+  for (const [file, expected] of [
+    ["../src/screens/intake/add-folder.tsx", ['"project"']],
+    ["../src/screens/intake/home-folder.tsx", ['"projects_home"']],
+    ["../src/screens/settings/projects-home.tsx", ['"projects_home"']],
+    ["../src/screens/settings/plugins.tsx", ['"skill"', '"skill"', '"plugin"']],
   ]) {
     const calls = [...source(file).matchAll(/\bpickFolder\(([^)]*)\)/g)].map((call) => call[1]);
-    assert.deepEqual(calls, Array(count).fill(`"${purpose}"`), file);
+    assert.deepEqual(calls, expected, file);
   }
   const lib = source("../src-tauri/src/lib.rs");
   assert.match(lib, /async fn desktop_pick_folder\(\s*window: WebviewWindow,\s*purpose: FolderPurpose,\s*\)/);
   assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
   const picker = source("../src-tauri/src/bridge/picker.rs");
-  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*\}/,
+  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*\}/,
     "the web view's purpose names are the engine's");
 });
 
