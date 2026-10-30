@@ -6575,6 +6575,36 @@ fn the_owners_wake_of_a_lead_clears_its_workers_stops_and_their_held_tasks_start
     host.close(&[]).unwrap();
 }
 
+/// RSF2-L1 (K8, AW-1): the owner's restart of a lead in the agent register clears the
+/// owner's stops of the agents it leads, as the owner's Wake does, so the worker's held
+/// task starts it again.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_restart_of_a_lead_clears_its_workers_stops_and_their_held_tasks_start_them() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default())
+        .with_agents(agents.clone());
+    let (lead, worker, _) = lead_with_owner_stopped_worker(&fixture, &mut team);
+    let entries =
+        crate::agents::hosted_entries(&fixture.connection, &fixture.setup.project_id, TEAM_HOST)
+            .unwrap();
+    agents.restart(&entries[&lead.to_string()]).unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's restart starts the lead and its worker's held task starts the worker",
+        |f| {
+            launches(f, lead).len() == 2
+                && launches(f, worker).len() == 2
+                && typed(f, worker).contains("Finish the notes.")
+        },
+    );
+    assert!(!crate::team::owner_stopped(&fixture.connection, worker).unwrap());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// The session limit counts from when the agent's terminal started, also across an engine
 /// restart: a sub-agent the next engine adopts keeps the time it ran before, so a session
 /// it already passed ends it.
