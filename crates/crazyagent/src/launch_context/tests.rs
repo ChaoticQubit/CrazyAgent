@@ -1044,6 +1044,15 @@ fn a_fresh_agent_home_starts_context_mode_from_the_engine_install_not_npx() {
     )
     .unwrap();
     fs::write(package.join("cli.bundle.mjs"), "").unwrap();
+    fs::write(
+        install.join("node_modules").join(".package-lock.json"),
+        serde_json::json!({"packages": {"node_modules/context-mode": {
+            "version": CONTEXT_MODE_VERSION,
+            "integrity": "sha512-94JIaFuLjF9SO2BsGTrbGtyT44K95+9OC8BdbaL/UT76xOkanJLfUR5CzmNw+GELXZQqH4nBrKg9wjBnSFkVnQ==",
+        }}})
+        .to_string(),
+    )
+    .unwrap();
     let bundle = package.join("cli.bundle.mjs");
     let node = bin.join("node");
 

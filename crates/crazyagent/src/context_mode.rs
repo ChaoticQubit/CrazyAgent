@@ -7,14 +7,17 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PACKAGE: &str = "context-mode";
 const PROGRAM: &str = "cli.bundle.mjs";
 const MODULES: &str = "node_modules";
 const VERSION_BYTES_MAX: usize = 32;
 const MANIFEST_BYTES_MAX: u64 = 64 * 1024;
+const LOCK_BYTES_MAX: u64 = 1024 * 1024;
+const MARKER_BYTES_MAX: u64 = 32;
 const INSTALL_TIME: Duration = Duration::from_secs(900);
+const INSTALL_BACKOFF: Duration = Duration::from_secs(600);
 const INSTALLS_MAX: usize = 16;
 
 static INSTALLING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -69,19 +72,24 @@ pub fn shared_install(spec: &ServerSpec) -> Option<&Path> {
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_prefix(PACKAGE))
             .and_then(|name| name.strip_prefix('@'))
-            .is_some_and(plain_version);
+            .is_some_and(exact_version);
     named.then_some(folder)
 }
 
 /// Installs one context-mode version into the engine's shared folder, once. An exclusive
 /// lock on `<folder>.lock` makes a parallel installer wait, then find the finished install.
-/// npm from npx's folder runs inside an agent sandbox with its own private home and cache,
-/// as npx did in each agent before, into a staging folder that becomes the install folder
-/// only after the package checks out. Inputs: the engine root, npx's folder and the version.
-/// Output: the install folder, or the failure code.
+/// Only a version the default pack pins with a tarball hash installs. Under the lock a failure
+/// less than [`INSTALL_BACKOFF`] old (`<folder>.failed`) stops a retry, and whatever is left
+/// at the install path that is not complete is removed. npm from npx's folder runs in an agent
+/// sandbox (HTTPS only, a fresh home and cache) into a staging folder that becomes the install
+/// folder only after the package and npm's recorded tarball hash check out.
+/// Inputs: the engine root, npx's folder and the version. Output: the folder, or the code.
 pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, InstallError> {
-    if !plain_version(version) {
+    if !exact_version(version) {
         return Err(InstallError("context_mode_version_invalid"));
+    }
+    if pin(version).is_none() {
+        return Err(InstallError("context_mode_integrity_unpinned"));
     }
     if !runnable(&bin.join("npm")) || !runnable(&bin.join("node")) {
         return Err(InstallError("context_mode_npm_missing"));
@@ -91,23 +99,47 @@ pub fn install(root: &Path, bin: &Path, version: &str) -> Result<PathBuf, Instal
         .parent()
         .ok_or(InstallError("setup_store_unavailable"))?;
     private_folder(parent)?;
-    let _lock = lock(&parent.join(format!("{PACKAGE}@{version}.lock")))?;
+    let prefix = format!("{PACKAGE}@{version}");
+    let _lock = lock(&parent.join(format!("{prefix}.lock")))?;
     if complete(&folder, version) {
         return Ok(folder);
     }
+    let failed = parent.join(format!("{prefix}.failed"));
+    if backing_off(&failed) {
+        return Err(InstallError("context_mode_install_backoff"));
+    }
+    let result = replace(root, &folder, bin, version);
+    if result.is_ok() {
+        let _ = std::fs::remove_file(&failed);
+    } else {
+        let _ = std::fs::write(&failed, unix_now().to_string());
+    }
+    result.map(|()| folder)
+}
+
+fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), InstallError> {
+    let parent = folder
+        .parent()
+        .ok_or(InstallError("setup_store_unavailable"))?;
     let prefix = format!("{PACKAGE}@{version}");
+    clear(folder)?;
     remove_staged(parent, &prefix);
     let staged = staging_folder(parent, &prefix)?;
-    let result = fill(root, &staged, bin, version).and_then(|()| {
-        if !complete(&staged, version) {
-            return Err(InstallError("context_mode_install_incomplete"));
-        }
-        std::fs::rename(&staged, &folder).map_err(|_| InstallError("setup_store_unavailable"))
+    let work = staging_folder(parent, &format!("{prefix}-work"));
+    let result = work.and_then(|work| {
+        let filled = fill(root, &staged, &work, bin, version)
+            .and_then(|()| checked(&staged, version).map_err(InstallError))
+            .and_then(|()| {
+                std::fs::rename(&staged, folder)
+                    .map_err(|_| InstallError("setup_store_unavailable"))
+            });
+        let _ = std::fs::remove_dir_all(&work);
+        filled
     });
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staged);
     }
-    result.map(|()| folder)
+    result
 }
 
 fn pinned(spec: &ServerSpec) -> Option<(&Path, &str)> {
@@ -121,20 +153,40 @@ fn pinned(spec: &ServerSpec) -> Option<(&Path, &str)> {
     let version = package
         .strip_prefix(PACKAGE)
         .and_then(|rest| rest.strip_prefix('@'))
-        .filter(|version| flag == "-y" && plain_version(version))?;
+        .filter(|version| flag == "-y" && exact_version(version))?;
     let npx = command.is_absolute() && command.file_name() == Some("npx".as_ref());
     command.parent().filter(|_| npx).map(|bin| (bin, version))
 }
 
-fn plain_version(version: &str) -> bool {
+fn exact_version(version: &str) -> bool {
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let numbers: Vec<&str> = core.split('.').collect();
     version.len() <= VERSION_BYTES_MAX
-        && version
-            .bytes()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-        && version
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+        && numbers.len() == 3
+        && numbers
+            .iter()
+            .all(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+        && pre.is_none_or(|pre| {
+            !pre.is_empty()
+                && pre
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        })
+}
+
+fn pin(version: &str) -> Option<String> {
+    let wanted = format!("{PACKAGE}@{version}");
+    crate::setup::pack::default_pack()
+        .ok()?
+        .entries
+        .into_iter()
+        .find(|entry| {
+            entry.id == PACKAGE && entry.install.split_whitespace().any(|word| word == wanted)
+        })?
+        .integrity
 }
 
 fn shared(folder: &Path, node: &Path, version: &str) -> Option<ServerSpec> {
@@ -151,11 +203,68 @@ fn shared(folder: &Path, node: &Path, version: &str) -> Option<ServerSpec> {
 }
 
 fn complete(folder: &Path, version: &str) -> bool {
+    checked(folder, version).is_ok()
+}
+
+fn checked(folder: &Path, version: &str) -> Result<(), &'static str> {
     let package = folder.join(MODULES).join(PACKAGE);
     let real = std::fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir());
     let program =
         std::fs::symlink_metadata(package.join(PROGRAM)).is_ok_and(|metadata| metadata.is_file());
-    real && program && reported_version(&package.join("package.json")).as_deref() == Some(version)
+    let reported = reported_version(&package.join("package.json"));
+    if !real || !program || reported.as_deref() != Some(version) {
+        return Err("context_mode_install_incomplete");
+    }
+    let pinned = pin(version).ok_or("context_mode_integrity_unpinned")?;
+    if recorded_integrity(folder, version).as_deref() != Some(pinned.as_str()) {
+        return Err("context_mode_integrity_mismatch");
+    }
+    Ok(())
+}
+
+fn recorded_integrity(folder: &Path, version: &str) -> Option<String> {
+    let mut text = String::new();
+    File::open(folder.join(MODULES).join(".package-lock.json"))
+        .ok()?
+        .take(LOCK_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    let lock: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let entry = &lock["packages"][format!("{MODULES}/{PACKAGE}")];
+    if entry["version"] != version {
+        return None;
+    }
+    entry["integrity"].as_str().map(str::to_owned)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+fn backing_off(marker: &Path) -> bool {
+    let mut text = String::new();
+    let read =
+        File::open(marker).and_then(|file| file.take(MARKER_BYTES_MAX).read_to_string(&mut text));
+    let Some(failed) = read.ok().and_then(|_| text.trim().parse::<u64>().ok()) else {
+        return false;
+    };
+    let now = unix_now();
+    let backoff = INSTALL_BACKOFF.as_secs();
+    failed <= now.saturating_add(backoff) && now.saturating_sub(failed) < backoff
+}
+
+fn clear(folder: &Path) -> Result<(), InstallError> {
+    let unavailable = InstallError("setup_store_unavailable");
+    match std::fs::symlink_metadata(folder) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(unavailable),
+        Ok(metadata) if metadata.is_dir() => {
+            std::fs::remove_dir_all(folder).map_err(|_| unavailable)
+        }
+        Ok(_) => std::fs::remove_file(folder).map_err(|_| unavailable),
+    }
 }
 
 fn reported_version(manifest: &Path) -> Option<String> {
@@ -244,14 +353,47 @@ fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
 }
 
-fn fill(root: &Path, staged: &Path, bin: &Path, version: &str) -> Result<(), InstallError> {
+fn fill(
+    root: &Path,
+    staged: &Path,
+    work: &Path,
+    bin: &Path,
+    version: &str,
+) -> Result<(), InstallError> {
+    let mut command = npm_command(root, staged, work, bin, version)?;
+    command
+        .arg("install")
+        .arg("--prefix")
+        .arg(staged)
+        .args([
+            "--no-save",
+            "--no-audit",
+            "--no-fund",
+            "--no-update-notifier",
+            "--loglevel=error",
+        ])
+        .arg(format!("{PACKAGE}@{version}"));
+    let (ok, _) = run_command(command, INSTALL_TIME)?;
+    if !ok {
+        return Err(InstallError("context_mode_install_failed"));
+    }
+    Ok(())
+}
+
+fn npm_command(
+    root: &Path,
+    staged: &Path,
+    work: &Path,
+    bin: &Path,
+    version: &str,
+) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
     let parent = staged
         .parent()
         .ok_or(InstallError("setup_store_unavailable"))?;
-    let home = parent.join("home");
-    let tmp = parent.join("tmp");
+    let home = work.join("home");
+    let tmp = work.join("tmp");
     private_folder(&home)?;
     private_folder(&tmp)?;
     let canonical = |path: &Path| path.canonicalize().map_err(refused);
@@ -260,7 +402,7 @@ fn fill(root: &Path, staged: &Path, bin: &Path, version: &str) -> Result<(), Ins
         &canonical(staged)?,
         &canonical(&home)?,
         &canonical(&tmp)?,
-        SandboxNetwork::Open,
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
     )
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
@@ -280,20 +422,9 @@ fn fill(root: &Path, staged: &Path, bin: &Path, version: &str) -> Result<(), Ins
     search.push(path);
     command
         .env("PATH", search)
-        .arg("install")
-        .arg("--prefix")
-        .arg(staged)
-        .args([
-            "--no-save",
-            "--no-audit",
-            "--no-fund",
-            "--no-update-notifier",
-            "--loglevel=error",
-        ])
-        .arg(format!("{PACKAGE}@{version}"));
-    let (ok, _) = run_command(command, INSTALL_TIME)?;
-    if !ok {
-        return Err(InstallError("context_mode_install_failed"));
-    }
-    Ok(())
+        .env("npm_config_update_notifier", "false");
+    Ok(command)
 }
+
+#[cfg(test)]
+mod tests;
