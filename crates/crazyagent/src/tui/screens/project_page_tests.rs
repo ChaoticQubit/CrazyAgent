@@ -1281,6 +1281,68 @@ async fn a_new_session_on_a_live_master_turns_the_switch_on() {
     );
 }
 
+/// A new session asked for while no session is in view opens the master, and once the
+/// engine confirms that open the live switch turns on, as it does for a new session of a
+/// master that already had one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 40);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    for _ in 0..4 {
+        shell.key(Key::ShiftLeft);
+    }
+    pump(&mut shell, &mut connection).await;
+    let (none, _) = latest_master(&mut engine, &notes).await;
+    assert!(none.is_none(), "the project has no master session yet");
+    let before = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_ne!(before.live_master, Some(true), "the switch starts off");
+
+    shell.key(Key::Char('n'));
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !sent.contains(&"team change") {
+        assert!(
+            Instant::now() < deadline,
+            "the switch never turned on: {sent:?}"
+        );
+        shell.refresh();
+        sent.extend(pump(&mut shell, &mut connection).await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let open = sent.iter().position(|label| *label == "master");
+    let change = sent.iter().position(|label| *label == "team change");
+    assert!(
+        open.is_some() && open < change,
+        "the switch turns on after the master opens: {sent:?}"
+    );
+    let (opened, _) = latest_master(&mut engine, &notes).await;
+    assert!(opened.is_some(), "the new session opened the master");
+    let after = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert!(
+        after.live_master.is_some(),
+        "the engine took the switch change: {:?} {:?}",
+        after.live_master,
+        after.live_problem
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_on_home() {
     let mut engine = Engine::start().await;
