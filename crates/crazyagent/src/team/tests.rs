@@ -3484,3 +3484,138 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         "a stopped teammate never comes back as Idle"
     );
 }
+
+#[test]
+fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
+    use crate::coord::settings::{
+        CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, SubagentMode,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let setup = stored("team-coord", vec![]);
+    let project_row = crate::protocol::StoredProject {
+        project_id: setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&project_row).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let row = |view: &CoordinationView, harness: HarnessKind| {
+        let row = view
+            .harnesses
+            .iter()
+            .find(|row| row.harness == harness)
+            .unwrap();
+        (row.mode, row.delivery, row.native)
+    };
+
+    let defaults = coordination(&connection, &project).unwrap();
+    assert_eq!(defaults.settings, CoordSettings::default());
+    assert_eq!(defaults.harnesses.len(), HarnessKind::ALL.len());
+    assert_eq!(
+        row(&defaults, HarnessKind::ClaudeCode),
+        (SubagentMode::AppSpawned, Delivery::Auto, true)
+    );
+    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
+        assert_eq!(
+            row(&defaults, harness),
+            (SubagentMode::AppSpawned, Delivery::Auto, false)
+        );
+    }
+    assert_eq!(
+        status(&connection, &setup).unwrap().coordination,
+        Some(defaults)
+    );
+
+    let mut act = |action: TeamAction| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(&tx, &access("team-coord", &["local-a"]), &action);
+        tx.commit().unwrap();
+        outcome.map_err(|error| error.0)
+    };
+    let too_many = TeamAction::CoordSettings {
+        project_id: project.clone(),
+        settings: CoordSettings {
+            counted_tools: (0..33).map(|index| format!("tool_{index}")).collect(),
+            ..CoordSettings::default()
+        },
+    };
+    assert_eq!(too_many.validate().unwrap_err().0, "coord_settings_invalid");
+    assert_eq!(act(too_many).unwrap_err(), "coord_settings_invalid");
+    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
+        let native = TeamAction::HarnessMode {
+            project_id: project.clone(),
+            harness,
+            mode: SubagentMode::Native,
+        };
+        assert_eq!(native.validate().unwrap_err().0, "coord_native_unsupported");
+        assert_eq!(act(native).unwrap_err(), "coord_native_unsupported");
+    }
+
+    let chosen = CoordSettings {
+        questions_to: QuestionsTo::Me,
+        overlaps: Overlaps::Block,
+        nudges: false,
+        counted_tools: vec!["start_work".into(), "ctx_*".into()],
+    };
+    for action in [
+        TeamAction::CoordSettings {
+            project_id: project.clone(),
+            settings: chosen.clone(),
+        },
+        TeamAction::HarnessMode {
+            project_id: project.clone(),
+            harness: HarnessKind::ClaudeCode,
+            mode: SubagentMode::Native,
+        },
+        TeamAction::HarnessDelivery {
+            project_id: project.clone(),
+            harness: HarnessKind::Rcli,
+            delivery: Delivery::TypingOnly,
+        },
+    ] {
+        assert_eq!(act(action), Ok(Outcome::Applied));
+    }
+    let saved = status(&connection, &setup).unwrap().coordination.unwrap();
+    assert_eq!(saved.settings, chosen);
+    assert_eq!(
+        row(&saved, HarnessKind::ClaudeCode),
+        (SubagentMode::Native, Delivery::Auto, true)
+    );
+    assert_eq!(
+        row(&saved, HarnessKind::Rcli),
+        (SubagentMode::AppSpawned, Delivery::TypingOnly, false)
+    );
+    assert_eq!(
+        row(&saved, HarnessKind::Codex),
+        (SubagentMode::AppSpawned, Delivery::Auto, false)
+    );
+    let other = stored("team-coord-other", vec![]);
+    assert_eq!(
+        coordination(&connection, &other.project_id)
+            .unwrap()
+            .settings,
+        CoordSettings::default(),
+        "the settings are per project"
+    );
+}
