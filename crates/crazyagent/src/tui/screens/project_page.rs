@@ -801,14 +801,7 @@ impl ProjectPage {
                 if matches!(action, MasterOwnerAction::NewSession { .. })
                     && self.screen.live_master()
                 {
-                    let generation = ctx.next_generation();
-                    ctx.request(Request::Setup(SetupQuery::TeamChange {
-                        action: crate::team::TeamAction::LiveMaster {
-                            project_id: self.screen.project.clone(),
-                            on: true,
-                        },
-                        generation,
-                    }));
+                    self.turn_live_on(ctx);
                 }
             }
             MasterOwnerAction::Open { .. } => {
@@ -833,6 +826,19 @@ impl ProjectPage {
             }
             _ => {}
         }
+    }
+
+    /// Turns the project's live master switch on, for a new session the owner asked for.
+    /// Takes the context; the change goes out with a fresh generation.
+    fn turn_live_on(&self, ctx: &mut Ctx) {
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: crate::team::TeamAction::LiveMaster {
+                project_id: self.screen.project.clone(),
+                on: true,
+            },
+            generation,
+        }));
     }
 
     fn advance_open(&mut self, event: &MasterEvent, stopped: bool, ctx: &mut Ctx) {
@@ -1179,8 +1185,17 @@ impl ProjectPage {
                 Flow::Handled
             }
             ProjectReply::Session(action) => {
+                let in_view = self
+                    .master
+                    .transcript()
+                    .is_some_and(|(session, _, _)| session.is_some());
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
+                } else if matches!(action, super::sessions::SessionsAction::New { .. })
+                    && !in_view
+                    && self.screen.live_master()
+                {
+                    self.turn_live_on(ctx);
                 }
                 Flow::Handled
             }
