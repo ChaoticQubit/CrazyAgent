@@ -3,12 +3,13 @@ use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::memory::KnowledgeStatus;
+use crate::memory::import::ImportReport;
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crate::protocol::ProjectSpec;
 use rusqlite::OpenFlags;
 use rusqlite::types::ValueRef;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long these engine tests let the engine and its owner client wait for
@@ -1401,5 +1402,241 @@ async fn every_project_memory_read_for_counts_and_lists_reaches_past_one_engine_
             .all(|entry| entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed)
     );
     drop(owner);
+    engine.stop().await;
+}
+
+fn import_db() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'), ('beta','{}');",
+    )
+    .unwrap();
+    crate::memory::initialize(&db).unwrap();
+    let config =
+        crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
+            .unwrap();
+    (directory, db, config)
+}
+
+fn import_action(project: &str, file: &str, text: &str) -> LibraryAction {
+    LibraryAction::Import {
+        project_id: ProjectId::new(project).unwrap(),
+        file: file.into(),
+        text: text.into(),
+    }
+}
+
+#[test]
+fn import_saves_one_project_memory_per_file_and_refuses_reimport() {
+    let (_directory, mut db, config) = import_db();
+    let tx = db.transaction().unwrap();
+    let text = "Plan meals on Sunday.";
+    let first = import_action("alpha", "a.md", text);
+    assert_eq!(execute(&tx, &config, &first, 1).unwrap(), Outcome::Applied);
+    assert_eq!(
+        execute(&tx, &config, &first, 2).unwrap(),
+        Outcome::Rejected {
+            code: "memory_duplicate".into()
+        }
+    );
+    assert_eq!(
+        execute(&tx, &config, &import_action("alpha", "b.md", text), 3).unwrap(),
+        Outcome::Rejected {
+            code: "memory_duplicate".into()
+        },
+        "the same text in the same project is a duplicate under another name"
+    );
+    assert_eq!(
+        execute(&tx, &config, &import_action("absent", "a.md", text), 4).unwrap(),
+        Outcome::Rejected {
+            code: "memory_project_missing".into()
+        }
+    );
+    let too_long = "t".repeat(TEXT_BYTES_MAX + 1);
+    for (file, text) in [
+        ("../x.md", text),
+        ("a/b.md", text),
+        ("x.txt", text),
+        (".a.md", text),
+        ("a.md", too_long.as_str()),
+        ("a.md", " padded "),
+        ("a.md", "a\u{202e}b"),
+    ] {
+        let action = import_action("alpha", file, text);
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "memory_import_invalid",
+            "{file}"
+        );
+        assert_eq!(
+            execute(&tx, &config, &action, 5).unwrap(),
+            Outcome::Rejected {
+                code: "memory_import_invalid".into()
+            },
+            "{file}"
+        );
+    }
+    let saved: Vec<(Option<String>, String, String)> = tx
+        .prepare("SELECT project, origin, text FROM memory_library")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0.as_deref(), Some("alpha"));
+    assert_eq!(
+        serde_json::from_str::<MemoryOrigin>(&saved[0].1).unwrap(),
+        MemoryOrigin::Imported {
+            file: "a.md".into()
+        }
+    );
+    assert_eq!(saved[0].2, text);
+}
+
+#[test]
+fn an_imported_memory_reaches_agents_of_its_project_only_as_a_note() {
+    let (_directory, mut db, config) = import_db();
+    let tx = db.transaction().unwrap();
+    let action = import_action("alpha", "a.md", "Plan meals on Sunday.");
+    assert_eq!(execute(&tx, &config, &action, 1).unwrap(), Outcome::Applied);
+    let alpha = approved_for_project(&tx, &ProjectId::new("alpha").unwrap()).unwrap();
+    assert_eq!(
+        alpha.items,
+        vec![ApprovedMemory {
+            scope: ApprovedScope::Project,
+            kind: ApprovedKind::Note,
+            text: "Plan meals on Sunday.".into(),
+        }]
+    );
+    assert!(alpha.render().contains("Plan meals on Sunday."));
+    let beta = approved_for_project(&tx, &ProjectId::new("beta").unwrap()).unwrap();
+    assert!(beta.items.is_empty(), "{beta:?}");
+}
+
+fn memory_folder(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix("ca-mem-import-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for (name, text) in files {
+        std::fs::write(folder.path().join(name), text).unwrap();
+    }
+    folder
+}
+
+#[tokio::test]
+async fn import_memories_counts_imported_and_skipped() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "mem-import", 1).await;
+    let response = owner
+        .add_memory(project_scope(&project), "Shop on Monday.".into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folder = memory_folder(&[
+        ("a.md", "Plan meals on Sunday."),
+        ("b.md", "---\ntitle: shop\n---\nShop on Monday."),
+        ("c.md", "Cook twice a week."),
+    ]);
+
+    let first = owner
+        .import_memories(project.clone(), folder.path(), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        ImportReport {
+            imported: 2,
+            skipped: 1
+        }
+    );
+    let page = owner
+        .memories(project_scope(&project), None, None)
+        .await
+        .unwrap();
+    let mut imported: Vec<(String, String)> = page
+        .items
+        .iter()
+        .filter_map(|memory| match &memory.origin {
+            MemoryOrigin::Imported { file } => Some((file.clone(), memory.text.clone())),
+            _ => None,
+        })
+        .collect();
+    imported.sort();
+    assert_eq!(
+        imported,
+        vec![
+            ("a.md".into(), "Plan meals on Sunday.".into()),
+            ("c.md".into(), "Cook twice a week.".into()),
+        ]
+    );
+    assert_eq!(page.items.len(), 3);
+
+    let second = owner
+        .import_memories(project.clone(), folder.path(), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        ImportReport {
+            imported: 0,
+            skipped: 3
+        }
+    );
+    assert_eq!(
+        owner
+            .import_memories(project, Path::new("relative"), 5)
+            .await
+            .unwrap_err()
+            .0,
+        "memory_import_folder_invalid"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn import_memories_stops_at_full() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "mem-full", 1).await;
+    let mut generation = 1;
+    for index in 0..SCOPE_ITEMS_MAX - 1 {
+        generation += 1;
+        let response = owner
+            .add_memory(project_scope(&project), format!("note {index}"), generation)
+            .await
+            .unwrap();
+        assert_eq!(result(response), OwnerResult::Applied, "{index}");
+    }
+    let folder = memory_folder(&[
+        ("a.md", "First imported."),
+        ("b.md", "Second imported."),
+        ("c.md", "Third imported."),
+    ]);
+    let report = owner
+        .import_memories(project.clone(), folder.path(), generation + 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        report,
+        ImportReport {
+            imported: 1,
+            skipped: 2
+        }
+    );
+    let page = owner
+        .memories(project_scope(&project), Some("imported".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|memory| memory.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First imported."]
+    );
     engine.stop().await;
 }

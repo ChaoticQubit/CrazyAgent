@@ -1,8 +1,8 @@
 #![cfg(unix)]
 
 use crazyagent_desktop::bridge::picker::{
-    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, PROJECT_FOLDER_SCRIPT, PROJECTS_HOME_SCRIPT,
-    Pick, chooser_command, read_reply, run_chooser,
+    DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, MEMORY_FOLDER_SCRIPT, PROJECT_FOLDER_SCRIPT,
+    PROJECTS_HOME_SCRIPT, Pick, chooser_command, read_reply, run_chooser,
 };
 use std::process::Command;
 use std::time::Duration;
@@ -88,8 +88,13 @@ fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
     assert_eq!(FolderPurpose::Skill.script(), FOLDER_SCRIPT);
     assert_eq!(FolderPurpose::Project.script(), PROJECT_FOLDER_SCRIPT);
     assert_eq!(FolderPurpose::ProjectsHome.script(), PROJECTS_HOME_SCRIPT);
+    assert_eq!(FolderPurpose::Memory.script(), MEMORY_FOLDER_SCRIPT);
     assert!(FOLDER_SCRIPT.contains("SKILL.md"));
-    for script in [PROJECT_FOLDER_SCRIPT, PROJECTS_HOME_SCRIPT] {
+    for script in [
+        PROJECT_FOLDER_SCRIPT,
+        PROJECTS_HOME_SCRIPT,
+        MEMORY_FOLDER_SCRIPT,
+    ] {
         assert!(
             !script.contains("skill") && !script.contains("SKILL.md"),
             "adding a project never asks for a skill folder: {script}"
@@ -97,6 +102,7 @@ fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
     }
     assert!(PROJECT_FOLDER_SCRIPT.contains("project folder to add"));
     assert!(PROJECTS_HOME_SCRIPT.contains("holds your projects"));
+    assert!(MEMORY_FOLDER_SCRIPT.contains("markdown memory files to import"));
     for (index, purpose) in FolderPurpose::ALL.into_iter().enumerate() {
         let script = purpose.script();
         assert!(script.starts_with("POSIX path of (choose folder with prompt \""));
@@ -116,6 +122,7 @@ fn each_folder_purpose_asks_for_its_own_folder_with_fixed_text() {
         named("\"projects_home\"").unwrap(),
         FolderPurpose::ProjectsHome
     );
+    assert_eq!(named("\"memory\"").unwrap(), FolderPurpose::Memory);
     for unknown in ["\"documents\"", "\"Skill\"", "\"\"", "3", "null"] {
         assert!(named(unknown).is_err(), "{unknown} names no chooser");
     }
