@@ -783,6 +783,27 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
     );
 }
 
+#[test]
+fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
+    let tool = spec(UPDATE_WORK_TOOL);
+    assert!(
+        tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender."),
+        "{tool}"
+    );
+    let properties = &tool["inputSchema"]["properties"];
+    assert_eq!(
+        properties["kind"]["description"],
+        "message when left out, question with for, reply with reply_to to a question or work for you, never to a note."
+    );
+    assert_eq!(
+        properties["reply_to"]["description"],
+        "The question or message (work for you) this answers or passes on, or the message a note or message refers to."
+    );
+}
+
 fn served_pane(pane: Option<&str>) -> Option<String> {
     let directory = tempfile::tempdir().unwrap();
     let mailbox = directory.path().canonicalize().unwrap();
