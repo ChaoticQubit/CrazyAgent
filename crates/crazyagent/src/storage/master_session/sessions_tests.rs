@@ -247,6 +247,22 @@ impl Case {
         .await
     }
 
+    async fn delete(&self, id: &str, session: &SessionId) -> OwnerResult {
+        self.master(
+            id,
+            MasterOwnerAction::DeleteSession {
+                project_id: self.project.clone(),
+                session_id: session.clone(),
+            },
+        )
+        .await
+    }
+
+    fn used_in_terminal(&self, session: &SessionId) {
+        crate::master_sessions::mark_owner_turn(&self.db(), &self.project, session.as_str())
+            .unwrap();
+    }
+
     async fn shown(&self) -> MasterSessionView {
         let state = self
             .read(OwnerRead::ProjectMaster {
@@ -419,6 +435,12 @@ async fn new_session_parks_the_live_one_and_opens_a_fresh_one_atomically() {
     assert_eq!(cancelled[0].phase, MasterTurnPhase::Cancelled);
     assert_eq!(cancelled[0].reason, Some(MasterReason::Cancelled));
 
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()],
+        "the fresh live session holds no owner turn, so it is not listed"
+    );
+    case.used_in_terminal(&second.session_id);
     let listed = case.sessions().await;
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].session_id, second.session_id);
@@ -560,12 +582,14 @@ async fn the_session_list_is_bounded_and_newest_activity_first() {
     assert_eq!(case.open("open-0").await, OwnerResult::Applied);
     let total = SESSIONS_LISTED_MAX + 2;
     for index in 1..total {
+        case.used_in_terminal(&case.shown().await.session_id);
         assert_eq!(
             case.renew(&format!("renew-{index}"), false).await,
             OwnerResult::Applied,
             "renew {index}"
         );
     }
+    case.used_in_terminal(&case.shown().await.session_id);
     let phases = case.phases();
     assert_eq!(phases.len(), total);
     assert_eq!(live_count(&phases), 1);
@@ -604,11 +628,13 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
     let case = Case::new().await;
     assert_eq!(case.open("open-first").await, OwnerResult::Applied);
     let first = case.shown().await;
+    case.used_in_terminal(&first.session_id);
     assert_eq!(
         case.renew("renew-second", false).await,
         OwnerResult::Applied
     );
     let second = case.shown().await;
+    case.used_in_terminal(&second.session_id);
     let db = case.db();
     db.execute(
         "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,session) VALUES (?1,'sub','codex',0,'idle',1,1,?2)",
@@ -663,6 +689,7 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
 async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let case = Case::new().await;
     assert_eq!(case.open("open-zero").await, OwnerResult::Applied);
+    case.used_in_terminal(&case.shown().await.session_id);
     assert_eq!(
         case.renew_with("open-first", false, MasterBackend::Claude)
             .await,
@@ -718,7 +745,8 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    let latest = crate::storage::migrations::STEPS.last().unwrap().to;
+    assert_eq!(version, latest);
     let schema: String = db
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='master_sessions'",
@@ -742,7 +770,7 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     assert!(
         root_backups(&case)
             .iter()
-            .any(|name| name.starts_with("3-to-6-")),
+            .any(|name| name.starts_with(&format!("3-to-{latest}-"))),
         "the upgrade kept a backup"
     );
     drop(db);
@@ -829,6 +857,7 @@ async fn parking_switching_and_new_sessions_never_touch_a_dirty_master_worktree(
 
     assert_eq!(case.open("open-dirty").await, OwnerResult::Applied);
     let first = case.shown().await;
+    case.used_in_terminal(&first.session_id);
     assert_eq!(case.renew("renew-dirty", false).await, OwnerResult::Applied);
     let second = case.shown().await;
     assert_ne!(second.session_id, first.session_id);
@@ -868,12 +897,14 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     let case = Case::new().await;
     assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
     let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
     assert_eq!(
         case.renew_with("renew-native", false, MasterBackend::Claude)
             .await,
         OwnerResult::Applied
     );
     let native = case.shown().await;
+    case.used_in_terminal(&native.session_id);
     assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
     let case = case.reopen().await;
 
@@ -1128,6 +1159,321 @@ async fn turns_whose_input_an_older_engine_pruned_still_read_and_end() {
     assert_eq!(
         case.turns(&second.session_id).await[0].phase,
         MasterTurnPhase::Cancelled
+    );
+    case.close().await;
+}
+
+fn listed_ids(listed: &[MasterSessionSummary]) -> Vec<SessionId> {
+    listed
+        .iter()
+        .map(|summary| summary.session_id.clone())
+        .collect()
+}
+
+fn count(case: &Case, sql: &str, session: &SessionId) -> i64 {
+    case.db()
+        .query_row(sql, [session.as_str()], |row| row.get(0))
+        .unwrap()
+}
+
+fn keep_conversation(case: &Case, session: &SessionId, agent: i64, id: &str, record: &Path) {
+    case.db()
+        .execute(
+            "INSERT INTO team_master_conversations(session,project,agent,harness,connection,conversation,record)
+             VALUES (?1,?2,?3,'claude-code','native-connection',?4,?5)",
+            rusqlite::params![
+                session.as_str(),
+                case.project.as_str(),
+                agent,
+                id,
+                record.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn new_session_on_a_session_with_no_owner_turn_is_refused_and_blank_sessions_are_not_listed()
+{
+    let case = Case::new().await;
+    assert_eq!(case.open("open-blank").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert!(
+        case.sessions().await.is_empty(),
+        "a live session with no owner turn is not listed"
+    );
+    let before = snapshot(&case);
+    for (id, cancel_running) in [("renew-blank", false), ("renew-blank-again", true)] {
+        assert_eq!(
+            case.renew(id, cancel_running).await,
+            OwnerResult::Rejected {
+                code: "master_session_unused".into()
+            }
+        );
+    }
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused New session creates nothing"
+    );
+    assert!(case.sessions().await.is_empty());
+
+    assert_eq!(
+        case.submit("first-line", &first.session_id, "Draft the release notes")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()]
+    );
+    assert_eq!(case.renew("renew-used", true).await, OwnerResult::Applied);
+    let second = case.shown().await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()],
+        "the fresh live session is not listed before its first turn"
+    );
+    assert_eq!(
+        case.renew("renew-fresh", true).await,
+        OwnerResult::Rejected {
+            code: "master_session_unused".into()
+        }
+    );
+    assert_eq!(
+        case.submit("second-line", &second.session_id, "Check the changelog")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![second.session_id.clone(), first.session_id.clone()]
+    );
+    assert_eq!(case.phases().len(), 2);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-typed").await, OwnerResult::Applied);
+    let typed = case.shown().await;
+    assert_eq!(
+        case.submit("typed-line", &typed.session_id, "Sketch the settings page")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        case.renew("renew-terminal", true).await,
+        OwnerResult::Applied
+    );
+    let terminal = case.shown().await;
+    let record = case
+        .root
+        .path()
+        .join("team/agents/agent-3/home/terminal.jsonl");
+    keep_conversation(
+        &case,
+        &terminal.session_id,
+        3,
+        "terminal-conversation",
+        &record,
+    );
+    let project = case.project.clone();
+    let root = case.close().await;
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch("DROP TABLE session_owner_turns").unwrap();
+    drop(db);
+
+    let (storage, started) = start(root.path()).await;
+    let case = Case {
+        storage,
+        started,
+        project,
+        root,
+    };
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![terminal.session_id.clone(), typed.session_id.clone()],
+        "a session that only kept a harness conversation stays listed after the upgrade"
+    );
+    assert_eq!(
+        case.renew("renew-after-upgrade", true).await,
+        OwnerResult::Applied,
+        "the backfilled live session counts as used"
+    );
+    let fresh = case.shown().await;
+    assert!(
+        !listed_ids(&case.sessions().await).contains(&fresh.session_id),
+        "a session with neither a turn nor a kept conversation is not listed"
+    );
+    assert_eq!(listed_ids(&case.sessions().await).len(), 2);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_home_only() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-kept").await, OwnerResult::Applied);
+    let kept = case.shown().await;
+    assert_eq!(
+        case.submit("kept-line", &kept.session_id, "Write the import guide")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-linked", true).await, OwnerResult::Applied);
+    let linked = case.shown().await;
+    assert_eq!(
+        case.submit("linked-line", &linked.session_id, "Review the export flow")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-live", true).await, OwnerResult::Applied);
+    let live = case.shown().await;
+    assert_eq!(
+        case.submit("live-line", &live.session_id, "Plan the next sprint")
+            .await,
+        OwnerResult::Applied
+    );
+
+    let root = case.root.path().to_path_buf();
+    let home = crate::team::runtime::agent_home(&root.join("team"), 4);
+    let projects = home.join(".claude/projects/-session-repository");
+    std::fs::create_dir_all(projects.join("conversation-kept/subagents")).unwrap();
+    let record = projects.join("conversation-kept.jsonl");
+    std::fs::write(&record, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(
+        projects.join("conversation-kept/subagents/agent-a.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    let outside = root.join("outside/.claude/projects/-session-repository");
+    std::fs::create_dir_all(outside.join("conversation-kept")).unwrap();
+    std::fs::write(outside.join("conversation-kept.jsonl"), "outside\n").unwrap();
+    std::fs::write(outside.join("conversation-linked.jsonl"), "outside\n").unwrap();
+    keep_conversation(&case, &kept.session_id, 4, "conversation-kept", &record);
+    std::os::unix::fs::symlink(&outside, home.join(".claude/projects/linked")).unwrap();
+    let through_link = home.join(".claude/projects/linked/conversation-linked.jsonl");
+    keep_conversation(
+        &case,
+        &linked.session_id,
+        4,
+        "conversation-linked",
+        &through_link,
+    );
+    let inputs: Vec<i64> = {
+        let db = case.db();
+        let mut statement = db
+            .prepare("SELECT input FROM master_turns WHERE session=?1")
+            .unwrap();
+        statement
+            .query_map([kept.session_id.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(inputs.len(), 1);
+
+    let before = snapshot(&case);
+    let linked_turns = count(
+        &case,
+        "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+        &linked.session_id,
+    );
+    assert_eq!(
+        case.delete("delete-linked", &linked.session_id).await,
+        OwnerResult::Rejected {
+            code: "master_session_files_kept".into()
+        }
+    );
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused Delete changes no session"
+    );
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+            &linked.session_id
+        ),
+        linked_turns
+    );
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1",
+            &linked.session_id
+        ),
+        1
+    );
+    assert!(outside.join("conversation-linked.jsonl").is_file());
+    assert_eq!(
+        case.delete("delete-live", &live.session_id).await,
+        OwnerResult::Rejected {
+            code: "master_session_live".into()
+        }
+    );
+    assert_eq!(snapshot(&case), before);
+
+    assert_eq!(
+        case.delete("delete-kept", &kept.session_id).await,
+        OwnerResult::Applied
+    );
+    assert!(!record.exists(), "the kept record is removed");
+    assert!(
+        !projects.join("conversation-kept").exists(),
+        "the same-id folder is removed"
+    );
+    assert!(projects.is_dir(), "the master home itself stays");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("conversation-kept.jsonl")).unwrap(),
+        "outside\n",
+        "a same-named record outside the home is untouched"
+    );
+    assert!(outside.join("conversation-kept").is_dir());
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![live.session_id.clone(), linked.session_id.clone()]
+    );
+    let phases = case.phases();
+    assert_eq!(
+        phases[0],
+        (kept.session_id.as_str().into(), "closed".into())
+    );
+    for table in [
+        "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+        "SELECT COUNT(*) FROM master_preparations WHERE session=?1",
+        "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1",
+        "SELECT COUNT(*) FROM session_owner_turns WHERE session=?1",
+        "SELECT COUNT(*) FROM session_marks WHERE session=?1",
+    ] {
+        assert_eq!(count(&case, table, &kept.session_id), 0, "{table}");
+    }
+    let db = case.db();
+    let messages: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_entries WHERE kind='message' AND event_cursor=?1",
+            [inputs[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        messages, 0,
+        "the deleted session's owner messages are removed"
+    );
+    assert_eq!(
+        case.resume("resume-deleted", &kept.session_id, true).await,
+        OwnerResult::Rejected {
+            code: "master_session_closed".into()
+        }
+    );
+    assert_eq!(
+        case.delete("delete-again", &kept.session_id).await,
+        OwnerResult::Applied,
+        "deleting a deleted session again finds nothing left to remove"
     );
     case.close().await;
 }
