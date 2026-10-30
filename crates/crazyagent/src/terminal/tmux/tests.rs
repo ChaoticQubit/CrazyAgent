@@ -740,13 +740,54 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
         !own.contains("typed-to-teammate") && !own.contains("teammate-pane-ready"),
         "typing went to the teammate's pane only, and the lead's view stays its own: {own}"
     );
-    for pane in [elsewhere.as_str(), "%99999", "lead"] {
-        let refused = crate::terminal::pane_view(host.clone(), pane)
-            .and_then(|view| view.attach(&lead).map(drop));
+    let unknown = Err("terminal_pane_unknown".to_owned());
+    assert_eq!(
+        crate::terminal::pane_view(host.clone(), "lead")
+            .map(drop)
+            .map_err(|problem| problem.0),
+        unknown,
+        "an invalid pane id is refused before any call"
+    );
+    for pane in [elsewhere.as_str(), "%99999"] {
+        let view = crate::terminal::pane_view(host.clone(), pane).unwrap();
         assert_eq!(
-            refused.map_err(|problem| problem.0),
-            Err("terminal_pane_unknown".to_owned()),
-            "a pane its lead's window does not list is refused: {pane}"
+            view.attach(&lead).map(drop).map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never attached: {pane}"
         );
+        assert_eq!(
+            view.snapshot(&lead).map(drop).map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never read: {pane}"
+        );
+        assert_eq!(
+            view.input(&lead, b"typed-to-other\r")
+                .map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never typed into: {pane}"
+        );
+        assert_eq!(
+            view.input_live(&lead)
+                .map(drop)
+                .map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never checked for live input: {pane}"
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let screen = String::from_utf8_lossy(&host.attach(&other).unwrap().screen).into_owned();
+        assert!(
+            !screen.contains("typed-to-other"),
+            "no refused typing reached the other lead's pane: {screen}"
+        );
+        if Instant::now() >= deadline && screen.contains("other-lead-screen") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline + Duration::from_secs(14),
+            "the other lead's pane showed its own screen in time: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
