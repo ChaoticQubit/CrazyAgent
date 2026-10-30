@@ -5996,6 +5996,10 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         "nothing is typed before the owner's first line"
     );
     let master = masters(&fixture.connection)[0];
+    let pane = AgentId::team(master).unwrap();
+    fixture.until(&mut team, "the master's app reads keys itself", |_| {
+        host.input_live(&pane).unwrap()
+    });
     let typed = std::fs::read_to_string(
         fixture
             .base
@@ -6010,8 +6014,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
     );
     assert!(listed(&fixture).is_empty());
 
-    host.input(&AgentId::team(master).unwrap(), b"hello\r")
-        .unwrap();
+    host.input(&pane, b"hello\r").unwrap();
     fixture.until(&mut team, "the owner's turn in the session ends", |f| {
         live_turns(&f.connection) == (1, false)
     });
