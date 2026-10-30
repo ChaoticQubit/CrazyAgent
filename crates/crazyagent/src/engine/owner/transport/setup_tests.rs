@@ -162,3 +162,50 @@ async fn the_backfill_seeds_hooks_from_cached_checkouts_of_installed_entries_onc
     );
     owner.stop().await;
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_makes_no_setup_folder_before_setup_and_seeds_the_shipped_hook_after() {
+    let owner = Usage::start().await;
+    let sender = owner.runtime().engine.storage.sender.clone();
+    let setup = owner.engine_root.join("setup");
+    setup::backfill_hooks(sender.clone(), owner.engine_root.clone()).await;
+    assert!(
+        std::fs::symlink_metadata(&setup).is_err(),
+        "an engine whose owner never ran setup gets no setup folder"
+    );
+    assert!(stored_hooks(&owner.engine_root).is_empty());
+
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("graphify");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: graphify\ndescription: The graphify skill.\n---\n",
+    )
+    .unwrap();
+    let (send, installed) = oneshot::channel();
+    sender
+        .send(crate::storage::Job::Setup(
+            crate::storage::setup::Command::Install {
+                id: "graphify".into(),
+                source: "https://example.invalid/graphify@1".into(),
+                skills: vec![source],
+                server: None,
+            },
+            send,
+        ))
+        .await
+        .unwrap();
+    installed.await.unwrap().unwrap();
+    crate::setup::bundled::extract(&setup).unwrap();
+
+    setup::backfill_hooks(sender, owner.engine_root.clone()).await;
+    assert!(setup.join("bundled-hooks/hooks/graphify").is_dir());
+    assert_eq!(
+        stored_hooks(&owner.engine_root),
+        ["graphify/PreToolUse/1", "graphify/PreToolUse/2"],
+        "an installed entry still gets the hook this build ships"
+    );
+    owner.stop().await;
+}
