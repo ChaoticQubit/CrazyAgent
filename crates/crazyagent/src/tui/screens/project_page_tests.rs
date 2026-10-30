@@ -4,7 +4,7 @@ use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
 use super::project_page::{Opening, opening};
-use super::{Flow, Place, ProjectTab, open};
+use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
@@ -1803,4 +1803,343 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
     assert!(shown.contains("No changes yet."), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_memory_imports_a_real_folder_into_the_chosen_project() {
+    let mut engine = Engine::start().await;
+    let parent = tempfile::Builder::new()
+        .prefix("ca-tui-import-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let folder = parent.path().join("memory");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.md"), "Plan meals on Sunday.").unwrap();
+    std::fs::write(
+        folder.join("b.md"),
+        "---\ntitle: shop\n---\nShop on Monday.",
+    )
+    .unwrap();
+    std::fs::write(folder.join("long.md"), "l".repeat(5000)).unwrap();
+    std::fs::write(folder.join("MEMORY.md"), "- [a](a.md)").unwrap();
+
+    {
+        let mut connection = engine.connect();
+        let mut ctx = ctx(120, 40);
+        let screen = open(&Place::Settings(SettingsSection::Memory), &mut ctx);
+        let mut shell = Shell::with(ctx, screen);
+        pump(&mut shell, &mut connection).await;
+        shell.key(Key::Char('i'));
+        let shown = render(&mut shell, 120, 40);
+        assert!(shown.contains("Add a project first."), "{shown}");
+        assert!(!shown.contains("Import memory"), "{shown}");
+    }
+
+    let notes = engine.project("notes-cli", "Notes CLI", 2).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 40);
+    ctx.home = Some(parent.path().to_str().unwrap().into());
+    let screen = open(&Place::Settings(SettingsSection::Memory), &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("i Import"), "{shown}");
+
+    shell.key(Key::Char('i'));
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Import memory"), "{shown}");
+    assert!(shown.contains("Notes CLI"), "{shown}");
+    for character in "memory".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Use the full path of the folder"), "{shown}");
+
+    for _ in "memory".chars() {
+        shell.key(Key::Backspace);
+    }
+    for character in "~/memory".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Imported 2, skipped 1."), "{shown}");
+    assert!(!shown.contains("Import memory"), "{shown}");
+    assert!(shown.contains("Shop on Monday."), "{shown}");
+    assert!(shown.contains("Plan meals on Sunday."), "{shown}");
+    assert!(
+        shown.contains("Imported from b.md for Notes CLI only.")
+            || shown.contains("Imported from a.md for Notes CLI only."),
+        "{shown}"
+    );
+
+    let page = engine
+        .controller
+        .memories(
+            crate::memory::library::MemoryScope::Project {
+                project_id: notes.clone(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut files: Vec<String> = page
+        .items
+        .iter()
+        .filter_map(|memory| match &memory.origin {
+            crate::memory::library::MemoryOrigin::Imported { file } => Some(file.clone()),
+            _ => None,
+        })
+        .collect();
+    files.sort();
+    assert_eq!(files, ["a.md", "b.md"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tools_page_switches_real_tools_and_ignores_reads_for_another_scope() {
+    use super::settings_plugins::{ToolsPage, plugin_plain};
+    use crate::coord::tool_switches::Switch;
+    use crate::plugins::{Scope, ServerSpec};
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    for (project, tool, switch) in [
+        (None, "start_work", Switch::Off),
+        (None, "recall", Switch::Hidden),
+        (Some(notes.clone()), "start_work", Switch::On),
+    ] {
+        engine
+            .controller
+            .set_tool_switch(project, None, tool.into(), switch)
+            .await
+            .unwrap();
+    }
+    let folder = engine.root.path().join("servers");
+    std::fs::create_dir(&folder).unwrap();
+    let command = folder.join("mcp_fixture.py");
+    std::fs::write(
+        &command,
+        include_str!("../../../tests/fixtures/mcp_fixture.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = engine
+        .controller
+        .add_mcp_server(
+            Scope::Global,
+            "fixture".into(),
+            ServerSpec::Stdio {
+                command: command.to_str().unwrap().into(),
+                args: vec![],
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let checked = engine
+        .controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(checked.tools, ["echo", "anonymous"]);
+
+    let mut connection = engine.connect();
+    let page = ToolsPage::new(vec![(server.id.clone(), "fixture".into())], 0);
+    let mut shell = Shell::with(ctx(120, 30), Box::new(page));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("CrazyAgent tools  1 of 2"), "{shown}");
+    assert!(shown.contains("start_work"), "{shown}");
+    assert!(!shown.contains("recall"), "{shown}");
+    assert!(
+        shown.contains("1 deleted. Press r to restore the defaults and bring it back."),
+        "{shown}"
+    );
+    assert!(!shown.contains("On here"), "{shown}");
+
+    connection
+        .settings(SettingsJob::Tools {
+            project: Some(notes.clone()),
+            server: None,
+        })
+        .unwrap();
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        !shown.contains("On here"),
+        "a read for one project never lands on the every-project page: {shown}"
+    );
+
+    shell.key(Key::Char(' '));
+    shell.key(Key::Tab);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["settings"]);
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("start_work is on for every project."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("CrazyAgent tools  1 of 2"),
+        "Tab while a change runs keeps the server: {shown}"
+    );
+    let stored = engine.controller.tool_switches(None, None).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .find(|view| view.tool == "start_work")
+            .unwrap()
+            .global,
+        Switch::On
+    );
+
+    shell.key(Key::Tab);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("fixture  2 of 2"), "{shown}");
+    assert!(
+        shown.contains("echo") && shown.contains("anonymous"),
+        "{shown}"
+    );
+    shell.key(Key::Char('d'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("Only a CrazyAgent tool can be deleted."),
+        "{shown}"
+    );
+
+    engine
+        .controller
+        .remove_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    shell.key(Key::Char(' '));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["settings", "settings"], "the change, then a reload");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains(plugin_plain("server_not_found")), "{shown}");
+    assert!(shown.contains("Could not refresh the tools."), "{shown}");
+}
+
+async fn owner_ready(connection: &mut Connection) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ready = false;
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            if let OwnerEvent::Access { ready: true, .. } = event {
+                ready = true;
+            }
+        }
+        if ready && !connection.busy() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the owner link never got ready");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn settings_reply(
+    connection: &mut Connection,
+    job: SettingsJob,
+) -> crate::tui::client::settings::SettingsEvent {
+    connection.settings(job).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            if let OwnerEvent::Settings(event) = event {
+                return *event;
+            }
+        }
+        assert!(Instant::now() < deadline, "no settings reply");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_jobs_round_trip_through_the_tui_client_with_their_changed_flags() {
+    use crate::coord::tool_switches::Switch;
+    use crate::tui::client::settings::SettingsEvent;
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    owner_ready(&mut connection).await;
+    let jobs = [
+        (
+            SettingsJob::Tools {
+                project: Some(notes.clone()),
+                server: None,
+            },
+            false,
+            None,
+        ),
+        (
+            SettingsJob::SetTool {
+                project: Some(notes.clone()),
+                server: None,
+                tool: "start_work".into(),
+                switch: Switch::Off,
+            },
+            true,
+            Some(Switch::Off),
+        ),
+        (
+            SettingsJob::RestoreTools {
+                project: Some(notes.clone()),
+                server: None,
+            },
+            true,
+            None,
+        ),
+    ];
+    for (job, flag, here) in jobs {
+        let SettingsEvent::Tools {
+            project,
+            server,
+            changed,
+            result,
+        } = settings_reply(&mut connection, job).await
+        else {
+            panic!("a tools reply expected");
+        };
+        assert_eq!(
+            (project, server, changed),
+            (Some(notes.clone()), None, flag)
+        );
+        let tools = result.unwrap();
+        let start = tools.iter().find(|view| view.tool == "start_work").unwrap();
+        assert_eq!(start.here, here);
+        owner_ready_after(&mut connection).await;
+    }
+    let SettingsEvent::Tools {
+        changed, result, ..
+    } = settings_reply(
+        &mut connection,
+        SettingsJob::SetTool {
+            project: None,
+            server: None,
+            tool: "nope".into(),
+            switch: Switch::Off,
+        },
+    )
+    .await
+    else {
+        panic!("a tools reply expected");
+    };
+    assert!(changed);
+    assert_eq!(result.unwrap_err(), "tool_unknown");
+}
+
+async fn owner_ready_after(connection: &mut Connection) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while connection.busy() {
+        while connection.poll_owner().unwrap().is_some() {}
+        assert!(Instant::now() < deadline, "the owner job never finished");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
