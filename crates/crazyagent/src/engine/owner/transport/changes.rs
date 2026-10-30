@@ -817,7 +817,20 @@ mod tests {
         .collect();
         let protocol = refusals(include_str!("changes.rs"));
         assert!(engine.len() >= 15 && protocol.len() >= 5);
-        for code in engine.iter().chain(&protocol) {
+        let import = include_str!("../../../instruction_files.rs");
+        let import_only = ["changes_import_none", "changes_import_staged"];
+        for code in import_only {
+            assert!(engine.contains(code), "{code}");
+            assert!(
+                import.contains(&format!("\"{code}\" => \"process_commit_")),
+                "{code} reaches the owner as a process_commit code"
+            );
+        }
+        for code in engine
+            .iter()
+            .chain(&protocol)
+            .filter(|code| !import_only.contains(*code))
+        {
             assert!(
                 CHANGES_CODES.contains(code),
                 "{code} is not in CHANGES_CODES"

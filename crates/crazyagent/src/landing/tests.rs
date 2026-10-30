@@ -3913,3 +3913,220 @@ fn a_change_set_the_owner_has_not_landed_stays_open_with_its_whole_change() {
     case.observe();
     case.landed_outside(&id, &head);
 }
+
+#[test]
+fn an_import_commit_that_loses_the_branch_race_leaves_only_the_staged_deletion_and_a_retry_lands() {
+    let case = Case::new();
+    let start = case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    std::fs::remove_file(case.repo.join("CLAUDE.md")).unwrap();
+    let elsewhere = std::cell::RefCell::new(String::new());
+    let lost = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {
+            let moved = case
+                .owner(&[
+                    "commit-tree",
+                    "main^{tree}",
+                    "-p",
+                    "main",
+                    "-m",
+                    "Elsewhere",
+                ])
+                .trim()
+                .to_owned();
+            case.owner(&["update-ref", "refs/heads/main", &moved]);
+            *elsewhere.borrow_mut() = moved;
+        },
+    );
+    assert_eq!(refused(lost), "changes_branch_moved");
+    let elsewhere = elsewhere.into_inner();
+    assert_eq!(case.tip(), elsewhere);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &elsewhere]).trim(),
+        start
+    );
+    assert_eq!(
+        case.owner(&["status", "--porcelain"]),
+        "D  CLAUDE.md\n",
+        "only the deletion is staged; the owner's files are untouched"
+    );
+    let (commit, branch, files) = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {},
+    )
+    .unwrap();
+    assert_eq!(
+        (branch.as_str(), files),
+        ("main", vec!["CLAUDE.md".to_owned()])
+    );
+    assert_eq!(case.tip(), commit);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>|%s", &commit])
+            .trim(),
+        format!("{elsewhere}|Repo Owner <owner@example.invalid>|Move CLAUDE.md")
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move_is_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    let moved = crate::instruction_files::import(&case.repo).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true, true)]
+    );
+    let head = case.view(&id).head;
+    assert_eq!(
+        refused(accept_into(&case.db, &case.home, &id, &head, None, "main")),
+        "changes_owner_dirty"
+    );
+    assert_eq!(
+        crate::instruction_files::uncommitted(&case.repo).unwrap(),
+        ["CLAUDE.md"]
+    );
+    let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
+    assert_eq!(made.files, ["CLAUDE.md"]);
+    let AcceptOutcome::Landed { commit, branch } =
+        accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        made.commit
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
+
+/// The paths every diff page of a change set names, in page order. Inputs: the case and
+/// the set. Output: the paths.
+fn shown_paths(case: &Case, id: &ChangeSetId) -> Vec<String> {
+    all_pages(case, id)
+        .iter()
+        .flat_map(|page| page.files.iter().map(|file| file.path.clone()))
+        .collect()
+}
+
+/// A change set whose base is older than the owner's tip, part of it already on the
+/// owner's branch, shows only the rest, measured from the merge base of the owner's tip
+/// and its head; with the owner's checkout detached it falls back to its stored base; and
+/// Accept lands only the rest (DEC-107 rule 1, fix/changes-vs-owner-branch).
+#[test]
+fn a_set_the_owner_holds_part_of_shows_and_lands_only_the_rest() {
+    let case = Case::new();
+    case.start();
+    case.edit("a.txt", "a\n");
+    let first = case.agent_commit("Add a");
+    case.edit("b.txt", "b\n");
+    case.agent_commit("Add b");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(shown_paths(&case, &id), ["a.txt", "b.txt"]);
+    case.owner(&["merge", "-q", "--ff-only", &first]);
+    assert_eq!(shown_paths(&case, &id), ["b.txt"]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    assert_eq!(
+        shown_paths(&case, &id),
+        ["a.txt", "b.txt"],
+        "a detached owner checkout falls back to the stored base"
+    );
+    case.owner(&["checkout", "-q", "main"]);
+    assert_eq!(shown_paths(&case, &id), ["b.txt"]);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        first
+    );
+    assert_eq!(
+        case.owner(&["diff", "--name-only", &first, &commit]),
+        "b.txt\n"
+    );
+}
+
+/// Writes `count` small files under one folder of the agent's worktree, "" for its root.
+/// Inputs: the case, the folder and the count.
+fn add_files(case: &Case, folder: &str, count: u32) {
+    let at = case.workspace.worktree.join(folder);
+    std::fs::create_dir_all(&at).unwrap();
+    for file in 0..count {
+        std::fs::write(at.join(format!("f{file}.txt")), format!("{file}\n")).unwrap();
+    }
+}
+
+/// Ends one successful turn of the case's agent. Input: the case. Output: what the turn
+/// end gave.
+fn turn_result(case: &Case) -> Result<Option<ChangeSetId>, EngineError> {
+    record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+}
+
+/// A turn whose work adds more files than the limit to one new top-level folder is refused
+/// with the folder, its count and the limit for the agent; at the limit it is kept, and a
+/// folder the owner's branch has or files at the root never count (DEC-107 rule 3,
+/// fix/changes-vs-owner-branch).
+#[test]
+fn a_new_folder_past_the_default_limit_is_refused_with_its_count() {
+    let case = Case::new();
+    add_files(&case, "scratch", 1001);
+    let refused = turn_result(&case).unwrap_err();
+    assert_eq!(refusal_code(&refused), NEW_FOLDER_REFUSED);
+    let told = refusal_for_agent(&refused).unwrap();
+    assert!(
+        told.contains(
+            "folder scratch/ adds 1001 files, more than this project's limit of 1000 files"
+        ),
+        "{told}"
+    );
+
+    let case = Case::new();
+    add_files(&case, "scratch", 1000);
+    assert!(turn_result(&case).unwrap().is_some());
+
+    let case = Case::new();
+    case.owner_commit("src/keep.txt", "kept\n", "Add src");
+    add_files(&case, "src", 1001);
+    assert!(turn_result(&case).unwrap().is_some());
+
+    let case = Case::new();
+    add_files(&case, "", 1001);
+    assert!(turn_result(&case).unwrap().is_some());
+}
+
+/// The owner's New folder limit setting, stored for the project, replaces the default.
+#[test]
+fn a_new_folder_limit_the_owner_set_is_the_one_applied() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    add_files(&case, "scratch", 101);
+    let refused = turn_result(&case).unwrap_err();
+    assert!(
+        refusal_for_agent(&refused)
+            .unwrap()
+            .contains("adds 101 files, more than this project's limit of 100 files"),
+        "{refused:?}"
+    );
+}

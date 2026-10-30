@@ -23,11 +23,11 @@ function panel(read) {
 
 test("the master and each agent card name the team agent the engine reads", () => {
   assert.equal(client.agentOf(node("master", "master", { agent: 4 })), null);
-  assert.equal(client.agentOf(node("team-12", "lead")), 12);
-  assert.equal(client.agentOf(node("team-12", "sub")), 12);
+  assert.equal(client.agentOf(node("team-12", "lead", { agent: 12 })), 12);
+  assert.equal(client.agentOf(node("team-12", "sub", { agent: 12 })), 12);
   assert.equal(client.agentOf(node("team-12", "sub", { agent: 7 })), 7, "the node's own agent id wins over its card id");
   assert.equal(client.agentOf(node("team-9", "teammate", { agent: 9, pane: "%12" })), 9);
-  for (const shown of [node("teammate-3-12", "teammate", { agent: null, pane: "%12" }), node("team-3", "teammate"), node("team-0", "sub"), node("team--3", "sub"), node("team-1x", "lead"),
+  for (const shown of [node("team-12", "lead"), node("team-12", "sub"), node("teammate-3-12", "teammate", { agent: null, pane: "%12" }), node("team-3", "teammate"), node("team-0", "sub"), node("team--3", "sub"), node("team-1x", "lead"),
     node("team:12", "sub"), node("team-012", "sub"), node("team-99999999999999999999", "sub"), node("master", "lead"), node("team-5", "sub", { agent: 0 }),
     node("team-5x", "sub", { agent: 1.5 }), node("team-5y", "sub", { agent: -2 }), node("team-5", "sub", { agent: null })]) {
     assert.equal(client.agentOf(shown), undefined, shown.id);

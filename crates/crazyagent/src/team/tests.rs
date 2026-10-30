@@ -1033,6 +1033,45 @@ fn the_team_status_tells_the_live_master_switch_and_why_it_could_not_start() {
     assert_eq!(switch(&connection), (Some(false), None));
 }
 
+/// DEC-108: turning the live master on clears why it last could not start, whatever the
+/// line; turning it off clears only the line that it waits for this run's sign-in re-checks,
+/// and keeps any other reason it stopped.
+#[test]
+fn set_live_on_clears_problem_and_off_clears_only_wait_line() {
+    let (_directory, connection) = database();
+    let setup = stored("live-wait-line", Vec::new());
+    let project = &setup.project_id;
+    let switch = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        (team.live_master, team.live_problem)
+    };
+    let stopped = "The live master was turned off: it could not start: Sign in to an account in this project's pool to run codex. Start it again from the master view.";
+    master::set_live(&connection, project, true).unwrap();
+    for line in [master::SIGN_INS_CHECKING, stopped] {
+        assert!(master::problem(&connection, project, Some(line)).unwrap());
+        master::set_live(&connection, project, true).unwrap();
+        assert_eq!(
+            switch(&connection),
+            (Some(true), None),
+            "turning it on clears {line:?}"
+        );
+    }
+    assert!(master::problem(&connection, project, Some(master::SIGN_INS_CHECKING)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    assert_eq!(
+        switch(&connection),
+        (Some(false), None),
+        "a sign-in wait line no longer applies once the master is off"
+    );
+    assert!(master::problem(&connection, project, Some(stopped)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    assert_eq!(
+        switch(&connection),
+        (Some(false), Some(stopped.to_owned())),
+        "turning it off keeps why it stopped"
+    );
+}
+
 #[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();
@@ -4603,5 +4642,71 @@ fn a_stopped_harness_stops_its_whole_lead_tree_and_its_wake_clears_it() {
         stopped(&connection),
         vec![theirs],
         "waking the lead brings back its whole tree, and only it"
+    );
+}
+
+/// Every New folder limit choice the owner picks is saved for its project and shown in the
+/// team status the TUI and desktop read, 1,000 files until one is picked; a count outside
+/// the choices is refused, and another project keeps the default (fix/changes-vs-owner-branch
+/// DEC-107 rule 3).
+#[test]
+fn every_new_folder_limit_choice_is_saved_and_shown() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
+    let setup = stored("team-folders", vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        status(&connection, &setup).unwrap().new_folder_files_max,
+        NEW_FOLDER_FILES_DEFAULT
+    );
+    for files in NEW_FOLDER_FILES_CHOICES {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-folders", &["local-a"]),
+            &TeamAction::NewFolderLimit {
+                project_id: setup.project_id.clone(),
+                files,
+            },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(outcome, Outcome::Applied, "{files}");
+        assert_eq!(
+            status(&connection, &setup).unwrap().new_folder_files_max,
+            files
+        );
+        assert_eq!(
+            new_folder_files_max(&connection, &setup.project_id).unwrap(),
+            files
+        );
+    }
+    let invalid = TeamAction::NewFolderLimit {
+        project_id: setup.project_id.clone(),
+        files: 999,
+    };
+    assert!(
+        invalid
+            .validate()
+            .unwrap_err()
+            .0
+            .contains("team_new_folder_limit_invalid")
+    );
+    assert_eq!(
+        new_folder_files_max(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        NEW_FOLDER_FILES_DEFAULT,
+        "the choice is per project"
     );
 }

@@ -268,3 +268,25 @@ fn note(connection: &mut Connection, project: &ProjectId, text: &str) -> Result<
     )?;
     tx.commit().map_err(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::refusal;
+
+    #[test]
+    fn a_dirty_checkout_refusal_names_the_uncommitted_import_move_and_its_commit() {
+        let moved = ["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()];
+        let named = refusal("changes_owner_dirty", &moved);
+        assert!(named.contains("CLAUDE.md, .claude/CLAUDE.md"), "{named}");
+        assert!(named.contains("Commit the move"), "{named}");
+        assert!(
+            named.contains("commit or stash any other change"),
+            "{named}"
+        );
+        assert_eq!(
+            refusal("changes_owner_dirty", &[]),
+            "the owner's checkout of that branch has uncommitted changes. Ask the owner to commit or stash them, then merge again."
+        );
+        assert!(!refusal("changes_git_busy", &moved).contains("CLAUDE.md"));
+    }
+}
