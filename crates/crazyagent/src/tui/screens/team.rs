@@ -77,8 +77,8 @@ enum Body {
     Detail {
         account: Option<String>,
         branch: Option<String>,
-        hookless: bool,
     },
+    Note(String),
     Heading(&'static str),
     Blank,
     Edge(usize),
@@ -395,7 +395,7 @@ impl Team {
     fn items(&self, glyphs: &Glyphs) -> Vec<Item> {
         self.graph
             .ready()
-            .map(|graph| tree(graph, glyphs))
+            .map(|graph| tree(graph, glyphs, usize::MAX))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|row| row.item)
@@ -750,7 +750,7 @@ impl Team {
                 "Agents show here once the master starts work.",
             );
         }
-        let rows = tree(graph, glyphs);
+        let rows = tree(graph, glyphs, limit.saturating_sub(2));
         let selected = rows
             .iter()
             .enumerate()
@@ -1275,8 +1275,10 @@ impl Screen for Team {
 /// The rows of the team tree: each master, then the agents it leads depth first, each
 /// with a detail row for its account and branch, then the task rows. An agent whose lead
 /// is not in the graph hangs under the master, or starts the tree when there is none.
-/// Inputs: the graph and glyphs. Output: the rows, at least the blank and heading rows.
-fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
+/// Inputs: the graph, glyphs and the width a row's prefix and text get, which wraps the
+/// words of an agent launched without hooks. Output: the rows, at least the blank and
+/// heading rows.
+fn tree(graph: &TeamGraph, glyphs: &Glyphs, width: usize) -> Vec<TreeRow> {
     let known: BTreeSet<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
     let masters: Vec<usize> = (0..graph.nodes.len())
         .filter(|index| graph.nodes[*index].kind == NodeKind::Master)
@@ -1308,11 +1310,12 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
             &mut out,
             &graph.nodes[*master],
             stem(glyphs, kids.is_empty()),
+            width,
         );
-        lead_rows(graph, glyphs, &kids, "", &mut seen, &mut out);
+        lead_rows(graph, glyphs, &kids, "", width, &mut seen, &mut out);
     }
     if masters.is_empty() {
-        lead_rows(graph, glyphs, &orphans, "", &mut seen, &mut out);
+        lead_rows(graph, glyphs, &orphans, "", width, &mut seen, &mut out);
     }
     out.push(TreeRow {
         item: None,
@@ -1366,12 +1369,13 @@ fn stem(glyphs: &Glyphs, last: bool) -> String {
 /// Adds the rows of agents that share one lead, each followed by its detail row and the
 /// agents it leads in turn. A node already drawn is skipped, so a cycle in the parent
 /// links cannot loop. Inputs: the graph, glyphs, the agents, the indent their branches
-/// hang from, the drawn nodes and the rows. Output: none; rows are appended.
+/// hang from, the row width, the drawn nodes and the rows. Output: none; rows are appended.
 fn lead_rows(
     graph: &TeamGraph,
     glyphs: &Glyphs,
     members: &[usize],
     indent: &str,
+    width: usize,
     seen: &mut BTreeSet<usize>,
     out: &mut Vec<TreeRow>,
 ) {
@@ -1400,22 +1404,39 @@ fn lead_rows(
         } else {
             format!("{base}{}", stem(glyphs, false))
         };
-        detail_row(out, &graph.nodes[*member], detail);
-        lead_rows(graph, glyphs, &kids, &base, seen, out);
+        detail_row(out, &graph.nodes[*member], detail, width);
+        lead_rows(graph, glyphs, &kids, &base, width, seen, out);
     }
 }
 
-fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
-    if node.account.is_some() || node.branch.is_some() || node.hookless {
+/// Adds the rows under an agent: its account and branch on one row, then, for an agent
+/// whose launch fires no hooks, that its receipts and adoption are unavailable, wrapped to
+/// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
+/// the prefix and the row width. Output: none; rows are appended.
+fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
+    if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
-            prefix,
+            prefix: prefix.clone(),
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
-                hookless: node.hookless,
             },
         });
+    }
+    if node.hookless {
+        let words = format!(
+            "Receipts and adoption {}",
+            crate::coord::adoption::HOOKLESS_WORDS
+        );
+        let room = width
+            .saturating_sub(crate::tui::text::width(&prefix))
+            .max(1);
+        out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
+            item: None,
+            prefix: prefix.clone(),
+            body: Body::Note(line),
+        }));
     }
 }
 
@@ -1452,34 +1473,24 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                 },
             }
         }
-        Body::Detail {
-            account,
-            branch,
-            hookless,
-        } => {
+        Body::Detail { account, branch } => {
             let account = account.as_ref().map(|account| {
                 account_name(
                     Some(account),
                     ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
                 )
             });
-            let hookless = hookless.then(|| {
-                format!(
-                    "Receipts and adoption {}",
-                    crate::coord::adoption::HOOKLESS_WORDS
-                )
-            });
             styled(
                 account
                     .into_iter()
                     .chain(branch.iter().cloned())
-                    .chain(hookless)
                     .collect::<Vec<_>>()
                     .join("  "),
                 Role::Muted,
                 theme,
             )
         }
+        Body::Note(text) => styled(text.clone(), Role::Muted, theme),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {

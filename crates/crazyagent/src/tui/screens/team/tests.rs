@@ -2485,3 +2485,41 @@ fn a_refused_start_all_from_the_master_view_says_why_and_keeps_the_offer() {
         "S asks again after a refusal: {sent:?}"
     );
 }
+
+#[test]
+fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_account_kind() {
+    let mut shell = fresh(120, 30);
+    let mut graph = graph();
+    graph.nodes[2].hookless = true;
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows.iter().map(|row| chars(row, 2, 46)).collect();
+    let under = tree
+        .iter()
+        .position(|row| row.contains("claude-2"))
+        .expect("the hookless agent is drawn");
+    let words: String = tree[under + 1..]
+        .iter()
+        .take_while(|row| !row.contains("codex-1"))
+        .map(|row| {
+            row.trim_matches(|c: char| c == '│' || c == ' ' || c == '└' || c == '├' || c == '─')
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        words.trim(),
+        "Receipts and adoption unavailable for this account kind",
+        "{tree:#?}"
+    );
+    let hooked = tree
+        .iter()
+        .position(|row| row.contains("claude-1"))
+        .unwrap();
+    assert!(
+        !tree[hooked + 1].contains("Receipts"),
+        "a hooked agent keeps its account row only: {tree:#?}"
+    );
+}

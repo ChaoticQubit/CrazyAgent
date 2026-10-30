@@ -362,6 +362,13 @@ test("workflow adoption shows each counted tool's column, skill counts, red flag
   assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
 
+test("a hookless agent's adoption row is one cell spanning the counts, skills and flags", () => {
+  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
+  const bare = rowOf(markup, "#3 sub claude-code");
+  assert.match(bare, new RegExp(`<td colSpan="${ADOPTION.counted.length + 2}" class="secondary">Counts and flags unavailable for this account kind</td>`, "i"));
+  assert.doesNotMatch(bare, /<strong>|None/);
+});
+
 test("an agent's skill counts list graphify, ctx_* and every enabled skill, zeros muted", () => {
   const counts = renderToStaticMarkup(createElement(view.SkillCounts, { skills: ADOPTION.skills, agent: ADOPTION.agents[1] }));
   assert.deepEqual([...counts.matchAll(/<span( class="secondary")?>([^<]+) <strong>(\d+)<\/strong><\/span>/g)].map((found) => [found[2], Number(found[3]), Boolean(found[1])]), [
