@@ -1824,7 +1824,8 @@ fn the_worktree_start_moves_to_where_accept_or_discard_leaves_the_worktree() {
 /// A set that starts where an accepted set's head was is measured from that head only
 /// while the owner's branch still holds the commit the engine landed. Once the owner
 /// resets the branch below it, the earlier work counts again, and once gc prunes the
-/// landed commit, a turn end still records the set from the joined range.
+/// landed commit, a turn end still records the set and counts it from the joined range,
+/// while the set keeps its stored start.
 #[test]
 fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_breaks_no_turn() {
     let case = Case::new();
@@ -1847,7 +1848,7 @@ fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_brea
     let view = case.view(&third);
     assert_eq!(
         (view.base.as_str(), view.head.as_str(), view.files),
-        (start.as_str(), newer.as_str(), 2)
+        (reviewed.as_str(), newer.as_str(), 2)
     );
     case.owner(&["reflog", "expire", "--expire=now", "--all"]);
     case.owner(&["gc", "-q", "--prune=now"]);
@@ -1874,7 +1875,7 @@ fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_brea
     let view = case.view(&third);
     assert_eq!(
         (view.base.as_str(), view.head.as_str(), view.files),
-        (start.as_str(), latest.as_str(), 3)
+        (reviewed.as_str(), latest.as_str(), 3)
     );
 }
 
