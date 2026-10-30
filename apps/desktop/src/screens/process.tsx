@@ -194,20 +194,27 @@ export function SkillCounts({ skills, agent }: { skills: readonly string[]; agen
   </span>;
 }
 
+/** One agent's skill counts as a pure view of its project's adoption read: that agent's
+ * graphify, ctx_* and per-skill counts, or why there are none. Inputs: the read, the agent's
+ * team row id and the retry action. */
+export function AgentSkills({ adoption, agent, onRetry }: { adoption: Loaded<Adoption>; agent: number; onRetry: () => void }) {
+  const row = adoption.kind === "ok" ? adoption.value.agents.find((item) => item.agent === agent) : undefined;
+  return adoption.kind === "loading" ? <Skeleton shape="card" count={1} />
+    : adoption.kind === "not_ready" ? <NotReady what="Skill counts" />
+    : adoption.kind === "error" ? <LoadError message={processMessage(adoption)} onRetry={onRetry} />
+    : !row ? <p className="secondary">This agent is older than the agents the Process page lists, so its counts are not shown.</p>
+    : row.hookless ? <p className="secondary">Skill counts {HOOKLESS_WORDS}.</p>
+    : <SkillCounts skills={adoption.value.skills ?? []} agent={row} />;
+}
+
 /** One agent's skill counts for its graph card menu: reads the project's adoption and shows
- * that agent's graphify, ctx_* and per-skill counts, or why there are none. Inputs: the
- * project, the agent's team row id and its label, and the close action. */
+ * that agent's counts, again on Refresh. Inputs: the project, the agent's team row id and its
+ * label, and the close action. */
 export function AgentSkillsDialog({ projectId, agent, label, onClose }: { projectId: string; agent: number; label: string; onClose: () => void }) {
   const [adoption, reload] = useLoad(() => loadAdoption(projectId), [projectId]);
-  const row = adoption.kind === "ok" ? adoption.value.agents.find((item) => item.agent === agent) : undefined;
   return <Dialog open title={`Skills of ${label}`} onClose={onClose}
     footer={<><Button icon="refresh-cw" onClick={reload}>Refresh</Button><Button variant="primary" onClick={onClose}>Close</Button></>}>
-    {adoption.kind === "loading" ? <Skeleton shape="card" count={1} />
-      : adoption.kind === "not_ready" ? <NotReady what="Skill counts" />
-      : adoption.kind === "error" ? <LoadError message={processMessage(adoption)} onRetry={reload} />
-      : !row ? <p className="secondary">This agent is older than the agents the Process page lists, so its counts are not shown.</p>
-      : row.hookless ? <p className="secondary">Skill counts {HOOKLESS_WORDS}.</p>
-      : <SkillCounts skills={adoption.value.skills ?? []} agent={row} />}
+    <AgentSkills adoption={adoption} agent={agent} onRetry={reload} />
   </Dialog>;
 }
 

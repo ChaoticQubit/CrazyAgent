@@ -609,3 +609,6 @@ fn resolved(path: &Path) -> PathBuf {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

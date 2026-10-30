@@ -141,6 +141,65 @@ fn tool_key_names_mcp_shell_graphify_and_skill_calls() {
 }
 
 #[test]
+fn skill_key_names_claude_and_codex_skills() {
+    let key = |name: &str, input: Value| skill_key(name, &input);
+    assert_eq!(
+        key("Skill", json!({"skill": "tdd"})).as_deref(),
+        Some("skill:tdd")
+    );
+    assert_eq!(
+        key("Skill", json!({"skill": "superpowers:brainstorming"})).as_deref(),
+        Some("skill:superpowers:brainstorming")
+    );
+    assert_eq!(
+        key(
+            "Bash",
+            json!({"command": "cat /Users/o/.claude/skills/grill-me/SKILL.md"})
+        )
+        .as_deref(),
+        Some("skill:grill-me")
+    );
+    assert_eq!(
+        key(
+            "exec_command",
+            json!({"cmd": "sed -n 1,80p '/h/.codex/skills/tiger-style/SKILL.md'"})
+        )
+        .as_deref(),
+        Some("skill:tiger-style")
+    );
+    assert_eq!(
+        key(
+            "shell",
+            json!({"command": ["bash", "-lc", "cat skills/caveman/SKILL.md | head"]})
+        )
+        .as_deref(),
+        Some("skill:caveman")
+    );
+    assert_eq!(key("Skill", json!({"skill": "bad name"})), None);
+    assert_eq!(key("Skill", json!({})), None);
+    assert_eq!(key("Skill", json!({"skill": ""})), None);
+    assert_eq!(
+        key(
+            "Skill",
+            json!({"skill": "x".repeat(SKILL_NAME_BYTES_MAX + 1)})
+        ),
+        None
+    );
+    assert_eq!(
+        key("Skill", json!({"skill": "x".repeat(SKILL_NAME_BYTES_MAX)})).map(|key| key.len()),
+        Some(TOOL_BYTES_MAX)
+    );
+    assert_eq!(
+        key(
+            "Read",
+            json!({"file_path": "/h/.claude/skills/tdd/SKILL.md"})
+        ),
+        None
+    );
+    assert_eq!(key("Bash", json!({"command": "ls skills/"})), None);
+}
+
+#[test]
 fn adoption_flags_follow_q18_rules() {
     let (_root, db, project) = database();
     let long_ago = NOW - UNGROUNDED_MS;
@@ -300,5 +359,101 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
     assert_eq!(
         row(&view_on, flagged).reminded,
         [Flag::EditsWithoutWork, Flag::Ungrounded]
+    );
+}
+
+#[test]
+fn view_counts_every_enabled_skill_with_zero() {
+    let (_root, db, project) = database();
+    let agent = agent_row(&db, &project, "working", true, NOW, false);
+    call(&db, agent, "Skill", &json!({"skill": "tdd"}), 2);
+    call(
+        &db,
+        agent,
+        "Skill",
+        &json!({"skill": "superpowers:grill-me"}),
+        1,
+    );
+    call(
+        &db,
+        agent,
+        "Bash",
+        &json!({"command": "cat /h/.claude/skills/other-one/SKILL.md"}),
+        1,
+    );
+    call(&db, agent, "mcp__graphify__query_graph", &json!({}), 1);
+    call(&db, agent, "mcp__context-mode__ctx_execute", &json!({}), 2);
+    call(&db, agent, "mcp__context-mode__ctx_search", &json!({}), 1);
+    let enabled = [
+        "zeta".to_owned(),
+        "tdd".into(),
+        "grill-me".into(),
+        "bad name".into(),
+    ];
+    let view = view(&db, &project, &enabled, NOW).unwrap();
+    assert_eq!(
+        view.skills,
+        ["grill-me", "tdd", "zeta"],
+        "sorted, invalid names left out"
+    );
+    let shown = row(&view, agent);
+    assert_eq!(
+        shown.skills,
+        [1, 2, 0],
+        "every enabled skill, zero included"
+    );
+    assert_eq!(
+        shown.other_skills,
+        [SkillCount {
+            name: "other-one".into(),
+            count: 1
+        }]
+    );
+    assert_eq!((shown.graphify, shown.context_mode), (1, 3));
+    let column = |name: &str| {
+        let at = view.counted.iter().position(|entry| entry == name).unwrap();
+        shown.counts[at]
+    };
+    assert_eq!(column("ctx_*"), 3);
+    assert_eq!(column("graphify"), 1);
+    assert_eq!(column("Skill"), 4, "the harness's own Skill count");
+    assert_eq!(column("start_work"), 0);
+}
+
+#[test]
+fn view_keeps_newest_agents_within_budget() {
+    let (_root, db, project) = database();
+    let skills: Vec<String> = (0..200).map(|n| format!("skill-number-{n:03}")).collect();
+    let mut ids = Vec::new();
+    for n in 0..AGENTS_SHOWN_MAX + 2 {
+        let agent = agent_row(&db, &project, "working", true, NOW, false);
+        for other in 0..OTHER_SKILLS_MAX {
+            let name = format!("{}{n}-{other}", "o".repeat(SKILL_NAME_BYTES_MAX - 8));
+            crate::coord::record_tool(&db, agent, &format!("{SKILL_PREFIX}{name}"), NOW).unwrap();
+        }
+        ids.push(agent);
+    }
+    let view = view(&db, &project, &skills, NOW).unwrap();
+    assert_eq!(view.skills.len(), SKILLS_SHOWN_MAX.min(200));
+    let bytes = serde_json::to_vec(&view).unwrap().len();
+    assert!(bytes <= VIEW_BYTES_MAX, "{bytes}");
+    assert!(view.hidden > 0, "the byte budget left some out");
+    assert_eq!(
+        view.agents.len() + usize::try_from(view.hidden).unwrap(),
+        AGENTS_SHOWN_MAX,
+        "only the newest AGENTS_SHOWN_MAX are read"
+    );
+    let shown: Vec<AgentId> = view.agents.iter().map(|row| row.agent).collect();
+    let newest: Vec<AgentId> = ids.iter().rev().take(shown.len()).copied().collect();
+    assert_eq!(shown, newest, "newest first, none skipped");
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.skills.len() == view.skills.len())
+    );
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.other_skills.len() == OTHER_SKILLS_MAX)
     );
 }

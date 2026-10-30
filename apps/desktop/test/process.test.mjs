@@ -361,3 +361,22 @@ test("workflow adoption shows each counted tool's column, skill counts, red flag
   const failed = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRefresh() {} }));
   assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
+
+test("an agent's skill counts list graphify, ctx_* and every enabled skill, zeros muted", () => {
+  const counts = renderToStaticMarkup(createElement(view.SkillCounts, { skills: ADOPTION.skills, agent: ADOPTION.agents[1] }));
+  assert.deepEqual([...counts.matchAll(/<span( class="secondary")?>([^<]+) <strong>(\d+)<\/strong><\/span>/g)].map((found) => [found[2], Number(found[3]), Boolean(found[1])]), [
+    ["graphify", 2, false], ["ctx_*", 1, false], ["tdd", 1, false], ["zeta", 0, true], ["other-one (not enabled)", 1, false],
+  ]);
+  const none = renderToStaticMarkup(createElement(view.SkillCounts, { skills: [], agent: ADOPTION.agents[2] }));
+  assert.match(none, /<span class="secondary">No skills enabled<\/span>/);
+});
+
+test("the skills dialog shows an agent's counts, or says why a hookless or unlisted agent has none", () => {
+  const body = (agent, adoption = { kind: "ok", value: ADOPTION }) =>
+    renderToStaticMarkup(createElement(view.AgentSkills, { adoption, agent, onRetry() {} }));
+  assert.match(body(2), /tdd <strong>1<\/strong>/);
+  assert.match(body(3), /Skill counts unavailable for this account kind\./);
+  assert.doesNotMatch(body(3), /<strong>/);
+  assert.match(body(9), /This agent is older than the agents the Process page lists, so its counts are not shown\./);
+  assert.match(body(2, { kind: "error", code: "process_adoption_unavailable", message: "" }), /Workflow adoption couldn&#x27;t be read\. Try again\./);
+});
