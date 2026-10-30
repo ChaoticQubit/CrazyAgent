@@ -5624,6 +5624,41 @@ fn reported_conversations(reports: &[Report]) -> Vec<String> {
         .collect()
 }
 
+/// A managed Claude Code lead in a pane, set up the way the live native-lead tests set it
+/// up, gets past the runtime's prepare: its agent row is there as spawn makes it, so its
+/// sub-agent mode is read and fixed at this first start, and it has its persona, worktree
+/// and sandbox profile.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_lead_in_a_pane_is_prepared_with_its_sub_agent_mode_fixed() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let lead = super::managed_agent::ManagedAgent::in_pane(
+        "claude-code",
+        &claude,
+        fixture.host(),
+        AgentRole::Sub,
+    );
+    let connection = Connection::open(lead.base.join("engine.db")).unwrap();
+    let mode: Option<String> = connection
+        .query_row("SELECT mode FROM team_agents WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(mode.as_deref(), Some("app_spawned"));
+    assert!(names::name(&connection, 1).unwrap().is_some());
+    assert!(lead.working_dir.is_dir(), "{}", lead.working_dir.display());
+    assert!(
+        lead.sandbox_profile.is_file(),
+        "{}",
+        lead.sandbox_profile.display()
+    );
+}
+
 /// An agent on a signed-in account (per turn, the owner's account kind) keeps its harness
 /// conversation (WK-R1): its second turn's harness resumes the conversation the first
 /// recorded, the conversation is reported once so a wake can continue it, a woken agent's
