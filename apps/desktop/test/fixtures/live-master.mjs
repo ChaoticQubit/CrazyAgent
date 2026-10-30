@@ -9,6 +9,7 @@ import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
 import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
+import { teamStatus } from "./team-status.mjs";
 
 let root = null;
 let menuRoot = null;
@@ -54,7 +55,7 @@ function data(master, on, team = undefined) {
 }
 
 function status(on) {
-  return { project_id: "alpha", keep_warm: false, paused: false, min_agents: 0, max_agents: 1, harnesses: [], agents: [], tasks: [], messages: [], plan: [], live_master: on, live_problem: null };
+  return teamStatus({ live_master: on, live_problem: null });
 }
 
 const node = { id: "team-1", kind: "master", parent: null, label: "Master", harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: "team-1" };
@@ -113,6 +114,7 @@ export function shown() {
   const area = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   const box = document.querySelector(".pj-master-live > .tg-terminal")?.getBoundingClientRect();
   const above = document.querySelector(".pj-master-live > .tg-terminal")?.previousElementSibling?.getBoundingClientRect();
+  const sessions = document.querySelector(".pj-master-live > .pj-sessions")?.getBoundingClientRect();
   return {
     live: Boolean(document.querySelector(".pj-master-live")),
     terminal: Boolean(document.querySelector(".tg-terminal")),
@@ -131,6 +133,7 @@ export function shown() {
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
     above: above ? Math.round(above.bottom) : null,
+    sessions: sessions ? { top: Math.round(sessions.top), bottom: Math.round(sessions.bottom) } : null,
   };
 }
 

@@ -620,3 +620,129 @@ fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
     sorted.dedup();
     assert_eq!(sorted, PROCESS_CODES);
 }
+
+#[test]
+fn process_adoption_round_trip() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let unknown = ProjectId::new("never-set-up").unwrap();
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+    }
+    let project = with_project(&root, &folder);
+    let master = team_agent(&root, project.as_str(), "master", "claude-code");
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    team_agent(&root, "another-project", "sub", "codex");
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        for _ in 0..2 {
+            crate::coord::record_tool(&connection, sub, "graphify", 5).unwrap();
+        }
+        crate::coord::record_tool(&connection, sub, "ctx_execute", 5).unwrap();
+        crate::coord::record_tool(&connection, master, "Edit", 5).unwrap();
+        crate::coord::record_tool(&connection, sub, "skill:tdd", 5).unwrap();
+        let skill = |id: &str, name: &str, scope: serde_json::Value, key: &str, enabled: bool| {
+            let folder = format!("plugins/skills/{id}/{name}");
+            fs::create_dir_all(root.join(&folder)).unwrap();
+            fs::write(
+                root.join(&folder).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: The {name} rule.\n---\n"),
+            )
+            .unwrap();
+            let body = serde_json::json!({
+                "id": id,
+                "name": name,
+                "description": format!("The {name} rule."),
+                "scope": scope,
+                "enabled": enabled,
+                "source": format!("/owner/skills/{name}"),
+                "folder": folder,
+            });
+            connection
+                .execute(
+                    "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES(?1,'skill',?2,?3,?4)",
+                    rusqlite::params![id, key, name, body.to_string()],
+                )
+                .unwrap();
+        };
+        let own = serde_json::json!({"kind": "project", "project_id": project.as_str()});
+        let elsewhere = serde_json::json!({"kind": "project", "project_id": "another-project"});
+        skill(
+            "s1",
+            "zeta",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            true,
+        );
+        skill("s2", "tdd", own, "project:process-1", true);
+        skill(
+            "s3",
+            "off",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            false,
+        );
+        skill("s4", "theirs", elsewhere, "project:another-project", true);
+    }
+
+    let view = adoption(&root, &project).unwrap();
+    assert!(view.nudges, "nudges are on by default");
+    assert_eq!(
+        view.counted,
+        crate::coord::settings::COUNTED_TOOLS_DEFAULT
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(
+        view.agents
+            .iter()
+            .map(|row| (row.agent, row.harness.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(sub, "codex"), (master, "claude-code")],
+        "the project's own agents, newest first"
+    );
+    assert_eq!(
+        (view.agents[0].graphify, view.agents[0].context_mode),
+        (2, 1)
+    );
+    assert_eq!(
+        (view.agents[1].graphify, view.agents[1].context_mode),
+        (0, 0)
+    );
+    assert_eq!(
+        view.skills,
+        vec!["tdd".to_owned(), "zeta".to_owned()],
+        "the project's enabled skills, its own and global ones, by name"
+    );
+    assert_eq!(view.agents[0].skills, vec![1, 0]);
+    assert_eq!(view.agents[1].skills, vec![0, 0]);
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.counts.len() == view.counted.len())
+    );
+
+    let request: Envelope = serde_json::from_value(serde_json::json!({
+        "process": {"kind": "adoption", "project": project.as_str()},
+        "text_bytes": null
+    }))
+    .unwrap();
+    assert!(
+        matches!(request.process, Action::Adoption { project: ref asked } if *asked == project)
+    );
+    let wire = serde_json::to_vec(&Reply::Adoption {
+        adoption: view.clone(),
+    })
+    .unwrap();
+    match serde_json::from_slice::<Reply>(&wire).unwrap() {
+        Reply::Adoption { adoption } => assert_eq!(adoption, view),
+        _ => panic!("an adoption reply reads back as one"),
+    }
+
+    assert_eq!(
+        adoption(&root, &unknown).unwrap_err().0,
+        "process_project_unknown"
+    );
+}

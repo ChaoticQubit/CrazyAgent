@@ -4428,16 +4428,27 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
         [("CLAUDE.md", true, true)]
     );
     let head = case.view(&id).head;
+    let before = case.tip();
     assert_eq!(
         refused(accept_into(&case.db, &case.home, &id, &head, None, "main")),
         "changes_owner_dirty"
     );
+    assert_eq!(case.tip(), before, "a refused accept moves no branch");
     assert_eq!(
         crate::instruction_files::uncommitted(&case.repo).unwrap(),
         ["CLAUDE.md"]
     );
     let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
     assert_eq!(made.files, ["CLAUDE.md"]);
+    assert_eq!(
+        (made.branch.as_str(), case.tip()),
+        ("main", made.commit.clone())
+    );
+    assert!(
+        crate::instruction_files::uncommitted(&case.repo)
+            .unwrap()
+            .is_empty()
+    );
     let AcceptOutcome::Landed { commit, branch } =
         accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
     else {
@@ -4453,6 +4464,10 @@ fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move
         "README\n"
     );
     assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join(".crazyagent/imported/CLAUDE.md")).unwrap(),
+        "RULE\n"
+    );
 }
 
 /// The paths every diff page of a change set names, in page order. Inputs: the case and

@@ -1113,3 +1113,67 @@ fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() 
         );
     }
 }
+
+#[test]
+fn hookless_agent_marks_its_node() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let setup = crate::project_setup::StoredSetup {
+        project_id: ProjectId::new("team-hookless").unwrap(),
+        name: "Team".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 4,
+        },
+        documents: vec![],
+        folder: "/private/tmp/unused".into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups(project, body) VALUES (?1,?2)",
+            rusqlite::params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let agent = |role: &str, hookless: bool| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless) VALUES ('team-hookless',?1,'codex',0,'working',1,1,?2)",
+                rusqlite::params![role, hookless],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let master = agent("master", true);
+    let hooked = agent("sub", false);
+    let bare = agent("sub", true);
+    let graph = crate::team::owner_graph(&connection, &setup).unwrap();
+    let marked: Vec<(Option<i64>, bool)> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.agent, node.hookless))
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            (Some(master), true),
+            (Some(hooked), false),
+            (Some(bare), true)
+        ],
+        "{:?}",
+        graph.nodes
+    );
+}

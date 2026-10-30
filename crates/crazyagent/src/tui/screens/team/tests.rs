@@ -2675,3 +2675,221 @@ fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
         "{rows:#?}"
     );
 }
+
+fn paused_read(on: Option<bool>) -> Arrival {
+    let mut arrival = switch(on, None);
+    let Arrival::Owner(event) = &mut arrival else {
+        unreachable!()
+    };
+    let OwnerEvent::Setup(setup) = event.as_mut() else {
+        unreachable!()
+    };
+    let Ok(crate::project_setup::SetupView::Team(status)) = &mut setup.result else {
+        unreachable!()
+    };
+    status.paused = true;
+    arrival
+}
+
+fn resumed(result: Result<(), &str>) -> Arrival {
+    Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::Resume {
+                    project_id: project(),
+                },
+                generation: 1,
+            },
+            result: result
+                .map(|()| {
+                    crate::project_setup::SetupView::Changed(
+                        crate::engine::owner::OwnerResult::Applied,
+                    )
+                })
+                .map_err(str::to_owned),
+        },
+    ))))
+}
+
+fn resume_sent(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::TeamChange {
+            action: crate::team::TeamAction::Resume { project_id },
+            ..
+        }) if *project_id == project()
+    )
+}
+
+#[test]
+fn master_view_on_a_paused_team_offers_start_all() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a stopped team's switch already on is not turned on again"
+    );
+    let rows = render(&mut shell);
+    assert!(rows[2].contains("Team stopped."), "{}", rows[2]);
+    assert!(!rows[2].contains("Live master on"), "{}", rows[2]);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "The team is stopped (Stop all). Start the team to run the master."
+        )
+    );
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!(
+            "│{:<74}│",
+            "S starts every agent of this project again; the master starts with them."
+        )
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Starting the master's terminal")),
+        "{rows:#?}"
+    );
+    assert!(rows[23].contains("S Start all"), "{}", rows[23]);
+
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "{sent:?}"
+    );
+    shell.arrive(resumed(Ok(())));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [read] if switch_read(read)),
+        "an accepted Start all reads the team again: {sent:?}"
+    );
+    shell.arrive(switch(Some(true), None));
+    assert!(requests(&mut shell).is_empty());
+    let rows = render(&mut shell);
+    assert!(rows[2].contains("Live master on"), "{}", rows[2]);
+    assert!(!rows[2].contains("Team stopped."), "{}", rows[2]);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "Starting the master's terminal. It opens once the master signs in and"
+        )
+    );
+    assert!(!rows[23].contains("S Start all"), "{}", rows[23]);
+    shell.key(Key::Char('S'));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "S starts nothing once the team runs"
+    );
+}
+
+#[test]
+fn a_refused_start_all_from_the_master_view_says_why_and_keeps_the_offer() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(paused_read(Some(true)));
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "{sent:?}"
+    );
+    shell.arrive(resumed(Err("trusted_connection_unavailable")));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a refused change reads nothing"
+    );
+    let lead = shell.ctx.message().unwrap().lead.clone();
+    assert_eq!(
+        lead, "Not connected to the engine. Retrying.",
+        "the same words as the team panel's Start all"
+    );
+    assert!(!lead.contains('_'), "no raw code reaches the owner: {lead}");
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!(
+            "│{:<74}│",
+            "The team is stopped (Stop all). Start the team to run the master."
+        )
+    );
+    shell.key(Key::Char('S'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [change] if resume_sent(change)),
+        "S asks again after a refusal: {sent:?}"
+    );
+}
+
+#[test]
+fn a_refused_live_master_start_says_why_in_words_not_its_code() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::LiveMaster {
+                    project_id: project(),
+                    on: true,
+                },
+                generation: 1,
+            },
+            result: Err("trusted_connection_unavailable".into()),
+        },
+    )))));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!("│{:<74}│", "The master terminal could not start.")
+    );
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!("│{:<74}│", "Not connected to the engine. Retrying.")
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("trusted_connection_unavailable")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_account_kind() {
+    let mut shell = fresh(120, 30);
+    let mut graph = graph();
+    graph.nodes[2].hookless = true;
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows.iter().map(|row| chars(row, 2, 46)).collect();
+    let under = tree
+        .iter()
+        .position(|row| row.contains("claude-2"))
+        .expect("the hookless agent is drawn");
+    let words: String = tree[under + 1..]
+        .iter()
+        .take_while(|row| !row.contains("codex-1"))
+        .map(|row| {
+            row.trim_matches(|c: char| c == '│' || c == ' ' || c == '└' || c == '├' || c == '─')
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        words.trim(),
+        "Receipts and adoption unavailable for this account kind",
+        "{tree:#?}"
+    );
+    let hooked = tree
+        .iter()
+        .position(|row| row.contains("claude-1"))
+        .unwrap();
+    assert!(
+        !tree[hooked + 1].contains("Receipts"),
+        "a hooked agent keeps its account row only: {tree:#?}"
+    );
+}

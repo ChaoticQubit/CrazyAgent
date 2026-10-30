@@ -6,6 +6,7 @@ import "./load-source.mjs";
 
 const graph = await import("../src/screens/team/graph.ts");
 const view = await import("../src/screens/team/index.tsx");
+const engineClient = await import("../src/engine-client.ts");
 
 const node = (id, kind, extra = {}) => ({
   id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra,
@@ -408,4 +409,25 @@ test("the hover card sits under a card near the top and over a card near the bot
   assert.deepEqual(low, { left: port.width - graph.TIP_HALF, top: 450 - graph.TIP_GAP, above: true });
   const scaled = graph.tipPlace({ x: 100, y: 20, width: 200, height: 100 }, { x: 10, y: 10, zoom: 0.5 }, port);
   assert.deepEqual(scaled, { left: graph.TIP_HALF, top: 10 + 60 + graph.TIP_GAP, above: false });
+});
+
+test("a hookless card has no receipt ticks and says its receipts and adoption are unavailable", () => {
+  const client = engineClient;
+  const bare = { ...talk, nodes: talk.nodes.map((item) => item.id === "team-3" ? { ...item, hookless: true } : item) };
+  const layout = graph.layoutGraph(bare);
+  const down = layout.links.find((link) => link.to === "team-3");
+  assert.equal(down.hookless, true);
+  assert.equal(graph.badgeLabel(down), `1 unread message, receipts ${client.HOOKLESS_WORDS}`);
+  assert.equal(layout.links.find((link) => link.to === "team-2").hookless, false);
+  assert.deepEqual(graph.receiptShown("delivered", true), { ticks: "", word: "receipts unavailable for this account kind" });
+  assert.equal(graph.receiptShown("delivered", false).ticks, "✓✓");
+  const tip = graph.cardTip(card(layout, "team-3").node, bare);
+  assert.ok(tip.includes("Receipts and adoption unavailable for this account kind."), tip.join("\n"));
+  assert.ok(tip.some((line) => /^2 unread messages from .+, receipts unavailable for this account kind\.$/.test(line)), tip.join("\n"));
+  assert.ok(!graph.cardTip(card(graph.layoutGraph(talk), "team-3").node, talk).some((line) => line.includes("unavailable")));
+  const html = renderToStaticMarkup(createElement(view.GraphCard, {
+    placed: card(layout, "team-3"), graph: bare, items: [], open: false, tipId: null, onOpen() {}, onTip() {},
+  }));
+  assert.match(html, /<span class="tg-chip">From you 2<\/span>/);
+  assert.doesNotMatch(html, /✓/);
 });
