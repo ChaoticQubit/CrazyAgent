@@ -1197,7 +1197,7 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
 
     shell.key(Key::Char('n'));
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("1 earlier") && shown.contains("No messages yet.")
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
     })
     .await;
     assert!(!shown.contains("RCLI stopped"), "{shown}");
@@ -1205,6 +1205,16 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
     assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+
+    say(&mut shell, &mut connection, "Plan the second slice").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_eq!(second.session_id, fresh.session_id);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("1 earlier") && shown.contains("Plan the second slice")
+    })
+    .await;
+    assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
 
     shell.key(Key::Char('l'));
     let shown = render(&mut shell, 100, 40);
@@ -1220,12 +1230,14 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     }
     shell.key(Key::Enter);
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("RCLI stopped") && !shown.contains("Sessions  2")
+        shown.contains("RCLI stopped")
+            && shown.contains("Plan the first slice")
+            && !shown.contains("Sessions  2")
     })
     .await;
     assert!(shown.contains("1 earlier"), "{shown}");
     assert!(!shown.contains("No messages yet."), "{shown}");
-    assert!(shown.contains("Plan the first slice"), "{shown}");
+    assert!(!shown.contains("Plan the second slice"), "{shown}");
     let (resumed, _) = latest_master(&mut engine, &notes).await;
     let resumed = resumed.unwrap();
     assert_eq!(resumed.session_id, first.session_id);
