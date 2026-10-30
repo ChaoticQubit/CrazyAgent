@@ -5951,3 +5951,108 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         "a teammate whose pane ended stops"
     );
 }
+
+#[test]
+fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_otherwise() {
+    let plan = Plan {
+        harness: "claude-code".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: PathBuf::from("/private/tmp"),
+        model: None,
+        tools: true,
+        sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
+        access: AgentAccess::Sandboxed,
+        layout: Layout::Linked,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+        pane: None,
+        live: false,
+        resume: None,
+        continues: false,
+        native: true,
+        tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
+        hookless: false,
+    };
+    let account = || AccountBinding::Subscription {
+        home: PathBuf::from("/private/tmp/agent-1-home"),
+    };
+    let refused = plan.request(account(), AgentAccess::Full).unwrap_err();
+    assert_eq!(
+        refused,
+        with_code(NATIVE_NEEDS_SANDBOX, Some("team_native_needs_sandbox"))
+    );
+    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        let request = plan.request(account(), access).unwrap();
+        assert!(!request.unconfined);
+        assert_eq!(request.sandbox_profile, Some(plan.sandbox_profile.clone()));
+    }
+    let app_spawned = Plan {
+        native: false,
+        tmux: None,
+        ..plan
+    };
+    let request = app_spawned.request(account(), AgentAccess::Full).unwrap();
+    assert!(request.unconfined && request.sandbox_profile.is_none());
+}
+
+#[test]
+fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let graph = project.join(GRAPH_FOLDER);
+    std::fs::create_dir_all(graph.join("wiki")).unwrap();
+    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    std::fs::write(graph.join("GRAPH_REPORT.md"), "report\n").unwrap();
+    let worktree = |name: &str, ignore: &str| -> PathBuf {
+        let folder = base.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(".gitignore"), ignore).unwrap();
+        folder
+    };
+    let linked = |folder: &Path, entry: &str| -> Option<PathBuf> {
+        std::fs::read_link(folder.join(GRAPH_FOLDER).join(entry)).ok()
+    };
+
+    let ignoring = worktree("ignoring", "target\n/graphify-out/\n");
+    expose_graph(&project, &ignoring);
+    expose_graph(&project, &ignoring);
+    for entry in GRAPH_ENTRIES {
+        assert_eq!(linked(&ignoring, entry), Some(graph.join(entry)), "{entry}");
+    }
+
+    let owned = worktree("owned", "graphify-out\n");
+    std::fs::create_dir(owned.join(GRAPH_FOLDER)).unwrap();
+    std::fs::write(owned.join(GRAPH_FOLDER).join("graph.json"), "mine").unwrap();
+    std::os::unix::fs::symlink(&base, owned.join(GRAPH_FOLDER).join("wiki")).unwrap();
+    expose_graph(&project, &owned);
+    assert_eq!(
+        std::fs::read_to_string(owned.join(GRAPH_FOLDER).join("graph.json")).unwrap(),
+        "mine"
+    );
+    assert_eq!(linked(&owned, "wiki"), Some(graph.join("wiki")));
+    assert_eq!(
+        linked(&owned, "GRAPH_REPORT.md"),
+        Some(graph.join("GRAPH_REPORT.md"))
+    );
+
+    let tracking = worktree("tracking", "target\ngraphify-out/wiki\n");
+    expose_graph(&project, &tracking);
+    assert!(!tracking.join(GRAPH_FOLDER).exists());
+
+    let linked_ignore = base.join("linked-ignore");
+    std::fs::create_dir(&linked_ignore).unwrap();
+    std::os::unix::fs::symlink(
+        ignoring.join(".gitignore"),
+        linked_ignore.join(".gitignore"),
+    )
+    .unwrap();
+    expose_graph(&project, &linked_ignore);
+    assert!(!linked_ignore.join(GRAPH_FOLDER).exists());
+
+    let bare_project = base.join("bare-project");
+    std::fs::create_dir(&bare_project).unwrap();
+    let fresh = worktree("fresh", "graphify-out/\n");
+    expose_graph(&bare_project, &fresh);
+    assert!(!fresh.join(GRAPH_FOLDER).exists());
+}

@@ -2155,3 +2155,42 @@ fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_
         );
     }
 }
+
+#[test]
+fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let teammates = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let bob = teammates.join("bob");
+    let added = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b agent/bob {} HEAD",
+            quoted(&clone),
+            quoted(&bob)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    assert!(bob.join(".git").is_file());
+    for target in [
+        teammates.join("dave").join(".git").join("config"),
+        bob.join("nested").join(".git"),
+        clone.join("sub").join(".git"),
+    ] {
+        write_refused(
+            &confined,
+            &profile,
+            &format!(
+                "mkdir -p {} && printf x > {}",
+                quoted(target.parent().unwrap()),
+                quoted(&target)
+            ),
+            &target,
+        );
+    }
+}

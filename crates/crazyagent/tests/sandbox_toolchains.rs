@@ -630,3 +630,90 @@ fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_reada
         "a project that uses Rust gets the same grant as the Rust switch"
     );
 }
+
+fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
+    let mut command = std::process::Command::new(tmux);
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .arg("-S")
+        .arg(socket)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crazyagent::spawn_gate::output(&mut command).unwrap()
+}
+
+#[test]
+fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let own = tmp.join("tmux.sock");
+    let engine = tmp.parent().unwrap().join(format!(
+        "ca-engine-{}.sock",
+        tmp.file_name().unwrap().to_str().unwrap()
+    ));
+    let base = || {
+        ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+    };
+    let invalid = |result: Result<ProjectSandbox, SandboxError>| match result {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("granted: {:?}", other.map(|_| ())),
+    };
+    assert!(invalid(base().allow_tmux_server(&own, &tmux)).contains("temp folder"));
+    let scratch = || base().allow_scratch(&tmp).unwrap();
+    assert!(
+        invalid(scratch().allow_tmux_server(&case.tmp.join("tmux.sock"), &tmux))
+            .contains("agent temp folder")
+    );
+    assert!(
+        invalid(scratch().allow_tmux_server(&own, Path::new("/opt/homebrew/bin/../bin/tmux")))
+            .contains("canonical")
+    );
+    let sandbox = scratch().allow_tmux_server(&own, &tmux).unwrap();
+    assert!(invalid(sandbox.clone().allow_tmux_server(&own, &tmux)).contains("already has a tmux"));
+    let text = sandbox.profile();
+    assert!(text.matches(own.to_str().unwrap()).count() >= 2, "{text}");
+    assert!(!text.contains(engine.to_str().unwrap()));
+
+    let outside = tmux_at(
+        &tmux,
+        &engine,
+        &["new-session", "-d", "-s", "engine", "sleep 60"],
+    );
+    assert!(
+        outside.status.success(),
+        "{}",
+        String::from_utf8_lossy(&outside.stderr)
+    );
+    let script = format!(
+        "{t} -S {o} new-session -d -s lead 'sleep 60' && {t} -S {o} list-sessions -F '#{{session_name}}' && {t} -S {e} list-sessions",
+        t = quoted(&tmux),
+        o = quoted(&own),
+        e = quoted(&engine),
+    );
+    let output = run(&sandbox, &case.profiles.join("lead.sb"), &script);
+    let _ = tmux_at(&tmux, &own, &["kill-server"]);
+    let _ = tmux_at(&tmux, &engine, &["kill-server"]);
+    let _ = fs::remove_file(&engine);
+    toolchains::remove_tmp(&case.home).unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stdout, "lead\n", "{stderr}");
+    assert!(
+        !output.status.success(),
+        "the lead listed the engine server: {stdout}"
+    );
+    assert!(
+        stderr.contains("Operation not permitted") || stderr.contains("error connecting"),
+        "{stderr}"
+    );
+}
