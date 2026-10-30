@@ -1236,3 +1236,186 @@ async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list(
         .expect("typing in the box removed no server");
     assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
 }
+
+async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut quiet = 0;
+    loop {
+        let mut moved = false;
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+            moved = true;
+        }
+        if !connection.busy()
+            && shell.ctx.link == Link::Ready
+            && let Some(request) = shell.ctx.next_request()
+        {
+            moved = true;
+            match request {
+                Request::Profile => connection.shell(ShellRequest::Profile).unwrap(),
+                Request::Pools => connection.shell(ShellRequest::Pools).unwrap(),
+                Request::PoolProjects => connection.shell(ShellRequest::PoolProjects).unwrap(),
+                Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
+                Request::Process(query) => connection.process(*query).unwrap(),
+                Request::Setup(query) => connection.project_setup(query).unwrap(),
+                Request::Master(job) => connection.master(*job).unwrap(),
+                Request::Settings(job) => {
+                    sent.push(match job.as_ref() {
+                        SettingsJob::Plugin(_) => "plugin change",
+                        SettingsJob::Hooks { .. } => "hooks",
+                        _ => "settings",
+                    });
+                    connection.settings(*job).unwrap();
+                }
+                other => panic!("the plugins pages never send {other:?}"),
+            }
+        }
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
+            0
+        } else {
+            quiet + 1
+        };
+        if quiet > 20 {
+            return sent;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "engine reads never settled: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn shell_at(engine: &Engine, place: &Place) -> (Shell, Connection) {
+    let connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 120;
+    ctx.height = 36;
+    let screen = open(place, &mut ctx);
+    (Shell::with(ctx, screen), connection)
+}
+
+fn hook_row(shown: &str) -> &str {
+    shown
+        .lines()
+        .find(|line| line.contains("PreToolUse Bash:") || line.contains("  guard  "))
+        .unwrap_or_else(|| panic!("no hook row:\n{shown}"))
+}
+
+/// A real engine's hooks through the TUI: h in Settings, Plugins adds a plugin folder's
+/// hooks for every project, Space turns the hook off and on again there, and a project's
+/// Settings tab switches that every-project hook off for the project only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_through_the_engine() {
+    let engine = engine().await;
+    let plugin = engine.root.path().join("picked/guard");
+    std::fs::create_dir_all(plugin.join("hooks")).unwrap();
+    std::fs::write(plugin.join("hooks/guard.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(
+        plugin.join("hooks/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    let global = || engine.controller.plugin_hooks(None);
+
+    let (mut shell, mut connection) = shell_at(
+        &engine,
+        &Place::Settings(crate::tui::screens::SettingsSection::Plugins),
+    );
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown.contains("No hooks yet. Press h to add a plugin folder's hooks."),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('h'));
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown.contains("Every project's agents run them."),
+        "{shown}"
+    );
+    for character in plugin.display().to_string().chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let hooks = global().await.unwrap();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(
+        (
+            hooks[0].plugin.as_str(),
+            hooks[0].event.as_str(),
+            hooks[0].matcher.as_deref(),
+            hooks[0].enabled,
+            &hooks[0].scope,
+        ),
+        ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global)
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(shown.contains("Hooks added for every project."), "{shown}");
+    assert!(hook_row(&shown).contains("On"), "{shown}");
+
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert!(
+        !global().await.unwrap()[0].enabled,
+        "Space turned the hook off"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Off"), "{shown}");
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert!(
+        global().await.unwrap()[0].enabled,
+        "Space turned the hook on again"
+    );
+
+    let (mut shell, mut connection) = shell_at(
+        &engine,
+        &Place::Project {
+            id: project(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Settings,
+        },
+    );
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("On"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let here = engine
+        .controller
+        .plugin_hooks(Some(project()))
+        .await
+        .unwrap();
+    assert_eq!(here[0].on_here, Some(false), "{here:?}");
+    assert!(
+        global().await.unwrap()[0].enabled,
+        "every other project keeps it"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Off here"), "{shown}");
+    assert!(shown.contains("is off for this project."), "{shown}");
+}
