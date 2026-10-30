@@ -74,7 +74,7 @@ test("Settings and a project each have a Process tab, and a skill link keeps its
 test("the app Process page shows the saved text, the two seeds and a Save that waits for a change", () => {
   const markup = page();
   assert.match(markup, /Instructions every master and sub-agent gets, in every project\./);
-  assert.match(markup, /Import my global instructions/);
+  assert.match(markup, /Import from file/);
   assert.match(markup, /Use the CrazyAgent default process/);
   assert.match(markup, /<textarea[^>]*id="process-app"[^>]*>Use tdd\.\n<\/textarea>/);
   assert.match(markup, /9 bytes of 64\.0 KB/);
@@ -94,7 +94,7 @@ test("a project Process page names its file and offers no seeds", () => {
   const markup = page({ scope: { kind: "project", id: "harbor-notes", name: "Harbor Notes" } });
   assert.match(markup, /Instructions every agent in Harbor Notes gets, after the app-wide ones\. Kept in the project&#x27;s \.crazyagent\/instructions\.md/);
   assert.match(markup, /id="process-project"/);
-  assert.doesNotMatch(markup, /Import my global instructions/);
+  assert.doesNotMatch(markup, /Import from file/);
   assert.doesNotMatch(markup, /Use the CrazyAgent default process/);
 });
 
@@ -112,22 +112,26 @@ test("a draft over 64 KB or with a NUL says why and cannot be saved", () => {
 test("a seed opens a preview first and only Put in the editor or Save would change anything", () => {
   const imported = page({ preview: { source: "import", text: "Owner rule: use tdd.\n" } });
   assert.match(imported, /<dialog[^>]*>/);
-  assert.match(imported, /Your global instructions/);
-  assert.match(imported, /Read from ~\/\.claude\/CLAUDE\.md\. It replaces the editor&#x27;s text; nothing is saved until you click Save\./);
+  assert.match(imported, /Instructions from your file/);
+  assert.match(imported, /Read once from the file you picked; afterwards the instructions live here\. It replaces the editor&#x27;s text; nothing is saved until you click Save\./);
   assert.match(imported, /Owner rule: use /);
   assert.match(imported, /Put in the editor/);
   const fallback = page({ preview: { source: "default", text: "# CrazyAgent default process\n" } });
   assert.match(fallback, /CrazyAgent default process/);
-  assert.doesNotMatch(fallback, /Read from ~\/\.claude/);
+  assert.doesNotMatch(fallback, /Read once from the file you picked/);
   assert.match(page({ busy: "import" }), /Reading\.\.\./);
 });
 
-test("only the Import click reads the owner's global instructions", () => {
+test("only the Import from file click opens the chooser, and a closed chooser changes nothing", () => {
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
-  const reads = [...source.matchAll(/importGlobalInstructions\(\)/g)];
+  const reads = [...source.matchAll(/importInstructionsFile\(\)/g)];
   assert.equal(reads.length, 1);
   const seed = source.slice(source.indexOf("const seed = async"), source.indexOf("const save = async"));
-  assert.match(seed, /source === "import" \? importGlobalInstructions\(\) : defaultProcess\(\)/);
+  assert.match(seed, /source === "import" \? importInstructionsFile\(\) : defaultProcess\(\)/);
+  assert.match(seed, /else if \(result\.value !== null\) setPreview\(\{ source, text: result\.value \}\)/, "a closed chooser opens no preview");
+  const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
+  assert.match(api, /call<string \| null>\("desktop_import_instructions_file"\)/);
+  assert.doesNotMatch(source + api, /importGlobalInstructions|desktop_import_global_instructions/);
   assert.match(source, /onImport=\{\(\) => void seed\("import"\)\}/);
   assert.match(source, /onClick=\{onImport\}/);
 });
@@ -196,24 +200,28 @@ function agentSettings(extra = {}) {
   }));
 }
 
-test("a project's agent settings offer every instruction files option and the transcript switch, the defaults first", () => {
-  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { files: "project", transcripts: true });
-  assert.deepEqual(client.INSTRUCTION_CHOICES.map((choice) => [choice.value, choice.label]),
-    [["project", "Project files"], ["project_and_user", "Project and user files"], ["none", "None"]]);
+const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const html = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("'", "&#x27;");
+
+test("a project's agent settings offer every instructions mode and the transcript switch, the defaults first", () => {
+  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true });
+  assert.deepEqual(client.INSTRUCTION_MODES.map((choice) => [choice.value, choice.label]),
+    [["project_only", "Project only"], ["app_only", "App only"], ["both", "Both (app, then project appended)"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
-  for (const choice of client.INSTRUCTION_CHOICES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  for (const choice of client.INSTRUCTION_MODES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
-  assert.match(markup, /Agent instruction files/);
-  for (const label of ["Project files", "Project and user files", "None"]) assert.match(markup, new RegExp(`role="radio"[^>]*>${label}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
-  assert.match(markup, /as committed in your checkout/);
+  assert.match(markup, /Instructions agents get/);
+  for (const choice of client.INSTRUCTION_MODES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
+  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[2].note)));
   assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
   assert.match(markup, /Keep transcripts for headless Claude runs/);
   assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
-  for (const choice of client.INSTRUCTION_CHOICES) {
-    const shown = agentSettings({ settings: { kind: "ok", value: { files: choice.value, transcripts: false } } });
-    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${choice.label}</`));
-    assert.ok(shown.includes(choice.note.replaceAll("'", "&#x27;")), choice.value);
+  assert.doesNotMatch(markup, /Project files|Project and user files/);
+  for (const choice of client.INSTRUCTION_MODES) {
+    const shown = agentSettings({ settings: { kind: "ok", value: { mode: choice.value, transcripts: false } } });
+    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
+    assert.ok(shown.includes(html(choice.note)), choice.value);
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
     assert.match(shown, /keep no transcript/);
   }
@@ -223,7 +231,7 @@ test("unreadable agent settings say why and show the defaults so a change replac
   const markup = agentSettings({ settings: { kind: "error", code: "instruction_settings_invalid", message: "" } });
   assert.match(markup, /value CrazyAgent doesn&#x27;t know/);
   assert.doesNotMatch(markup, /instruction_settings_/);
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
   assert.match(agentSettings({ failure: "This project's agent settings couldn't be read. Try again." }), /couldn&#x27;t be read/);
   assert.match(agentSettings({ busy: true }), /Saving\.\.\./);
   assert.match(agentSettings({ settings: { kind: "not_ready" } }), /ready/);
@@ -242,4 +250,46 @@ test("a project's Process page reads and saves its agent settings through the en
     assert.match(lib, new RegExp(`async fn ${command}\\(`));
     assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
   }
+});
+
+test("picking an instructions mode or the transcript switch saves the whole setting as mode and transcripts, never a files field", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/agent-settings.mjs", import.meta.url).pathname);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(client.DEFAULT_INSTRUCTION_SETTINGS)})`);
+    const clicks = [];
+    for (const label of ["Project only", "App only", "agent-transcripts"]) clicks.push(await evaluate(`Fixture.click(${JSON.stringify(label)})`));
+    return { clicks, saves: await evaluate("Fixture.saves()") };
+  });
+  assert.deepEqual(seen.clicks, [true, true, true]);
+  assert.deepEqual(seen.saves, [
+    { mode: "project_only", transcripts: true },
+    { mode: "app_only", transcripts: true },
+    { mode: "both", transcripts: false },
+  ]);
+});
+
+const importFile = (path, extra = {}) => ({ path, bytes: 15, tracked: false, refused: null, uncommitted: false, ...extra });
+
+test("the import prompt lists each found file with its size, a tracked note or why it stays, and confirms only a movable set", () => {
+  const prompt = (files, extra = {}) => renderToStaticMarkup(createElement(view.InstructionImportView, {
+    name: "Harbor Notes", files, busy: false, failure: "", onConfirm: never("onConfirm"), onLater: never("onLater"), ...extra,
+  }));
+  const markup = prompt([
+    importFile("CLAUDE.md", { tracked: true }),
+    importFile("AGENTS.md", { bytes: 2048 }),
+    importFile("CLAUDE.local.md", { refused: "process_import_outside" }),
+  ]);
+  assert.match(markup, /Instruction files found in Harbor Notes/);
+  assert.match(markup, /<strong>CLAUDE\.md<\/strong> <span class="secondary">15 bytes, tracked by git<\/span>/);
+  assert.match(markup, /<strong>AGENTS\.md<\/strong> <span class="secondary">2\.0 KB<\/span>/);
+  assert.ok(markup.includes(html(`Stays in place: ${client.importRefusal("process_import_outside")}`)), markup);
+  assert.match(markup, /Git tracks some of these files, so after the move your checkout shows them as deleted\./);
+  assert.match(markup, /Not now/);
+  assert.doesNotMatch(markup.match(/<button[^>]*>(?:(?!<\/button>).)*Copy into instructions\.md and move aside/s)[0], /disabled/);
+  const refused = prompt([importFile("CLAUDE.md", { refused: "process_import_outside" })]);
+  assert.match(refused.match(/<button[^>]*>(?:(?!<\/button>).)*Copy into instructions\.md and move aside/s)[0], /disabled=""/, "nothing movable, nothing to confirm");
+  assert.doesNotMatch(refused, /Git tracks some/);
+  assert.match(prompt([importFile("AGENTS.md")], { failure: "The instruction files couldn't be moved aside." }), /class="notice danger" role="alert">.*The instruction files couldn&#x27;t be moved aside\./s);
 });
