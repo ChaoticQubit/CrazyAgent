@@ -157,6 +157,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("project files");
                     connection.project_files(project, query).unwrap();
                 }
+                Request::Process(query) => {
+                    sent.push("process");
+                    connection.process(*query).unwrap();
+                }
                 other => panic!("project pages never send {other:?}"),
             }
         }
@@ -1803,4 +1807,71 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
     assert!(shown.contains("No changes yet."), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut first = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut first,
+    );
+    let mut settings = Shell::with(first, screen);
+    pump(&mut settings, &mut connection).await;
+    settings.key(Key::Enter);
+    settings.key(Key::Enter);
+    pump(&mut settings, &mut connection).await;
+    let shown = render(&mut settings, 120, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    drop(settings);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 24);
+    assert!(shown.contains("No messages yet."), "{shown}");
+    let conversation = shell.place();
+    for character in "start the sync".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert_eq!(
+        shell.place(),
+        conversation,
+        "t types while the input is focused"
+    );
+    let shown = render(&mut shell, 120, 24);
+    assert!(shown.contains("start the sync"), "{shown}");
+    assert!(shown.contains("Ctrl-T Team"), "{shown}");
+
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+    assert_eq!(shell.depth(), 2);
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), conversation);
+    let shown = render(&mut shell, 120, 24);
+    assert!(shown.contains("start the sync"), "{shown}");
 }
