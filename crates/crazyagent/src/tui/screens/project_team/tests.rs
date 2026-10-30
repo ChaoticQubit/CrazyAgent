@@ -1620,6 +1620,222 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
     );
 }
 
+fn shows(view: &TeamView, setting: &str) -> bool {
+    frame(view, 120, 48).iter().any(|row| row.contains(setting))
+}
+
+fn applied(view: &mut TeamView, reply: TeamReply) {
+    let TeamReply::Change(action) = reply else {
+        panic!("no change was sent");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+}
+
+fn reread(view: &mut TeamView, status: TeamStatus, now: i64) {
+    let query = view.next_query(now).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+}
+
+#[test]
+fn agent_branches_flip_between_a_named_branch_and_a_detached_head() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("b", "Agent branches")));
+    assert!(shows(&view, "Agent branches  Named branch"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Detached,
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("New agents now work on a detached HEAD."))
+    );
+    let mut detached = team();
+    detached.agent_branches = crate::team::BranchMode::Detached;
+    reread(&mut view, detached, NOW + 10);
+    assert!(shows(&view, "Agent branches  Detached"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Named,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Each new agent now works on its own branch."))
+    );
+}
+
+#[test]
+fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    assert!(!view.typing());
+    let mut view = loaded();
+    assert!(view.help().contains(&("m", "Master's branch")));
+    assert!(shows(&view, "Master's branch  Repository default"));
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert!(view.typing());
+    assert_eq!(view.help(), vec![("Enter", "Save"), ("Esc", "Close")]);
+    assert!(shows(&view, "[ Repository default"));
+    typed(&mut view, "release");
+    assert!(view.paste("/2.0"));
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::MasterBranch {
+            project_id: project(),
+            branch: Some("release/2.0".into()),
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+    applied(&mut view, reply);
+    assert!(!view.typing());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The master now works on release/2.0."))
+    );
+    let mut chosen = team();
+    chosen.master_branch = Some("release/2.0".into());
+    reread(&mut view, chosen, NOW + 10);
+    assert!(shows(&view, "Master's branch  release/2.0"));
+
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(
+        view.branch_edit.as_ref().map(TextInput::value),
+        Some("release/2.0")
+    );
+    for _ in "release/2.0".chars() {
+        assert_eq!(view.key(press(KeyCode::Backspace)), TeamReply::Handled);
+    }
+    typed(&mut view, "  ");
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::MasterBranch {
+            project_id: project(),
+            branch: None,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 10,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "team_master_branch_invalid".into(),
+        })),
+    );
+    assert!(view.typing(), "a refused name stays in the editor");
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Type a branch name such as main or release/2.0, or leave it empty for the repository default."
+        ))
+    );
+    let reply = view.key(press(KeyCode::Enter));
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now works on the repository's default branch."
+        ))
+    );
+
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    typed(&mut view, "dev");
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(!view.typing());
+    assert!(view.branch_edit.is_none());
+    assert!(view.help().contains(&("g", "Ask before merge")));
+}
+
+#[test]
+fn g_turns_ask_before_merge_on_and_off() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('g'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(shows(&view, "Ask before merge  Off"));
+    let reply = view.key(press(KeyCode::Char('g')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AskBeforeMerge {
+            project_id: project(),
+            on: true,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now asks you before merging a harness."
+        ))
+    );
+    let mut asking = team();
+    asking.ask_before_merge = true;
+    reread(&mut view, asking, NOW + 10);
+    assert!(shows(&view, "Ask before merge  On"));
+    let reply = view.key(press(KeyCode::Char('g')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AskBeforeMerge {
+            project_id: project(),
+            on: false,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now merges a finished harness without asking."
+        ))
+    );
+}
+
 async fn coord_send(
     view: &mut TeamView,
     controller: &mut OwnerController,

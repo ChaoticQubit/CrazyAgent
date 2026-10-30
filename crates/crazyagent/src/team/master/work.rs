@@ -298,9 +298,11 @@ pub(super) fn inspect_work(
 /// a question its tags route (Q14b), whose owner alert K7's tick raises, or a message or
 /// note to the agent it names. A message to a finished agent the caller leads wakes that
 /// agent with a short task, and the message itself reaches it once, with the waiting
-/// messages that task's prompt carries; delivery to a running agent is the coordination
-/// layer's too. Takes the database, what the answers need, the caller, whether it is the
-/// master and the call. Returns the sentence.
+/// messages that task's prompt carries. The wake decision, the message and the wake share
+/// one transaction, so a wake refused, as for an agent the owner stopped or whose worktree
+/// is gone, stores nothing and is answered "Not sent". Delivery to a running agent is the
+/// coordination layer's too. Takes the database, what the answers need, the caller,
+/// whether it is the master and the call. Returns the sentence.
 pub(super) fn update_work(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -353,7 +355,10 @@ pub(super) fn update_work(
     let name = sending
         .to
         .expect("the tool requires to for a message or note");
-    let Some(target) = named_agent(connection, project, agent, name)? else {
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(state)?;
+    let Some(target) = named_agent(&tx, project, agent, name)? else {
         return Ok((
             format!(
                 "Not sent: no agent of this project is called {}. Call {}() for the team.",
@@ -364,8 +369,8 @@ pub(super) fn update_work(
         ));
     };
     let wakes = sending.kind == Update::Message
-        && !running(connection, project, target)?
-        && (master || super::is_worker(connection, project, agent, target)?);
+        && !running(&tx, project, target)?
+        && (master || super::is_worker(&tx, project, agent, target)?);
     let message = NewMessage {
         project: project.clone(),
         from,
@@ -381,12 +386,13 @@ pub(super) fn update_work(
         body: text,
         idempotency_key: sending.key.map(str::to_owned),
     };
-    let id = match coord::send(connection, message, now) {
+    let id = match coord::send(&tx, message, now) {
         Ok(id) => id,
         Err(problem) => return refused("Not sent", problem),
     };
-    let label = who(connection, project, Party::Agent(target))?;
+    let label = who(&tx, project, Party::Agent(target))?;
     if !wakes {
+        tx.commit().map_err(state)?;
         return Ok((
             format!(
                 "Sent #{id} to {label}. It reaches {label} at its next turn or once it is idle; {}() shows when it is read.",
@@ -397,11 +403,38 @@ pub(super) fn update_work(
     }
     let shown = target.to_string();
     let (said, refusal) = if master {
-        super::wake(connection, answering, &shown, WAKE_TASK)?
+        super::wake_in(
+            &tx,
+            answering.access,
+            answering.stored,
+            &shown,
+            WAKE_TASK,
+            true,
+        )?
     } else {
-        super::lead_wake(connection, answering, agent, &shown, WAKE_TASK)?
+        super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
     };
-    Ok((format!("Sent #{id}. {said}"), refusal))
+    if refusal {
+        return Ok((not_sent(&said), true));
+    }
+    tx.commit().map_err(state)?;
+    Ok((format!("Sent #{id}. {said}"), false))
+}
+
+/// Words a refused wake as the refused message it is, since `update_work` then stores
+/// nothing and the caller must not wait for it (review N2). Takes the wake's refusal, which
+/// starts "Not woken: " or names the owner's stop. Returns it starting "Not sent: ".
+fn not_sent(refusal: &str) -> String {
+    let reason = refusal
+        .strip_prefix("Not woken: ")
+        .map(str::to_owned)
+        .or_else(|| {
+            refusal
+                .strip_prefix("The owner ")
+                .map(|rest| format!("the owner {rest}"))
+        })
+        .unwrap_or_else(|| refusal.to_owned());
+    format!("Not sent: {reason}")
 }
 
 /// Changes who owns a unit of work for `transfer_work` (DEC-104): the coordination layer

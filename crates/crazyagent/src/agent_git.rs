@@ -74,7 +74,7 @@ pub fn task_branch(name: &str) -> Option<String> {
 pub fn is_agent_branch(branch: &str) -> bool {
     branch.strip_prefix(LINKED_PREFIX).is_some_and(|name| {
         plain_name(name)
-            || plain_folder(Path::new(name)).is_some()
+            || (!name.contains('/') && plain_folder(Path::new(name)).is_some())
             || name
                 .split_once(TEAMMATE_SEPARATOR)
                 .is_some_and(|(task, teammate)| plain_name(task) && plain_name(teammate))
@@ -126,3 +126,6 @@ fn plain_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
+
+#[cfg(test)]
+mod tests;

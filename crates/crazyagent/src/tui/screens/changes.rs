@@ -440,6 +440,8 @@ impl ProjectChanges {
             (KeyCode::Char('a'), Some(actions)) if actions.accept => {
                 let proposed = self.chosen().map(|set| set.message.clone());
                 self.message.set(&proposed.unwrap_or_default());
+                self.notice = None;
+                self.notice_set = None;
                 self.ask(Ask::Accept);
                 self.branches = None;
                 self.branch = 0;
@@ -845,6 +847,7 @@ impl ProjectChanges {
             .into_iter()
             .map(|line| Row::of(line, look.muted)),
         );
+        rows.extend(self.shown_notice().map(|notice| notice.row(look)));
         if let Some((name, _)) = self.landing_branch() {
             rows.push(Row::of("Branch", look.heading).push(format!("  {name}"), look.fg));
         }

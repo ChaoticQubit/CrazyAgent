@@ -3525,6 +3525,156 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     );
 }
 
+/// The late team columns of `team_agents` and `team_tasks` an engine database has. Takes
+/// the connection. Returns (table, column) pairs in name order.
+fn late_columns(connection: &Connection) -> Vec<(String, String)> {
+    let mut statement = connection
+        .prepare(
+            "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
+             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks')
+             AND p.name IN ('pane','mode','hookless') ORDER BY 1,2",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, role TEXT NOT NULL,
+                harness TEXT NOT NULL, tools INTEGER NOT NULL, connection TEXT, worktree TEXT,
+                status TEXT NOT NULL, task INTEGER, process_group INTEGER,
+                turns INTEGER NOT NULL DEFAULT 0, error TEXT, created_ms INTEGER NOT NULL,
+                heartbeat_ms INTEGER NOT NULL, stopped_ms INTEGER, session TEXT, parent INTEGER
+            );
+            CREATE TABLE team_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, project TEXT NOT NULL, source TEXT NOT NULL,
+                turn INTEGER, harness TEXT NOT NULL, tools INTEGER NOT NULL, prompt TEXT NOT NULL,
+                status TEXT NOT NULL, agent INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+                result TEXT, error TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0,
+                delivered INTEGER NOT NULL DEFAULT 0, output_bytes INTEGER NOT NULL DEFAULT 0,
+                created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER,
+                session TEXT, parent INTEGER
+            );
+            INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+                VALUES ('old','sub','claude-code',1,'stopped',1,1);",
+        )
+        .unwrap();
+    assert!(late_columns(&connection).is_empty());
+    let expected: Vec<(String, String)> = [
+        ("team_agents", "hookless"),
+        ("team_agents", "mode"),
+        ("team_agents", "pane"),
+        ("team_tasks", "mode"),
+    ]
+    .iter()
+    .map(|(table, column)| ((*table).to_owned(), (*column).to_owned()))
+    .collect();
+    initialize(&connection).unwrap();
+    assert_eq!(late_columns(&connection), expected);
+    initialize(&connection).unwrap();
+    assert_eq!(late_columns(&connection), expected);
+    let old: (Option<String>, Option<String>, i64) = connection
+        .query_row(
+            "SELECT pane,mode,hookless FROM team_agents WHERE project='old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(old, (None, None, 0));
+}
+
+#[test]
+fn a_lead_keeps_the_mode_it_first_started_in_whatever_the_setting_says_later() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new("modes").unwrap();
+    let row = crate::protocol::StoredProject {
+        project_id: project.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Modes".into(),
+            repositories: vec![],
+        },
+    };
+    connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&row).unwrap()],
+        )
+        .unwrap();
+    let agent = |role: &str, harness: &str, parent: Option<i64>, mode: Option<&str>| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,mode) VALUES (?1,?2,?3,1,'starting',1,1,?4,?5)",
+                params![project.as_str(), role, harness, parent, mode],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let stored = |agent: i64| -> Option<String> {
+        connection
+            .query_row("SELECT mode FROM team_agents WHERE id=?1", [agent], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let claude = HarnessKind::ClaudeCode;
+    set_mode(&connection, &project, claude, SubagentMode::Native).unwrap();
+    let native = agent("sub", "claude-code", None, None);
+    assert_eq!(stored(native), None);
+    assert_eq!(
+        lead_mode(&connection, &project, native).unwrap(),
+        SubagentMode::Native
+    );
+    assert_eq!(stored(native).as_deref(), Some("native"));
+    let worker = agent("sub", "claude-code", Some(native), None);
+    let codex = agent("sub", "codex", None, None);
+    let master = agent("master", "claude-code", None, None);
+    for other in [worker, codex, master] {
+        assert_eq!(
+            lead_mode(&connection, &project, other).unwrap(),
+            SubagentMode::AppSpawned
+        );
+        assert_eq!(stored(other).as_deref(), Some("app_spawned"));
+    }
+    set_mode(&connection, &project, claude, SubagentMode::AppSpawned).unwrap();
+    assert_eq!(
+        lead_mode(&connection, &project, native).unwrap(),
+        SubagentMode::Native
+    );
+    let spawned = agent("sub", "claude", None, None);
+    assert_eq!(
+        lead_mode(&connection, &project, spawned).unwrap(),
+        SubagentMode::AppSpawned
+    );
+    set_mode(&connection, &project, claude, SubagentMode::Native).unwrap();
+    assert_eq!(
+        lead_mode(&connection, &project, spawned).unwrap(),
+        SubagentMode::AppSpawned
+    );
+    assert_eq!(
+        lead_mode(&connection, &project, native).unwrap(),
+        SubagentMode::Native
+    );
+    let unknown = agent("sub", "claude-code", None, Some("teams"));
+    assert_eq!(
+        lead_mode(&connection, &project, unknown).unwrap_err().0,
+        "team_lead_mode_invalid"
+    );
+}
+
 #[test]
 fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane() {
     let (_directory, mut connection) = database();

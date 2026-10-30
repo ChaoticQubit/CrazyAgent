@@ -333,3 +333,6 @@ pub struct Snapshot {
     pub questions_for_owner: Vec<Message>,
     pub unread_edges: Vec<(Party, Party, u32, Receipt)>,
 }
+
+#[cfg(test)]
+mod tests;

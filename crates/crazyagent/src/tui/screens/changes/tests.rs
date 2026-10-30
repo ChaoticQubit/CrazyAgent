@@ -879,6 +879,131 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
     );
 }
 
+fn flat(view: &ProjectChanges) -> String {
+    text(view).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn accept_lists_the_branches_and_tab_picks_another_target() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(
+        view.key(key(KeyCode::Tab), NOW),
+        "Tab before the list arrives moves nothing"
+    );
+    let listed_branches = TargetBranches {
+        branches: vec!["main".into(), "release".into(), "next".into()],
+        current: Some("main".into()),
+    };
+    let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
+    assert_eq!(query, ChangesQuery::Branches { id: id('1') });
+    let shown = flat(&view);
+    assert!(shown.contains("Branch main"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on main, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch release"), "{shown}");
+    assert!(shown.contains("That branch isn't checked out"), "{shown}");
+    assert!(view.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), NOW));
+    assert!(view.key(key(KeyCode::BackTab), NOW));
+    assert!(flat(&view).contains("Branch next"));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(flat(&view).contains("Branch release"));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "release".into(),
+        })
+    );
+}
+
+#[test]
+fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.key(key(KeyCode::Esc), NOW));
+    assert_eq!(view.next_query(NOW), None, "Esc drops the branch read");
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+        })),
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        })
+    );
+
+    let mut failed = listed(vec![set('1', ChangeState::Pending)]);
+    failed.key(key(KeyCode::Char('a')), NOW);
+    reply(&mut failed, Err("changes_unavailable".into()));
+    let shown = flat(&failed);
+    assert!(
+        shown.contains(
+            "Couldn't list your branches, so these changes land on the checked-out branch."
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("They land as one commit on the branch checked out in your project folder"),
+        "{shown}"
+    );
+}
+
+/// Opening the Accept editor drops an older notice about the same change set, such as a
+/// refused Discard, so the editor shows only what bears on this Accept: the branch list,
+/// or the notice that it could not be read (review WL-L2).
+#[test]
+fn opening_accept_drops_an_older_notice_about_the_set() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    reply(&mut view, Err("changes_stale".into()));
+    let refused = refusal("changes_stale")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    let query = reply(
+        &mut view,
+        Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])),
+    );
+    assert_eq!(query, ChangesQuery::List { project: project() });
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let editor = flat(&view);
+    assert!(!editor.contains(&refused), "{editor}");
+    assert_eq!(
+        reply(&mut view, Err("changes_unavailable".into())),
+        ChangesQuery::Branches { id: id('1') }
+    );
+    let failed = flat(&view);
+    assert!(!failed.contains(&refused), "{failed}");
+    assert!(
+        failed.contains(
+            "Couldn't list your branches, so these changes land on the checked-out branch."
+        ),
+        "{failed}"
+    );
+}
+
 #[test]
 fn an_action_notice_shows_only_while_the_set_it_was_about_is_chosen() {
     let mut view = listed(vec![

@@ -17,7 +17,7 @@ use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -76,19 +76,6 @@ fn tool_call(id: u64, name: &str, arguments: Value) -> String {
     format!("{call}\n")
 }
 
-/// Reads the file a pane writes until it holds `wanted` or the wait ends.
-/// Takes the file and the bytes. Returns what the file held last.
-fn typed_until(file: &Path, wanted: &str) -> String {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let seen = std::fs::read_to_string(file).unwrap_or_default();
-        if seen.contains(wanted) || Instant::now() >= deadline {
-            return seen;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 #[test]
 fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_binary() {
     let root = tempfile::Builder::new()
@@ -99,6 +86,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let base = root.path().canonicalize().unwrap();
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     crazyagent::team::initialize(&connection).unwrap();
+    crazyagent::coord::ensure(&connection).unwrap();
     crazyagent::project_setup::initialize(&connection).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     let folder = base.join("project");
@@ -132,7 +120,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let writer = agent(&connection, "sub", "working");
     let stopped = agent(&connection, "sub", "stopped");
     let writer_label = named(&connection, &project, writer, "page-writer");
-    named(&connection, &project, stopped, "old-job");
+    let stopped_label = named(&connection, &project, stopped, "old-job");
     let persona = names::name(&connection, writer)
         .unwrap()
         .unwrap()
@@ -294,27 +282,40 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         .unwrap();
     assert_eq!(role, "docs");
 
-    assert_eq!(answer(3), (format!("Sent to {writer_label}."), false));
-    assert_eq!(answer(4), (format!("Answered {writer_label}."), false));
-    let seen = typed_until(&typed, "Yes, keep going.");
-    assert!(
-        seen.contains("Use the old header.\n") && seen.contains("Yes, keep going.\n"),
-        "the pane got {seen:?}"
-    );
-    assert_eq!(
-        answer(5),
-        (
-            "Not sent: no running sub-agent of this project is called @old-job. Call status() for their names.".to_owned(),
-            true
+    let sent = |number: i64| {
+        format!(
+            "Sent #{number} to {writer_label}. It reaches {writer_label} at its next turn or once it is idle; inspect_work() shows when it is read."
         )
-    );
+    };
+    assert_eq!(answer(3), (sent(1), false));
+    assert_eq!(answer(4), (sent(2), false));
+    let bodies = |agent: i64| -> Vec<String> {
+        connection
+            .prepare("SELECT body FROM coord_messages WHERE to_agent=?1 ORDER BY id")
+            .unwrap()
+            .query_map([agent], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
     assert_eq!(
-        answer(6),
-        (format!("Not sent: codex-{stopped} is not running."), true)
+        bodies(writer),
+        ["Use the old header.", "Yes, keep going."],
+        "a running agent's messages wait for its next turn"
+    );
+    let gone = format!(
+        "Not sent: the worktree of {stopped_label} was cleaned up. Hand the work out with spawn() instead."
+    );
+    assert_eq!(answer(5), (gone.clone(), true));
+    assert_eq!(answer(6), (gone, true));
+    assert!(
+        bodies(stopped).is_empty(),
+        "a message to an agent that cannot wake is not stored"
     );
 
     let (status, error) = answer(7);
     assert!(!error, "{status}");
+    assert!(status.contains("\n\nThe team:\n"), "{status}");
     let writer_line = status
         .lines()
         .find(|line| line.starts_with(&writer_label))
@@ -335,31 +336,50 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         "{status}"
     );
     assert!(!status.contains("[owner]"), "{status}");
-    assert_eq!(
-        answer(8),
-        ("No change set is waiting for the owner.".to_owned(), false)
+    let (again, error) = answer(8);
+    assert!(
+        !error && again.ends_with("No change set is waiting for the owner."),
+        "{again}"
     );
     assert_eq!(
         answer(9),
         (
-            "The owner has been notified. Wait for their answer here and do not decide this yourself.".to_owned(),
+            "Asked #3; it went to the owner. The owner gets an urgent alert. Wait for their answer and do not decide this yourself.".to_owned(),
             false
         )
     );
-    let mut notifications = connection
-        .prepare("SELECT kind,text FROM team_notifications WHERE project=?1")
-        .unwrap();
-    let raised: Vec<(String, String)> = notifications
-        .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let raised = |connection: &Connection| -> Vec<(String, String)> {
+        connection
+            .prepare("SELECT kind,text FROM team_notifications WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
     assert_eq!(
-        raised,
-        [(
-            "escalation".to_owned(),
-            "Ada wants to force-push main. Allow it?".to_owned()
-        )]
+        raised(&connection),
+        Vec::<(String, String)>::new(),
+        "the urgent alert is raised by the team tick, not by update_work"
+    );
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let urgent = [(
+        "urgent_question".to_owned(),
+        "Master asks you, urgent: Ada wants to force-push main. Allow it?".to_owned(),
+    )];
+    crazyagent::team::questions::tick(&mut connection, now).unwrap();
+    assert_eq!(raised(&connection), urgent);
+    crazyagent::team::questions::tick(&mut connection, now + 1).unwrap();
+    assert_eq!(
+        raised(&connection),
+        urgent,
+        "a second tick raises no second alert"
     );
     assert_eq!(answers.len(), 9, "{output}");
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);

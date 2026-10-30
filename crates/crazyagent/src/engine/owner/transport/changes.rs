@@ -708,6 +708,106 @@ mod tests {
             .unwrap();
     }
 
+    /// The owner socket lists the local branches a change set can be accepted onto with the
+    /// checked-out one as the default, and refuses an unknown change set.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn branches_lists_local_branches_and_the_current_one() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-brn-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("global.toml"), "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(
+            root.join("global.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = started(root, &stopped).await;
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&home, &repo, &["add", "README"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Start",
+            ],
+        );
+        git(&home, &repo, &["branch", "release"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("NEW"), "new\n").unwrap();
+        let db = landing::open(root).unwrap();
+        let workspace = landing::Workspace {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        drop(db);
+        let (_, controller) = crate::client_controller::OwnerController::attach_configured(
+            crate::engine::Client::new(root.join("e.sock"), Duration::from_secs(10)).unwrap(),
+            crate::engine::owner::OwnerClientKind::Tui,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            controller.change_branches(id).await.unwrap(),
+            TargetBranches {
+                branches: vec!["main".to_owned(), "release".to_owned()],
+                current: Some("main".to_owned()),
+            }
+        );
+        let unknown = ChangeSetId::new("0".repeat(32)).unwrap();
+        assert_eq!(
+            controller.change_branches(unknown).await.unwrap_err().0,
+            "changes_not_found"
+        );
+        drop(controller);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     /// An owner List after the owner merged an open change set by hand replies with that
     /// set closed as landed outside the app, so every client shows it without an action.
     #[cfg(unix)]

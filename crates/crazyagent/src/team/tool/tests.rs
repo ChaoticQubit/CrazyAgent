@@ -499,7 +499,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
     let second = "1".repeat(32);
     std::fs::write(
         mailbox.join(format!("{first}{CALL_SUFFIX}")),
-        b"{\"tool\":\"status\"}\n",
+        b"{\"tool\":\"inspect_work\"}\n",
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -511,7 +511,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32))),
     )
     .unwrap();
-    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"status\"}").unwrap();
+    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"inspect_work\"}").unwrap();
     std::fs::write(
         mailbox.join(format!("{}{CALL_SUFFIX}", "3".repeat(32))),
         vec![b' '; CALL_BYTES_MAX as usize + 1],
@@ -559,7 +559,7 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(
             folder.join(format!("{id}{CALL_SUFFIX}")),
-            b"{\"tool\":\"status\"}\n",
+            b"{\"tool\":\"inspect_work\"}\n",
         )
         .unwrap();
         let reply = folder.join(format!("{stale}{REPLY_SUFFIX}"));
@@ -697,7 +697,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     let blocked = "c".repeat(32);
     std::fs::write(
         mailbox.join(format!("{blocked}{CALL_SUFFIX}")),
-        br#"{"tool":"status"}"#,
+        br#"{"tool":"inspect_work"}"#,
     )
     .unwrap();
     std::fs::create_dir(mailbox.join(format!("{blocked}{TAKEN_SUFFIX}"))).unwrap();
@@ -828,4 +828,207 @@ fn past_conversation_calls_keep_plain_ids_bounded_words_and_any_offset_form() {
         }),
         Err(SESSIONS_INVALID)
     );
+}
+
+#[test]
+fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
+    use crate::coord::settings::SubagentMode;
+    let spawn = |arguments: Value| live_call(SPAWN_TOOL, Some(&arguments)).unwrap();
+    let mode = |given: Value| match spawn(json!({"task": "Lead the docs", "mode": given})) {
+        Ok(Call::Spawn { mode, .. }) => Ok(mode),
+        Ok(other) => panic!("not a spawn: {other:?}"),
+        Err(refused) => Err(refused),
+    };
+    assert_eq!(mode(json!("native")), Ok(Some(SubagentMode::Native)));
+    assert_eq!(
+        mode(json!("app_spawned")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(
+        mode(json!(" App-Spawned ")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(mode(json!("")), Ok(None));
+    assert_eq!(mode(Value::Null), Ok(None));
+    assert_eq!(
+        spawn(json!({"task": "Lead the docs"})),
+        Ok(Call::Spawn {
+            task: "Lead the docs".into(),
+            harness: None,
+            role: None,
+            mode: None,
+        })
+    );
+    for refused in [json!("teams"), json!(3), json!(["native"])] {
+        assert_eq!(mode(refused), Err(MODE_INVALID));
+    }
+    let planted = Call::Spawn {
+        task: "Lead the docs".into(),
+        harness: Some("claude-code".into()),
+        role: None,
+        mode: Some(SubagentMode::Native),
+    };
+    assert_eq!(checked(planted.clone()), Ok(planted));
+    let line =
+        br#"{"tool":"spawn","task":"Lead the docs","harness":null,"role":null,"mode":"teams"}"#;
+    assert_eq!(read_call(line), None);
+    let schema = &spec(SPAWN_TOOL)["inputSchema"]["properties"]["mode"];
+    assert_eq!(schema["enum"], json!(["native", "app_spawned"]));
+    assert!(
+        schema["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Master only, fixed for the lead's life")
+    );
+}
+
+#[test]
+fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
+    let tool = spec(UPDATE_WORK_TOOL);
+    assert!(
+        tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender."),
+        "{tool}"
+    );
+    let properties = &tool["inputSchema"]["properties"];
+    assert_eq!(
+        properties["kind"]["description"],
+        "message when left out, question with for, reply with reply_to to a question or work for you, never to a note."
+    );
+    assert_eq!(
+        properties["reply_to"]["description"],
+        "The question or message (work for you) this answers or passes on, or the message a note or message refers to."
+    );
+}
+
+fn served_pane(pane: Option<&str>) -> Option<String> {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let served = mailbox.clone();
+    let pane = pane.map(str::to_owned);
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let input = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": INSPECT_WORK_TOOL, "arguments": {}}})]);
+        serve_live(input, &mut output, &served, &[], pane.as_deref()).unwrap();
+        output
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (id, call, stamped) = loop {
+        if let Some(taken) = take_calls(&mailbox, 1).pop() {
+            break taken;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(call, Some(Call::InspectWork));
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    let output = server.join().unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    assert_eq!(answer["result"]["content"][0]["text"], "Taken.");
+    stamped
+}
+
+#[test]
+fn the_live_server_stamps_only_a_host_pane_id_beside_its_call() {
+    assert_eq!(served_pane(Some("%3")), Some("%3".to_owned()));
+    assert_eq!(
+        served_pane(Some("%123456789")),
+        Some("%123456789".to_owned())
+    );
+    for forged in ["", "%", "%x1", "%1234567890", "%1;rm", "3", "%-1"] {
+        assert_eq!(served_pane(Some(forged)), None, "{forged:?}");
+    }
+    assert_eq!(served_pane(None), None);
+}
+
+#[test]
+fn a_call_carries_its_pane_beside_it_and_a_bad_pane_leaves_the_call_unread() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let asked = mailbox.clone();
+    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, Some("%3"), REPLY_WAIT));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let id = loop {
+        if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
+            break id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}{CALL_SUFFIX}"))).unwrap())
+            .unwrap();
+    assert_eq!(written, json!({"tool": "inspect_work", "pane": "%3"}));
+    assert_eq!(
+        take_calls(&mailbox, CALLS_PER_TICK_MAX),
+        vec![(id.clone(), Some(Call::InspectWork), Some("%3".to_owned()))]
+    );
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    assert_eq!(asker.join().unwrap(), ("Taken.".to_owned(), false));
+
+    let planted = [
+        (
+            br#"{"tool":"inspect_work"}"#.as_slice(),
+            Some(Call::InspectWork),
+        ),
+        (br#"{"tool":"inspect_work","pane":3}"#.as_slice(), None),
+        (br#"{"tool":"inspect_work","pane":"%x1"}"#.as_slice(), None),
+        (br#"{"tool":"inspect_work","pane":null}"#.as_slice(), None),
+        (
+            br#"{"tool":"inspect_work","pane":"%1;rm"}"#.as_slice(),
+            None,
+        ),
+    ];
+    for (index, (bytes, call)) in planted.into_iter().enumerate() {
+        let id = format!("{index}").repeat(32);
+        std::fs::write(mailbox.join(format!("{id}{CALL_SUFFIX}")), bytes).unwrap();
+        assert_eq!(
+            take_calls(&mailbox, CALLS_PER_TICK_MAX),
+            vec![(id, call, None)],
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    assert_eq!(
+        read_call(br#"{"tool":"inspect_work","pane":"%7"}"#),
+        Some((Call::InspectWork, Some("%7".to_owned())))
+    );
+}
+
+#[test]
+fn a_switched_off_tool_is_refused_by_its_server_and_never_reaches_the_mailbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let input = requests(&[json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": STOP_TOOL, "arguments": {"agent": "3"}}
+    })]);
+    let mut output = Vec::new();
+    serve_live(input, &mut output, &mailbox, &[STOP_TOOL.to_owned()], None).unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        json!(SWITCHED_OFF),
+        "{answer}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+#[test]
+fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
+    let names =
+        |list: &[&str]| -> Vec<String> { list.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(known_tools(&[]));
+    assert!(known_tools(&names(&TEAM_TOOLS)));
+    assert!(known_tools(&names(&[STOP_TOOL, MERGE_TOOL])));
+    assert!(!known_tools(&names(&["status"])));
+    assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
+    assert!(known_tools(&names(&[STOP_TOOL; 12])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 13])));
 }

@@ -1166,27 +1166,25 @@ fn lead_status(
     Ok((format!("Your workers:\n{}", status.text()), false))
 }
 
-/// Wakes one of a lead's own finished workers as `wake` does for the master, found by the
-/// same names in the same order, and keeps the lead as the one its next result goes to.
-/// Takes the database, what the answers need, the lead, the name and the text. Returns the
+/// Wakes one of a lead's own finished workers as [`wake_in`] does for the master, found by
+/// the same names in the same order, and keeps the lead as the one its next result goes
+/// to. The caller's transaction holds the wake, so a refusal leaves it to roll back. Takes
+/// the transaction, what the answers need, the lead, the name and the text. Returns the
 /// sentence the lead reads and whether it is a refusal, or a SQLite failure.
 fn lead_wake(
-    connection: &mut Connection,
+    tx: &Transaction<'_>,
     answering: &Answering<'_>,
     lead: i64,
     agent: &str,
     text: &str,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(state)?;
-    let found = match super::names::resolve_finished(&tx, project, agent)? {
+    let found = match super::names::resolve_finished(tx, project, agent)? {
         Some(id) => Some(id),
-        None => super::events::resolve(&tx, project, agent)?,
+        None => super::events::resolve(tx, project, agent)?,
     };
     let worker = match found {
-        Some(worker) if is_worker(&tx, project, lead, worker)? => worker,
+        Some(worker) if is_worker(tx, project, lead, worker)? => worker,
         _ => {
             return Ok((
                 format!(
@@ -1198,7 +1196,7 @@ fn lead_wake(
             ));
         }
     };
-    let (said, refused) = wake_in(&tx, answering.access, answering.stored, agent, text, true)?;
+    let (said, refused) = wake_in(tx, answering.access, answering.stored, agent, text, true)?;
     if refused {
         return Ok((said, true));
     }
@@ -1207,7 +1205,6 @@ fn lead_wake(
         params![worker, lead, project.as_str()],
     )
     .map_err(state)?;
-    tx.commit().map_err(state)?;
     Ok((said, false))
 }
 
@@ -1486,26 +1483,6 @@ fn delegate(
         ),
         false,
     ))
-}
-
-/// Wakes the finished sub-agent a live master names with its `wake` tool (DEC-102), in one
-/// transaction through [`wake_in`]. Takes the database, what the answers need, the name and
-/// the text. Returns the sentence the master reads and whether it is a refusal, or a SQLite
-/// failure.
-fn wake(
-    connection: &mut Connection,
-    answering: &Answering<'_>,
-    agent: &str,
-    text: &str,
-) -> Result<(String, bool), EngineError> {
-    let tx = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(state)?;
-    let (said, refused) = wake_in(&tx, answering.access, answering.stored, agent, text, true)?;
-    if !refused {
-        tx.commit().map_err(state)?;
-    }
-    Ok((said, refused))
 }
 
 /// Wakes the finished sub-agent a master names (DEC-102) by pinning its text to that agent

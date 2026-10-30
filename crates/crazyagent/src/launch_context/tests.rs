@@ -908,6 +908,102 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     );
 }
 
+#[test]
+fn the_team_tools_section_lists_each_tool_left_on_with_the_tags_and_the_branch_rule() {
+    let all = team_tools_section(&[]);
+    for (name, line) in crate::coord::tool_switches::BUILTIN_TOOLS {
+        assert_eq!(
+            all.matches(&format!("\n- {name}: {line}\n")).count(),
+            1,
+            "{name}:\n{all}"
+        );
+    }
+    assert!(all.contains("Every question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low)."));
+    assert!(all.contains("an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`"));
+    assert!(all.len() <= TOOLS_SECTION_BYTES_MAX);
+    let off = vec![
+        crate::team::tool::SPAWN_TOOL.to_owned(),
+        crate::team::tool::STOP_TOOL.to_owned(),
+        crate::team::tool::MERGE_TOOL.to_owned(),
+    ];
+    let some = team_tools_section(&off);
+    for name in &off {
+        assert!(!some.contains(&format!("\n- {name}: ")), "{name}:\n{some}");
+    }
+    assert!(some.contains(&format!("\n- {}: ", crate::team::tool::UPDATE_WORK_TOOL)));
+    assert!(some.contains("severity (high, normal or low)"));
+    assert!(some.len() < all.len());
+}
+
+#[test]
+fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap().join("mailbox");
+    let engine = Path::new("/usr/local/bin/crazyagent");
+    let fresh = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+    };
+    let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
+    for (context, subcommand) in [
+        (
+            fresh().with_live_team_tool(engine, &mailbox, &off).unwrap(),
+            crate::team::tool::LIVE_SERVER_COMMAND,
+        ),
+        (
+            fresh()
+                .with_agent_team_tool(engine, &mailbox, &off)
+                .unwrap(),
+            crate::team::tool::AGENT_SERVER_COMMAND,
+        ),
+    ] {
+        let server = context
+            .plugins
+            .servers
+            .iter()
+            .find(|server| server.name == crate::team::tool::SERVER_NAME)
+            .unwrap();
+        let ServerSpec::Stdio { command, args } = &server.spec else {
+            panic!("the team server runs over stdio");
+        };
+        assert_eq!(command, "/usr/local/bin/crazyagent");
+        assert_eq!(
+            args,
+            &vec![
+                subcommand.to_owned(),
+                mailbox.to_str().unwrap().to_owned(),
+                crate::team::tool::STOP_TOOL.to_owned(),
+            ]
+        );
+        assert!(server.secrets.is_empty());
+        assert!(
+            context.instructions().ends_with(&team_tools_section(&off)),
+            "{}",
+            context.instructions()
+        );
+    }
+    let unknown = vec!["status".to_owned()];
+    assert_eq!(
+        fresh()
+            .with_live_team_tool(engine, &mailbox, &unknown)
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    assert_eq!(
+        fresh()
+            .with_agent_team_tool(engine, Path::new("mailbox"), &[])
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+}
+
 /// Builds the context a project launch gets, with no app or project text, the given
 /// plugins and switched-off tools, as `for_project` builds it. Inputs: the temp root, the
 /// plugins and the switched-off tools by stored server name. Output: the context.
