@@ -1618,3 +1618,109 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
         "Show keeps finished agents in the list with no pointer"
     );
 }
+
+/// Sends one settings key's change as the engine answers it: applied, then a fresh team read
+/// with the stored choice. Takes the view, the reply, the stored team and the read time.
+/// Returns the notice the applied change left.
+fn settled(view: &mut TeamView, reply: TeamReply, stored: &TeamStatus, at: i64) -> Option<Notice> {
+    let TeamReply::Change(action) = reply else {
+        panic!("a settings key sends a change: {reply:?}");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    let notice = view.notice.clone();
+    let query = view.next_query(at).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    notice
+}
+
+/// Sub-agent depth steps through every choice (3 after the default 2, then 1, then 2) and
+/// Worker lands flips between both choices (N1, N2): each key sends its change, a second key
+/// waits for the first, the engine's answer says what the choice means and the team rows show
+/// the stored choice.
+#[test]
+fn sub_agent_depth_and_worker_landing_step_through_every_choice() {
+    let mut loading = TeamView::new(project());
+    for code in ['d', 'k'] {
+        assert_eq!(loading.key(press(KeyCode::Char(code))), TeamReply::Handled);
+        assert_eq!(
+            loading.notice,
+            Some(Notice::plain("The team is still loading."))
+        );
+    }
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    assert!(shows(&view, "Sub-agent depth  2"));
+    assert!(shows(&view, "Worker lands  When the lead accepts"));
+    let mut stored = team();
+    let mut at = NOW;
+    for (depth, note) in [
+        (
+            3,
+            "Workers can now lead workers of their own, three levels deep.",
+        ),
+        (1, "Only the master starts sub-agents now."),
+        (
+            2,
+            "The master's sub-agents can now lead workers of their own.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('d')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SubAgentDepth {
+                project_id: project(),
+                depth,
+            })
+        );
+        assert_eq!(
+            view.key(press(KeyCode::Char('d'))),
+            TeamReply::Handled,
+            "a second press waits for the first change"
+        );
+        stored.sub_agent_depth = depth;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(
+            shows(&view, &format!("Sub-agent depth  {depth}")),
+            "{depth}"
+        );
+    }
+    for (mode, note, words) in [
+        (
+            crate::team::ChildLanding::Owner,
+            "A lead's worker now lands only when you accept it.",
+            "Only when I accept",
+        ),
+        (
+            crate::team::ChildLanding::Lead,
+            "A lead's worker now lands on the lead's branch when the lead accepts it.",
+            "When the lead accepts",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('k')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::ChildLanding {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.child_landing = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(shows(&view, &format!("Worker lands  {words}")), "{words}");
+    }
+}

@@ -6154,3 +6154,402 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         "a teammate whose pane ended stops"
     );
 }
+
+/// The live master's instructions keep the nesting and landing rules and stay within
+/// `LIVE_RULES_BYTES_MAX` with the project name at its byte bound, with team tools on and
+/// off (N3).
+#[test]
+fn the_live_master_instructions_keep_the_nesting_rules_within_their_bound() {
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "é".repeat(crate::launch_context::NAME_BYTES_MAX),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: "/tmp/ca-nesting-bound".into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    for tools in [true, false] {
+        let text = live_instructions(&setup, tools);
+        assert!(
+            text.len() <= crate::launch_context::LIVE_RULES_BYTES_MAX,
+            "{tools}: {} bytes",
+            text.len()
+        );
+        assert!(text.contains(MASTER_NESTING_RULES), "{tools}");
+        assert!(
+            text.contains(crate::launch_context::MASTER_LANDING_RULES),
+            "{tools}"
+        );
+        assert!(text.contains("éé"), "{tools}: the cut name is still there");
+    }
+}
+
+/// A codex stand-in for leads and their workers: each typed turn ends with "Done." unless
+/// the agent's worktree holds a `hold` file, which keeps that turn open.
+#[cfg(target_os = "macos")]
+const LEAD_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  [ -f hold ] && exec /bin/sleep 300
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// Makes the fixture's project a git repository with one owner commit, as a project the
+/// owner added. Takes the fixture. Returns the owner's git home.
+#[cfg(target_os = "macos")]
+fn committed_project(fixture: &Fixture) -> PathBuf {
+    let project = fixture.base.join("project");
+    std::fs::write(project.join("notes.txt"), "Notes app.\n").unwrap();
+    let home = fixture.base.join("owner-home");
+    std::fs::create_dir(&home).unwrap();
+    for arguments in [
+        &["init", "-q"][..],
+        &["config", "user.email", "owner@local"],
+        &["config", "user.name", "owner"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "start"],
+    ] {
+        let done = level_git(&project, &home, arguments);
+        assert!(done.status.success(), "{done:?}");
+    }
+    home
+}
+
+/// Reads the commit a folder's git checkout holds. Takes the folder and the git home.
+/// Returns the full commit id.
+#[cfg(target_os = "macos")]
+fn head_of(folder: &Path, home: &Path) -> String {
+    let done = level_git(folder, home, &["rev-parse", "HEAD"]);
+    assert!(done.status.success(), "{done:?}");
+    String::from_utf8(done.stdout).unwrap().trim().to_owned()
+}
+
+/// Commits one new file in an agent's worktree, as the agent does with its own work.
+/// Takes the worktree, the git home and the file name. Returns the new commit.
+#[cfg(target_os = "macos")]
+fn commit_in(worktree: &Path, home: &Path, file: &str) -> String {
+    std::fs::write(worktree.join(file), "Lead work.\n").unwrap();
+    for arguments in [
+        &["add", file][..],
+        &[
+            "-c",
+            "user.email=agent@local",
+            "-c",
+            "user.name=agent",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-q",
+            "-m",
+            "lead work",
+        ],
+    ] {
+        let done = level_git(worktree, home, arguments);
+        assert!(done.status.success(), "{done:?}");
+    }
+    head_of(worktree, home)
+}
+
+/// The folder an agent works in, as the runtime stored it. Takes the fixture and the agent.
+#[cfg(target_os = "macos")]
+fn worktree_of(fixture: &Fixture, agent: i64) -> PathBuf {
+    fixture
+        .base
+        .join("project")
+        .join(agent_worktree(fixture, agent))
+}
+
+/// Calls `spawn` as the sub-agent `lead` does through its team tools, on a database
+/// connection of its own. Takes the fixture, the lead and the task. Returns the answer
+/// text; panics when the call is refused.
+#[cfg(target_os = "macos")]
+fn lead_spawns(fixture: &Fixture, lead: i64, task: &str) -> String {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let folder = fixture.base.join("team");
+    let answering = super::super::master::Answering {
+        access: &fixture.access,
+        stored: &fixture.setup,
+        landing: &folder,
+        agents: &folder,
+        events: None,
+        host: None,
+    };
+    let (text, refused) = super::super::master::answer_sub(
+        &mut connection,
+        &answering,
+        lead,
+        super::super::tool::Call::Spawn {
+            task: task.into(),
+            harness: None,
+            role: None,
+            mode: None,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!refused, "{text}");
+    text
+}
+
+/// The task id and the agent that took the task with this prompt. Takes the fixture and
+/// the prompt.
+#[cfg(target_os = "macos")]
+fn task_and_agent(fixture: &Fixture, prompt: &str) -> (i64, Option<i64>) {
+    fixture
+        .connection
+        .query_row(
+            "SELECT id,agent FROM team_tasks WHERE prompt=?1",
+            [prompt],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// The lead an agent's row records. Takes the fixture and the agent.
+#[cfg(target_os = "macos")]
+fn parent_of(fixture: &Fixture, agent: i64) -> Option<i64> {
+    fixture
+        .connection
+        .query_row(
+            "SELECT parent FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Starts a lead, lets it finish its first task, has it commit in its worktree and spawn
+/// one worker, and waits for that worker's task to finish. Takes the fixture, its runtime
+/// and the git home. Returns the lead, the lead's commit, the worker's task and the worker.
+#[cfg(target_os = "macos")]
+fn lead_with_worker(
+    fixture: &Fixture,
+    team: &mut TeamRuntime,
+    home: &Path,
+) -> (i64, String, i64, i64) {
+    let lead = idle_sub_agent(fixture, team);
+    let tip = commit_in(&worktree_of(fixture, lead), home, "lead.txt");
+    let answer = lead_spawns(fixture, lead, "Write the notes page.");
+    let (task, _) = task_and_agent(fixture, "Write the notes page.");
+    assert_eq!(
+        answer,
+        format!(
+            "Task {task} is queued for a codex worker of yours, in its own worktree on a branch <your task branch>--<its name>, cut from your current commit. The engine tells you when it ends; then merge it into your task branch."
+        )
+    );
+    fixture.until(team, "the worker finished its task", |f| {
+        task_of(f, "Write the notes page.").0 == "done"
+    });
+    let worker = task_and_agent(fixture, "Write the notes page.").1.unwrap();
+    (lead, tip, task, worker)
+}
+
+/// A lead's worker starts at the lead's current commit (N1), in the linked worktree layout
+/// and in the own-clone layout of Own branch access: the lead commits in its worktree and
+/// calls spawn, and the worker the engine starts records the lead as its parent and checks
+/// out that commit in a checkout of the same layout.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
+    for access in [None, Some(crate::sandbox::policy::AgentAccess::OwnBranch)] {
+        let fixture = Fixture::new(2);
+        let home = committed_project(&fixture);
+        if let Some(access) = access {
+            crate::sandbox::policy::save(
+                &fixture.connection,
+                PROJECT,
+                &crate::sandbox::policy::AgentPolicy {
+                    access,
+                    toolchains: Vec::new(),
+                },
+            )
+            .unwrap();
+        }
+        let host = fixture.host();
+        let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+        let start = head_of(&fixture.base.join("project"), &home);
+        let (lead, tip, _, worker) = lead_with_worker(&fixture, &mut team, &home);
+        assert_ne!(tip, start, "{access:?}");
+        assert_ne!(worker, lead, "{access:?}");
+        assert_eq!(parent_of(&fixture, worker), Some(lead), "{access:?}");
+        assert_eq!(parent_of(&fixture, lead), None, "{access:?}");
+        let checkout = worktree_of(&fixture, worker);
+        assert_eq!(
+            head_of(&checkout, &home),
+            tip,
+            "{access:?}: the worker starts at the lead's commit, not the owner's"
+        );
+        assert!(checkout.join("lead.txt").is_file(), "{access:?}");
+        let own_clone = access.is_some();
+        for agent in [lead, worker] {
+            assert_eq!(
+                worktree_of(&fixture, agent).join(".git").is_dir(),
+                own_clone,
+                "{access:?}: agent {agent} works in a {} checkout",
+                if own_clone { "cloned" } else { "linked" }
+            );
+        }
+        team.shutdown().unwrap();
+    }
+}
+
+/// One coord message as the lead results test reads it: the sender and receiver kinds, the
+/// receiving agent, the message kind, its body and its idempotency key.
+#[cfg(target_os = "macos")]
+type SentNote = (String, String, Option<i64>, String, String, Option<String>);
+
+/// A worker's result goes to its lead, not to the master (N1, DEC-104): once the worker's
+/// task ends, the engine sends the lead one note from the engine with the task's line and
+/// the merge hint, keyed so it is sent once, marks the task delivered, and the master's
+/// team messages never carry it.
+#[cfg(target_os = "macos")]
+#[test]
+fn worker_results_go_to_the_lead_not_the_master() {
+    let fixture = Fixture::new(2);
+    let home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let (lead, _, task, _) = lead_with_worker(&fixture, &mut team, &home);
+    let line = format!("Task {task} (codex): ");
+    let sent = |fixture: &Fixture| -> Vec<SentNote> {
+        fixture
+            .connection
+            .prepare(
+                "SELECT from_kind,to_kind,to_agent,kind,body,idem_key FROM coord_messages
+                 WHERE project=?1 AND instr(body,?2)>0 ORDER BY id",
+            )
+            .unwrap()
+            .query_map(params![PROJECT, line], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    fixture.until(&mut team, "the lead is sent its worker's result", |f| {
+        !sent(f).is_empty()
+    });
+    idle_ticks(&mut team);
+    let notes = sent(&fixture);
+    assert_eq!(notes.len(), 1, "sent once: {notes:?}");
+    let (from, to, agent, kind, body, key) = &notes[0];
+    assert_eq!(
+        (from.as_str(), to.as_str(), *agent, kind.as_str()),
+        ("engine", "agent", Some(lead), "note")
+    );
+    assert_eq!(
+        key.as_deref(),
+        Some(format!("{}{task}", crate::coord::delivery::RESULTS_KEY).as_str())
+    );
+    assert!(
+        body.starts_with(&format!("Results from your sub-agents:\n\n{line}")),
+        "{body}"
+    );
+    assert!(body.ends_with(LEAD_RESULTS_TRAILER), "{body}");
+    let delivered: bool = fixture
+        .connection
+        .query_row(
+            "SELECT delivered FROM team_tasks WHERE id=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(delivered);
+    assert!(
+        fixture
+            .status()
+            .messages
+            .iter()
+            .all(|message| !message.text.contains(&line)),
+        "the master never hears a lead's worker"
+    );
+    team.shutdown().unwrap();
+}
+
+/// An idle worker takes only its own lead's next task (N1): the lead's second task goes to
+/// its idle worker rather than to the idle lead, and a master task the busy lead cannot take
+/// goes to a fresh sub-agent of the master while that worker sits idle.
+#[cfg(target_os = "macos")]
+#[test]
+fn idle_worker_reused_only_within_its_lead() {
+    let fixture = Fixture::new(3);
+    let home = committed_project(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let (lead, _, _, worker) = lead_with_worker(&fixture, &mut team, &home);
+    let idle = |f: &Fixture, agent: i64| f.agent_status(agent).0 == AgentStatus::Idle;
+    fixture.until(&mut team, "the lead and its worker are idle", |f| {
+        idle(f, lead) && idle(f, worker)
+    });
+
+    lead_spawns(&fixture, lead, "Write the index page.");
+    fixture.until(&mut team, "the lead's second task is done", |f| {
+        task_of(f, "Write the index page.").0 == "done"
+    });
+    assert_eq!(
+        task_and_agent(&fixture, "Write the index page.").1,
+        Some(worker),
+        "the lead's idle worker takes it, not the idle lead"
+    );
+    assert_eq!(subs(&fixture), vec![lead, worker]);
+    fixture.until(&mut team, "the lead and its worker are idle again", |f| {
+        idle(f, lead) && idle(f, worker)
+    });
+
+    std::fs::write(worktree_of(&fixture, lead).join("hold"), "").unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Plan the next release.")]);
+    fixture.until(&mut team, "the lead works on the master's task", |f| {
+        task_of(f, "Plan the next release.").0 == "running"
+    });
+    assert_eq!(
+        task_and_agent(&fixture, "Plan the next release.").1,
+        Some(lead)
+    );
+    owner(&fixture, &[hand_off(&fixture, "Write the help page.")]);
+    fixture.until(&mut team, "the master's next task is done", |f| {
+        task_of(f, "Write the help page.").0 == "done"
+    });
+    let fresh = task_and_agent(&fixture, "Write the help page.").1.unwrap();
+    assert!(
+        fresh != worker && fresh != lead,
+        "the idle worker never takes a master task: {fresh}"
+    );
+    assert_eq!(parent_of(&fixture, fresh), None);
+    assert_eq!(subs(&fixture), vec![lead, worker, fresh]);
+    assert!(idle(&fixture, worker));
+    team.shutdown().unwrap();
+}
