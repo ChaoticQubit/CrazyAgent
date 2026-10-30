@@ -421,8 +421,9 @@ fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result
 /// one commit on its checked-out branch: the tree comes from the branch tip in a private
 /// index, so nothing else the owner changed goes in; the owner's own index then stages
 /// the same deletions and the branch moves by compare and swap. Refuses an index that
-/// stages any other path. Inputs: the checkout root, the owner's home, the paths and the
-/// message. Output: the commit, the branch and the paths deleted, or
+/// stages any other path. Inputs: the checkout root, the owner's home, the paths, the
+/// message and what runs after the index is staged and before the branch moves, where a
+/// test moves the branch. Output: the commit, the branch and the paths deleted, or
 /// `changes_import_none`, `changes_import_staged`, `changes_git_busy`,
 /// `changes_detached_head`, `changes_branch_moved` or another git code.
 pub(super) fn commit_deletions(
@@ -430,6 +431,7 @@ pub(super) fn commit_deletions(
     home: &Path,
     paths: &[&str],
     message: &str,
+    before_move: &dyn Fn(),
 ) -> Result<(String, String, Vec<String>), EngineError> {
     assert!(paths.iter().enumerate().all(|(at, path)| {
         !path.is_empty() && !path.starts_with(':') && !paths[..at].contains(path)
@@ -516,6 +518,7 @@ pub(super) fn commit_deletions(
     if owner.exec(&arguments, None, &[], 4096)?.code != 0 {
         return Err(failure("changes_git_busy"));
     }
+    before_move();
     let env = [
         ("GIT_COMMITTER_NAME", identity.0),
         ("GIT_COMMITTER_EMAIL", identity.1),

@@ -2091,3 +2091,71 @@ async fn a_home_move_points_a_nested_project_and_its_repository_at_the_moved_fol
     drop(db);
     bench.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them_and_a_rejected_start_moves_nothing()
+ {
+    const CLAUDE: &str = "# Rules\n\nONBOARD-CLAUDE-RULE-83\n";
+    const AGENTS: &str = "ONBOARD-AGENTS-RULE-84\n";
+    let mut bench = Bench::start_without_graphify(|repo| {
+        fs::write(repo.join("CLAUDE.md"), CLAUDE).unwrap();
+        git(repo, &["add", "CLAUDE.md"]);
+        git(repo, &["commit", "-q", "-m", "rules"]);
+        fs::write(repo.join("AGENTS.md"), AGENTS).unwrap();
+    })
+    .await;
+    bench.use_repos_as_home().await;
+    let imported = bench.repo.join(".crazyagent").join("imported");
+    let link = bench.root.join("repo-link");
+    std::os::unix::fs::symlink(&bench.repo, &link).unwrap();
+    let refused = bench.start_onboarding_at(&link).await;
+    assert_eq!(
+        rejection(&refused).as_deref(),
+        Some("onboarding_folder_missing")
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert!(fs::symlink_metadata(&imported).is_err());
+    let project = bench.start_onboarding().await;
+    let view = bench.view(&project).await;
+    let file =
+        |path: &str, bytes: usize, tracked: bool| crazyagent::instruction_files::ImportFile {
+            path: path.to_owned(),
+            bytes: bytes as u64,
+            tracked,
+            refused: None,
+            uncommitted: tracked,
+        };
+    assert_eq!(
+        view.imported,
+        [
+            file("CLAUDE.md", CLAUDE.len(), true),
+            file("AGENTS.md", AGENTS.len(), false)
+        ]
+    );
+    assert!(fs::symlink_metadata(bench.repo.join("CLAUDE.md")).is_err());
+    assert!(fs::symlink_metadata(bench.repo.join("AGENTS.md")).is_err());
+    assert_eq!(
+        fs::read_to_string(imported.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(imported.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join(".crazyagent").join("instructions.md")).unwrap(),
+        "## Imported from CLAUDE.md\n\n# Rules\n\nONBOARD-CLAUDE-RULE-83\n\n## Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
+    );
+    assert_eq!(
+        git(&bench.repo, &["status", "--porcelain"]),
+        " D CLAUDE.md\n"
+    );
+    bench.stop().await;
+}

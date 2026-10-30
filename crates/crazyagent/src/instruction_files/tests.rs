@@ -46,6 +46,52 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
     );
 }
 
+#[test]
+fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                files TEXT NOT NULL,
+                transcripts INTEGER NOT NULL
+            );
+            INSERT INTO agent_instruction_settings VALUES
+                ('old-project', 'project', 1),
+                ('old-user', 'project_and_user', 0),
+                ('old-none', 'none', 1);",
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    let stored = [
+        ("old-project", true),
+        ("old-user", false),
+        ("old-none", true),
+    ];
+    for (project, transcripts) in stored {
+        assert_eq!(
+            load(&connection, &ProjectId::new(project).unwrap()).unwrap(),
+            Settings {
+                mode: Mode::Both,
+                transcripts
+            },
+            "{project}"
+        );
+    }
+    let project = ProjectId::new("old-project").unwrap();
+    let chosen = Settings {
+        mode: Mode::AppOnly,
+        transcripts: true,
+    };
+    save(&connection, &project, chosen).unwrap();
+    initialize(&connection).unwrap();
+    assert_eq!(
+        load(&connection, &project).unwrap(),
+        chosen,
+        "a later start keeps a choice made after the change"
+    );
+}
+
 #[cfg(target_os = "macos")]
 mod launch {
     use super::*;
@@ -298,6 +344,698 @@ mod launch {
                 .iter()
                 .any(|argument| argument == "--no-session-persistence"),
             "a launch with no project context writes no transcript, as before"
+        );
+    }
+
+    const APP_RULE: &str = "APP-INSTRUCTIONS-RULE-78";
+    const PROJECT_RULE: &str = "PROJECT-INSTRUCTIONS-RULE-79";
+
+    fn after<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
+        arguments
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+    }
+
+    /// What one launch of each harness of the project was handed: the text in a Claude
+    /// home's CLAUDE.md, Claude's startup prompt file and arguments, the text in a Codex
+    /// home's AGENTS.md and its config, and what an rcli master is given from the same
+    /// source. A harness file the launch left out reads as empty.
+    struct Handed {
+        claude: String,
+        prompt: String,
+        claude_arguments: Vec<String>,
+        codex: String,
+        config: toml::Table,
+        rcli: String,
+    }
+
+    fn launch_all(
+        case: &Case,
+        connection: &Connection,
+        project: &ProjectId,
+        round: &str,
+    ) -> Handed {
+        let context = crate::launch_context::for_project(
+            connection,
+            project,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
+        let claude = agent_home(case, &format!("claude-{round}"));
+        let (command, installed) =
+            command_with_context(&request(case, "claude-code", &claude), &context).unwrap();
+        let claude_arguments = arguments(&command);
+        let prompt = after(&claude_arguments, "--append-system-prompt-file")
+            .map(|file| fs::read_to_string(file).unwrap())
+            .unwrap_or_default();
+        let claude_text = fs::read_to_string(claude.join("CLAUDE.md")).unwrap_or_default();
+        drop(installed);
+        let codex = agent_home(case, &format!("codex-{round}"));
+        let (_, installed) =
+            command_with_context(&request(case, "codex", &codex), &context).unwrap();
+        let codex_text = fs::read_to_string(codex.join("AGENTS.md")).unwrap_or_default();
+        let config: toml::Table =
+            toml::from_str(&fs::read_to_string(codex.join("config.toml")).unwrap()).unwrap();
+        drop(installed);
+        let tx = connection.unchecked_transaction().unwrap();
+        let rcli =
+            crate::agent_home::text(&crate::launch_context::agent_project(&tx, project).unwrap())
+                .unwrap()
+                .text;
+        drop(tx);
+        Handed {
+            claude: claude_text,
+            prompt,
+            claude_arguments,
+            codex: codex_text,
+            config,
+            rcli,
+        }
+    }
+
+    #[test]
+    fn each_mode_gives_exactly_its_text_to_claude_codex_and_rcli_and_never_a_repo_or_home_file() {
+        let case = Case::new();
+        let (connection, project) = engine(&case);
+        let (app, own) = (format!("{APP_RULE}\n"), format!("{PROJECT_RULE}\n"));
+        crate::agent_home::save_app(&case.data, &app).unwrap();
+        crate::agent_home::save_project(&case.checkout, &own).unwrap();
+        let options = [
+            (Mode::ProjectOnly, crate::agent_home::render("", &own)),
+            (Mode::AppOnly, crate::agent_home::render(&app, "")),
+            (Mode::Both, crate::agent_home::render(&app, &own)),
+        ];
+        for (mode, expected) in options {
+            save(
+                &connection,
+                &project,
+                Settings {
+                    mode,
+                    transcripts: true,
+                },
+            )
+            .unwrap();
+            let handed = launch_all(&case, &connection, &project, mode.as_str());
+            assert_eq!(handed.claude, expected, "{mode:?} Claude");
+            assert_eq!(handed.codex, expected, "{mode:?} Codex");
+            assert_eq!(handed.rcli, expected, "{mode:?} rcli");
+            assert_eq!(expected.contains(APP_RULE), mode != Mode::ProjectOnly);
+            assert_eq!(expected.contains(PROJECT_RULE), mode != Mode::AppOnly);
+            assert_eq!(
+                after(&handed.claude_arguments, "--setting-sources"),
+                Some(""),
+                "{mode:?}: Claude loads no settings or memory files itself"
+            );
+            assert_eq!(
+                handed.config["project_doc_max_bytes"].as_integer(),
+                Some(0),
+                "{mode:?}: Codex never reads AGENTS.md from the worktree itself"
+            );
+            let developer = handed.config["developer_instructions"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            for rule in [
+                PROJECT_CLAUDE,
+                PROJECT_DOT_CLAUDE,
+                PROJECT_AGENTS,
+                PROJECT_LOCAL,
+                USER_CLAUDE,
+                USER_CODEX,
+                UNCOMMITTED,
+            ] {
+                for (harness, given) in [
+                    ("Claude", &handed.claude),
+                    ("Claude prompt", &handed.prompt),
+                    ("Codex", &handed.codex),
+                    ("Codex developer", &developer),
+                    ("rcli", &handed.rcli),
+                ] {
+                    assert!(!given.contains(rule), "{mode:?} {harness}: {rule}");
+                }
+            }
+        }
+        let both = crate::agent_home::render(&app, &own);
+        assert!(both.find(APP_RULE).unwrap() < both.find(PROJECT_RULE).unwrap());
+        crate::agent_home::save_project(&case.checkout, "").unwrap();
+        let handed = launch_all(&case, &connection, &project, "empty-project");
+        assert_eq!(
+            handed.claude,
+            crate::agent_home::render(&app, ""),
+            "Both with an empty project text gives the app text as it is"
+        );
+        crate::agent_home::save_app(&case.data, "").unwrap();
+        let handed = launch_all(&case, &connection, &project, "empty");
+        assert_eq!((handed.claude.as_str(), handed.codex.as_str()), ("", ""));
+        assert_eq!(handed.rcli, "");
+    }
+}
+
+#[cfg(unix)]
+mod import {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    const TRACKED_RULE: &str = "TRACKED-CLAUDE-RULE-81";
+    const TRACKED_DOT_RULE: &str = "TRACKED-DOT-CLAUDE-RULE-82";
+
+    /// One owner checkout on `main` with its instruction files committed, a bare remote it
+    /// pushed to, and an owner home with no git config, so the engine reads only the
+    /// repository's own identity.
+    struct Checkout {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        home: PathBuf,
+        folder: PathBuf,
+        remote: PathBuf,
+    }
+
+    /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
+    /// Inputs: the owner home, the folder and the arguments. Output: standard output.
+    fn git(home: &Path, dir: &Path, args: &[&str]) -> String {
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    impl Checkout {
+        fn new() -> Self {
+            let tmp = tempfile::Builder::new()
+                .prefix("ca-icommit-")
+                .tempdir_in(fs::canonicalize("/tmp").unwrap())
+                .unwrap();
+            let root = fs::canonicalize(tmp.path()).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            let (home, folder, remote) = (
+                root.join("home"),
+                root.join("repo"),
+                root.join("remote.git"),
+            );
+            for made in [&home, &folder] {
+                fs::create_dir(made).unwrap();
+            }
+            git(&home, &folder, &["init", "-q", "--template=", "-b", "main"]);
+            git(&home, &folder, &["config", "user.name", "Repo Owner"]);
+            git(
+                &home,
+                &folder,
+                &["config", "user.email", "repo@example.invalid"],
+            );
+            git(&home, &folder, &["config", "commit.gpgSign", "false"]);
+            write(
+                &folder.join("CLAUDE.md"),
+                &format!("# Rules\n\n{TRACKED_RULE}\n"),
+            );
+            write(
+                &folder.join(".claude/CLAUDE.md"),
+                &format!("{TRACKED_DOT_RULE}\n"),
+            );
+            write(&folder.join("README.md"), "Read me.\n");
+            write(
+                &folder.join(".gitignore"),
+                ".crazyagent/\nCLAUDE.local.md\n",
+            );
+            git(&home, &folder, &["add", "-A"]);
+            git(&home, &folder, &["commit", "-q", "-m", "Start"]);
+            git(
+                &home,
+                &root,
+                &["init", "-q", "--bare", "--template=", "remote.git"],
+            );
+            git(
+                &home,
+                &folder,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            git(&home, &folder, &["push", "-q", "origin", "main"]);
+            Self {
+                _tmp: tmp,
+                root,
+                home,
+                folder,
+                remote,
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            git(&self.home, &self.folder, args)
+        }
+
+        fn tip(&self) -> String {
+            self.git(&["rev-parse", "main"]).trim().to_owned()
+        }
+    }
+
+    fn marks(files: &[ImportFile]) -> Vec<(&str, bool, bool)> {
+        files
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect()
+    }
+
+    #[test]
+    fn committing_the_import_move_holds_only_the_moved_tracked_files_and_keeps_other_work() {
+        let checkout = Checkout::new();
+        write(
+            &checkout.folder.join("CLAUDE.local.md"),
+            "UNTRACKED-LOCAL-RULE\n",
+        );
+        let start = checkout.tip();
+        let moved = import(&checkout.folder).unwrap();
+        assert_eq!(
+            marks(&moved),
+            [
+                ("CLAUDE.md", true, true),
+                (".claude/CLAUDE.md", true, true),
+                ("CLAUDE.local.md", false, false)
+            ]
+        );
+        assert_eq!(
+            uncommitted(&checkout.folder).unwrap(),
+            ["CLAUDE.md", ".claude/CLAUDE.md"]
+        );
+        write(&checkout.folder.join("README.md"), "Read me twice.\n");
+        let made = commit(&checkout.folder, &checkout.home).unwrap();
+        assert_eq!(made.branch, "main");
+        assert_eq!(made.files, ["CLAUDE.md", ".claude/CLAUDE.md"]);
+        assert_eq!(checkout.tip(), made.commit);
+        assert_eq!(
+            checkout
+                .git(&[
+                    "log",
+                    "-1",
+                    "--format=%P|%an <%ae>|%cn <%ce>|%s",
+                    &made.commit
+                ])
+                .trim(),
+            format!(
+                "{start}|Repo Owner <repo@example.invalid>|Repo Owner <repo@example.invalid>|Move CLAUDE.md, .claude/CLAUDE.md into .crazyagent/imported/"
+            )
+        );
+        assert_eq!(
+            checkout.git(&[
+                "diff",
+                "--name-status",
+                "--no-renames",
+                &start,
+                &made.commit
+            ]),
+            "D\t.claude/CLAUDE.md\nD\tCLAUDE.md\n",
+            "the commit holds the two tracked deletions and nothing else"
+        );
+        assert_eq!(
+            checkout.git(&["status", "--porcelain"]),
+            " M README.md\n",
+            "the owner's own edit stays unstaged and out of the commit"
+        );
+        assert_eq!(
+            git(&checkout.home, &checkout.remote, &["rev-parse", "main"]).trim(),
+            start,
+            "nothing was pushed"
+        );
+        assert_eq!(
+            checkout
+                .git(&["rev-parse", "refs/remotes/origin/main"])
+                .trim(),
+            start
+        );
+        assert!(uncommitted(&checkout.folder).unwrap().is_empty());
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+        let instructions =
+            fs::read_to_string(checkout.folder.join(".crazyagent/instructions.md")).unwrap();
+        assert!(instructions.contains(TRACKED_RULE) && instructions.contains(TRACKED_DOT_RULE));
+    }
+
+    #[test]
+    fn the_import_commit_refuses_and_changes_nothing() {
+        let checkout = Checkout::new();
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none",
+            "nothing was moved"
+        );
+        import(&checkout.folder).unwrap();
+        let start = checkout.tip();
+        let unchanged = |staged: &str| {
+            assert_eq!(checkout.tip(), start);
+            assert_eq!(checkout.git(&["diff", "--cached", "--name-only"]), staged);
+            assert_eq!(
+                uncommitted(&checkout.folder).unwrap(),
+                ["CLAUDE.md", ".claude/CLAUDE.md"]
+            );
+        };
+        write(&checkout.folder.join("NEW.md"), "new\n");
+        checkout.git(&["add", "NEW.md"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_staged"
+        );
+        unchanged("NEW.md\n");
+        checkout.git(&["rm", "-q", "--cached", "NEW.md"]);
+        for state in ["MERGE_HEAD", "index.lock"] {
+            let path = checkout.folder.join(".git").join(state);
+            fs::write(&path, format!("{start}\n")).unwrap();
+            assert_eq!(
+                commit(&checkout.folder, &checkout.home).unwrap_err().0,
+                "process_commit_busy",
+                "{state}"
+            );
+            fs::remove_file(&path).unwrap();
+            unchanged("");
+        }
+        checkout.git(&["config", "--unset", "user.name"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_identity"
+        );
+        unchanged("");
+        checkout.git(&["config", "user.name", "Repo Owner"]);
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_detached"
+        );
+        assert_eq!(checkout.git(&["rev-parse", "HEAD"]).trim(), start);
+        checkout.git(&["checkout", "-q", "main"]);
+        unchanged("");
+        checkout.git(&["checkout", "-q", "--", "CLAUDE.md", ".claude/CLAUDE.md"]);
+        assert!(
+            uncommitted(&checkout.folder).unwrap().is_empty(),
+            "restored originals need no commit"
+        );
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+        assert_eq!(checkout.tip(), start);
+    }
+
+    #[test]
+    fn a_folder_without_git_moves_its_files_with_nothing_to_commit() {
+        let checkout = Checkout::new();
+        let plain = checkout.root.join("plain");
+        write(&plain.join("CLAUDE.md"), "PLAIN-RULE\n");
+        let moved = import(&plain).unwrap();
+        assert_eq!(marks(&moved), [("CLAUDE.md", false, false)]);
+        assert!(plain.join(".crazyagent/imported/CLAUDE.md").is_file());
+        assert!(uncommitted(&plain).unwrap().is_empty());
+        assert_eq!(
+            commit(&plain, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+    }
+
+    #[test]
+    fn the_onboarding_moved_list_marks_a_tracked_move_until_it_is_committed() {
+        let checkout = Checkout::new();
+        let connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        let project = ProjectId::new("import-commit").unwrap();
+        record_moved(&connection, &project, &import(&checkout.folder).unwrap()).unwrap();
+        let listed = || {
+            moved(&connection, &project, &checkout.folder)
+                .unwrap()
+                .into_iter()
+                .map(|file| (file.path, file.uncommitted))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed(),
+            [
+                ("CLAUDE.md".to_owned(), true),
+                (".claude/CLAUDE.md".to_owned(), true)
+            ]
+        );
+        commit(&checkout.folder, &checkout.home).unwrap();
+        assert_eq!(
+            listed(),
+            [
+                ("CLAUDE.md".to_owned(), false),
+                (".claude/CLAUDE.md".to_owned(), false)
+            ]
+        );
+    }
+
+    fn refusals(files: &[ImportFile]) -> Vec<(&str, Option<&str>)> {
+        files
+            .iter()
+            .map(|file| (file.path.as_str(), file.refused.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn an_import_copies_each_text_once_merging_a_link_and_a_copy_and_a_retry_adds_nothing() {
+        let checkout = Checkout::new();
+        let folder = &checkout.folder;
+        std::os::unix::fs::symlink("CLAUDE.md", folder.join("AGENTS.md")).unwrap();
+        write(
+            &folder.join("CLAUDE.local.md"),
+            &format!("{TRACKED_DOT_RULE}\n"),
+        );
+        fs::create_dir(folder.join(".crazyagent")).unwrap();
+        crate::agent_home::save_project(folder, "Existing project rule.\n").unwrap();
+        let claude = format!("# Rules\n\n{TRACKED_RULE}\n").len() as u64;
+        let dot = format!("{TRACKED_DOT_RULE}\n").len() as u64;
+        assert_eq!(
+            pending(folder).unwrap(),
+            [
+                ("CLAUDE.md", claude, true),
+                (".claude/CLAUDE.md", dot, true),
+                ("AGENTS.md", claude, false),
+                ("CLAUDE.local.md", dot, false)
+            ]
+            .map(|(path, bytes, tracked)| ImportFile {
+                path: path.to_owned(),
+                bytes,
+                tracked,
+                refused: None,
+                uncommitted: false,
+            }),
+            "listing changes nothing and marks what git tracks"
+        );
+        assert!(folder.join("CLAUDE.md").is_file());
+        let moved = import(folder).unwrap();
+        assert_eq!(
+            marks(&moved),
+            [
+                ("CLAUDE.md", true, true),
+                (".claude/CLAUDE.md", true, true),
+                ("AGENTS.md", false, false),
+                ("CLAUDE.local.md", false, false)
+            ]
+        );
+        let expected = format!(
+            "Existing project rule.\n\n## Imported from CLAUDE.md, AGENTS.md\n\n# Rules\n\n{TRACKED_RULE}\n\n## Imported from .claude/CLAUDE.md, CLAUDE.local.md\n\n{TRACKED_DOT_RULE}\n"
+        );
+        let instructions = folder.join(".crazyagent/instructions.md");
+        assert_eq!(fs::read_to_string(&instructions).unwrap(), expected);
+        let imported = folder.join(".crazyagent/imported");
+        for path in PROJECT_FILES {
+            assert!(
+                fs::symlink_metadata(folder.join(path)).is_err(),
+                "{path} left the project folder"
+            );
+        }
+        assert!(
+            fs::symlink_metadata(imported.join("AGENTS.md"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "a link is moved as the link"
+        );
+        assert_eq!(
+            fs::read_to_string(imported.join(".claude/CLAUDE.md")).unwrap(),
+            format!("{TRACKED_DOT_RULE}\n")
+        );
+        assert_eq!(
+            checkout.git(&["status", "--porcelain"]),
+            " D .claude/CLAUDE.md\n D CLAUDE.md\n"
+        );
+        write(
+            &folder.join("CLAUDE.md"),
+            &format!("# Rules\n\n{TRACKED_RULE}\n"),
+        );
+        let again = import(folder).unwrap();
+        assert_eq!(marks(&again), [("CLAUDE.md", true, true)]);
+        assert_eq!(
+            fs::read_to_string(&instructions).unwrap(),
+            expected,
+            "text already there is never copied twice"
+        );
+        assert_eq!(
+            fs::read_to_string(imported.join("CLAUDE.md.2")).unwrap(),
+            format!("# Rules\n\n{TRACKED_RULE}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(imported.join("CLAUDE.md")).unwrap(),
+            format!("# Rules\n\n{TRACKED_RULE}\n"),
+            "the earlier move stays where it was"
+        );
+    }
+
+    #[test]
+    fn an_import_leaves_links_out_and_a_fifo_in_place() {
+        let checkout = Checkout::new();
+        let folder = checkout.root.join("refusing");
+        fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        fs::create_dir(folder.join(".claude")).unwrap();
+        let outside = checkout.root.join("outside.md");
+        write(&outside, "OUTSIDE-RULE\n");
+        write(&folder.join(".crazyagent/notes.md"), "STATE-RULE\n");
+        std::os::unix::fs::symlink(&outside, folder.join("CLAUDE.md")).unwrap();
+        std::os::unix::fs::symlink("../.crazyagent/notes.md", folder.join(".claude/CLAUDE.md"))
+            .unwrap();
+        let fifo = crate::spawn_gate::output(
+            Command::new("/usr/bin/mkfifo")
+                .arg(folder.join("AGENTS.md"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(fifo.status.success(), "{fifo:?}");
+        let refused = [
+            ("CLAUDE.md", Some("process_import_outside")),
+            (".claude/CLAUDE.md", Some("process_import_outside")),
+            ("AGENTS.md", Some("process_import_unsafe")),
+        ];
+        assert_eq!(refusals(&pending(&folder).unwrap()), refused);
+        assert!(import(&folder).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+            ""
+        );
+        for (path, _) in refused {
+            assert!(fs::symlink_metadata(folder.join(path)).is_ok(), "{path}");
+            assert!(
+                fs::symlink_metadata(folder.join(".crazyagent/imported").join(path)).is_err(),
+                "{path}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "OUTSIDE-RULE\n");
+        fs::remove_file(folder.join("CLAUDE.md")).unwrap();
+        write(&folder.join("CLAUDE.md"), "OWN-RULE\n");
+        let moved = import(&folder).unwrap();
+        assert_eq!(refusals(&moved), [("CLAUDE.md", None)]);
+        assert_eq!(
+            fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+            "## Imported from CLAUDE.md\n\nOWN-RULE\n"
+        );
+        assert_eq!(refusals(&pending(&folder).unwrap()), refused[1..].to_vec());
+    }
+
+    #[test]
+    fn an_import_past_the_instructions_limit_moves_nothing() {
+        let checkout = Checkout::new();
+        let folder = checkout.root.join("large");
+        let half = "a".repeat(crate::agent_home::TEXT_BYTES_MAX / 2 + 16);
+        write(&folder.join("CLAUDE.md"), &half);
+        write(&folder.join("AGENTS.md"), &half.replace('a', "b"));
+        write(
+            &folder.join("CLAUDE.local.md"),
+            &"c".repeat(crate::agent_home::TEXT_BYTES_MAX + 1),
+        );
+        assert_eq!(
+            refusals(&pending(&folder).unwrap()),
+            [
+                ("CLAUDE.md", None),
+                ("AGENTS.md", None),
+                ("CLAUDE.local.md", Some("process_text_too_large"))
+            ]
+        );
+        assert_eq!(import(&folder).unwrap_err().0, "process_text_too_large");
+        assert_eq!(
+            fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+            ""
+        );
+        for path in ["CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"] {
+            assert!(folder.join(path).is_file(), "{path} stays");
+        }
+        assert!(fs::symlink_metadata(folder.join(".crazyagent/imported/CLAUDE.md")).is_err());
+    }
+
+    #[test]
+    fn a_picked_file_is_read_only_when_it_is_the_owners_plain_text() {
+        let checkout = Checkout::new();
+        let picks = checkout.root.join("picks");
+        write(&picks.join("notes.md"), "PICKED-RULE\n");
+        std::os::unix::fs::symlink(picks.join("notes.md"), picks.join("linked.md")).unwrap();
+        assert_eq!(
+            read_picked(&picks.join("linked.md")).unwrap(),
+            "PICKED-RULE\n"
+        );
+        assert_eq!(
+            read_picked(Path::new("picks/notes.md")).unwrap_err().0,
+            "process_request_invalid"
+        );
+        std::os::unix::fs::symlink(picks.join("gone.md"), picks.join("dangling.md")).unwrap();
+        assert_eq!(
+            read_picked(&picks.join("dangling.md")).unwrap_err().0,
+            "process_import_missing"
+        );
+        assert_eq!(read_picked(&picks).unwrap_err().0, "process_import_unsafe");
+        write(
+            &picks.join("large.md"),
+            &"d".repeat(crate::agent_home::TEXT_BYTES_MAX + 1),
+        );
+        assert_eq!(
+            read_picked(&picks.join("large.md")).unwrap_err().0,
+            "process_text_too_large"
+        );
+        fs::write(picks.join("binary.md"), [0xff, 0xfe, b'\n']).unwrap();
+        assert_eq!(
+            read_picked(&picks.join("binary.md")).unwrap_err().0,
+            "process_text_invalid"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn another_owners_file_is_never_imported_or_read_as_a_pick() {
+        let checkout = Checkout::new();
+        let folder = checkout.root.join("foreign");
+        fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        fs::hard_link("/private/etc/hosts", folder.join("CLAUDE.local.md")).unwrap();
+        let refused = [("CLAUDE.local.md", Some("process_import_unsafe"))];
+        assert_eq!(refusals(&pending(&folder).unwrap()), refused);
+        assert!(import(&folder).unwrap().is_empty());
+        assert_eq!(
+            fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+            ""
+        );
+        assert!(fs::symlink_metadata(folder.join("CLAUDE.local.md")).is_ok());
+        assert!(fs::symlink_metadata(folder.join(".crazyagent/imported/CLAUDE.local.md")).is_err());
+        assert_eq!(
+            read_picked(&folder.join("CLAUDE.local.md")).unwrap_err().0,
+            "process_import_unsafe"
         );
     }
 }

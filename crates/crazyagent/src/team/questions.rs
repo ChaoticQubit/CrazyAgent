@@ -639,3 +639,7 @@ fn waiting_words(waiting: Waiting) -> &'static str {
         Waiting::Question => "a question",
     }
 }
+
+#[cfg(test)]
+#[path = "questions/tests.rs"]
+mod tests;
