@@ -7004,6 +7004,80 @@ fn reap_skips_lead_with_working_teammate_or_sent_message() {
     team.shutdown().unwrap();
 }
 
+#[test]
+fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = fixture.runtime();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let record = fixture.pane(&host, lead);
+    let agent = AgentId::team(lead).unwrap();
+    team.run_worker(
+        lead,
+        Launch::Adopt(Box::new(Adoption {
+            host: host.clone(),
+            agent: agent.clone(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join("lead-home"),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+        })),
+        Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: AgentRole::Sub,
+            harness: "claude-code".into(),
+            connection: reference(ENDPOINT),
+            tools: false,
+            hosted: None,
+        },
+    )
+    .unwrap();
+    assert!(team.workers[&lead].kept_session);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,NULL,NULL,1)
+             ON CONFLICT(project) DO UPDATE SET idle_secs=excluded.idle_secs",
+            [PROJECT],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,'working',1,1,?2,'%3')",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    let teammate = fixture.connection.last_insert_rowid();
+    let past_limit = |team: &mut TeamRuntime| {
+        team.workers.get_mut(&lead).unwrap().idle_since =
+            Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+    };
+    past_limit(&mut team);
+    team.reap_idle(&fixture.setup).unwrap();
+    assert!(
+        !team.workers[&lead].stopping,
+        "a working teammate holds its kept lead past the idle limit"
+    );
+    assert!(host.alive().unwrap().contains(&agent));
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [teammate])
+        .unwrap();
+    past_limit(&mut team);
+    team.reap_idle(&fixture.setup).unwrap();
+    assert!(
+        team.workers[&lead].stopping,
+        "with its teammate idle the same reap pass stops the lead"
+    );
+    team.shutdown().unwrap();
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
 /// lead an earlier engine left running. A Stop before any order, or a first order without
 /// the signed-in account, ends its pane; a Stop while the engine leaves panes running
