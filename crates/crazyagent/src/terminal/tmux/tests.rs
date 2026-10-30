@@ -642,3 +642,103 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
     let all: Vec<AgentId> = (1..=STARTED).map(|id| AgentId::team(id).unwrap()).collect();
     assert_eq!(host.alive().unwrap(), all);
 }
+
+/// Splits a pane of a test's own private tmux server, as a native harness splits its window
+/// for a teammate. Takes the server and the pane to split. Panics unless tmux splits it.
+#[cfg(target_os = "macos")]
+fn split(server: &Server, pane: &str) {
+    let status = crate::spawn_gate::status(
+        Command::new(&server.tmux)
+            .arg("-S")
+            .arg(&server.socket)
+            .args(["split-window", "-d", "-t", pane, "exec /bin/sleep 60"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(status.success(), "tmux split the pane");
+}
+
+/// A harness's teammate pane is listed under its agent and ended on its own (S4): `panes`
+/// lists the panes of the agent's window, and `kill_pane` ends only the named one while it
+/// refuses an invalid id, another agent's pane, an unknown pane and the window's last pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let sleeper = || InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let lead = AgentId::team(1).unwrap();
+    let other = AgentId::team(2).unwrap();
+    host.spawn(&lead, &sleeper()).unwrap();
+    host.spawn(&other, &sleeper()).unwrap();
+    let first = host.panes(&lead).unwrap();
+    assert_eq!(first.len(), 1, "{first:?}");
+    let kept = first[0].id.clone();
+    assert!(pane_id_valid(&kept), "{kept}");
+    split(&server, &kept);
+    let panes = host.panes(&lead).unwrap();
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert!(
+        panes.iter().all(|pane| !pane.dead && pane.pid > 0),
+        "{panes:?}"
+    );
+    let teammate = panes
+        .iter()
+        .find(|pane| pane.id != kept)
+        .unwrap()
+        .id
+        .clone();
+    let foreign = host.panes(&other).unwrap()[0].id.clone();
+    for (pane, why) in [
+        ("pane-1", "an invalid id"),
+        (foreign.as_str(), "another agent's pane"),
+        ("%999999", "an unknown pane"),
+    ] {
+        assert_eq!(
+            host.kill_pane(&lead, pane).unwrap_err().0,
+            "terminal_pane_unknown",
+            "{why}"
+        );
+    }
+    assert_eq!(host.panes(&other).unwrap().len(), 1);
+    assert_eq!(host.panes(&lead).unwrap().len(), 2);
+
+    host.kill_pane(&lead, &teammate).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let left = loop {
+        let left = host.panes(&lead).unwrap();
+        if left.len() == 1 {
+            break left;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the teammate pane ended: {left:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(left[0].id, kept, "the lead's own pane stays");
+    assert_eq!(
+        host.kill_pane(&lead, &kept).unwrap_err().0,
+        "terminal_pane_unknown",
+        "the window's last pane is not a teammate"
+    );
+    assert_eq!(host.panes(&lead).unwrap().len(), 1);
+    assert_eq!(host.panes(&other).unwrap().len(), 1);
+}

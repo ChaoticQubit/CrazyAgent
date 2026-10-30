@@ -1232,6 +1232,55 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     assert_eq!(resumed.phase, MasterSessionPhase::Configured);
 }
 
+/// A new session on a project whose master runs live turns the live switch on once the
+/// engine has made the new session, so the live master starts on the fresh conversation
+/// even when it was stopped or never started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_on_a_live_master_turns_the_switch_on() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    let before = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_ne!(before.live_master, Some(true), "the switch starts off");
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+
+    shell.key(Key::Char('n'));
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !sent.contains(&"team change") {
+        assert!(
+            Instant::now() < deadline,
+            "the switch never turned on: {sent:?}"
+        );
+        shell.refresh();
+        sent.extend(pump(&mut shell, &mut connection).await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let new = sent.iter().position(|label| *label == "master");
+    let change = sent.iter().position(|label| *label == "team change");
+    assert!(
+        new.is_some() && new < change,
+        "the switch turns on after the new session is asked for: {sent:?}"
+    );
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    let after = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert!(
+        after.live_master.is_some(),
+        "the engine took the switch change for a live-capable master: {:?} {:?}",
+        after.live_master,
+        after.live_problem
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_on_home() {
     let mut engine = Engine::start().await;

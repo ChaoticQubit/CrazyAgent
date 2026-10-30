@@ -1574,9 +1574,10 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<58}s Stop live master",
+            "{:<63}n New session",
             "Live master on. It starts when you open this view."
-        )
+        ),
+        "at 80 columns the state stays whole and l Sessions stays in the hints"
     );
     assert_eq!(
         chars(&rows[3], 2, 78),
@@ -1653,12 +1654,16 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
         "Ctrl-] leaves the terminal open"
     );
     let rows = render(&mut shell);
-    assert!(rows[23].contains("s Stop live master"), "{}", rows[23]);
-    assert!(
-        rows[23].contains("Esc Earlier conversation"),
-        "{}",
-        rows[23]
-    );
+    for shown in ["n New session", "l Sessions", "Esc Back"] {
+        assert!(rows[23].contains(shown), "{shown}: {}", rows[23]);
+    }
+    for gone in [
+        "Stop live master",
+        "Start live master",
+        "Earlier conversation",
+    ] {
+        assert!(!rows[23].contains(gone), "{gone}: {}", rows[23]);
+    }
     shell.key(Key::Char('z'));
     assert!(
         requests(&mut shell)
@@ -1673,43 +1678,88 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     );
 }
 
+/// Opening the master view turns a stored switch that is off on, once per open and whatever
+/// stopped it, and shows it starting rather than the reason it stopped. The header and hints
+/// carry no stop or start key. A stop the engine makes right after says why and that opening
+/// the view or a new session starts it again; a switch already on is left alone.
 #[test]
-fn the_master_view_header_stops_and_starts_the_live_master_and_says_why_it_stopped() {
+fn the_master_view_turns_an_off_switch_on_at_open() {
     let mut shell = master_view(80, 24);
     requests(&mut shell);
-    shell.arrive(switch(Some(true), None));
-    assert!(
-        requests(&mut shell).is_empty(),
-        "a switch already on is not turned on again"
-    );
-    shell.arrive(Arrival::TeamGraph {
-        project: project(),
-        result: Ok(graph()),
-    });
-    requests(&mut shell);
-    shell.key(LEADER);
-    shell.key(Key::Char('s'));
+    let why = "The live master could not start: no signed-in account.";
+    shell.arrive(switch(Some(false), Some(why)));
     let sent = requests(&mut shell);
-    assert_eq!(sent.len(), 2, "{sent:?}");
-    assert!(matches!(&sent[0], Request::TerminalDetach { agent } if agent.as_str() == "team-1"));
-    assert!(live_master_change(&sent[1], false), "{sent:?}");
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        live_master_change(&sent[0], true),
+        "a stored switch false turns on at open: {sent:?}"
+    );
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!("{:<57}s Start live master", "Live master stopped.")
+        format!(
+            "{:<63}n New session",
+            "Live master on. It starts when you open this view."
+        )
     );
     assert_eq!(
         chars(&rows[4], 2, 78),
         format!(
             "│{:<74}│",
-            "The live master is stopped. Its terminal opens again once you start it."
-        )
+            "Starting the master's terminal. It opens once the master signs in and"
+        ),
+        "the start replaces the reason the master stopped"
     );
+    assert!(!rows[2].contains("  s "), "{}", rows[2]);
+    assert!(rows[23].contains("Esc Back"), "{}", rows[23]);
+    for gone in [
+        "Stop live master",
+        "Start live master",
+        "Earlier conversation",
+        "Press s",
+    ] {
+        assert!(
+            rows.iter().all(|row| !row.contains(gone)),
+            "{gone}: {rows:?}"
+        );
+    }
+
+    shell.arrive(turned(true, Ok(())));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [read] if switch_read(read)),
+        "an accepted change reads the switch again: {sent:?}"
+    );
+    let again =
+        "The live master was turned off: it could not start. Start it again from the master view.";
+    shell.arrive(switch(Some(false), Some(again)));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "the view turns the switch on once per open"
+    );
+    let rows = render(&mut shell);
     assert_eq!(
-        chars(&rows[5], 2, 78),
-        format!("│{:<74}│", "Press s to start it.")
+        chars(&rows[2], 2, 78),
+        format!("{:<51}n New session  l Sessions", "Live master stopped.")
     );
-    assert!(rows[23].contains("s Start live master"), "{}", rows[23]);
+    assert!(
+        rows[4].contains("The live master was turned off"),
+        "{}",
+        rows[4]
+    );
+    let restart = rows[4..10].join("\n");
+    assert!(
+        restart.contains("It starts again when you open this view again or press n for a new"),
+        "{restart}"
+    );
+    assert!(restart.contains("session."), "{restart}");
+    shell.key(Key::Char('s'));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| !live_master_change(sent, true) && !live_master_change(sent, false)),
+        "s neither stops nor starts the live master"
+    );
     shell.arrive(Arrival::TeamGraph {
         project: project(),
         result: Ok(graph()),
@@ -1719,53 +1769,22 @@ fn the_master_view_header_stops_and_starts_the_live_master_and_says_why_it_stopp
         "a stopped master's terminal is not opened"
     );
 
-    let mut guarded = master_view(80, 24);
-    requests(&mut guarded);
-    let why = "The live master could not start: no signed-in account.";
-    guarded.arrive(switch(Some(false), Some(why)));
+    let mut running = master_view(100, 24);
+    requests(&mut running);
+    running.arrive(switch(Some(true), None));
     assert!(
-        requests(&mut guarded).is_empty(),
-        "a switch turned off is not turned on by opening the view"
+        requests(&mut running).is_empty(),
+        "a switch already on is not turned on again"
     );
-    let rows = render(&mut guarded);
-    assert_eq!(chars(&rows[4], 2, 78), format!("│{why:<74}│"));
+    let rows = render(&mut running);
     assert_eq!(
-        chars(&rows[5], 2, 78),
-        format!("│{:<74}│", "Press s to start it.")
+        chars(&rows[2], 2, 98),
+        format!(
+            "{:<71}n New session  l Sessions",
+            "Live master on. It starts when you open this view."
+        ),
+        "a wide view shows both session keys"
     );
-    guarded.key(Key::Char('s'));
-    let sent = requests(&mut guarded);
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert!(live_master_change(&sent[0], true), "{sent:?}");
-    let rows = render(&mut guarded);
-    assert!(rows[2].contains("Live master on."), "{}", rows[2]);
-    assert!(
-        rows[4].contains("Starting the master's terminal."),
-        "{}",
-        rows[4]
-    );
-
-    guarded.arrive(turned(true, Ok(())));
-    let sent = requests(&mut guarded);
-    assert!(
-        matches!(sent.as_slice(), [read] if switch_read(read)),
-        "an accepted change reads the switch again: {sent:?}"
-    );
-    let again =
-        "The live master was turned off: it could not start. Start it again from the master view.";
-    guarded.arrive(switch(Some(false), Some(again)));
-    let rows = render(&mut guarded);
-    assert!(
-        rows[2].contains("Live master stopped."),
-        "the engine stopping it right after the owner's start is shown: {}",
-        rows[2]
-    );
-    assert!(
-        rows[4].contains("The live master was turned off"),
-        "{}",
-        rows[4]
-    );
-    assert!(rows[23].contains("s Start live master"), "{}", rows[23]);
 }
 
 #[test]
@@ -1780,11 +1799,17 @@ fn a_failed_switch_read_never_starts_the_live_master() {
         "a read that failed is not a switch never set"
     );
     shell.arrive(switch(Some(false), None));
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(
+        live_master_change(&sent[0], true),
+        "the open turns the stored switch on: {sent:?}"
+    );
     shell.arrive(failed_read("engine_unavailable"));
     assert!(requests(&mut shell).is_empty());
     let rows = render(&mut shell);
     assert!(
-        rows[2].contains("Live master stopped."),
+        rows[2].contains("Live master on."),
         "a failed read keeps the switch it had: {}",
         rows[2]
     );
@@ -1829,18 +1854,18 @@ fn keys_typed_after_the_master_terminal_closes_never_turn_the_live_master_off() 
     );
     let rows = render(&mut shell);
     assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
-    assert!(rows[2].contains("s Stop live master"), "{}", rows[2]);
+    assert!(rows[2].contains("n New session"), "{}", rows[2]);
     assert!(rows[23].contains("Ctrl-] Leave terminal"), "{}", rows[23]);
 
     shell.key(LEADER);
     let rows = render(&mut shell);
-    assert!(rows[23].contains("s Stop live master"), "{}", rows[23]);
+    assert!(rows[23].contains("Esc Back"), "{}", rows[23]);
     shell.key(Key::Char('s'));
     let sent = requests(&mut shell);
     assert!(
         sent.iter()
-            .any(|request| live_master_change(request, false)),
-        "s still stops the live master once the owner left the terminal: {sent:?}"
+            .all(|request| !live_master_change(request, false)),
+        "no key of the master view stops the live master: {sent:?}"
     );
 }
 
@@ -2208,21 +2233,17 @@ fn a_removal_the_engine_could_not_confirm_says_so_and_asks_for_a_fresh_read() {
 }
 
 #[test]
-fn the_master_view_names_its_way_back_as_the_earlier_conversation() {
+fn the_master_view_names_its_way_back_as_back() {
     let mut shell = master_view(80, 24);
     requests(&mut shell);
     let rows = render(&mut shell);
-    assert!(
-        rows[23].contains("Esc Earlier conversation"),
-        "{}",
-        rows[23]
-    );
-    assert!(!rows[23].contains("Esc Back"), "{}", rows[23]);
+    assert!(rows[23].contains("Esc Back"), "{}", rows[23]);
+    assert!(!rows[23].contains("Earlier conversation"), "{}", rows[23]);
 }
 
 /// The master view's header says where the live session's master harness last switched and
-/// what the new harness got, next to the switch key, and keeps saying it after the owner
-/// turns the live master off.
+/// what the new harness got, whole at 80 columns next to the session keys, and keeps saying
+/// it once the live master stops; the first read of this open that finds it off turns it on.
 #[test]
 fn the_master_view_head_says_the_live_session_switched_harness() {
     let mut shell = master_view(80, 24);
@@ -2241,7 +2262,7 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<58}s Stop live master",
+            "{:<63}n New session",
             "Live master on. Switched to Claude Code, carried over."
         )
     );
@@ -2261,15 +2282,27 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<57}s Start live master",
-            "Live master stopped. Switched to Claude Code, started …"
+            "{:<63}n New session",
+            "Live master stopped. Switched to Claude Code, started fresh."
         )
     );
+    requests(&mut shell);
     shell.arrive(switch_off_unswitched());
+    let sent = requests(&mut shell);
+    assert_eq!(
+        sent.iter()
+            .filter(|sent| live_master_change(sent, true))
+            .count(),
+        1,
+        "{sent:?}"
+    );
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!("{:<57}s Start live master", "Live master stopped.")
+        format!(
+            "{:<63}n New session",
+            "Live master on. It starts when you open this view."
+        )
     );
 }
 

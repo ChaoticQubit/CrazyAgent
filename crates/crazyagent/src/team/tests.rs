@@ -4187,3 +4187,421 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         "the settings are per project"
     );
 }
+
+/// Applies one owner change through the engine's own `execute`, as a client's change is.
+/// Takes the connection and the action. Panics unless the engine applied it.
+fn applied(connection: &mut Connection, action: TeamAction) {
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &ModelAccess::default(), &action).unwrap(),
+        Outcome::Applied,
+        "{action:?}"
+    );
+    tx.commit().unwrap();
+}
+
+/// A team database holding one stored project, for the owner changes that read its setup.
+/// Takes the project id. Returns the folder guard, the connection and the project.
+fn team_database(project: &str) -> (tempfile::TempDir, Connection, ProjectId) {
+    let (directory, connection) = database();
+    let setup = stored(project, vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![project, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    (directory, connection, setup.project_id)
+}
+
+/// Records tokens an agent used in the usage hour that holds `at`, as usage capture does,
+/// one row per session. Takes the connection, the project, the session, the time and the
+/// input and output tokens.
+fn used_tokens(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    at: i64,
+    input: i64,
+    output: i64,
+) {
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','codex',?3,?4,?5,0,0)",
+            params![hour_of(at), project.as_str(), session, input, output],
+        )
+        .unwrap();
+}
+
+/// The owner's token budget stops the whole team once, at the budget, for every budget
+/// choice (S4): use earlier in the hour the budget was set never counts, one token short
+/// leaves the team running, reaching it pauses the project and sends one budget_stopped
+/// notification, and starting the team again restarts the count.
+#[test]
+fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
+    for tokens in BUDGET_CHOICES {
+        let (_directory, mut connection, project) = team_database("team-budget");
+        crate::usage::initialize(&connection).unwrap();
+        let earlier = now_ms();
+        used_tokens(&connection, &project, "before", earlier, 4_000, 1_000);
+        applied(
+            &mut connection,
+            TeamAction::TokenBudget {
+                project_id: project.clone(),
+                tokens: Some(tokens),
+            },
+        );
+        let read = budget(&connection, &project).unwrap().unwrap();
+        assert_eq!(
+            (read.tokens, read.used, read.reached),
+            (tokens, 0, false),
+            "{tokens}: the hour's earlier use is left out"
+        );
+        let now = now_ms();
+        let short = i64::try_from(tokens).unwrap() - 1;
+        used_tokens(&connection, &project, "short", now, short - 10, 10);
+        assert!(
+            !budget_stop(&connection, &project, now).unwrap(),
+            "{tokens}"
+        );
+        assert!(!paused(&connection, &project).unwrap());
+        used_tokens(&connection, &project, "last", now, 1, 0);
+        assert!(budget_stop(&connection, &project, now).unwrap(), "{tokens}");
+        assert!(
+            !budget_stop(&connection, &project, now + 1).unwrap(),
+            "only once"
+        );
+        assert!(paused(&connection, &project).unwrap());
+        let notes: Vec<(String, String)> = connection
+            .prepare("SELECT kind,text FROM team_notifications WHERE project=?1")
+            .unwrap()
+            .query_map([project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            notes,
+            vec![(
+                "budget_stopped".to_owned(),
+                format!(
+                    "The team stopped: its agents used {} of the {} token budget. Raise the budget or start the team again to continue.",
+                    token_words(tokens),
+                    token_words(tokens)
+                )
+            )],
+            "{tokens}"
+        );
+
+        applied(
+            &mut connection,
+            TeamAction::Resume {
+                project_id: project.clone(),
+            },
+        );
+        let again = budget(&connection, &project).unwrap().unwrap();
+        assert_eq!(
+            (again.used, again.reached),
+            (0, false),
+            "{tokens}: starting the team again restarts the count"
+        );
+        assert!(!paused(&connection, &project).unwrap());
+        assert!(!budget_stop(&connection, &project, now_ms()).unwrap());
+    }
+}
+
+/// Inserts one agent row. Takes the connection, the project, the role, its lead and its
+/// status. Returns its id.
+fn agent_row(
+    connection: &Connection,
+    project: &ProjectId,
+    role: AgentRole,
+    parent: Option<i64>,
+    status: AgentStatus,
+) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES (?1,?2,'codex',1,?3,1,1,?4)",
+            params![project.as_str(), role.name(), status.name(), parent],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
+/// Records a teammate pane the engine saw in a lead's terminal. Takes the connection, the
+/// project, the lead and the pane id.
+fn teammate_pane(connection: &Connection, project: &ProjectId, lead: i64, pane: &str) {
+    connection
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (?1,?2,?3,1)",
+            params![lead, project.as_str(), pane],
+        )
+        .unwrap();
+}
+
+/// A sub-agent lead is admitted another sub-agent until it runs the owner's Max teammates
+/// per harness, for every choice (DEC-104 K8): its running app-spawned workers count, a
+/// stopped one does not, and the refusal names the cap and the count.
+#[test]
+fn admit_sub_agent_refuses_a_lead_at_each_max_teammates_choice() {
+    for cap in CAP_CHOICES {
+        let (_directory, mut connection, project) = team_database("team-caps");
+        let lead = agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            None,
+            AgentStatus::Working,
+        );
+        assert_eq!(caps::admit_sub_agent(&connection, &project, lead), Ok(()));
+        applied(
+            &mut connection,
+            TeamAction::MaxTeammates {
+                project_id: project.clone(),
+                max: Some(cap),
+            },
+        );
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            Some(lead),
+            AgentStatus::Stopped,
+        );
+        for running in 0..cap {
+            assert_eq!(
+                caps::admit_sub_agent(&connection, &project, lead),
+                Ok(()),
+                "cap {cap} with {running} running"
+            );
+            agent_row(
+                &connection,
+                &project,
+                AgentRole::Sub,
+                Some(lead),
+                AgentStatus::Working,
+            );
+        }
+        assert_eq!(
+            caps::admit_sub_agent(&connection, &project, lead),
+            Err(format!(
+                "The owner allows at most {cap} sub-agents per harness, and this harness already runs {cap}. Wait for one to finish, or ask the owner to raise Max teammates per harness."
+            ))
+        );
+    }
+}
+
+/// A lead's native teammates count once (DEC-104 K8): as the larger of their agent rows and
+/// the teammate panes the engine saw, never their sum, next to its app-spawned workers; an
+/// ended or stopped pane does not count.
+#[test]
+fn admit_sub_agent_counts_native_teammates_as_rows_or_panes_not_both() {
+    let (_directory, mut connection, project) = team_database("team-native");
+    let lead = agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        None,
+        AgentStatus::Working,
+    );
+    applied(
+        &mut connection,
+        TeamAction::MaxTeammates {
+            project_id: project.clone(),
+            max: Some(3),
+        },
+    );
+    for _ in 0..2 {
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Teammate,
+            Some(lead),
+            AgentStatus::Working,
+        );
+    }
+    teammate_pane(&connection, &project, lead, "%4");
+    teammate_pane(&connection, &project, lead, "%5");
+    teammate_pane(&connection, &project, lead, "%6");
+    connection
+        .execute("UPDATE team_teammates SET ended_ms=2 WHERE pane='%6'", [])
+        .unwrap();
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        2
+    );
+    assert_eq!(caps::admit_sub_agent(&connection, &project, lead), Ok(()));
+    teammate_pane(&connection, &project, lead, "%7");
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        3,
+        "three live panes outnumber two rows"
+    );
+    assert!(caps::admit_sub_agent(&connection, &project, lead).is_err());
+    connection
+        .execute("UPDATE team_teammates SET stopped_ms=3 WHERE pane='%7'", [])
+        .unwrap();
+    agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        Some(lead),
+        AgentStatus::Working,
+    );
+    assert_eq!(
+        caps::running_sub_agents(&connection, &project, lead).unwrap(),
+        3,
+        "one app-spawned worker plus two teammates"
+    );
+    assert!(caps::admit_sub_agent(&connection, &project, lead).is_err());
+}
+
+/// The master as lead is held to Max harnesses per project, counting only the harnesses it
+/// started and never their own workers (DEC-104 K8), and a stopped team, a teammate as lead
+/// and an agent of no project are each refused in plain words.
+#[test]
+fn admit_sub_agent_holds_the_master_to_max_harnesses_and_refuses_the_rest() {
+    let (_directory, mut connection, project) = team_database("team-harnesses");
+    let master = agent_row(
+        &connection,
+        &project,
+        AgentRole::Master,
+        None,
+        AgentStatus::Working,
+    );
+    applied(
+        &mut connection,
+        TeamAction::MaxHarnesses {
+            project_id: project.clone(),
+            max: Some(2),
+        },
+    );
+    let first = agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        None,
+        AgentStatus::Working,
+    );
+    for _ in 0..3 {
+        agent_row(
+            &connection,
+            &project,
+            AgentRole::Sub,
+            Some(first),
+            AgentStatus::Working,
+        );
+    }
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, master),
+        Ok(()),
+        "a lead's workers are not harnesses"
+    );
+    agent_row(
+        &connection,
+        &project,
+        AgentRole::Sub,
+        Some(master),
+        AgentStatus::Idle,
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, master),
+        Err("The owner allows at most 2 harnesses in this project, and 2 already run. Wait for one to finish, or ask the owner to raise Max harnesses per project.".into())
+    );
+
+    let teammate = agent_row(
+        &connection,
+        &project,
+        AgentRole::Teammate,
+        Some(first),
+        AgentStatus::Working,
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, teammate),
+        Err("A teammate does not start sub-agents. Its lead starts them.".into())
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, 9_999),
+        Err("That lead is not an agent of this project.".into())
+    );
+    applied(
+        &mut connection,
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+    );
+    assert_eq!(
+        caps::admit_sub_agent(&connection, &project, first),
+        Err("The owner stopped every agent of this project, so no sub-agent starts until they start the team again.".into())
+    );
+}
+
+/// Stop harness stops the lead and every agent it leads, down the whole tree and nobody
+/// else, for any role but the master (DEC-104 K8), and waking the lead clears each of those
+/// stops while another stop stays.
+#[test]
+fn a_stopped_harness_stops_its_whole_lead_tree_and_its_wake_clears_it() {
+    let (_directory, mut connection, project) = team_database("team-cascade");
+    let row = |connection: &Connection, role, parent| {
+        agent_row(connection, &project, role, parent, AgentStatus::Working)
+    };
+    let master = row(&connection, AgentRole::Master, None);
+    let lead = row(&connection, AgentRole::Sub, None);
+    let worker = row(&connection, AgentRole::Sub, Some(lead));
+    let helper = row(&connection, AgentRole::Sub, Some(worker));
+    let teammate = row(&connection, AgentRole::Teammate, Some(lead));
+    let sibling = row(&connection, AgentRole::Sub, None);
+    let theirs = row(&connection, AgentRole::Sub, Some(sibling));
+    let stopped = |connection: &Connection| -> Vec<i64> {
+        connection
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1 ORDER BY agent")
+            .unwrap()
+            .query_map([project.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    applied(
+        &mut connection,
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent: lead,
+        },
+    );
+    assert_eq!(stopped(&connection), vec![lead, worker, helper, teammate]);
+    for (agent, code) in [
+        (master, "team_stop_master"),
+        (9_999, "team_agent_not_found"),
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &ModelAccess::default(),
+                &TeamAction::StopAgent {
+                    project_id: project.clone(),
+                    agent,
+                },
+            )
+            .unwrap(),
+            rejected(code)
+        );
+    }
+    applied(
+        &mut connection,
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent: theirs,
+        },
+    );
+    assert_eq!(
+        stopped(&connection),
+        vec![lead, worker, helper, teammate, theirs]
+    );
+    owner_start(&connection, &project, lead).unwrap();
+    assert_eq!(
+        stopped(&connection),
+        vec![theirs],
+        "waking the lead brings back its whole tree, and only it"
+    );
+}

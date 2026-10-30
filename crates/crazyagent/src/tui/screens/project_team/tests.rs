@@ -1262,7 +1262,7 @@ fn a_long_notification_list_stays_inside_a_short_window() {
     assert!(text.iter().any(|row| row.contains("Question number 20")));
     let more = text
         .iter()
-        .find(|row| row.contains("older"))
+        .find(|row| row.contains(" older"))
         .unwrap_or_else(|| panic!("{text:?}"));
     let shown = text
         .iter()
@@ -1848,4 +1848,232 @@ fn workflow_nudges_show_off_by_default_and_space_turns_them_on() {
             settings: on,
         })
     );
+}
+
+/// Sends one settings key's change as the engine answers it: applied, then a fresh team read
+/// with the stored choice. Takes the view, the reply, the stored team and the read time.
+/// Returns the notice the applied change left.
+fn settled(view: &mut TeamView, reply: TeamReply, stored: &TeamStatus, at: i64) -> Option<Notice> {
+    let TeamReply::Change(action) = reply else {
+        panic!("a settings key sends a change: {reply:?}");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    let notice = view.notice.clone();
+    let query = view.next_query(at).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    notice
+}
+
+/// Sub-agent depth steps through every choice (3 after the default 2, then 1, then 2) and
+/// Worker lands flips between both choices (N1, N2): each key sends its change, a second key
+/// waits for the first, the engine's answer says what the choice means and the team rows show
+/// the stored choice.
+#[test]
+fn sub_agent_depth_and_worker_landing_step_through_every_choice() {
+    let mut loading = TeamView::new(project());
+    for code in ['d', 'k'] {
+        assert_eq!(loading.key(press(KeyCode::Char(code))), TeamReply::Handled);
+        assert_eq!(
+            loading.notice,
+            Some(Notice::plain("The team is still loading."))
+        );
+    }
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    assert!(shows(&view, "Sub-agent depth  2"));
+    assert!(shows(&view, "Worker lands  When the lead accepts"));
+    let mut stored = team();
+    let mut at = NOW;
+    for (depth, note) in [
+        (
+            3,
+            "Workers can now lead workers of their own, three levels deep.",
+        ),
+        (1, "Only the master starts sub-agents now."),
+        (
+            2,
+            "The master's sub-agents can now lead workers of their own.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('d')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SubAgentDepth {
+                project_id: project(),
+                depth,
+            })
+        );
+        assert_eq!(
+            view.key(press(KeyCode::Char('d'))),
+            TeamReply::Handled,
+            "a second press waits for the first change"
+        );
+        stored.sub_agent_depth = depth;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(
+            shows(&view, &format!("Sub-agent depth  {depth}")),
+            "{depth}"
+        );
+    }
+    for (mode, note, words) in [
+        (
+            crate::team::ChildLanding::Owner,
+            "A lead's worker now lands only when you accept it.",
+            "Only when I accept",
+        ),
+        (
+            crate::team::ChildLanding::Lead,
+            "A lead's worker now lands on the lead's branch when the lead accepts it.",
+            "When the lead accepts",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('k')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::ChildLanding {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.child_landing = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(shows(&view, &format!("Worker lands  {words}")), "{words}");
+    }
+}
+
+/// Max harnesses (v), Max teammates (u) and Token budget (T) each step through every choice
+/// and back to No limit or Off, and Spread accounts (P) turns on and off (S4, DEC-104 K8):
+/// each key sends its change, the engine's answer says the new choice and the team rows
+/// show what the engine stored.
+#[test]
+fn caps_budget_and_spread_step_through_every_choice() {
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    let mut stored = team();
+    let mut at = NOW;
+    for (key, label, done) in [
+        ('v', "Max harnesses", "Max harnesses is now"),
+        ('u', "Max teammates", "Max teammates per harness is now"),
+    ] {
+        assert!(shows(&view, &format!("{label}  No limit")), "{label}");
+        for max in crate::team::CAP_CHOICES
+            .iter()
+            .copied()
+            .map(Some)
+            .chain([None])
+        {
+            let reply = view.key(press(KeyCode::Char(key)));
+            let wanted = if key == 'v' {
+                TeamAction::MaxHarnesses {
+                    project_id: project(),
+                    max,
+                }
+            } else {
+                TeamAction::MaxTeammates {
+                    project_id: project(),
+                    max,
+                }
+            };
+            assert_eq!(reply, TeamReply::Change(wanted), "{label} {max:?}");
+            if key == 'v' {
+                stored.max_harnesses = max;
+            } else {
+                stored.max_teammates = max;
+            }
+            at += 60_000;
+            assert_eq!(
+                settled(&mut view, reply, &stored, at),
+                Some(Notice::plain(format!("{done} {}.", cap_words(max))))
+            );
+            assert!(
+                shows(&view, &format!("{label}  {}", cap_words(max))),
+                "{label} {max:?}"
+            );
+        }
+    }
+
+    assert!(shows(&view, "Token budget  Off"));
+    for tokens in crate::team::BUDGET_CHOICES
+        .iter()
+        .copied()
+        .map(Some)
+        .chain([None])
+    {
+        let reply = view.key(press(KeyCode::Char('T')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::TokenBudget {
+                project_id: project(),
+                tokens,
+            }),
+            "{tokens:?}"
+        );
+        stored.token_budget = tokens;
+        stored.budget_used = tokens.map(|_| 0);
+        at += 60_000;
+        let done = match tokens {
+            Some(tokens) => format!(
+                "The team now stops after {} from now.",
+                crate::team::token_words(tokens)
+            ),
+            None => "The token budget is off.".to_owned(),
+        };
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(
+            shows(
+                &view,
+                &format!("Token budget  {}", budget_words(tokens, Some(0)))
+            ),
+            "{tokens:?}"
+        );
+    }
+
+    assert!(shows(&view, "Spread accounts  Off"));
+    for (on, done, words) in [
+        (
+            true,
+            "New agents now prefer a pool account no running agent of this project uses.",
+            "On",
+        ),
+        (
+            false,
+            "New agents now take the account your account strategy picks.",
+            "Off",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('P')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SpreadAccounts {
+                project_id: project(),
+                on,
+            })
+        );
+        stored.spread_accounts = on;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(shows(&view, &format!("Spread accounts  {words}")), "{on}");
+    }
 }

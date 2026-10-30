@@ -58,6 +58,9 @@ const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to r
 const MASTER_PAUSED_START: &str =
     "S starts every agent of this project again; the master starts with them.";
 const MASTER_TEAM_STOPPED: &str = "Team stopped.";
+/// The master view header's session keys, widest first; the state picks the widest that
+/// fits beside it whole.
+const MASTER_CONTROLS: [&str; 2] = ["n New session  l Sessions", "n New session"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -247,6 +250,9 @@ impl Team {
         self.asked = true;
         self.want = Some(true);
         self.refused = None;
+        if let Some(switch) = self.switch.as_mut() {
+            switch.problem = None;
+        }
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: TeamAction::LiveMaster {
@@ -823,8 +829,9 @@ impl Team {
     }
 
     /// The master view's header: whether the live master is on, where the live session's
-    /// master harness last switched, and the session keys at the right edge.
-    /// Inputs: the width and context. Output: the line.
+    /// master harness last switched, and the session keys at the right edge. The state is
+    /// kept whole: when it does not fit beside both keys, only n New session shows and
+    /// l Sessions stays in the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
         let switched = self
             .switch
@@ -837,7 +844,11 @@ impl Team {
             (false, false, None) => MASTER_ON.to_owned(),
             (false, false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
-        let control = "n New session  l Sessions".to_owned();
+        let control = MASTER_CONTROLS
+            .into_iter()
+            .find(|control| width(&state) + 2 + width(control) <= limit)
+            .unwrap_or(MASTER_CONTROLS[1])
+            .to_owned();
         let room = limit.saturating_sub(width(&control));
         if room < width(MASTER_OFF) + 2 {
             return styled(

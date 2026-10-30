@@ -886,3 +886,66 @@ fn an_upgrade_from_six_lets_items_hold_hooks_and_the_trash_hold_hook_folders_kee
         "the widened check still refuses an unknown kind"
     );
 }
+
+/// Step 8 (N1) gives the team tables of a version 7 database a `parent` column, keeping each
+/// row with no lead; a database with no team tables upgrades with none made, and a second
+/// engine start adds nothing.
+#[test]
+fn migration_8_adds_parent_to_team_tasks_and_agents() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE team_tasks (id INTEGER PRIMARY KEY, project TEXT NOT NULL, prompt TEXT NOT NULL);
+         CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL);
+         INSERT INTO team_tasks(id,project,prompt) VALUES (3,'notes','Write the notes page');
+         INSERT INTO team_agents(id,project,role) VALUES (5,'notes','sub');
+         PRAGMA user_version = 7;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    for (table, id) in [("team_tasks", 3), ("team_agents", 5)] {
+        let parent: Option<i64> = db
+            .query_row(
+                &format!("SELECT parent FROM {table} WHERE id=?1"),
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None, "{table} keeps its row with no lead");
+    }
+    db.execute("UPDATE team_agents SET parent=5 WHERE id=5", [])
+        .unwrap();
+    db.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('team_agents') WHERE name='parent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 1, "the step adds the column once");
+    let parent: Option<i64> = db
+        .query_row("SELECT parent FROM team_agents WHERE id=5", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(parent, Some(5), "a second run keeps the recorded lead");
+
+    let bare = Root::new();
+    let mut empty = bare.connection();
+    empty.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut empty, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&empty).unwrap(), latest(STEPS));
+    let tables: i64 = empty
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('team_tasks','team_agents')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "the step makes no team table of its own");
+}
