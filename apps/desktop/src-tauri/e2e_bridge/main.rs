@@ -247,7 +247,8 @@ fn ask_owner(args: &[OsString]) -> Result<String, String> {
     let since = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| "the clock is before 1970".to_owned())?;
-    let now = i64::try_from(since.as_millis()).map_err(|_| "the clock is out of range".to_owned())?;
+    let now =
+        i64::try_from(since.as_millis()).map_err(|_| "the clock is out of range".to_owned())?;
     let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
     let id = crazyagent::coord::send(&db, message, now).map_err(|error| error.0)?;
     assert!(id > 0);
