@@ -1956,9 +1956,11 @@ mod tests {
         );
         drop(db);
         let agent = "Ada (@lead-a)".to_owned();
-        let listed = |event: SettingsEvent| match event {
-            SettingsEvent::Memories(Ok(list)) => list,
-            other => panic!("memories expected, got {other:?}"),
+        let listed = |event: SettingsEvent| {
+            let SettingsEvent::Memories(Ok(list)) = event else {
+                panic!("the memories were not listed");
+            };
+            list
         };
         let global = || SettingsJob::Memories {
             scopes: vec![MemoryScope::Global],
