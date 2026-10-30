@@ -262,7 +262,7 @@ fn confinement(layout: Layout, access: AgentAccess) -> Result<bool, String> {
 enum Mode {
     Kept {
         account: AccountBinding,
-        context: AgentContext,
+        context: Box<AgentContext>,
     },
     PerTurn {
         home: PathBuf,
@@ -4975,7 +4975,7 @@ impl TeamRuntime {
                     base_url: base_url.clone(),
                     key: None,
                 },
-                context,
+                context: Box::new(context),
             },
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
@@ -6240,7 +6240,7 @@ fn work(
                 plan.request(account, plan.access).and_then(|request| {
                     AgentSession::start_resuming(
                         request,
-                        plan.team_context(context),
+                        plan.team_context(*context),
                         plan.pane.clone(),
                         resume,
                     )
@@ -6319,7 +6319,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    plan.team_context(context.with_live_instructions(&instructions)),
+                    plan.team_context((*context).with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),

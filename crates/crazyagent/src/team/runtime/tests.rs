@@ -1498,9 +1498,8 @@ fn both_master_framings_name_the_harnesses_an_empty_plan_can_use() {
         revision: 1,
     };
     let listed = "Your sub-agents:\nThe team plan names no harness, so you may use any harness that can run now:\n- codex\n- claude-code\nThere is no per-harness limit, only the team maximum of 64 agents, counting you.\n";
-    for text in [framing(&setup, true, &["codex", "claude-code"], &[])] {
-        assert!(text.contains(listed), "{text}");
-    }
+    let text = framing(&setup, true, &["codex", "claude-code"], &[]);
+    assert!(text.contains(listed), "{text}");
 }
 
 #[test]

@@ -122,7 +122,8 @@ pub fn inbox(connection: &Connection, project: &ProjectId) -> Result<Inbox, Engi
             |row| row.get(0),
         )
         .map_err(error)?;
-    let rows: Vec<(i64, i64, Option<String>, Option<String>, String, i64)> = connection
+    type QuestionRow = (i64, i64, Option<String>, Option<String>, String, i64);
+    let rows: Vec<QuestionRow> = connection
         .prepare(&format!(
             "SELECT id, from_agent, q_for, q_severity, body, created {filter}
              ORDER BY CASE q_severity WHEN '{}' THEN 0 WHEN '{}' THEN 1 ELSE 2 END, id
@@ -319,7 +320,8 @@ fn ended_waits() -> String {
 }
 
 fn alert_questions(tx: &Transaction<'_>, now: i64) -> Result<(), EngineError> {
-    let rows: Vec<(i64, String, i64, Option<String>, String, String, i64)> = tx
+    type AlertRow = (i64, String, i64, Option<String>, String, String, i64);
+    let rows: Vec<AlertRow> = tx
         .prepare(&format!(
             "SELECT m.id, m.project, m.from_agent, m.q_severity, m.body, m.receipt, m.created {}
              ORDER BY m.id LIMIT {ALERTS_PER_TICK_MAX}",
