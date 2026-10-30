@@ -233,21 +233,20 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
     );
 
     let bound = 1024;
+    let head =
+        format!("[crazyagent msg {long}] from the master: work for you, answer with update_work: ");
     let (text, carried) = lines(&fixture.db, &waiting, bound).unwrap();
     assert_eq!(carried, [long]);
-    assert!(text.len() <= bound, "{} bytes", text.len());
-    assert!(
-        text.starts_with(&format!(
-            "[crazyagent msg {long}] from the master: work for you, answer with update_work: aaa"
-        )),
-        "{text}"
-    );
-    assert!(text.ends_with(CUT), "{text}");
-
-    let (text, carried) = lines(&fixture.db, &waiting[1..], bound).unwrap();
-    assert_eq!(carried, [note, asked]);
     assert_eq!(
         text,
+        format!("{head}{}{CUT}", "a".repeat(bound - head.len() - CUT.len()))
+    );
+    assert_eq!(text.len(), bound);
+
+    let (later, carried) = lines(&fixture.db, &waiting[1..], bound).unwrap();
+    assert_eq!(carried, [note, asked]);
+    assert_eq!(
+        later,
         format!(
             "[crazyagent msg {note}] from CrazyAgent: note, it takes no reply: Two workers done\n[crazyagent msg {asked}] from {}: question (for lead, high), answer with update_work: Which port?",
             crate::team::events::label(&fixture.db, worker).unwrap()
@@ -256,8 +255,13 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
 
     let (text, carried) = lines(&fixture.db, &waiting, NEXT_TURN_BYTES_MAX).unwrap();
     assert_eq!(carried, [long, note, asked]);
-    assert!(text.len() <= NEXT_TURN_BYTES_MAX);
-    assert!(!text.contains(CUT));
+    assert_eq!(
+        text,
+        format!(
+            "{head}{}\n{later}",
+            "a".repeat(crate::coord::BODY_BYTES_MAX)
+        )
+    );
 
     let answer = crate::coord::reply(
         &fixture.db,
@@ -269,12 +273,12 @@ fn lines_name_each_message_cut_a_long_first_one_and_stay_within_the_bound() {
     .unwrap();
     let back = crate::coord::pending(&fixture.db, worker, PENDING_MAX).unwrap();
     let (text, _) = lines(&fixture.db, &back, bound).unwrap();
-    assert!(
-        text.ends_with(&format!(
+    assert_eq!(
+        text,
+        format!(
             "[crazyagent msg {answer}] from {}: Reply to msg {asked}: Port 8080",
             crate::team::events::label(&fixture.db, lead).unwrap()
-        )),
-        "{text}"
+        )
     );
 }
 
@@ -423,8 +427,13 @@ fn the_master_gets_one_engine_message_and_waits_while_it_is_pending() {
     let told = fixture.team_messages();
     assert_eq!(told.len(), 1, "{told:?}");
     assert_eq!(told[0].0, "engine");
-    assert!(told[0].1.contains(&format!("[crazyagent msg {first}]")));
-    assert!(told[0].1.contains(&format!("[crazyagent msg {second}]")));
+    let from = crate::team::events::label(&fixture.db, lead).unwrap();
+    assert_eq!(
+        told[0].1,
+        format!(
+            "[crazyagent msg {first}] from {from}: note, it takes no reply: Merged\n[crazyagent msg {second}] from {from}: work for you, answer with update_work: Review"
+        )
+    );
     assert_eq!(fixture.receipt(first), "delivered");
     assert_eq!(fixture.receipt(second), "delivered");
 
