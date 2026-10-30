@@ -1031,14 +1031,31 @@ fn a_record_whose_volume_was_renumbered_keeps_its_place_and_counts_nothing_twice
         "the pin moved to the live device"
     );
 
+    let kept_offset = {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().offset
+    };
     renumber(&db);
     std::fs::remove_file(&record).unwrap();
     append(&record, &claude_assistant("r3", 9, 4, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r4", 2, 1, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r5", 1, 1, 0, 0, "end_turn"));
+    assert!(
+        std::fs::metadata(&record).unwrap().len() >= kept_offset,
+        "the recreated record is at least as long as the kept offset, so only the \
+         inode check, not the length guard, can start it over"
+    );
     assert_eq!(
         scan_home(&db, home.path(), Format::Claude, &who, NOW + 2)
             .unwrap()
             .input,
-        9,
+        12,
         "a record recreated with a new inode on the renumbered pin starts over"
     );
     let live = std::fs::metadata(&record).unwrap();
