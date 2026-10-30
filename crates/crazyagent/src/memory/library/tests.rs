@@ -1660,3 +1660,31 @@ fn recall_answers_the_newest_memories_first_and_at_most_twelve() {
         ["fact 13", "fact 12", "fact 11", "fact 10", "fact 1"]
     );
 }
+
+#[test]
+fn an_imported_project_memory_is_recalled_in_its_project_only() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Import {
+                project_id: alpha.clone(),
+                file: "notes.md".into(),
+                text: "Deploys go out on Tuesdays.".into(),
+            }
+        ),
+        Outcome::Applied
+    );
+    let found = recall(&mut db, &alpha, "tuesdays").unwrap().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].origin,
+        MemoryOrigin::Imported {
+            file: "notes.md".into()
+        }
+    );
+    assert!(recalled(&mut db, &beta, "").is_empty());
+}
