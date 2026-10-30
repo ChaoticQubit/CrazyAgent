@@ -535,6 +535,13 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
             .env
             .contains(&("SHELL".to_owned(), "/bin/zsh".to_owned()))
     );
+    assert!(
+        built
+            .env
+            .contains(&("MCP_TIMEOUT".to_owned(), "60000".to_owned())),
+        "a tools-on agent waits 60 s, not Claude Code's 30 s, for its MCP servers: {:?}",
+        built.env
+    );
 
     let bad = Run {
         session_id: "not-a-uuid",
