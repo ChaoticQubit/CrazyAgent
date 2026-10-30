@@ -972,6 +972,40 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
     );
 }
 
+/// Opening the Accept editor drops an older notice about the same change set, such as a
+/// refused Discard, so the editor shows only what bears on this Accept: the branch list,
+/// or the notice that it could not be read (review WL-L2).
+#[test]
+fn opening_accept_drops_an_older_notice_about_the_set() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    reply(&mut view, Err("changes_stale".into()));
+    let refused = refusal("changes_stale")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    let query = reply(&mut view, Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])));
+    assert_eq!(query, ChangesQuery::List { project: project() });
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let editor = flat(&view);
+    assert!(!editor.contains(&refused), "{editor}");
+    assert_eq!(
+        reply(&mut view, Err("changes_unavailable".into())),
+        ChangesQuery::Branches { id: id('1') }
+    );
+    let failed = flat(&view);
+    assert!(!failed.contains(&refused), "{failed}");
+    assert!(
+        failed.contains(
+            "Couldn't list your branches, so these changes land on the checked-out branch."
+        ),
+        "{failed}"
+    );
+}
+
 #[test]
 fn a_set_closed_outside_the_app_says_how_keeps_its_note_and_takes_no_action_keys() {
     let mut landed = set('1', ChangeState::Accepted);
