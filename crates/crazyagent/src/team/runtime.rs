@@ -1573,7 +1573,8 @@ impl TeamRuntime {
     /// worktree and register entry; no other sub-agent starts again, so a register entry
     /// never moves to another agent. A restarted master starts as a fresh process under its
     /// register entry. A Wake (no `again`) of an agent that is no longer finished does
-    /// nothing, so a stale Wake never stops or replaces a running agent.
+    /// nothing, so a stale Wake never stops or replaces a running agent. A woken sub-agent
+    /// clears the owner stops of the agents it leads too, the one start that does (AW-1).
     fn start_again(
         &mut self,
         reference: i64,
@@ -1677,6 +1678,7 @@ impl TeamRuntime {
             Ok(Some(account)) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
+                        super::owner_start(&self.connection, &project, id)?;
                         self.owner_woke(&project, id, resumed, again.is_some())?;
                         Ok(id)
                     }
@@ -4066,10 +4068,12 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. Takes the setup,
-    /// the agent, its role, harness and tools switch, the account to run on and the register
-    /// restart if any. Returns its id, or the plain reason it could not start; the worktree
-    /// must still be the one recorded when it first started.
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. It clears only
+    /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
+    /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
+    /// tools switch, the account to run on and the register restart if any. Returns its id,
+    /// or the plain reason it could not start; the worktree must still be the one recorded
+    /// when it first started.
     #[allow(clippy::too_many_arguments)]
     fn revive(
         &mut self,
@@ -4109,7 +4113,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
-        super::owner_start(&self.connection, &stored.project_id, id)?;
+        super::owner_start_alone(&self.connection, &stored.project_id, id)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }

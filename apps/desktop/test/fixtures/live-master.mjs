@@ -39,7 +39,7 @@ function page() {
   return document.getElementById("panel");
 }
 
-function data(master, on) {
+function data(master, on, team = undefined) {
   const setup = master === undefined ? undefined : {
     kind: "ok",
     value: { project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: null, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 1,
@@ -48,7 +48,7 @@ function data(master, on) {
   return {
     id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
+    team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
     reloadTeam: () => { reloads += 1; },
   };
 }
@@ -70,8 +70,8 @@ export function mountArea(master, on) {
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
  * running before the terminal opens, starting, refused with an engine code, or stopped with
- * the engine's reason when the code is given. */
-export function mountView(state, code = "") {
+ * the engine's reason when the code is given, with the team status read so far, if any. */
+export function mountView(state, code = "", team = undefined) {
   const panel = page();
   const live = state === "running" ? { kind: "running", node }
     : state === "waiting" ? { kind: "running", node: null }
@@ -79,7 +79,7 @@ export function mountView(state, code = "") {
     : state === "stopped" ? { kind: "stopped", problem: code || null }
     : { kind: state };
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onStart: async () => { starts += 1; } })));
+  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex", undefined, team), harness: "codex", live, onStart: async () => { starts += 1; } })));
 }
 
 /** How many times the mounted view asked to start the live master. */

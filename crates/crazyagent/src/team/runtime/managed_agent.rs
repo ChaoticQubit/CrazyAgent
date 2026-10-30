@@ -341,6 +341,18 @@ impl ManagedAgent {
                 model: None,
             },
         };
+        runtime
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,?2,?3,?4,1,?5,'starting',1,1)",
+                params![AGENT, PROJECT, role.name(), harness, model.id.as_str()],
+            )
+            .unwrap();
+        if role == AgentRole::Sub {
+            crate::team::names::assign_persona(&runtime.connection, &setup.project_id, AGENT)
+                .unwrap();
+        }
         let (_, plan, mode) = runtime
             .prepare(
                 &setup,

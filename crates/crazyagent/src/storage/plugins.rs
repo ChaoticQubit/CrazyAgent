@@ -1357,9 +1357,13 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
-            spec: server.spec,
+            spec,
             secrets,
         });
     }

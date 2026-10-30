@@ -2634,3 +2634,44 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     drop(controller);
     service.shutdown().await.unwrap();
 }
+
+/// DEC-108: with the live master switched on and no terminal yet, a sign-in wait line from
+/// the engine replaces the starting text in the master pane, so the owner sees why it waits.
+#[test]
+fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(
+        Some(true),
+        Some(crate::team::master::SIGN_INS_CHECKING),
+    ));
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a switch already on is not turned on again"
+    );
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].trim_start().starts_with("Live master on."),
+        "the switch reads on: {rows:#?}"
+    );
+    assert_eq!(
+        chars(&rows[3], 2, 78),
+        format!("┌─ Master {}┐", "─".repeat(65))
+    );
+    let pane: Vec<String> = rows[4..9]
+        .iter()
+        .map(|row| chars(row, 2, 78))
+        .take_while(|row| row.starts_with('│'))
+        .map(|row| row.trim_matches('│').trim().to_owned())
+        .collect();
+    assert_eq!(
+        pane.join(" ").trim(),
+        crate::team::master::SIGN_INS_CHECKING,
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("Starting the master's terminal")),
+        "{rows:#?}"
+    );
+}
