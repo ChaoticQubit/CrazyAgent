@@ -6360,14 +6360,13 @@ fn the_owners_wake_of_a_lead_clears_its_workers_stops_and_their_held_tasks_start
     fixture.until(
         &mut team,
         "the owner's Wake starts the lead and its worker's held task starts the worker",
-        |f| launches(f, lead).len() == 2 && launches(f, worker).len() == 2,
+        |f| {
+            launches(f, lead).len() == 2
+                && launches(f, worker).len() == 2
+                && typed(f, worker).contains("Finish the notes.")
+        },
     );
     assert!(!crate::team::owner_stopped(&fixture.connection, worker).unwrap());
-    assert!(
-        typed(&fixture, worker).contains("Finish the notes."),
-        "{}",
-        typed(&fixture, worker)
-    );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
