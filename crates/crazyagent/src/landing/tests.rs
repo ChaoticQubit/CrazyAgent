@@ -3460,3 +3460,100 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         Some(&case.workspace.worktree),
     );
 }
+
+/// Puts a test change set's agent under a lead as the team tables record it, with the
+/// lead's own linked worktree on branch `lead` cut from the owner's `main` and `files`
+/// lead commits ahead of it, the worker's worktree moved to the lead's tip and its start
+/// recorded there. Inputs: the case and how many files the lead adds. Output: the lead's
+/// tip.
+fn worker_of_lead(case: &mut Case, files: usize) -> String {
+    let root = case.repo.parent().unwrap().to_path_buf();
+    let lead = root.join("agent-35");
+    case.owner(&["branch", "lead", "main"]);
+    case.owner(&["worktree", "add", "-q", lead.to_str().unwrap(), "lead"]);
+    for at in 0..files {
+        write(&lead.join(format!("lead/file-{at}.txt")), "lead work\n");
+    }
+    git_in(&case.home, &lead, &["add", "-A"]);
+    git_in(
+        &case.home,
+        &lead,
+        &[
+            "-c",
+            "user.name=Lead",
+            "-c",
+            "user.email=lead@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Lead work",
+        ],
+    );
+    let lead_tip = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    crate::team::initialize(&case.db).unwrap();
+    let project = case.workspace.project.as_str().to_owned();
+    case.db
+        .execute_batch(&format!(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (35,'{project}','sub','claude',0,'idle',1,1,NULL),
+                    (52,'{project}','sub','claude',0,'idle',1,1,35);"
+        ))
+        .unwrap();
+    for (agent, worktree, git_dir) in [
+        (35, lead.clone(), case.repo.join(".git/worktrees/agent-35")),
+        (
+            52,
+            case.workspace.worktree.clone(),
+            case.workspace.git_dir.clone(),
+        ),
+    ] {
+        case.db
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![
+                    agent,
+                    project,
+                    case.repo.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    case.workspace.agent.id = "52".into();
+    case.agent(&["checkout", "-q", "--detach", &lead_tip]);
+    case.start();
+    lead_tip
+}
+
+/// A lead's worker lands on its lead's branch, so its change set holds only what would
+/// change there: with the owner's branch far behind the lead, the set counts, judges and
+/// shows the worker's one file, never the lead's work the owner's branch lacks (owner
+/// session 2026-10-29, sets a3edc313 and ef58a29b).
+#[test]
+fn a_lead_worker_s_set_is_measured_against_its_lead_s_branch() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 30);
+    assert_ne!(case.tip(), lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let recorded = case.view(&id);
+    assert_eq!(
+        (recorded.files, recorded.added, recorded.removed),
+        (1, 1, 0),
+        "turn end counted the lead's work"
+    );
+    observe(&case.db, None).unwrap();
+    let observed = case.view(&id);
+    assert_eq!(observed.state, ChangeState::Pending);
+    assert_eq!(
+        (observed.files, observed.added, observed.removed),
+        (1, 1, 0),
+        "the owner view counted the lead's work"
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    let paths: Vec<&str> = page.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["worker.txt"], "the diff showed the lead's work");
+}

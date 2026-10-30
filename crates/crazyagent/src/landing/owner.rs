@@ -749,8 +749,9 @@ pub(super) fn accept_to(
     Ok(AcceptOutcome::Landed { commit, branch })
 }
 
-/// Merges the owner's branch tip into a change set's agent worktree with conflict
-/// markers as an engine merge commit, from the merge base of the tip and the set's head,
+/// Merges the tip the set lands on (`landing_tip`: its lead's branch for a lead's worker
+/// while Lands is Lead, else the owner's branch) into a change set's agent worktree with
+/// conflict markers as an engine merge commit, from the merge base of the tip and its head,
 /// so the agent can resolve them in its next turn. Inputs: the store and the change set.
 /// Output: Ok once the worktree holds the merge.
 pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
@@ -785,7 +786,10 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         Some(agent)
     };
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
-    let (_, tip) = owner_branch(&owner, &repository)?;
+    let tip = match super::subagent::lead_tip(db, &record.project, &record.agent, &repository)? {
+        Some(tip) => tip,
+        None => owner_branch(&owner, &repository)?.1,
+    };
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(&owner, &record.base, &record.head, &tip)?;
     let paths = diff::changed_paths(&owner, &from, &record.head)?;
@@ -958,6 +962,32 @@ pub(super) fn checked_out_tip(owner: &Repo, repository: &Path) -> Option<String>
     owner_branch(owner, repository).ok().map(|(_, tip)| tip)
 }
 
+/// The tip a change set is measured against, the branch it lands on (DEC-107): its lead's
+/// branch for a lead's worker while the owner's Lands setting is Lead, else the owner's
+/// checked-out branch. A lead tip that cannot be read is logged by its plain code and
+/// gives None, never the owner's branch, which that worker does not land on. Inputs: the
+/// store, the owner repository opened for object work, its root and the change set's
+/// project and agent. Output: the tip, None while it cannot be read.
+pub(super) fn landing_tip(
+    db: &Connection,
+    owner: &Repo,
+    repository: &Path,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+) -> Option<String> {
+    match super::subagent::lead_tip(db, project, agent, repository) {
+        Ok(Some(tip)) => Some(tip),
+        Ok(None) => checked_out_tip(owner, repository),
+        Err(error) => {
+            eprintln!(
+                "landing_lead_tip_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+            None
+        }
+    }
+}
+
 /// What judging one open change set against the owner's branch tip found.
 enum Judged {
     Landed,
@@ -1086,11 +1116,12 @@ fn close_removed(db: &Connection, record: &mut Record) -> Result<(), EngineError
 
 /// Notices what the owner did outside the app to one open change set. The caller holds
 /// [`hold`] on its repository. A gone agent copy closes it as removed outside; against the
-/// owner's branch tip, when one is readable, a pending or conflicting set the tip holds
-/// closes as landed outside like an Accept onto that tip, and otherwise its counts become
-/// what is not yet on the tip. Inputs: the store, the change set and the owner repository
-/// with its tip, None while the owner's HEAD is detached, busy or unreadable. Output: the
-/// two trees its diff shows against the tip (DEC-107), None to show its stored change.
+/// tip it lands on (DEC-107), its lead's branch for a lead's worker while Lands is Lead,
+/// else the owner's branch tip, when one is readable, a pending or conflicting set the tip
+/// holds closes as landed outside like an Accept onto that tip, and otherwise its counts
+/// become what is not yet on the tip. Inputs: the store, the change set and the owner
+/// repository with its tip, None while the owner's HEAD is detached, busy or unreadable.
+/// Output: the two trees its diff shows against that tip, None to show its stored change.
 fn observe_one(
     db: &Connection,
     id: &ChangeSetId,
@@ -1104,20 +1135,37 @@ fn observe_one(
         close_removed(db, &mut record)?;
         return Ok(None);
     }
-    let Some((owner, tip)) = owner else {
-        return Ok(None);
-    };
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict) {
         return Ok(None);
     }
-    match judged(owner, &record, tip)? {
+    let lead_tip =
+        match super::subagent::lead_tip(db, &record.project, &record.agent, &record.repository) {
+            Ok(lead_tip) => lead_tip,
+            Err(error) => {
+                eprintln!(
+                    "landing_lead_tip_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+                return Ok(None);
+            }
+        };
+    let opened;
+    let (owner, tip) = match (lead_tip, owner) {
+        (Some(lead_tip), _) => {
+            opened = shared(&record.repository)?;
+            (&opened, lead_tip)
+        }
+        (None, Some((owner, tip))) => (owner, tip.clone()),
+        (None, None) => return Ok(None),
+    };
+    match judged(owner, &record, &tip)? {
         Judged::Removed => {
             close_removed(db, &mut record)?;
             Ok(None)
         }
         Judged::Landed => {
             record.outside = true;
-            finish(db, &mut record, tip)?;
+            finish(db, &mut record, &tip)?;
             assert!(!record.is_open());
             Ok(None)
         }

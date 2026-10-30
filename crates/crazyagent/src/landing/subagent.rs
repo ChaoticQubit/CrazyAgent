@@ -243,6 +243,51 @@ pub(super) fn close_orphaned(
     Ok(())
 }
 
+/// The tip of the branch a lead's worker lands on while the owner's Lands setting is Lead
+/// (DEC-107): its lead's branch, read from the lead's linked worktree or fetched from the
+/// lead's own clone with the engine's checked fetch. It never takes the repository hold,
+/// so a caller holding it can read it. Inputs: the store, the project, the change set's
+/// agent and its repository. Output: the tip, None for an agent that is not a lead's
+/// worker, while Lands is Owner, or for a lead with no worktree in that repository.
+pub(super) fn lead_tip(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+    repository: &Path,
+) -> Result<Option<String>, EngineError> {
+    if agent.kind != super::AgentKind::Sub || !leads_merge(db, project)? {
+        return Ok(None);
+    }
+    let Ok(id) = agent.id.parse::<i64>() else {
+        return Ok(None);
+    };
+    let lead: Option<i64> = db
+        .query_row(
+            "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            params![id, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?
+        .flatten();
+    let Some(lead) = lead else {
+        return Ok(None);
+    };
+    let Some(lead_place) = place(db, project, lead)? else {
+        return Ok(None);
+    };
+    if lead_place.repository != repository {
+        return Ok(None);
+    }
+    super::flow::read_tip(
+        db,
+        &lead_place.repository,
+        &lead_place.worktree,
+        &lead_place.git_dir,
+    )
+    .map(Some)
+}
+
 /// Tells whether a project's lead merges its workers' change sets, so the owner's lists
 /// leave them out: the owner's Lands setting is Lead. Inputs: the store and the project.
 /// Output: the answer, false where the engine keeps no team tables.

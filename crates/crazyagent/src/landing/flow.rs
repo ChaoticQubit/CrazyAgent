@@ -1468,6 +1468,19 @@ pub(super) fn tip(
 ) -> Result<String, EngineError> {
     store::initialize(db)?;
     let _held = hold(repository);
+    read_tip(db, repository, worktree, git_dir)
+}
+
+/// The commit an agent worktree holds now, read as [`tip`] reads it, without taking the
+/// repository hold, for a caller that holds it already or reads before taking it.
+/// Inputs: the store, the owner checkout, the worktree and its git folder. Output: the
+/// commit id.
+pub(super) fn read_tip(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
     match check_places(repository, worktree, git_dir)? {
         Layout::Linked => open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head(),
         Layout::Clone => clone::fetch(
@@ -1489,7 +1502,8 @@ pub(super) fn tip(
 /// files included,
 /// must stay within the bounds before anything is stored. The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
-/// commits the same tree again.
+/// commits the same tree again. Its counts are measured against the tip it lands on,
+/// read before the hold as the clone fetch is (`owner::landing_tip`, DEC-107).
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending, or
 /// `changes_branch_not_above_base` for a clone branch that dropped the base; an updating
@@ -1522,6 +1536,13 @@ pub(super) fn record(
         )?),
         Layout::Linked => None,
     };
+    let tip = super::owner::landing_tip(
+        db,
+        &shared,
+        &workspace.repository,
+        &workspace.project,
+        &workspace.agent,
+    );
     let _held = hold(&workspace.repository);
     let open = store::open_for(db, worktree)?;
     if open
@@ -1629,7 +1650,6 @@ pub(super) fn record(
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();
-    let tip = super::owner::checked_out_tip(&shared, &workspace.repository);
     let from = match &tip {
         Some(tip) => super::owner::measured_from(&shared, &record.base, &record.head, tip)?,
         None => record.base.clone(),
