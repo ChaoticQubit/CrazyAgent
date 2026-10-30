@@ -588,19 +588,18 @@ fn b18_the_owner_sees_switches_and_wakes_a_finished_agent() {
         "SELECT count(*) FROM team_wake_requests WHERE agent=?1",
         agent,
     );
-    let restarted = count(
+    assert_eq!(
+        stored, 1,
+        "w stores one wake request for the team runtime's next tick"
+    );
+    let stopped = count(
         &db,
-        "SELECT count(*) FROM team_agents WHERE id=?1 AND status<>'stopped'",
+        "SELECT count(*) FROM team_agents WHERE id=?1 AND status='stopped'",
         agent,
     );
-    let noted = count(
-        &db,
-        "SELECT count(*) FROM team_messages WHERE created_ms>=?1 AND (text LIKE '%restart%' OR text LIKE '%was not started%' OR text LIKE '%no other was started%')",
-        now,
-    );
-    assert!(
-        stored == 1 || restarted + noted > 0,
-        "w reaches the engine: the wake waits for the team runtime's next tick, or the runtime already took it"
+    assert_eq!(
+        stopped, 1,
+        "this engine runs no team runtime, so the agent stays stopped until one takes the wake"
     );
     drop(pty);
     drop(db);
