@@ -135,6 +135,7 @@ test("each folder chooser names what the folder is for, and adding a project nev
     ["../src/screens/intake/add-folder.tsx", ['"project"']],
     ["../src/screens/intake/home-folder.tsx", ['"projects_home"']],
     ["../src/screens/settings/projects-home.tsx", ['"projects_home"']],
+    ["../src/screens/settings/memory.tsx", ['"memory"']],
     ["../src/screens/settings/plugins.tsx", ['"skill"', '"skill"', '"plugin"']],
   ]) {
     const calls = [...source(file).matchAll(/\bpickFolder\(([^)]*)\)/g)].map((call) => call[1]);

@@ -160,7 +160,7 @@ test("server rows use the design status words, show tools and a plain reason wit
   const markup = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [broken, checked] })));
   assert.match(markup, /Can&#x27;t start: command not found/);
   assert.match(markup, /Check again/);
-  assert.match(markup, /aria-expanded="false"[^>]*>(?:<svg[\s\S]*?<\/svg>)?\s*2 tools<\/button>/);
+  assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">(?:<svg[\s\S]*?<\/svg>)?\s*2 tools<\/button>/);
   const empty = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [] })));
   assert.match(empty, /No MCP servers yet/);
   assert.match(empty, /Add MCP server/);
