@@ -110,7 +110,7 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     <div className="pj-row">
       <span aria-hidden="true">Workflow nudges</span>
       <Segmented label="Workflow nudges" value={view.settings.nudges ? "on" : "off"} onValue={(value) => void save({ nudges: value === "on" }, "workflow nudges")}
-        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools.</span>
     </div>
     <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>

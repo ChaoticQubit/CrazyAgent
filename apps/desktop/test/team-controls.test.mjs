@@ -117,10 +117,10 @@ test("the idle stop says when an idle master stops, which no setting changes", (
 
 const coordination = await import("../src/screens/team/coordination.tsx");
 
-test("workflow nudges offer On and Off and show Off for a project with no saved coordination settings", () => {
+test("workflow nudges offer Off first and On, and show Off for a project with no saved coordination settings", () => {
   assert.equal(coordination.COORD_DEFAULTS.nudges, false);
   const html = renderToStaticMarkup(createElement(coordination.CoordinationControls, { projectId: "chores", status: status(), reload: () => {} }));
   const group = html.match(/<div class="segmented" role="radiogroup" aria-label="Workflow nudges">(.*?)<\/div>/)[1];
   const choices = [...group.matchAll(/aria-checked="(true|false)"[^>]*>([^<]+)<\/button>/g)].map(([, checked, label]) => [label, checked === "true"]);
-  assert.deepEqual(choices, [["On", false], ["Off", true]]);
+  assert.deepEqual(choices, [["Off", true], ["On", false]], "the default comes first, as in the panel's other settings");
 });
