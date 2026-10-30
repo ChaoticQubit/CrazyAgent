@@ -195,6 +195,71 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     assert!(!wrong.status.success());
 }
 
+fn stamped_by_binary(command: &str, pane: Option<&str>) -> Option<String> {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let mut launch = Command::new(env!("CARGO_BIN_EXE_crazyagent"));
+    launch
+        .arg(command)
+        .arg(&mailbox)
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(pane) = pane {
+        launch.env("TMUX_PANE", pane);
+    }
+    let mut server = crazyagent::spawn_gate::spawn(&mut launch).unwrap();
+    let mut input = server.stdin.take().unwrap();
+    input
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"inspect_work\",\"arguments\":{}}}\n")
+        .unwrap();
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let taken = loop {
+        let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
+        if !taken.is_empty() || Instant::now() >= deadline {
+            break taken;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(taken.len(), 1, "{command}: {taken:?}");
+    assert_eq!(taken[0].1, Some(Call::InspectWork));
+    answer_call(&mailbox, &taken[0].0, "Taken.", false).unwrap();
+    let mut output = String::new();
+    server
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut output)
+        .unwrap();
+    assert!(server.wait().unwrap().success(), "{output}");
+    assert!(output.contains("Taken."), "{output}");
+    taken[0].2.clone()
+}
+
+#[test]
+fn both_live_servers_stamp_their_tmux_pane_beside_each_call() {
+    for command in [LIVE_SERVER_COMMAND, AGENT_SERVER_COMMAND] {
+        assert_eq!(
+            stamped_by_binary(command, Some("%12")),
+            Some("%12".to_owned()),
+            "{command}"
+        );
+        assert_eq!(
+            stamped_by_binary(command, Some("%12;rm")),
+            None,
+            "{command}"
+        );
+        assert_eq!(stamped_by_binary(command, None), None, "{command}");
+    }
+}
+
 #[test]
 fn both_live_servers_refuse_an_unknown_tool_to_switch_off_with_their_usage() {
     let directory = tempfile::tempdir().unwrap();

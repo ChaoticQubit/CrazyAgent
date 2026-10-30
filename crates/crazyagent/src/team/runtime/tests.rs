@@ -5997,6 +5997,368 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
     );
 }
 
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct NativeLead {
+    lead: i64,
+    teammate: i64,
+    own: String,
+    record: PaneRecord,
+}
+
+fn native_lead(f: &Fixture, host: &Arc<dyn Host>) -> NativeLead {
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let other = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let teammate = |parent: i64, status: AgentStatus, pane: &str| {
+        f.connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane) VALUES (?1,'teammate','claude-code',1,?2,?3,1,1,?4,?5)",
+                params![PROJECT, ENDPOINT, status.name(), parent, pane],
+            )
+            .unwrap();
+        f.connection.last_insert_rowid()
+    };
+    let working = teammate(lead, AgentStatus::Working, "%900");
+    teammate(lead, AgentStatus::Stopped, "%901");
+    teammate(other, AgentStatus::Working, "%902");
+    let record = f.pane(host, lead);
+    f.keep(lead, &record);
+    let own = host
+        .panes(&AgentId::team(lead).unwrap())
+        .unwrap()
+        .into_iter()
+        .find(|listed| listed.pid == record.pid)
+        .unwrap()
+        .id;
+    assert!(!["%900", "%901", "%902"].contains(&own.as_str()), "{own}");
+    NativeLead {
+        lead,
+        teammate: working,
+        own,
+        record,
+    }
+}
+
+fn lead_socket(f: &Fixture, lead: i64) -> Removed {
+    let socket = crate::terminal::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
+    let folder = socket.parent().unwrap().to_path_buf();
+    assert!(!folder.exists(), "{}", folder.display());
+    std::fs::create_dir_all(&folder).unwrap();
+    let removed = Removed(folder);
+    std::fs::write(&socket, b"").unwrap();
+    removed
+}
+
+#[test]
+fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
+    let f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let caller = |pane: Option<&str>| {
+        team_caller(
+            &f.connection,
+            Some(host.as_ref()),
+            Some(&f.base),
+            &project,
+            (lead, "Lead"),
+            pane,
+        )
+    };
+    let as_lead = Some((lead, "Lead".to_owned()));
+
+    for pane in [None, Some("%900"), Some(native.own.as_str()), Some("%x")] {
+        assert_eq!(caller(pane), as_lead, "no socket, {pane:?}");
+    }
+
+    let _socket = lead_socket(&f, lead);
+    let named = crate::team::events::label(&f.connection, native.teammate).unwrap();
+    assert_eq!(caller(Some("%900")), Some((native.teammate, named)));
+    assert_eq!(caller(Some(native.own.as_str())), as_lead);
+    for pane in [
+        None,
+        Some("%77"),
+        Some("%901"),
+        Some("%902"),
+        Some("%x"),
+        Some(""),
+    ] {
+        assert_eq!(caller(pane), None, "{pane:?}");
+    }
+    let unlisted = PaneRecord {
+        pid: native.record.pid + 1,
+        ..native.record.clone()
+    };
+    f.connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![lead, unlisted.encode().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(caller(Some(native.own.as_str())), None);
+    f.connection
+        .execute(
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![lead, native.record.encode().unwrap()],
+        )
+        .unwrap();
+    assert_eq!(
+        team_caller(
+            &f.connection,
+            None,
+            Some(&f.base),
+            &project,
+            (lead, "Lead"),
+            Some(native.own.as_str())
+        ),
+        None
+    );
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+#[test]
+fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
+    let mut f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let _socket = lead_socket(&f, lead);
+    let mailbox = f.base.join("lead-mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let agents_folder = f.base.join("team").join("agents");
+    let rows = |connection: &Connection| -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before = rows(&f.connection);
+    let calls = [
+        (
+            "%900",
+            crate::team::tool::Call::Spawn {
+                task: "Write the docs.".into(),
+                harness: None,
+                role: None,
+                mode: None,
+            },
+        ),
+        (
+            "%900",
+            crate::team::tool::Call::Stop {
+                agent: "Lead".into(),
+            },
+        ),
+        (
+            "%900",
+            crate::team::tool::Call::Merge {
+                agent: "Lead".into(),
+            },
+        ),
+        (
+            "%900",
+            crate::team::tool::Call::Remember {
+                text: "The docs live in docs/guide.".into(),
+                scope: crate::team::tool::MemoryReach::Project,
+            },
+        ),
+        (
+            "%900",
+            crate::team::tool::Call::StartWork {
+                title: "Docs".into(),
+                claims: vec!["docs/guide.md".into()],
+            },
+        ),
+        (
+            "%900",
+            crate::team::tool::Call::UpdateWork {
+                kind: crate::team::tool::Update::Question,
+                text: "Which guide?".into(),
+                to: None,
+                question_for: Some(crate::coord::QuestionFor::Lead),
+                severity: Some(crate::coord::Severity::Low),
+                reply_to: None,
+                work: None,
+                key: None,
+            },
+        ),
+        (
+            native.own.as_str(),
+            crate::team::tool::Call::Spawn {
+                task: "Write the docs.".into(),
+                harness: None,
+                role: None,
+                mode: None,
+            },
+        ),
+        ("%77", crate::team::tool::Call::InspectWork),
+        (
+            "%77",
+            crate::team::tool::Call::Remember {
+                text: "Never saved.".into(),
+                scope: crate::team::tool::MemoryReach::Project,
+            },
+        ),
+        (
+            "%77",
+            crate::team::tool::Call::Spawn {
+                task: "Never started.".into(),
+                harness: None,
+                role: None,
+                mode: None,
+            },
+        ),
+    ];
+    let mut ids = Vec::new();
+    for (index, (pane, call)) in calls.iter().enumerate() {
+        let id = format!("{:032x}", index + 1);
+        let mut value = serde_json::to_value(call).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("pane".into(), serde_json::Value::String((*pane).to_owned()));
+        std::fs::write(
+            mailbox.join(format!("{id}.call")),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(mailbox.join(format!("{id}.call")))
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + index as u64))
+            .unwrap();
+        ids.push(id);
+    }
+    let answering = super::super::master::Answering {
+        access: &f.access,
+        stored: &f.setup,
+        landing: &f.base,
+        agents: &agents_folder,
+        events: None,
+        host: Some(host.as_ref()),
+    };
+    let base = f.base.clone();
+    let host_ref = host.as_ref();
+    let mut served = 0;
+    loop {
+        let taken = super::super::history::serve_agent_calls(
+            &mut f.connection,
+            &project,
+            (lead, "Lead"),
+            &agents_folder,
+            &mailbox,
+            &mut |connection, pane| {
+                team_caller(
+                    connection,
+                    Some(host_ref),
+                    Some(&base),
+                    &project,
+                    (lead, "Lead"),
+                    pane,
+                )
+            },
+            &mut |connection, caller, call| {
+                super::super::master::answer_sub(connection, &answering, caller, call)
+                    .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+            },
+        );
+        if taken == 0 {
+            break;
+        }
+        served += taken;
+    }
+    assert_eq!(served, calls.len());
+    let answers: Vec<(String, bool)> = ids
+        .iter()
+        .map(|id| {
+            let reply: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap(),
+            )
+            .unwrap();
+            (
+                reply["text"].as_str().unwrap().to_owned(),
+                reply["error"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    for (text, error) in &answers[..3] {
+        assert!(
+            *error && text.ends_with("(teammate_role_tool_refused)."),
+            "{text}"
+        );
+    }
+    assert!(!answers[3].1, "{:?}", answers[3]);
+    assert!(!answers[4].1, "{:?}", answers[4]);
+    assert!(!answers[5].1, "{:?}", answers[5]);
+    assert!(
+        !answers[6].0.contains("teammate_role_tool_refused"),
+        "the lead's own pane spawns as the lead: {:?}",
+        answers[6]
+    );
+    for (text, error) in &answers[7..] {
+        assert!(*error && text.ends_with("(team_caller_unknown)."), "{text}");
+    }
+    assert_eq!(
+        rows(&f.connection),
+        before,
+        "no agent was started or stopped"
+    );
+
+    let teammate = native.teammate;
+    let label = crate::team::events::label(&f.connection, teammate).unwrap();
+    let saved = crate::memory::library::recall(&mut f.connection, &project, "docs/guide")
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert_eq!(
+        saved[0].origin,
+        crate::memory::library::MemoryOrigin::Agent { agent: label }
+    );
+    assert!(
+        crate::memory::library::recall(&mut f.connection, &project, "Never saved")
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+    let (owner, claimant): (i64, i64) = f
+        .connection
+        .query_row(
+            "SELECT w.owner_agent, c.agent FROM coord_work w JOIN coord_claims c ON c.work=w.id WHERE w.project=?1",
+            [PROJECT],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((owner, claimant), (teammate, teammate));
+    let (from, to, kind): (i64, i64, String) = f
+        .connection
+        .query_row(
+            "SELECT from_agent, to_agent, kind FROM coord_messages WHERE project=?1 AND body='Which guide?'",
+            [PROJECT],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((from, to, kind.as_str()), (teammate, lead, "question"));
+    let seen: Option<i64> = f
+        .connection
+        .query_row(
+            "SELECT last_seen FROM coord_activity WHERE agent=?1",
+            [teammate],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert!(seen.is_some_and(|seen| seen > 1), "{seen:?}");
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.

@@ -731,6 +731,101 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
 }
 
+fn served_pane(pane: Option<&str>) -> Option<String> {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let served = mailbox.clone();
+    let pane = pane.map(str::to_owned);
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let input = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": INSPECT_WORK_TOOL, "arguments": {}}})]);
+        serve_live(input, &mut output, &served, &[], pane.as_deref()).unwrap();
+        output
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (id, call, stamped) = loop {
+        if let Some(taken) = take_calls(&mailbox, 1).pop() {
+            break taken;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(call, Some(Call::InspectWork));
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    let output = server.join().unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    assert_eq!(answer["result"]["content"][0]["text"], "Taken.");
+    stamped
+}
+
+#[test]
+fn the_live_server_stamps_only_a_host_pane_id_beside_its_call() {
+    assert_eq!(served_pane(Some("%3")), Some("%3".to_owned()));
+    assert_eq!(
+        served_pane(Some("%123456789")),
+        Some("%123456789".to_owned())
+    );
+    for forged in ["", "%", "%x1", "%1234567890", "%1;rm", "3", "%-1"] {
+        assert_eq!(served_pane(Some(forged)), None, "{forged:?}");
+    }
+    assert_eq!(served_pane(None), None);
+}
+
+#[test]
+fn a_call_carries_its_pane_beside_it_and_a_bad_pane_leaves_the_call_unread() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let asked = mailbox.clone();
+    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, Some("%3"), REPLY_WAIT));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let id = loop {
+        if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
+            break id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let written: Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}{CALL_SUFFIX}"))).unwrap())
+            .unwrap();
+    assert_eq!(written, json!({"tool": "inspect_work", "pane": "%3"}));
+    assert_eq!(
+        take_calls(&mailbox, CALLS_PER_TICK_MAX),
+        vec![(id.clone(), Some(Call::InspectWork), Some("%3".to_owned()))]
+    );
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    assert_eq!(asker.join().unwrap(), ("Taken.".to_owned(), false));
+
+    let planted = [
+        (
+            br#"{"tool":"inspect_work"}"#.as_slice(),
+            Some(Call::InspectWork),
+        ),
+        (br#"{"tool":"inspect_work","pane":3}"#.as_slice(), None),
+        (br#"{"tool":"inspect_work","pane":"%x1"}"#.as_slice(), None),
+        (br#"{"tool":"inspect_work","pane":null}"#.as_slice(), None),
+        (
+            br#"{"tool":"inspect_work","pane":"%1;rm"}"#.as_slice(),
+            None,
+        ),
+    ];
+    for (index, (bytes, call)) in planted.into_iter().enumerate() {
+        let id = format!("{index}").repeat(32);
+        std::fs::write(mailbox.join(format!("{id}{CALL_SUFFIX}")), bytes).unwrap();
+        assert_eq!(
+            take_calls(&mailbox, CALLS_PER_TICK_MAX),
+            vec![(id, call, None)],
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    assert_eq!(
+        read_call(br#"{"tool":"inspect_work","pane":"%7"}"#),
+        Some((Call::InspectWork, Some("%7".to_owned())))
+    );
+}
+
 #[test]
 fn a_switched_off_tool_is_refused_by_its_server_and_never_reaches_the_mailbox() {
     let directory = tempfile::tempdir().unwrap();

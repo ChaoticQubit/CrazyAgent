@@ -878,6 +878,84 @@ fn known_project(fixture: &Fixture) {
         .unwrap();
 }
 
+/// A message to a finished worker wakes it once with `WAKE_TASK` as its task. The message
+/// stays Sent until the woken turn's prompt carries it through
+/// `coord::delivery::next_turn`; `delivered` then marks it Delivered and no later turn
+/// carries a second copy.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_to_a_finished_worker_wakes_it_once_and_reaches_its_first_prompt_once() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let agent = named_sub(&fixture, "page-writer", "stopped");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![tool_call(
+            1,
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": "@page-writer", "text": "Add the footer."}),
+        )],
+    );
+    assert_eq!(answers.len(), 1, "{answers:#?}");
+    let message: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE to_kind='agent' AND to_agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (said, refused) = text(&answers[0]);
+    assert!(
+        !refused && said.starts_with(&format!("Sent #{message}. Waking {label}:")),
+        "{said}"
+    );
+    let woken = pinned(&fixture, agent);
+    assert_eq!(woken.len(), 1, "one wake pins one task");
+    let prompt: String = fixture
+        .connection
+        .query_row(
+            "SELECT prompt FROM team_tasks WHERE id=?1",
+            [woken[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(prompt, WAKE_TASK);
+    let receipt = |fixture: &Fixture| -> String {
+        fixture
+            .connection
+            .query_row(
+                "SELECT receipt FROM coord_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(receipt(&fixture), "sent");
+    let (waiting, carried) = crate::coord::delivery::next_turn(&fixture.connection, agent).unwrap();
+    assert_eq!(carried, vec![message]);
+    assert_eq!(waiting.matches("Add the footer.").count(), 1, "{waiting}");
+    assert_eq!(
+        waiting
+            .matches(&format!("[crazyagent msg {message}]"))
+            .count(),
+        1,
+        "{waiting}"
+    );
+    crate::coord::delivery::delivered(&fixture.connection, &carried, NOW).unwrap();
+    assert_eq!(receipt(&fixture), "delivered");
+    assert_eq!(
+        crate::coord::delivery::next_turn(&fixture.connection, agent).unwrap(),
+        (String::new(), Vec::new()),
+        "a delivered message is never carried again"
+    );
+    assert_eq!(pinned(&fixture, agent), woken);
+}
+
 /// Adds the fixture's master as a team agent row, so its own work and messages have an
 /// owner the coordination layer knows. Takes the fixture.
 #[cfg(target_os = "macos")]
