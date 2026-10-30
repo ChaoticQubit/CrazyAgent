@@ -543,3 +543,6 @@ pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Engine
     assert!(sent <= NUDGES_PER_TICK_MAX);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

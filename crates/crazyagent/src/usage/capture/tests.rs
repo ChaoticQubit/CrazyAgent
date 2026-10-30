@@ -1017,3 +1017,160 @@ fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
         "the record that changed last is counted"
     );
 }
+
+/// One Codex rollout line recording a tool call of the given item type, name and payload.
+fn codex_call(kind: &str, name: &str, field: &str, value: serde_json::Value) -> String {
+    let mut payload = serde_json::json!({"type": kind, "name": name});
+    payload[field] = value;
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "response_item", "payload": payload})
+    )
+}
+
+fn tool_counts(db: &Connection, agent: i64) -> Vec<(String, i64)> {
+    let mut query = db
+        .prepare("SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool")
+        .unwrap();
+    query
+        .query_map(params![agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn codex_rollout_tool_calls_count_once_per_line() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+         VALUES ('alpha','sub','codex',1,'running',?1,?1,0)",
+        params![NOW],
+    )
+    .unwrap();
+    let agent = db.last_insert_rowid();
+    let home = tempfile::tempdir().unwrap();
+    let record = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-t.jsonl");
+    let graphify = serde_json::json!({"cmd": "graphify query \"who owns pools\""}).to_string();
+    let skill =
+        serde_json::json!({"cmd": "sed -n 1,80p /h/.codex/skills/tdd/SKILL.md"}).to_string();
+    let oversized =
+        serde_json::json!({"cmd": format!("graphify {}", "x".repeat(ARGUMENTS_BYTES_MAX))})
+            .to_string();
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.clone().into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call("function_call", "exec_command", "arguments", skill.into()),
+    );
+    append(
+        &record,
+        &codex_call(
+            "custom_tool_call",
+            "apply_patch",
+            "input",
+            "*** Begin Patch".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "local_shell_call",
+            "",
+            "action",
+            serde_json::json!({"type": "exec", "command": ["bash", "-lc", "ls"]}),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "mcp__context-mode__ctx_search",
+            "arguments",
+            "{}".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            oversized.into(),
+        ),
+    );
+    append(
+        &record,
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+    );
+    append(&record, &codex_count(1000, 600, 50));
+    let mut who = attribution(RunKind::Agent, None);
+    who.harness = "codex".into();
+    let counted = vec![
+        ("Skill".to_owned(), 1),
+        ("apply_patch".to_owned(), 1),
+        ("ctx_search".to_owned(), 1),
+        ("exec_command".to_owned(), 1),
+        ("graphify".to_owned(), 1),
+        ("local_shell_call".to_owned(), 1),
+        ("skill:tdd".to_owned(), 1),
+    ];
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW).unwrap();
+    assert_eq!(tool_counts(&db, agent), counted);
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 1).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent),
+        counted,
+        "a second scan of the same lines counts nothing again"
+    );
+
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.into(),
+        ),
+    );
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 2).unwrap();
+    let graphify_count = tool_counts(&db, agent)
+        .into_iter()
+        .find(|(tool, _)| tool == "graphify")
+        .map(|(_, count)| count);
+    assert_eq!(graphify_count, Some(2), "only the new line counts");
+
+    let other = tempfile::tempdir().unwrap();
+    append(
+        &other
+            .path()
+            .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-u.jsonl"),
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            "{\"cmd\":\"graphify\"}".into(),
+        ),
+    );
+    scan_home(&db, other.path(), Format::Codex, &who, NOW + 3).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent)
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<i64>(),
+        8,
+        "a scan for no agent counts no tool calls"
+    );
+}

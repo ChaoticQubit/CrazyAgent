@@ -315,3 +315,49 @@ test("the move notice names the files, says this or these deletions, offers Leav
     assert.doesNotMatch(client.processMessage({ kind: "error", code, message: "" }), /process_/, code);
   }
 });
+
+const ADOPTION = {
+  nudges: true,
+  counted: ["start_work", "graphify"],
+  skills: ["tdd", "zeta"],
+  hidden: 2,
+  agents: [
+    { agent: 3, role: "sub", harness: "claude-code", active: true, counts: [0, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0, flags: [], reminded: [], hookless: true },
+    { agent: 2, role: "sub", harness: "codex", active: false, counts: [0, 2], skills: [1, 0], other_skills: [{ name: "other-one", count: 1 }], graphify: 2, context_mode: 1,
+      flags: ["edits_without_start_work"], reminded: ["edits_without_start_work"], hookless: false },
+    { agent: 1, role: "master", harness: "claude-code", active: true, counts: [1, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0,
+      flags: ["no_graphify_or_context_mode"], reminded: [], hookless: false },
+  ],
+};
+
+const rowOf = (markup, label) => {
+  const row = markup.split("<tr").find((part) => part.includes(`>${label}</th>`));
+  assert.ok(row, `${label} has a row`);
+  return row;
+};
+
+test("workflow adoption shows each counted tool's column, skill counts, red flags and the nudges line", () => {
+  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
+  assert.match(markup, /Nudges are on: each red flag sends that agent one reminder\./);
+  assert.match(markup, /<th scope="col">Agent<\/th><th scope="col">start_work<\/th><th scope="col">graphify<\/th><th scope="col">Skills<\/th><th scope="col">Flags<\/th>/);
+  const codex = rowOf(markup, "#2 sub codex");
+  assert.match(codex, /class="adoption-stopped"/, "a stopped agent is dimmed");
+  assert.match(codex, /<td>0<\/td><td>2<\/td>/);
+  assert.match(codex, /graphify <strong>2<\/strong>/);
+  assert.match(codex, /ctx_\* <strong>1<\/strong>/);
+  assert.match(codex, /<span>tdd <strong>1<\/strong><\/span>/);
+  assert.match(codex, /<span class="secondary">zeta <strong>0<\/strong><\/span>/, "a zero count is muted");
+  assert.match(codex, /other-one \(not enabled\) <strong>1<\/strong>/);
+  assert.match(codex, /Edits without start_work, reminded/);
+  const master = rowOf(markup, "#1 master claude-code");
+  assert.doesNotMatch(master, /adoption-stopped/);
+  assert.match(master, /10\+ min without graphify or context-mode/);
+  assert.doesNotMatch(master, /reminded/);
+  assert.match(markup, /2 older agents are not listed\./);
+  const off = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: false, hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
+  assert.match(off, /Nudges are off: flags show here, and agents get no reminder\./);
+  assert.match(off, /No agents yet/);
+  assert.doesNotMatch(off, /not listed/);
+  const failed = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRefresh() {} }));
+  assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
+});

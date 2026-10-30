@@ -893,6 +893,58 @@ fn each_import_from_file_refusal_reads_as_a_plain_sentence_and_keeps_the_editor(
     }
 }
 
+/// A project's adoption view read by the real coordination store: a master that called
+/// nothing, a Codex sub-agent that edited with no declared work, queried the graph twice,
+/// ran one context-mode call and read the tdd skill and a skill the project does not
+/// enable, and was reminded of its flag, and a newer agent whose launch fires no hooks.
+/// Input: the project. Output: the view and the master, sub-agent and hookless ids.
+fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
+    const NOW: i64 = 1_800_000_000_000;
+    let root = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let body = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: project.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Harbor Notes".into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES(?1, ?2)",
+        rusqlite::params![project.as_str(), body],
+    )
+    .unwrap();
+    let agent = |role: &str, harness: &str, hookless: bool| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+             VALUES (?1,?2,?3,1,'running',?4,?4,?5)",
+            rusqlite::params![project.as_str(), role, harness, NOW, hookless],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let master = agent("master", "claude-code", false);
+    let sub = agent("sub", "codex", false);
+    let hookless = agent("sub", "claude-code", true);
+    for tool in [
+        "Edit",
+        "graphify",
+        "graphify",
+        "ctx_execute",
+        "Skill",
+        "skill:tdd",
+        "skill:other-one",
+    ] {
+        crate::coord::record_tool(&db, sub, tool, NOW).unwrap();
+    }
+    crate::coord::adoption::tick(&db, project, NOW).unwrap();
+    let skills = ["zeta".to_owned(), "tdd".to_owned()];
+    let view = crate::coord::adoption::view(&db, project, &skills, NOW).unwrap();
+    (view, master, sub, hookless)
+}
+
 fn adoption_reply(project: &ProjectId, result: Result<Adoption, &str>) -> Arrival {
     Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(ProcessEvent {
         query: ProcessQuery::Adoption {
@@ -902,4 +954,98 @@ fn adoption_reply(project: &ProjectId, result: Result<Adoption, &str>) -> Arriva
             .map(|view| ProcessReply::Adoption(Box::new(view)))
             .map_err(str::to_owned),
     }))))
+}
+
+/// Opens a project's Process page on a tall terminal and answers its text and settings
+/// reads, leaving the adoption read it sends next. Input: the project. Output: the shell.
+fn opened_for_adoption(project: &ProjectId) -> Shell {
+    let scope = Scope::Project {
+        id: project.clone(),
+        name: "Harbor Notes".into(),
+    };
+    let mut shell = Shell::with(ctx(140, 60), Box::new(ProcessPage::new(scope)));
+    let read = ProcessQuery::Read {
+        project: Some(project.clone()),
+    };
+    assert_eq!(requests(&mut shell), vec![read.clone()]);
+    shell.arrive(reply(read, Ok("")));
+    let query = ProcessQuery::Settings {
+        project: project.clone(),
+    };
+    assert_eq!(requests(&mut shell), vec![query.clone()]);
+    shell.arrive(settings(query, Ok(InstructionSettings::default())));
+    assert_eq!(
+        requests(&mut shell),
+        vec![ProcessQuery::Adoption {
+            project: project.clone()
+        }],
+        "the page reads workflow adoption once its settings arrive"
+    );
+    shell
+}
+
+#[test]
+fn a_project_page_shows_workflow_adoption_after_its_settings() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let (view, master, sub, hookless) = adoption_read(&project);
+    let mut shell = opened_for_adoption(&project);
+    shell.arrive(adoption_reply(&project, Ok(view)));
+    let rows = render(&mut shell, 140, 60);
+    let shown = rows.join("\n");
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("{text:?} is missing:\n{shown}"))
+    };
+    let heading = at("Workflow adoption");
+    assert!(
+        rows[heading].contains("Nudges on: each flag sends that agent one reminder."),
+        "{shown}"
+    );
+    let hookless_row = at(&format!("#{hookless} sub claude-code"));
+    let sub_row = at(&format!("#{sub} sub codex"));
+    let master_row = at(&format!("#{master} master claude-code"));
+    assert!(heading < hookless_row && hookless_row < sub_row && sub_row < master_row);
+    assert!(
+        rows[hookless_row + 1].contains("Counts and flags unavailable for this account kind"),
+        "{shown}"
+    );
+    assert!(
+        rows[sub_row + 1].contains(
+            "start_work 0  inspect_work 0  update_work 0  transfer_work 0  finish_work 0  ctx_* 1  graphify 2  Skill 1"
+        ),
+        "{shown}"
+    );
+    assert!(
+        rows[sub_row + 2]
+            .contains("graphify 2  ctx_* 1  Skills:  tdd 1  zeta 0  other-one 1 (not enabled)"),
+        "{shown}"
+    );
+    assert!(
+        rows[sub_row + 3].contains("Edits without start_work, reminded"),
+        "{shown}"
+    );
+    assert!(
+        rows[master_row + 2].contains("graphify 0  ctx_* 0  Skills:  tdd 0  zeta 0"),
+        "{shown}"
+    );
+    assert!(
+        !rows[master_row + 3].contains("Edits without start_work"),
+        "a master that called nothing has no flag:\n{shown}"
+    );
+}
+
+#[test]
+fn an_unreadable_adoption_says_so_on_the_project_page() {
+    let project = ProjectId::new("harbor-notes").unwrap();
+    let mut shell = opened_for_adoption(&project);
+    shell.arrive(adoption_reply(
+        &project,
+        Err("process_adoption_unavailable"),
+    ));
+    let shown = render(&mut shell, 140, 60).join("\n");
+    assert!(
+        shown.contains("Workflow adoption couldn't be read. Try again."),
+        "{shown}"
+    );
 }
