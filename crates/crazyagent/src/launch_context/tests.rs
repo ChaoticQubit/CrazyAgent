@@ -899,7 +899,7 @@ fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     pane.kill_server();
     assert_eq!(
         pane.adopt().err().map(|refused| refused.0).as_deref(),
-        Some("terminal_closed")
+        Some("launch_closed")
     );
     assert!(
         !pane.config.exists(),
