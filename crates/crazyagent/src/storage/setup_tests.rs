@@ -1018,3 +1018,59 @@ fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks(
     seed(&mut connection, root, "caveman", &hookless).unwrap();
     assert!(hook_views(&mut connection, root, None).is_empty());
 }
+
+#[test]
+fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let mine = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::AddSkill {
+            scope: Scope::Global,
+            source: skill(mine.path(), "graphify").display().to_string(),
+        },
+    )
+    .unwrap();
+    install(
+        &mut connection,
+        root,
+        "graphify",
+        "https://example.invalid/graphify@1",
+        vec![skill(work.path(), "graphify")],
+        None,
+    )
+    .unwrap();
+    let owned = skills(&mut connection, root);
+    assert_eq!(owned.len(), 1);
+    seed(
+        &mut connection,
+        root,
+        "graphify",
+        &hook_plugin(work.path(), "graphify-hooks"),
+    )
+    .unwrap();
+    let views = hook_views(&mut connection, root, None);
+    assert_eq!(views.len(), 2);
+    assert!(
+        views
+            .iter()
+            .all(|view| view.follows.as_deref() == Some("graphify"))
+    );
+    assert_eq!(
+        effective_events(&mut connection, root, "project-1").len(),
+        2
+    );
+    plugins::execute(
+        &mut connection,
+        root,
+        plugins::Command::SetSkill {
+            id: owned[0].id.clone(),
+            enabled: false,
+        },
+    )
+    .unwrap();
+    assert!(effective_events(&mut connection, root, "project-1").is_empty());
+}
