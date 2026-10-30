@@ -3484,3 +3484,198 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         "a stopped teammate never comes back as Idle"
     );
 }
+
+#[test]
+fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane() {
+    let (_directory, mut connection) = database();
+    let setup = stored("team-stop", vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let agent = |connection: &Connection, role: &str, parent: Option<i64>, pane: Option<&str>| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES ('team-stop',?1,'claude-code',1,'working',1,1,?2,?3)",
+                params![role, parent, pane],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let master = agent(&connection, "master", None, None);
+    let lead = agent(&connection, "sub", None, None);
+    let teammate = agent(&connection, "teammate", Some(lead), Some("%3"));
+    connection
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (?1,'team-stop','%4',1)",
+            [lead],
+        )
+        .unwrap();
+    let press = |connection: &mut Connection, action: TeamAction| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(&tx, &access("team-stop", &["local-a"]), &action).unwrap();
+        tx.commit().unwrap();
+        outcome
+    };
+    let stop = |agent: i64| TeamAction::StopAgent {
+        project_id: setup.project_id.clone(),
+        agent,
+    };
+
+    assert_eq!(press(&mut connection, stop(teammate)), Outcome::Applied);
+    assert!(owner_stopped(&connection, teammate).unwrap());
+    assert!(
+        !owner_stopped(&connection, lead).unwrap(),
+        "stopping a teammate never stops its lead"
+    );
+    assert_eq!(
+        press(&mut connection, stop(master)),
+        Outcome::Rejected {
+            code: "team_stop_master".into()
+        }
+    );
+    assert_eq!(
+        press(&mut connection, stop(teammate + 100)),
+        Outcome::Rejected {
+            code: "team_agent_not_found".into()
+        }
+    );
+
+    let stop_pane = |pane: &str| TeamAction::StopTeammate {
+        project_id: setup.project_id.clone(),
+        agent: lead,
+        pane: pane.into(),
+    };
+    let stopped = |connection: &Connection| -> Option<i64> {
+        connection
+            .query_row(
+                "SELECT stopped_ms FROM team_teammates WHERE agent=?1 AND pane='%4'",
+                [lead],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(press(&mut connection, stop_pane("%4")), Outcome::Applied);
+    let first = stopped(&connection).expect("the pane is marked stopped");
+    assert_eq!(press(&mut connection, stop_pane("%4")), Outcome::Applied);
+    assert_eq!(
+        stopped(&connection),
+        Some(first),
+        "a second Stop keeps the first stop time"
+    );
+    connection
+        .execute(
+            "UPDATE team_teammates SET ended_ms=1 WHERE agent=?1",
+            [lead],
+        )
+        .unwrap();
+    assert_eq!(
+        press(&mut connection, stop_pane("%4")),
+        Outcome::Rejected {
+            code: "team_teammate_not_found".into()
+        }
+    );
+    assert_eq!(
+        press(&mut connection, stop_pane("%5")),
+        Outcome::Rejected {
+            code: "team_teammate_not_found".into()
+        }
+    );
+}
+
+#[test]
+fn add_late_columns_upgrades_an_old_database_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                role TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                tools INTEGER NOT NULL,
+                connection TEXT,
+                worktree TEXT,
+                status TEXT NOT NULL,
+                task INTEGER,
+                process_group INTEGER,
+                turns INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_ms INTEGER NOT NULL,
+                heartbeat_ms INTEGER NOT NULL,
+                stopped_ms INTEGER,
+                session TEXT,
+                parent INTEGER
+            );
+            INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+                VALUES ('team-old','sub','claude-code',1,'stopped',1,1);
+            CREATE TABLE team_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                source TEXT NOT NULL,
+                turn INTEGER,
+                harness TEXT NOT NULL,
+                tools INTEGER NOT NULL,
+                prompt TEXT NOT NULL,
+                status TEXT NOT NULL,
+                agent INTEGER,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                result TEXT,
+                error TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                delivered INTEGER NOT NULL DEFAULT 0,
+                output_bytes INTEGER NOT NULL DEFAULT 0,
+                created_ms INTEGER NOT NULL,
+                started_ms INTEGER,
+                finished_ms INTEGER,
+                session TEXT,
+                parent INTEGER
+            );
+            INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms)
+                VALUES ('team-old','owner','codex',0,'Plan','done',1);",
+        )
+        .unwrap();
+    let columns = |table: &str| -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .unwrap();
+        statement
+            .query_map([table], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert!(!columns("team_agents").contains(&"pane".to_owned()));
+
+    initialize(&connection).unwrap();
+    let agents = columns("team_agents");
+    let tasks = columns("team_tasks");
+    assert_eq!(
+        agents[agents.len() - 3..],
+        ["pane".to_owned(), "mode".to_owned(), "hookless".to_owned()]
+    );
+    assert_eq!(tasks.last().map(String::as_str), Some("mode"));
+    let kept: (String, Option<String>, Option<String>, bool) = connection
+        .query_row(
+            "SELECT harness,pane,mode,hookless FROM team_agents WHERE project='team-old'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(kept, ("claude-code".to_owned(), None, None, false));
+    let task_mode: Option<String> = connection
+        .query_row("SELECT mode FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(task_mode, None);
+
+    initialize(&connection).unwrap();
+    assert_eq!(columns("team_agents"), agents, "a second open adds nothing");
+    assert_eq!(columns("team_tasks"), tasks);
+}
