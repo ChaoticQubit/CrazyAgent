@@ -77,7 +77,7 @@ test("the view lists each instruction file the engine recorded with its size and
   const markup = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "Use tdd.\n", skills: [], sessions: 0, loaded: [], skills_used: [], files } });
   for (const shown of [
     /CLAUDE\.md<\/span> 1\.2 KB, given/,
-    /AGENTS\.md<\/span> 300 bytes, left out: the same text as a file above/,
+    /AGENTS\.md<\/span> 300 bytes, left out: the same text as the instructions or a file above/,
     /CLAUDE\.local\.md<\/span> 0 bytes, left out: a link or not a plain file/,
     /~\/\.claude\/CLAUDE\.md<\/span> 39\.1 KB, left out: larger than CrazyAgent gives/,
     /~\/\.codex\/AGENTS\.md<\/span> 12 bytes, left out: not plain text/,
