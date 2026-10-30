@@ -4305,15 +4305,28 @@ fn a_task_stays_open_until_the_background_command_it_started_ends() {
 
 /// A task its time limit ends while a command its agent started in the background still
 /// runs says so first in its result, so the master and the owner read that the command was
-/// stopped with the task rather than that it finished, and the command really stops: it
-/// never writes what it would have written on finishing (w-review LTK-L1).
+/// stopped with the task rather than that it finished, and the command really stops with
+/// the task: while the runtime and its panes still run, it never writes what it would have
+/// written on finishing (w-review LTK-L1, rounds 1 and 2).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     let fixture = Fixture::new(1);
+    let host = fixture.host();
     let slow = BACKGROUND_CLAUDE.replace("/bin/sleep 2\n", "/bin/sleep 4\n");
     assert_ne!(slow, BACKGROUND_CLAUDE);
-    let (status, result, error, finished) = background_task(&fixture, &slow, Some(1));
+    let mut team = check_runtime(&fixture, &host, &slow, Some(1), None);
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let (status, result, error) = check_end(&fixture).unwrap();
+    let finished = stand_in_file(&fixture, subs(&fixture)[0], "background-done");
+    std::thread::sleep(Duration::from_secs(5));
+    let outlived = finished.exists();
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(
+        !outlived,
+        "the background command outlived the task the time limit ended"
+    );
     assert_eq!(status, "failed");
     assert_eq!(
         error.as_deref(),
@@ -4323,11 +4336,6 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     assert!(
         result.starts_with(BACKGROUND_CUT) && result.contains("Waiting for the check."),
         "{result}"
-    );
-    std::thread::sleep(Duration::from_secs(5));
-    assert!(
-        !finished.exists(),
-        "the background command outlived the task the time limit ended"
     );
 }
 
