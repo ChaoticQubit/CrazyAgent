@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { MemoryView, SuggestionEditor, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
+const { AGENT_WRITES_OPTIONS, MemoryView, SuggestionEditor, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const names = new Map([["project-harbor", "Harbor Notes"]]);
@@ -111,4 +111,29 @@ test("an edited memory follows the engine's text rules", () => {
 test("saving an edited suggestion refuses bad text before the engine and needs the desktop shell", async () => {
   assert.deepEqual(await api.saveEditedSuggestion(suggestion(), " "), { kind: "error", code: "invalid_knowledge_text", message: "Write something to remember." });
   assert.equal((await api.saveEditedSuggestion(suggestion(), "Competitors charge per team.")).code, "engine_unreachable");
+});
+
+test("a memory an agent saved names the agent, and one it asked for waits for approval with an Approve button", () => {
+  const harbor = { scope: "project", project_id: "project-harbor" };
+  assert.equal(memorySource(saved({ origin: "agent", agent: "Ada (@lead-a)" }), names), "App-wide, saved by Ada (@lead-a)");
+  assert.equal(memorySource(saved({ origin: "agent", agent: "Master", ...harbor }), names), "Harbor Notes only, saved by Master");
+  assert.equal(memorySource(saved({ origin: "requested", agent: "Sub-agent 3" }), names), "Waiting for your approval. App-wide, asked by Sub-agent 3");
+  assert.equal(memorySource(saved({ origin: "imported", source_path: "notes.md", ...harbor }), names), "Harbor Notes only, imported from notes.md");
+  const approve = render({ saved: { kind: "ok", value: { items: [saved({ origin: "requested", agent: "Sub-agent 3" }), saved({ id: "memory-2", origin: "agent", agent: "Master" })], next: null, agent_writes: "ask" } }, onApprove: forbidden, onWrites: forbidden });
+  assert.equal(approve.split(">Approve<").length, 2, "only the requested memory has Approve");
+  assert.match(approve, /Waiting for your approval\. App-wide, asked by Sub-agent 3/);
+  assert.match(approve, /App-wide, saved by Master/);
+});
+
+test("Agent memory writes is a select with both choices and says what each one does", () => {
+  assert.deepEqual(AGENT_WRITES_OPTIONS, [{ value: "save", label: "Save directly" }, { value: "ask", label: "Ask me first" }]);
+  const page = (writes) => ({ saved: { kind: "ok", value: { items: [saved()], next: null, agent_writes: writes } }, onApprove: forbidden, onWrites: forbidden });
+  const save = render(page("save"));
+  assert.match(save, /Agent memory writes/);
+  assert.match(save, /id="memory-agent-writes"/);
+  assert.match(save, /Save directly/);
+  assert.match(save, /Ask me first/);
+  assert.match(save, /Agents&#x27; memories are saved at once\./);
+  assert.match(render(page("ask")), /Agents&#x27; memories wait here until you approve them\./);
+  assert.doesNotMatch(render({ saved: { kind: "ok", value: { items: [saved()], next: null, agent_writes: "save" } } }), /Agent memory writes/);
 });
