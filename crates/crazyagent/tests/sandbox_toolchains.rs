@@ -631,6 +631,165 @@ fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_reada
     );
 }
 
+struct AgentGit {
+    case: Case,
+    git: PathBuf,
+}
+
+impl AgentGit {
+    fn new(lead: bool) -> Self {
+        let case = case();
+        let tmp = toolchains::make_tmp(&case.home).unwrap();
+        if lead {
+            toolchains::lead_git(&tmp).unwrap();
+        }
+        let git = tmp.join("bin/git");
+        let metadata = fs::symlink_metadata(&git).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        Self { case, git }
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        let mut command = std::process::Command::new(&self.git);
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &self.case.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Agent")
+            .env("GIT_AUTHOR_EMAIL", "agent@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Agent")
+            .env("GIT_COMMITTER_EMAIL", "agent@example.invalid")
+            .env("LC_ALL", "C")
+            .current_dir(&self.case.project)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crazyagent::spawn_gate::output(&mut command).unwrap()
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let output = self.run(args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn head(&self) -> String {
+        self.ok(&["rev-parse", "HEAD"])
+    }
+
+    fn refused(&self, args: &[&str], reason: &str) {
+        let before = self.head();
+        let output = self.run(args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "git {args:?}: {stderr}");
+        assert!(
+            stderr.starts_with("crazyagent: git ")
+                && stderr.contains("is refused")
+                && stderr.contains("DEC-107")
+                && stderr.contains(reason),
+            "git {args:?}: {stderr}"
+        );
+        assert_eq!(self.head(), before, "git {args:?} moved HEAD");
+        assert!(!self.case.project.join(".git/MERGE_HEAD").exists());
+    }
+
+    fn branch_with_commit(&self, branch: &str, from: &str) -> String {
+        self.ok(&["switch", "-q", "-c", branch, from]);
+        self.ok(&["commit", "-q", "--allow-empty", "-m", branch]);
+        let tip = self.head();
+        self.ok(&["switch", "-q", "-"]);
+        tip
+    }
+}
+
+impl Drop for AgentGit {
+    fn drop(&mut self) {
+        let _ = toolchains::remove_tmp(&self.case.home);
+    }
+}
+
+#[test]
+fn a_workers_git_refuses_to_merge_pull_rebase_or_cherry_pick_another_branch() {
+    let agent = AgentGit::new(false);
+    agent.ok(&["init", "-q", "--template=", "-b", "own"]);
+    agent.ok(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let start = agent.head();
+    agent.branch_with_commit("other", &start);
+    agent.ok(&["commit", "-q", "--allow-empty", "-m", "own work"]);
+    agent.ok(&["config", "alias.mm", "merge"]);
+    agent.ok(&["config", "alias.pk", "cherry-pick --no-commit"]);
+    let reason = "tell your lead";
+    for args in [
+        &["merge", "other"][..],
+        &["merge", "--no-ff", "--no-edit", "other"],
+        &["pull", ".", "other"],
+        &["pull"],
+        &["rebase", "other"],
+        &["cherry-pick", "other"],
+        &["--no-pager", "merge", "other"],
+        &["mm", "other"],
+        &["pk", "other"],
+        &["-c", "alias.m=merge", "m", "other"],
+        &["-c", "ALIAS.m=merge", "status"],
+        &["--config-env=alias.m=HOME", "m", "other"],
+    ] {
+        agent.refused(args, reason);
+    }
+    let abort = agent.run(&["merge", "--abort"]);
+    let stderr = String::from_utf8_lossy(&abort.stderr);
+    assert!(
+        !abort.status.success() && stderr.contains("MERGE_HEAD") && !stderr.contains("crazyagent"),
+        "{stderr}"
+    );
+    assert!(agent.ok(&["status", "--short"]).is_empty());
+    assert_eq!(agent.ok(&["log", "-1", "--format=%s"]), "own work");
+}
+
+#[test]
+fn a_leads_git_merges_only_its_own_workers_branches() {
+    let agent = AgentGit::new(true);
+    agent.ok(&["init", "-q", "--template=", "-b", "task"]);
+    agent.ok(&["commit", "-q", "--allow-empty", "-m", "start"]);
+    let start = agent.head();
+    let ann = agent.branch_with_commit("task--ann", &start);
+    agent.branch_with_commit("task--bob", &start);
+    agent.branch_with_commit("other", &start);
+    agent.branch_with_commit("task--ann--x", &start);
+    let reason = "A lead merges only the branches of its own workers";
+    let project = agent.case.project.to_str().unwrap().to_owned();
+    for args in [
+        &["merge", "--no-edit", "other"][..],
+        &["merge", "--no-edit", "task--ann", "other"],
+        &["merge", "--no-edit", "task--ann--x"],
+        &["merge", "--no-edit", "task--"],
+        &["-C", project.as_str(), "merge", "--no-edit", "task--ann"],
+        &["rebase", "task--ann"],
+        &["pull", ".", "task--ann"],
+        &["cherry-pick", "task--ann"],
+    ] {
+        agent.refused(args, reason);
+    }
+    agent.ok(&["merge", "-q", "--no-ff", "--no-edit", "task--ann"]);
+    assert_eq!(agent.ok(&["rev-parse", "HEAD^2"]), ann);
+    agent.ok(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        "-m",
+        "bob",
+        "refs/heads/task--bob",
+    ]);
+    assert_eq!(agent.ok(&["log", "-1", "--format=%s"]), "bob");
+}
+
 fn agent_git_script(tmp: &Path) -> String {
     fs::read_to_string(tmp.join("bin/git")).unwrap()
 }

@@ -3460,3 +3460,145 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         Some(&case.workspace.worktree),
     );
 }
+
+impl Case {
+    /// Merges a commit into the agent worktree the way an agent running git by its full
+    /// path can, with a merge commit. Input: the commit. Output: the new HEAD.
+    fn agent_merge(&self, commit: &str) -> String {
+        self.agent(&[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-edit",
+            commit,
+        ]);
+        self.agent_head()
+    }
+
+    /// Makes branch `side` in the owner repository with one commit the owner's branch
+    /// does not hold, leaving the owner on its branch. Output: the side tip.
+    fn side_branch(&self) -> String {
+        self.owner(&["checkout", "-q", "-b", "side"]);
+        self.owner_commit("side.txt", "side\n", "Side work");
+        let side = self.owner(&["rev-parse", "side"]).trim().to_owned();
+        self.owner(&["checkout", "-q", "main"]);
+        side
+    }
+}
+
+fn merge_turn() -> TurnEnd {
+    TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Do the work".into(),
+    }
+}
+
+#[test]
+fn a_change_set_whose_agent_merged_another_branch_is_refused_and_nothing_is_committed() {
+    let case = Case::new();
+    case.start();
+    let side = case.side_branch();
+    case.edit("own.txt", "own\n");
+    case.agent_commit("Own work");
+    let merged = case.agent_merge(&side);
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), side);
+    case.edit("own.txt", "own\nuncommitted\n");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_outside_merge"
+    );
+    assert_eq!(case.agent_head(), merged);
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+}
+
+#[test]
+fn the_engines_own_update_merge_leaves_the_next_turn_to_add_to_its_change_set() {
+    let case = Case::new();
+    case.start();
+    case.edit("own.txt", "own\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let owner_tip = case.owner_commit("other.txt", "owner\n", "Owner work");
+    update(&case.db, &id).unwrap();
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), owner_tip);
+    case.edit("own.txt", "own\nmore\n");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+#[test]
+fn a_merge_already_in_the_commit_an_agent_started_from_is_not_its_own() {
+    let case = Case::new();
+    let side = case.side_branch();
+    let inherited = case.agent_merge(&side);
+    case.start();
+    case.edit("own.txt", "own\n");
+    assert!(case.turn(TurnOutcome::Succeeded).is_some());
+    assert_eq!(
+        case.agent(&["rev-parse", "HEAD~1"]).trim(),
+        inherited,
+        "the turn commit sits on the inherited merge"
+    );
+}
+
+#[test]
+fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
+    let mut case = Case::new();
+    case.workspace.agent.id = "1".into();
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,mode)
+             VALUES (1,'project-1','sub','claude',1,'running',1,1,NULL,'app_spawned'),
+                    (2,'project-1','sub','claude',1,'running',1,1,1,'app_spawned');",
+        )
+        .unwrap();
+    let worker = second_agent(&case);
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (2,'project-1',?1,?2,?3)",
+            rusqlite::params![
+                worker.repository.to_str().unwrap(),
+                worker.worktree.to_str().unwrap(),
+                worker.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    case.start();
+    write(&worker.worktree.join("worker.txt"), "worker\n");
+    git_in(&case.home, &worker.worktree, &["add", "-A"]);
+    git_in(
+        &case.home,
+        &worker.worktree,
+        &[
+            "-c",
+            "user.name=Worker",
+            "-c",
+            "user.email=worker@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Worker work",
+        ],
+    );
+    let worker_tip = git_in(&case.home, &worker.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    case.agent_merge(&worker_tip);
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), worker_tip);
+    let id = record_turn_end(&case.db, &case.workspace, &merge_turn())
+        .unwrap()
+        .unwrap();
+    let side = case.side_branch();
+    let merged = case.agent_merge(&side);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_outside_merge"
+    );
+    assert_eq!(case.agent_head(), merged);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
