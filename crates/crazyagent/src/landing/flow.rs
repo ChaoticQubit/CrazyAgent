@@ -1694,27 +1694,40 @@ pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(
 }
 
 /// The task prompt for resolving the conflict markers an update left in a worktree,
-/// each conflicting file on one line with its control characters replaced, newlines
-/// included. Inputs: the store and the change set. Output: the prompt.
+/// naming the branch it merged: its lead's branch for a lead's worker while Lands is Lead,
+/// else the owner's. Each conflicting file is on one line with its control characters
+/// replaced, newlines included. Inputs: the store and the change set. Output: the prompt.
 pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, EngineError> {
     store::initialize(db)?;
     let record = store::load(db, id)?;
     if record.state != ChangeState::Updating {
         return Err(failure("changes_stale"));
     }
+    let (merged, wait, whose) =
+        match super::subagent::lead_of(db, &record.project, &record.agent, &record.repository) {
+            Ok(Some((_, lead))) => (
+                match super::subagent::lead_branch(db, &lead) {
+                    Some(branch) => format!("Your lead's branch {branch}"),
+                    None => String::from("Your lead's branch"),
+                },
+                "your lead's merge",
+                "your lead's",
+            ),
+            _ => (String::from("The owner's branch"), "review", "the owner's"),
+        };
     let clone = in_clone(&record);
     let mut prompt = if clone {
         format!(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
+            "{merged} changed while your work waited for {wait}, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
             record.head, record.head
         )
     } else {
-        String::from(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it into your worktree.\n",
+        format!(
+            "{merged} changed while your work waited for {wait}, so CrazyAgent merged it into your worktree.\n",
         )
     };
     if record.conflicts.is_empty() {
-        prompt.push_str("The merge had no conflicts. Check that your work still fits the owner's changes and fix anything that no longer works.\n");
+        prompt.push_str(&format!("The merge had no conflicts. Check that your work still fits {whose} changes and fix anything that no longer works.\n"));
     } else {
         prompt.push_str("These files have conflict markers (<<<<<<<, ======= and >>>>>>>):\n");
         for file in record.conflicts.iter().take(CONFLICTS_SHOWN_MAX) {
