@@ -4088,19 +4088,51 @@ while IFS= read -r line; do
 done
 "#;
 
-/// A live runtime with Codex and Claude Code stand-ins that keep and resume conversations,
-/// and a local endpoint account each harness can use. Takes the fixture and host. Returns
-/// the runtime.
+/// A Claude Code stand-in that answers each typed task the way Claude Code does when the
+/// agent runs a long command with Bash `run_in_background`: a real child process runs on
+/// after the tool call, the reply ends the turn while it runs, and the child's end comes
+/// back as a task notification that starts the next turn. The record shapes are the ones a
+/// lead's real transcript showed on 2026-10-29 (agent 38, task 44).
 #[cfg(target_os = "macos")]
-fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
-    let bin = fixture.base.join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let codex = bin.join("codex");
-    std::fs::write(&codex, RESUMING_CODEX).unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let claude = bin.join("claude");
-    std::fs::write(&claude, RESUMING_CLAUDE).unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+const BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+id=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --resume|--session-id) id="$a" ;; esac
+  prev="$a"
+done
+[ -n "$id" ] || { echo "no session id"; exit 4; }
+d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
+/bin/mkdir -p "$d" || exit 1
+f="$d/$id.jsonl"
+printf '\033[?2004hClaude stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed" ;;
+    *"$e[200~"*) open=1; printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"; continue; } ;;
+  esac
+  printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
+  (
+    /bin/sleep 2
+    printf done > "$CLAUDE_CONFIG_DIR/background-done"
+    printf '%s\n' '{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}' >> "$f"
+    /bin/sleep 0.3
+    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+  ) &
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
+  /bin/sleep 0.3
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+done
+"#;
+
+/// The fixture's access with a second local endpoint account, `local-claude`, that runs
+/// Claude Code. Takes the fixture. Returns the access.
+#[cfg(target_os = "macos")]
+fn claude_access(fixture: &Fixture) -> ModelAccess {
     let mut access = fixture.access.clone();
     let mut endpoint = access.connections[0].clone();
     endpoint.id = reference("local-claude");
@@ -4108,6 +4140,30 @@ fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     endpoint.protocol = reference("anthropic-messages");
     access.connections.push(endpoint);
     access.pools[0].members.push(reference("local-claude"));
+    access
+}
+
+/// A live runtime with Codex and Claude Code stand-ins that keep and resume conversations,
+/// and a local endpoint account each harness can use. Takes the fixture and host. Returns
+/// the runtime.
+#[cfg(target_os = "macos")]
+fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
+    claude_runtime(fixture, host, RESUMING_CLAUDE)
+}
+
+/// A live runtime with the resuming Codex stand-in, the given Claude Code stand-in and
+/// `claude_access`. Takes the fixture, host and the Claude Code script. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn claude_runtime(fixture: &Fixture, host: &Arc<dyn Host>, script: &str) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, script).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = claude_access(fixture);
     TeamRuntime::open(
         &fixture.base.join("engine.db"),
         &fixture.base.join("team"),
@@ -4118,6 +4174,253 @@ fn switching_runtime(fixture: &Fixture, host: &Arc<dyn Host>) -> TeamRuntime {
     .unwrap()
     .with_terminal(host.clone())
     .unwrap()
+}
+
+/// Opens a runtime with the given Claude Code stand-in and hands it one Claude Code
+/// sub-agent task, "Run the compile check.", on the fixture's endpoint account under the
+/// given task limit. Takes the fixture, the host, the script, the limit in seconds and the
+/// owner's agent register, if the agents are hosted in one. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn check_runtime(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    script: &str,
+    limit_secs: Option<i64>,
+    agents: Option<Arc<Agents>>,
+) -> TeamRuntime {
+    let mut setup = fixture.setup.clone();
+    setup.team.sub_harnesses = vec![HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 1,
+        tools: false,
+    }];
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    if let Some(secs) = limit_secs {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,?2,NULL)",
+                params![PROJECT, secs],
+            )
+            .unwrap();
+    }
+    let team = claude_runtime(fixture, host, script);
+    let team = match agents {
+        Some(agents) => team.with_agents(agents),
+        None => team,
+    };
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &claude_access(fixture),
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("claude-code".into()),
+                prompt: "Run the compile check.".into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    team
+}
+
+/// The status, result and error of the fixture's task once it ended. Takes the fixture.
+/// Returns them, None while the task is open.
+#[cfg(target_os = "macos")]
+fn check_end(fixture: &Fixture) -> Option<(String, Option<String>, Option<String>)> {
+    fixture
+        .connection
+        .query_row(
+            "SELECT status,result,error FROM team_tasks WHERE project=?1
+             AND status IN ('done','failed','cancelled')",
+            [PROJECT],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .unwrap()
+}
+
+/// The file a sub-agent's Claude Code stand-in writes in its home, its CLAUDE_CONFIG_DIR.
+/// Takes the fixture, the agent and the file name. Returns the path.
+#[cfg(target_os = "macos")]
+fn stand_in_file(fixture: &Fixture, agent: i64, name: &str) -> PathBuf {
+    fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{agent}"))
+        .join("home")
+        .join(name)
+}
+
+/// Runs one Claude Code sub-agent task, "Run the compile check.", on the fixture's endpoint
+/// account with the given stand-in and task limit, and waits until it ends. Takes the
+/// fixture, the script and the limit in seconds. Returns the task's status, result and
+/// error, and the file the stand-in's background command writes when it finishes.
+#[cfg(target_os = "macos")]
+fn background_task(
+    fixture: &Fixture,
+    script: &str,
+    limit_secs: Option<i64>,
+) -> (String, Option<String>, Option<String>, PathBuf) {
+    let host = fixture.host();
+    let mut team = check_runtime(fixture, &host, script, limit_secs, None);
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let (status, result, error) = check_end(fixture).unwrap();
+    let finished = stand_in_file(fixture, subs(fixture)[0], "background-done");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    (status, result, error, finished)
+}
+
+/// A sub-agent's task stays open while a command it started in the background still runs:
+/// it ends only after the command's notification turn, with that turn's reply in its
+/// result, and the command finishes instead of being ended with the task. On 2026-10-29 a
+/// lead's task ended at "Waiting for the compile check to finish" and its check was killed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_stays_open_until_the_background_command_it_started_ends() {
+    let fixture = Fixture::new(1);
+    let (status, result, _, finished) = background_task(&fixture, BACKGROUND_CLAUDE, None);
+    assert!(
+        finished.exists(),
+        "the task ended while its background command still ran: {status} {result:?}"
+    );
+    assert_eq!(status, "done");
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.") && result.contains("Check passed."),
+        "{result}"
+    );
+}
+
+/// A task its time limit ends while a command its agent started in the background still
+/// runs says so first in its result, so the master and the owner read that the command was
+/// stopped with the task rather than that it finished, and the command really stops: it
+/// never writes what it would have written on finishing (w-review LTK-L1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
+    let fixture = Fixture::new(1);
+    let slow = BACKGROUND_CLAUDE.replace("/bin/sleep 2\n", "/bin/sleep 4\n");
+    assert_ne!(slow, BACKGROUND_CLAUDE);
+    let (status, result, error, finished) = background_task(&fixture, &slow, Some(1));
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error.as_deref(),
+        Some("The sub-agent was stopped by the 1 s task limit; change it in Team settings")
+    );
+    let result = result.unwrap_or_default();
+    assert!(
+        result.starts_with(BACKGROUND_CUT) && result.contains("Waiting for the check."),
+        "{result}"
+    );
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !finished.exists(),
+        "the background command outlived the task the time limit ended"
+    );
+}
+
+/// The reply line of the background stand-in's first turn, which a variant swaps for its
+/// own steps before the reply.
+#[cfg(target_os = "macos")]
+const WAITING_REPLY: &str = r#"  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}]"#;
+
+/// What the background stand-in does instead of waiting when its agent stops its own
+/// background command with TaskStop: it ends the command, writes the stop's tool call and
+/// result in the shape a real Claude Code session recorded on 2026-10-29, which brings no
+/// task notification, and replies.
+#[cfg(target_os = "macos")]
+const STOPPING_REPLY: &str = r#"  /bin/kill $!
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_stop","name":"TaskStop","input":{"task_id":"bgcheck1"}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_stop","content":"Successfully stopped task: bgcheck1 (check)"}]},"toolUseResult":{"message":"Successfully stopped task: bgcheck1 (check)","task_id":"bgcheck1","task_type":"local_bash"}}' >> "$f"
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Stopped the check."}]"#;
+
+/// A background command the agent stops itself ends its hold: the task is done with the
+/// agent's reply at once, not held to its limit and failed with a note that a command was
+/// still running (w-review LTK-H1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_whose_agent_stopped_its_background_command_ends_with_its_reply() {
+    const LIMIT_SECS: u64 = 15;
+    let fixture = Fixture::new(1);
+    let stopping = BACKGROUND_CLAUDE
+        .replace("/bin/sleep 2\n", "/bin/sleep 30\n")
+        .replace(WAITING_REPLY, STOPPING_REPLY);
+    assert_eq!(stopping.matches("toolu_stop").count(), 2);
+    let started = Instant::now();
+    let (status, result, error, _) = background_task(
+        &fixture,
+        &stopping,
+        Some(i64::try_from(LIMIT_SECS).unwrap()),
+    );
+    let result = result.unwrap_or_default();
+    assert_eq!((status.as_str(), error), ("done", None), "{result}");
+    assert!(
+        result.contains("Stopped the check.") && !result.contains(BACKGROUND_CUT),
+        "{result}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(LIMIT_SECS));
+}
+
+/// The owner's interrupt ends a task held for its background command at once, and stops
+/// the command with the agent's session: an idle Claude Code ignores Escape, so the task
+/// would otherwise wait for the command's notification or its limit (w-review LTK-M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_interrupt_ends_a_held_task_and_stops_its_background_command() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let script = BACKGROUND_CLAUDE
+        .replace("/bin/sleep 2\n", "/bin/sleep 4\n")
+        .replace(
+            ">> \"$f\"\ndone\n",
+            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/held\"\ndone\n",
+        );
+    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/held").count(), 1);
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let mut team = check_runtime(&fixture, &host, &script, None, Some(agents.clone()));
+    fixture.until(&mut team, "the agent waits for its background check", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let agent = subs(&fixture)[0];
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    assert_eq!(listed.len(), 1, "{listed:#?}");
+    let asked = Instant::now();
+    agents.interrupt(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the interrupted task ends", |f| {
+        check_end(f).is_some()
+    });
+    let waited = asked.elapsed();
+    let (status, result, error) = check_end(&fixture).unwrap();
+    let result = result.unwrap_or_default();
+    assert_eq!(
+        (status.as_str(), error.as_deref()),
+        ("cancelled", Some("Interrupted by you")),
+        "{result}"
+    );
+    assert!(waited < Duration::from_secs(3), "{waited:?}");
+    assert!(result.starts_with(BACKGROUND_INTERRUPTED), "{result}");
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(
+        !stand_in_file(&fixture, agent, "background-done").exists(),
+        "the interrupt left the background command running"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
 }
 
 /// Names the project's master harness in its stored team plan, as the owner's Settings
