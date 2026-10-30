@@ -336,12 +336,13 @@ fn a_switch_the_engine_refused_for_a_running_turn_asks_the_owner_again() {
 
 #[test]
 fn d_asks_before_deleting_a_session_that_is_not_live_and_n_keeps_it() {
+    let content = 80 - 4;
     let mut sessions = opened();
     assert_eq!(
         sessions.key(press(KeyCode::Char('d')), true, false),
         SessionsReply::Handled
     );
-    let (body, _) = sessions.view(80, 12, NOW, 0, &Look::plain()).unwrap();
+    let (body, _) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
     assert!(
         !texts(&body)
             .iter()
@@ -353,14 +354,17 @@ fn d_asks_before_deleting_a_session_that_is_not_live_and_n_keeps_it() {
         sessions.key(press(KeyCode::Char('d')), true, false),
         SessionsReply::Handled
     );
-    let (body, help) = sessions.view(80, 12, NOW, 0, &Look::plain()).unwrap();
-    assert!(body.iter().all(|row| row.width() <= 80));
+    let (body, help) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
+    assert!(body.iter().all(|row| row.width() <= content));
     let drawn = texts(&body);
     let asked = drawn
         .iter()
         .position(|line| line.starts_with("Delete the session"))
         .unwrap_or_else(|| panic!("{drawn:?}"));
-    assert!(asked + 1 < drawn.len(), "the question wraps at 80 columns");
+    assert!(
+        asked + 1 < drawn.len(),
+        "the question wraps in the 76 cells an 80-column master view gives it"
+    );
     assert_eq!(
         drawn[asked..].join(" "),
         "Delete the session from 26 h ago? Its messages and its transcript are removed for good.",
@@ -371,7 +375,7 @@ fn d_asks_before_deleting_a_session_that_is_not_live_and_n_keeps_it() {
         sessions.key(press(KeyCode::Char('n')), true, false),
         SessionsReply::Handled
     );
-    let (body, _) = sessions.view(80, 12, NOW, 0, &Look::plain()).unwrap();
+    let (body, _) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
     assert!(
         !texts(&body)
             .iter()
