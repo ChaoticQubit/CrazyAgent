@@ -5575,9 +5575,9 @@ fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
         (
             Layout::Clone,
             &[
-                "Commit your work on the branch checked out there with conventional commit messages before you finish: only your commits land.",
-                "Never create, switch, rename, delete or push a branch, never write inside the project folder's .git, and never retry a refused command outside the sandbox.",
-                "CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes lands your commits.",
+                "Commit your work on the branch checked out there with conventional commit messages before you finish: only commits on that branch land.",
+                "Never switch, rename, delete or push it, create no other branch but your teammates' branches named below, never write inside the project folder's .git, and never retry a refused command outside the sandbox.",
+                "CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes or the master's merge lands your commits.",
             ][..],
             &["never create a branch, commit", "Leave your edits as files"][..],
         ),
@@ -9406,4 +9406,83 @@ fn a_lead_worker_change_set_stays_the_owners_while_lands_is_owner() {
         "{notes:#?}"
     );
     assert!(owner_note, "the owner lost the note for a set it accepts");
+}
+
+/// A live master's session counts as used once a turn runs in its terminal: started and
+/// kept, the fresh session holds no owner turn and is not listed; once the owner's line runs
+/// as a turn in the master's pane, the session holds one and is listed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let session = crate::protocol::SessionId::new("s-used").unwrap();
+    switch_session(&fixture.connection, session.as_str());
+    let used =
+        |f: &Fixture| crate::master_sessions::has_owner_turn(&f.connection, &session).unwrap();
+    let listed = |f: &Fixture| {
+        crate::master_sessions::list(&f.connection, &project)
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.session_id)
+            .collect::<Vec<_>>()
+    };
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let ready = |f: &Fixture| {
+        f.connection
+            .query_row(
+                "SELECT agent FROM team_live_masters WHERE project=?1",
+                [PROJECT],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten()
+            .is_some()
+    };
+    fixture.until(&mut team, "the session's master is ready and kept", |f| {
+        ready(f) && kept_conversation(&f.connection, "s-used").is_some()
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        live_turns(&fixture.connection),
+        (0, false),
+        "nothing is typed before the owner's first line"
+    );
+    let master = masters(&fixture.connection)[0];
+    let pane = AgentId::team(master).unwrap();
+    fixture.until(&mut team, "the master's app reads keys itself", |_| {
+        host.input_live(&pane).unwrap()
+    });
+    let typed = std::fs::read_to_string(
+        fixture
+            .base
+            .join("team/agents")
+            .join(format!("agent-{master}"))
+            .join("home/typed"),
+    )
+    .unwrap_or_default();
+    assert!(
+        !used(&fixture),
+        "a started master with no turn is no owner turn; typed so far: {typed:?}"
+    );
+    assert!(listed(&fixture).is_empty());
+
+    host.input(&pane, b"hello\r").unwrap();
+    fixture.until(&mut team, "the owner's turn in the session ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    assert!(used(&fixture), "a turn in the terminal marks the session");
+    assert_eq!(listed(&fixture), vec![session.clone()]);
+    let marked: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_owner_turns WHERE session=?1 AND project=?2",
+            params![session.as_str(), PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(marked, 1);
 }
