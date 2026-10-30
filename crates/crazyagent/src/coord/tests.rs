@@ -1049,10 +1049,33 @@ fn a_lead_and_its_own_sub_agent_never_overlap_and_a_quiet_claim_goes_stale() {
         code(overlapping(&connection, &project(), other, "src/")),
         "coord_claim_invalid"
     );
+    start_work(
+        &connection,
+        &project(),
+        other,
+        "Other".into(),
+        vec!["src/a.rs".into()],
+        now,
+    )
+    .unwrap();
+    let pairs = |agent: AgentId| -> Vec<(AgentId, AgentId, Vec<String>)> {
+        overlaps_of(&connection, &project(), agent, now)
+            .unwrap()
+            .into_iter()
+            .map(|overlap| (overlap.mine.agent, overlap.theirs.agent, overlap.reasons))
+            .collect()
+    };
+    let same = || vec!["same file src/a.rs".to_owned()];
     assert_eq!(
-        overlaps_of(&connection, &project(), other, now).unwrap(),
-        vec![]
+        pairs(other),
+        vec![(other, lead, same()), (other, sub, same())]
     );
+    assert_eq!(
+        pairs(lead),
+        vec![(lead, other, same())],
+        "a lead's sweep never lists its own sub-agent"
+    );
+    assert_eq!(pairs(sub), vec![(sub, other, same())]);
 }
 
 #[test]
@@ -1212,19 +1235,19 @@ fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges()
         .iter()
         .find(|state| state.agent == sub)
         .unwrap();
-    let mut counted: Vec<&str> = state
+    let mut counted: Vec<(&str, _)> = state
         .tool_counts
         .iter()
-        .map(|(tool, _)| tool.as_str())
+        .map(|(tool, count)| (tool.as_str(), *count))
         .collect();
     counted.sort_unstable();
     assert_eq!(
         counted,
         [
-            "ctx_search",
-            "graphify",
-            "mcp__crazyagent__start_work",
-            "mcp__plugin_context-mode_context-mode__ctx_execute"
+            ("ctx_search", 1),
+            ("graphify", 1),
+            ("mcp__crazyagent__start_work", 1),
+            ("mcp__plugin_context-mode_context-mode__ctx_execute", 1)
         ]
     );
     assert_eq!(state.unread, 2);
@@ -1242,6 +1265,7 @@ fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges()
         .map(|message| message.body.as_str())
         .collect();
     assert_eq!(bodies, ["High?", "Normal?", "Low?"]);
+    assert_eq!(snapshot.unread_edges.len(), 2, "{:?}", snapshot.unread_edges);
     assert!(
         snapshot
             .unread_edges
