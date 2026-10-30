@@ -1620,8 +1620,10 @@ pub fn admit(
 /// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
 /// worktree and lands in the same change set; the team master gets an engine message. A
 /// sub-agent holds at most one queued resolve task, whose prompt the newest update
-/// replaces, so the global task cap never refuses a merge already made. Takes the
-/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
+/// replaces, so the global task cap never refuses a merge already made. The update is
+/// the owner's, so it clears an owner stop of the sub-agent as the owner's Wake does.
+/// Takes the transaction, project, agent, prompt and time. Returns Ok, or a plain
+/// refusal code.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -1645,7 +1647,7 @@ pub fn admit_resolve(
         return Ok(Err("team_agent_not_found"));
     };
     match AgentRole::parse(&role) {
-        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Sub) => owner_start(tx, project, agent)?,
         Some(AgentRole::Master) => {
             return append_message(
                 tx,

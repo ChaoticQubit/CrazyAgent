@@ -1290,6 +1290,12 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
             model: "qwen2.5:0.5b".into(),
         },
     };
+    for id in [1, 2] {
+        assert_eq!(
+            fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+            id
+        );
+    }
     let plan = |id: i64| {
         runtime
             .prepare(
@@ -1421,6 +1427,7 @@ fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {
         },
     };
     for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
+        assert_eq!(fixture.agent(role, "codex", AgentStatus::Starting), id);
         let (_, plan, mode) = runtime
             .prepare(
                 &fixture.setup,
@@ -1817,6 +1824,9 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     engine_file(&engine);
     let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
+    for (id, role) in [(1, AgentRole::Master), (2, AgentRole::Sub)] {
+        assert_eq!(fixture.agent(role, "codex", AgentStatus::Starting), id);
+    }
     let master = runtime
         .context(&project, 1, AgentRole::Master, true, Layout::Linked)
         .unwrap();
@@ -1892,6 +1902,13 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
         )
         .unwrap()
     };
+    for (id, role) in [
+        (1, AgentRole::Sub),
+        (2, AgentRole::Master),
+        (3, AgentRole::Sub),
+    ] {
+        assert_eq!(fixture.agent(role, "codex", AgentStatus::Starting), id);
+    }
     let runtime = open();
     assert!(
         runtime
@@ -1969,6 +1986,12 @@ fn a_clone_launch_that_fails_after_making_the_clone_leaves_no_clone_behind() {
         TeamLimits::default(),
     )
     .unwrap();
+    for id in [1, 2] {
+        assert_eq!(
+            fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+            id
+        );
+    }
     let prepare = |id: i64, layout: crate::agent_git::Layout| {
         runtime.prepare(
             &fixture.setup,
@@ -2147,7 +2170,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let codex = bin.join("codex");
     std::fs::write(
         &codex,
-        "#!/bin/sh\necho run >> runs.txt\nexec /bin/sleep 300\n",
+        "#!/bin/sh\n[ \"$1\" = app-server ] && exit 0\necho run >> runs.txt\nexec /bin/sleep 300\n",
     )
     .unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2320,6 +2343,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
 
 #[cfg(target_os = "macos")]
 const LIVE_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -2492,6 +2516,7 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
 
 #[cfg(target_os = "macos")]
 const LIMITED_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -2644,6 +2669,7 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
 
 #[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 printf '%s\n' "$*" >> "$CODEX_HOME/launches"
@@ -3019,6 +3045,7 @@ fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
 
 #[cfg(target_os = "macos")]
 const CRASHING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -3225,6 +3252,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
 
 #[cfg(target_os = "macos")]
 const WORKING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -3232,14 +3260,17 @@ printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f
 printf '\033[?2004hCodex stand-in ready\n'
 e=$(printf '\033')
 open=0
+turn=
 while IFS= read -r line; do
+  turn="$turn $line"
   case "$line" in
     *"$e[201~"*) open=0 ;;
     *"$e[200~"*) open=1; continue ;;
     *) [ "$open" = 1 ] && continue ;;
   esac
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
-  case "$line" in *"short summary"*|*"for a long time"*) exec /bin/sleep 300 ;; esac
+  case "$turn" in *"short summary"*|*"for a long time"*) exec /bin/sleep 300 ;; esac
+  turn=
   /bin/sleep 0.3
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
@@ -3704,6 +3735,8 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         .unwrap()
         .unwrap()
         .persona;
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
     let mailbox = fixture.base.join("mailbox");
     std::fs::create_dir(&mailbox).unwrap();
     assert_eq!(
