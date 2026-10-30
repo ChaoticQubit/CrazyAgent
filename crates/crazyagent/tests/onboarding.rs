@@ -2159,3 +2159,46 @@ async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them
     );
     bench.stop().await;
 }
+
+/// A project onboarded from an existing folder runs its agents in their own clones, as a
+/// New Project does: onboarding saves the New Project access level wherever this computer
+/// can run it, and starting the same folder's onboarding again keeps the level the owner
+/// chose since (fix/own-clones-and-lead-landing 6e60b198).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners_level() {
+    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let saved = bench
+        .owner
+        .project_agent_policy(project.clone())
+        .await
+        .unwrap();
+    let expected = match AgentAccess::NEW_PROJECT.unavailable() {
+        None => AgentAccess::NEW_PROJECT,
+        Some(_) => AgentAccess::Sandboxed,
+    };
+    assert_eq!(saved.access, expected);
+    #[cfg(target_os = "macos")]
+    assert_eq!(saved.access, AgentAccess::OwnBranch);
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .set_project_agent_policy(
+            project.clone(),
+            AgentPolicy {
+                access: AgentAccess::Sandboxed,
+                toolchains: Vec::new(),
+            },
+            bench.generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let repo = bench.repo.clone();
+    let restarted = bench.start_onboarding_at(&repo).await;
+    assert_eq!(rejection(&restarted), None, "{restarted:?}");
+    let kept = bench.owner.project_agent_policy(project).await.unwrap();
+    assert_eq!(kept.access, AgentAccess::Sandboxed);
+    bench.stop().await;
+}

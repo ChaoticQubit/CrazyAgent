@@ -8504,3 +8504,183 @@ fn max_harnesses_does_not_count_a_leads_sub_agents() {
     assert_eq!(subs(&fixture), vec![lead, worker]);
     team.shutdown().unwrap();
 }
+
+/// Runs a lead of the master and one worker of it, each a stand-in Codex that writes
+/// page.md in its own worktree, and stops the worker as the owner does, so the worker's
+/// edit becomes its change set. Takes the owner's Child landing setting, None for the
+/// default. Returns the engine notes the lead received and whether the master's team chat
+/// holds the owner note for the worker's task.
+#[cfg(target_os = "macos")]
+fn lead_worker_change_set(lands: Option<&str>) -> (Vec<String>, bool) {
+    let fixture = Fixture::new(2);
+    if let Some(lands) = lands {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,2,?2)",
+                params![PROJECT, lands],
+            )
+            .unwrap();
+    }
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(
+        &codex,
+        "#!/bin/sh\necho 'Written by an agent.' > page.md\nexec /bin/sleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let agents = Arc::new(Agents::open(&fixture.base).unwrap());
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_agents(agents)
+    .with_terminal(host.clone())
+    .unwrap();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let mut delegate = |prompt: &str, parent: Option<i64>| -> i64 {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &crate::team::TeamAction::Delegate {
+                    project_id: fixture.setup.project_id.clone(),
+                    harness: Some("codex".into()),
+                    prompt: prompt.into(),
+                },
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        let task: i64 = tx
+            .query_row(
+                "SELECT id FROM team_tasks WHERE prompt=?1",
+                [prompt],
+                |row| row.get(0),
+            )
+            .unwrap();
+        tx.execute(
+            "UPDATE team_tasks SET parent=?2 WHERE id=?1",
+            params![task, parent],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        task
+    };
+    let working = |f: &Fixture, other: Option<i64>| {
+        f.status().agents.into_iter().find(|agent| {
+            Some(agent.id) != other
+                && agent.status == AgentStatus::Working
+                && agent.process_group.is_some()
+        })
+    };
+    delegate("Lead the page", None);
+    fixture.until(&mut team, "the lead works on its task", |f| {
+        working(f, None).is_some()
+    });
+    let lead = working(&fixture, None).unwrap().id;
+    let task = delegate("Write page.md", Some(lead));
+    fixture.until(&mut team, "the lead's worker works on its task", |f| {
+        working(f, Some(lead)).is_some()
+    });
+    let worker = working(&fixture, Some(lead)).unwrap().id;
+    let (parent, worktree): (Option<i64>, String) = fixture
+        .connection
+        .query_row(
+            "SELECT parent,worktree FROM team_agents WHERE id=?1",
+            [worker],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(parent, Some(lead));
+    let page = fixture.base.join("project").join(&worktree).join("page.md");
+    let deadline = Instant::now() + WAIT;
+    while !page.is_file() {
+        assert!(Instant::now() < deadline, "the worker never wrote its page");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let tx = connection.transaction().unwrap();
+    crate::team::execute(
+        &tx,
+        &fixture.access,
+        &crate::team::TeamAction::StopAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: worker,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    let told = |f: &Fixture| -> Vec<String> {
+        let mut statement = f
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE to_kind='agent' AND to_agent=?1 AND from_kind='engine' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([lead], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    fixture.until(
+        &mut team,
+        "the lead hears of its worker's change set",
+        |f| {
+            told(f)
+                .iter()
+                .any(|body| body.contains("has changes ready"))
+        },
+    );
+    let owner_note = fixture.note(&format!(
+        "The edits from task {task} (codex, sub-agent {worker}) are waiting for you in Changes."
+    ));
+    let notes = told(&fixture);
+    assert_eq!(
+        team.shutdown().unwrap(),
+        names(&[lead]),
+        "the running lead's pane is left for the next engine, the stopped worker's is not"
+    );
+    host.close(&[]).unwrap();
+    (notes, owner_note)
+}
+
+/// While Lands is Lead, the default, a lead's worker's change set is told to the lead,
+/// naming merge(agent), and the owner gets no note for it (fix/own-clones-and-lead-landing
+/// a618faed).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_worker_change_set_is_told_to_the_lead_only() {
+    let (notes, owner_note) = lead_worker_change_set(None);
+    assert!(
+        notes
+            .iter()
+            .any(|body| body.contains(&format!("has changes ready: {LEAD_MERGES}"))),
+        "{notes:#?}"
+    );
+    assert!(!owner_note, "the owner was told of a set its lead merges");
+}
+
+/// While Lands is Owner, a lead hears that the owner accepts its worker's change set and
+/// the owner keeps the note for it (fix/own-clones-and-lead-landing a618faed).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_worker_change_set_stays_the_owners_while_lands_is_owner() {
+    let (notes, owner_note) = lead_worker_change_set(Some("owner"));
+    assert!(
+        notes
+            .iter()
+            .any(|body| body.contains(&format!("has changes ready: {OWNER_ACCEPTS}"))),
+        "{notes:#?}"
+    );
+    assert!(owner_note, "the owner lost the note for a set it accepts");
+}
