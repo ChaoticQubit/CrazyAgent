@@ -4977,9 +4977,9 @@ fn masters_and_sub_agents_are_told_how_the_team_work_lands() {
         (
             Layout::Clone,
             &[
-                "Commit your work on the branch checked out there with conventional commit messages before you finish: only your commits land.",
-                "Never create, switch, rename, delete or push a branch, never write inside the project folder's .git, and never retry a refused command outside the sandbox.",
-                "CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes lands your commits.",
+                "Commit your work on the branch checked out there with conventional commit messages before you finish: only commits on that branch land.",
+                "Never switch, rename, delete or push it, create no other branch but your teammates' branches named below, never write inside the project folder's .git, and never retry a refused command outside the sandbox.",
+                "CrazyAgent fetches your branch when you finish, and the owner's Accept in Changes or the master's merge lands your commits.",
             ][..],
             &["never create a branch, commit", "Leave your edits as files"][..],
         ),
