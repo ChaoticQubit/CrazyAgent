@@ -18,7 +18,7 @@ use crate::tui::screens::new_project_page::{key_event, look};
 use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
-use crate::tui::screens::project_team::{TeamReply, TeamView, account_name};
+use crate::tui::screens::project_team::{TeamReply, TeamView, account_name, team_plain};
 use crate::tui::screens::project_time::local_offset;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
@@ -327,7 +327,7 @@ impl Team {
                 ..
             } if *project_id == self.project => match result {
                 Ok(_) => self.read_switch(ctx),
-                Err(code) => ctx.say(Message::error(plain_problem(code).unwrap_or(code), "")),
+                Err(code) => ctx.say(Message::error(&refusal(code), "")),
             },
             _ => {}
         }
@@ -925,7 +925,7 @@ impl Team {
         if let Some(code) = self.refused.as_deref().filter(|_| self.attached.is_none()) {
             let mut lines = vec![Line::raw("The master terminal could not start.")];
             lines.extend(
-                wrap(plain_problem(code).unwrap_or(code), limit)
+                wrap(&refusal(code), limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -1550,6 +1550,13 @@ fn lost(code: &str) -> bool {
             | "owner_socket_replaced"
             | "trusted_owner_connection_failed"
     )
+}
+
+/// One plain sentence for a refused master view team change, the same words the team panel
+/// gives. Input: the engine's code. Output: the config's sentence when it names the code,
+/// else the team panel's sentence, which names an unknown code after a retry sentence.
+fn refusal(code: &str) -> String {
+    plain_problem(code).map_or_else(|| team_plain(code), str::to_owned)
 }
 
 /// The words shown for a closed or refused terminal.
