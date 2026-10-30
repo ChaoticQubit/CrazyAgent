@@ -5997,6 +5997,98 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
     );
 }
 
+#[test]
+fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let claude = HarnessKind::ClaudeCode;
+    let native = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    set_mode(&fixture.connection, &project, claude, SubagentMode::Native).unwrap();
+    let headless = fixture.runtime();
+    let unavailable = headless
+        .native_lead(&project, native, AgentRole::Sub, "claude-code")
+        .unwrap_err();
+    assert!(
+        unavailable.contains("(native_mode_unavailable)"),
+        "{unavailable}"
+    );
+    let team = fixture.runtime().with_terminal(fixture.host()).unwrap();
+    assert_eq!(
+        team.native_lead(&project, native, AgentRole::Sub, "claude-code"),
+        Ok(true)
+    );
+    set_mode(
+        &fixture.connection,
+        &project,
+        claude,
+        SubagentMode::AppSpawned,
+    )
+    .unwrap();
+    assert_eq!(
+        team.native_lead(&project, native, AgentRole::Sub, "claude-code"),
+        Ok(true)
+    );
+    let spawned = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    assert_eq!(
+        team.native_lead(&project, spawned, AgentRole::Sub, "claude-code"),
+        Ok(false)
+    );
+    set_mode(&fixture.connection, &project, claude, SubagentMode::Native).unwrap();
+    assert_eq!(
+        team.native_lead(&project, spawned, AgentRole::Sub, "claude-code"),
+        Ok(false)
+    );
+    assert_eq!(team.stored_mode(native).as_deref(), Some("native"));
+    assert_eq!(team.stored_mode(spawned).as_deref(), Some("app_spawned"));
+    let planted = |harness: &str, parent: Option<i64>| -> i64 {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,mode) VALUES (?1,'sub',?2,0,?3,'starting',1,1,?4,'native')",
+                params![PROJECT, harness, ENDPOINT, parent],
+            )
+            .unwrap();
+        fixture.connection.last_insert_rowid()
+    };
+    let worker = planted("claude-code", Some(native));
+    let codex = planted("codex", None);
+    for (agent, launch) in [(worker, "claude-code"), (codex, "codex")] {
+        let refused = team
+            .native_lead(&project, agent, AgentRole::Sub, launch)
+            .unwrap_err();
+        assert!(refused.contains("(native_mode_unsupported)"), "{refused}");
+    }
+}
+
+#[test]
+fn only_an_agent_with_tools_on_gets_the_message_relay() {
+    let fixture = Fixture::new(1);
+    let folder = fixture.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let runtime = fixture.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    for tools in [false, true] {
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+        std::fs::create_dir_all(runtime.mailbox(id).parent().unwrap()).unwrap();
+        let context = runtime
+            .context(&project, id, AgentRole::Sub, tools, Layout::Linked)
+            .unwrap();
+        let home = fixture.base.join(format!("home-{id}"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let installed = context.install("claude-code", &home, tools).unwrap();
+        assert_eq!(
+            crate::coord::relay::installed(&home),
+            tools,
+            "tools {tools}"
+        );
+        assert_eq!(installed.runs_hooks(), tools, "tools {tools}");
+    }
+}
+
 struct Removed(PathBuf);
 
 impl Drop for Removed {

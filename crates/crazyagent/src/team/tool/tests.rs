@@ -731,6 +731,58 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
 }
 
+#[test]
+fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
+    use crate::coord::settings::SubagentMode;
+    let spawn = |arguments: Value| live_call(SPAWN_TOOL, Some(&arguments)).unwrap();
+    let mode = |given: Value| match spawn(json!({"task": "Lead the docs", "mode": given})) {
+        Ok(Call::Spawn { mode, .. }) => Ok(mode),
+        Ok(other) => panic!("not a spawn: {other:?}"),
+        Err(refused) => Err(refused),
+    };
+    assert_eq!(mode(json!("native")), Ok(Some(SubagentMode::Native)));
+    assert_eq!(
+        mode(json!("app_spawned")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(
+        mode(json!(" App-Spawned ")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(mode(json!("")), Ok(None));
+    assert_eq!(mode(Value::Null), Ok(None));
+    assert_eq!(
+        spawn(json!({"task": "Lead the docs"})),
+        Ok(Call::Spawn {
+            task: "Lead the docs".into(),
+            harness: None,
+            role: None,
+            mode: None,
+        })
+    );
+    for refused in [json!("teams"), json!(3), json!(["native"])] {
+        assert_eq!(mode(refused), Err(MODE_INVALID));
+    }
+    let planted = Call::Spawn {
+        task: "Lead the docs".into(),
+        harness: Some("claude-code".into()),
+        role: None,
+        mode: Some(SubagentMode::Native),
+    };
+    assert_eq!(checked(planted.clone()), Ok(planted));
+    let line =
+        br#"{"tool":"spawn","task":"Lead the docs","harness":null,"role":null,"mode":"teams"}"#;
+    assert_eq!(read_call(line), None);
+    let schema = &spec(SPAWN_TOOL)["inputSchema"]["properties"]["mode"];
+    assert_eq!(schema["enum"], json!(["native", "app_spawned"]));
+    assert!(
+        schema["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Master only, fixed for the lead's life")
+    );
+}
+
 fn served_pane(pane: Option<&str>) -> Option<String> {
     let directory = tempfile::tempdir().unwrap();
     let mailbox = directory.path().canonicalize().unwrap();

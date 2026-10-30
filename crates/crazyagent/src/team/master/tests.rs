@@ -878,6 +878,160 @@ fn known_project(fixture: &Fixture) {
         .unwrap();
 }
 
+fn tasks(fixture: &Fixture) -> Vec<(String, Option<String>)> {
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT prompt,mode FROM team_tasks ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn the_master_fixes_a_lead_s_mode_at_spawn_and_a_lead_cannot_pick_one() {
+    let mut fixture = Fixture::new();
+    fixture.setup.team.sub_harnesses.push(HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 2,
+        tools: true,
+    });
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::SPAWN_TOOL,
+            json!({"task": "Lead the docs", "harness": "codex", "mode": "native"}),
+        ),
+        (
+            "Not handed off: a codex lead has no native teammates; leave mode out or use app_spawned (native_mode_unsupported).".to_owned(),
+            true
+        )
+    );
+    assert!(tasks(&fixture).is_empty());
+    for (task, mode) in [
+        ("Lead A", Some("native")),
+        ("Lead B", Some("app_spawned")),
+        ("Lead C", None),
+    ] {
+        let mut arguments = json!({"task": task, "harness": "claude-code"});
+        if let Some(mode) = mode {
+            arguments["mode"] = json!(mode);
+        }
+        let (said, refused) = as_master(&mut fixture, tool::SPAWN_TOOL, arguments);
+        assert!(!refused, "{said}");
+    }
+    assert_eq!(
+        tasks(&fixture),
+        vec![
+            ("Lead A".to_owned(), Some("native".to_owned())),
+            ("Lead B".to_owned(), Some("app_spawned".to_owned())),
+            ("Lead C".to_owned(), None),
+        ]
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','claude-code',1,'working',?2,?2)",
+            params![PROJECT, NOW],
+        )
+        .unwrap();
+    let lead = fixture.connection.last_insert_rowid();
+    let call = tool::live_call(
+        tool::SPAWN_TOOL,
+        Some(&json!({"task": "Write the tests", "mode": "native"})),
+    )
+    .unwrap()
+    .unwrap();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    assert_eq!(
+        answer_sub(&mut fixture.connection, &answering, lead, call).unwrap(),
+        Some((LEAD_MODE_REFUSED.to_owned(), true))
+    );
+    assert_eq!(tasks(&fixture).len(), 3);
+}
+
+#[test]
+fn a_lead_s_own_mode_decides_its_app_spawns_whatever_the_setting_says_later() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let mut fixture = Fixture::new();
+    known_project(&fixture);
+    let lead = |fixture: &Fixture, mode: &str| -> i64 {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,mode) VALUES (?1,'sub','claude-code',1,'working',?2,?2,?3)",
+                params![PROJECT, NOW, mode],
+            )
+            .unwrap();
+        fixture.connection.last_insert_rowid()
+    };
+    let native = lead(&fixture, "native");
+    let spawned = lead(&fixture, "app_spawned");
+    let project = fixture.setup.project_id.clone();
+    let spawn = |fixture: &mut Fixture, agent: i64| -> (String, bool) {
+        let call = tool::live_call(tool::SPAWN_TOOL, Some(&json!({"task": "Write the tests"})))
+            .unwrap()
+            .unwrap();
+        let access = ModelAccess::default();
+        let setup = fixture.setup.clone();
+        let landing = fixture.base.clone();
+        let answering = Answering {
+            access: &access,
+            stored: &setup,
+            landing: &landing,
+            agents: &landing,
+            events: None,
+            host: None,
+        };
+        answer_sub(&mut fixture.connection, &answering, agent, call)
+            .unwrap()
+            .unwrap()
+    };
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::AppSpawned,
+    )
+    .unwrap();
+    assert_eq!(
+        spawn(&mut fixture, native),
+        (NATIVE_LEAD_REFUSED.to_owned(), true)
+    );
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let (said, refused) = spawn(&mut fixture, spawned);
+    assert!(refused, "{said}");
+    assert!(
+        said.starts_with(
+            "Not started: no account in this project's pool that runs codex is signed in."
+        ),
+        "{said}"
+    );
+    assert_eq!(
+        spawn(&mut fixture, native),
+        (NATIVE_LEAD_REFUSED.to_owned(), true)
+    );
+    assert!(tasks(&fixture).is_empty());
+}
+
 /// A message to a finished worker wakes it once with `WAKE_TASK` as its task. The message
 /// stays Sent until the woken turn's prompt carries it through
 /// `coord::delivery::next_turn`; `delivered` then marks it Delivered and no later turn
