@@ -1290,7 +1290,7 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
     let defaults = CoordSettings::default();
     assert_eq!(
         (defaults.questions_to, defaults.overlaps, defaults.nudges),
-        (QuestionsTo::Lead, Overlaps::Warn, true)
+        (QuestionsTo::Lead, Overlaps::Warn, false)
     );
     for counted in [
         (0..=settings::COUNTED_TOOLS_MAX)

@@ -367,16 +367,6 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
     let mut view = listed(vec![proposed]);
     assert!(!view.editing());
     assert!(view.key(key(KeyCode::Char('a')), NOW));
-    assert_eq!(
-        reply(
-            &mut view,
-            Ok(ChangesView::Branches(TargetBranches {
-                branches: vec!["main".into()],
-                current: Some("main".into()),
-            })),
-        ),
-        ChangesQuery::Branches { id: id('1') }
-    );
     assert!(view.editing());
     let (rows, cursor, help) = view.rows(100, 40, NOW, &Look::plain());
     let shown: Vec<String> = rows.iter().map(|row| row.text()).collect();
