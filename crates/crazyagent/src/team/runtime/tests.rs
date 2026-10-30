@@ -6611,7 +6611,7 @@ fn native_plan_gives_team_context() {
 }
 
 #[test]
-#[should_panic(expected = "assertion `left == right` failed")]
+#[should_panic(expected = "a native plan carries its tmux")]
 fn a_native_plan_without_its_tmux_is_a_caller_bug() {
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
