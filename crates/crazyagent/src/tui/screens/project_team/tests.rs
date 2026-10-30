@@ -1618,3 +1618,75 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
         "Show keeps finished agents in the list with no pointer"
     );
 }
+
+fn shows(view: &TeamView, setting: &str) -> bool {
+    frame(view, 120, 48).iter().any(|row| row.contains(setting))
+}
+
+fn applied(view: &mut TeamView, reply: TeamReply) {
+    let TeamReply::Change(action) = reply else {
+        panic!("no change was sent");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+}
+
+fn reread(view: &mut TeamView, status: TeamStatus, now: i64) {
+    let query = view.next_query(now).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+}
+
+#[test]
+fn agent_branches_flip_between_a_named_branch_and_a_detached_head() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("b", "Agent branches")));
+    assert!(shows(&view, "Agent branches  Named branch"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Detached,
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("New agents now work on a detached HEAD."))
+    );
+    let mut detached = team();
+    detached.agent_branches = crate::team::BranchMode::Detached;
+    reread(&mut view, detached, NOW + 10);
+    assert!(shows(&view, "Agent branches  Detached"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Named,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Each new agent now works on its own branch."))
+    );
+}

@@ -367,6 +367,16 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
     let mut view = listed(vec![proposed]);
     assert!(!view.editing());
     assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert_eq!(
+        reply(
+            &mut view,
+            Ok(ChangesView::Branches(TargetBranches {
+                branches: vec!["main".into()],
+                current: Some("main".into()),
+            })),
+        ),
+        ChangesQuery::Branches { id: id('1') }
+    );
     assert!(view.editing());
     let (rows, cursor, help) = view.rows(100, 40, NOW, &Look::plain());
     let shown: Vec<String> = rows.iter().map(|row| row.text()).collect();
@@ -862,6 +872,94 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
         shown.contains(&format!(
             "Only the first {FILES_MAX} changed files are listed."
         )),
+        "{shown}"
+    );
+}
+
+fn flat(view: &ProjectChanges) -> String {
+    text(view).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn accept_lists_the_branches_and_tab_picks_another_target() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(
+        view.key(key(KeyCode::Tab), NOW),
+        "Tab before the list arrives moves nothing"
+    );
+    let listed_branches = TargetBranches {
+        branches: vec!["main".into(), "release".into(), "next".into()],
+        current: Some("main".into()),
+    };
+    let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
+    assert_eq!(query, ChangesQuery::Branches { id: id('1') });
+    let shown = flat(&view);
+    assert!(shown.contains("Branch main"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on main, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch release"), "{shown}");
+    assert!(shown.contains("That branch isn't checked out"), "{shown}");
+    assert!(view.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), NOW));
+    assert!(view.key(key(KeyCode::BackTab), NOW));
+    assert!(flat(&view).contains("Branch next"));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(flat(&view).contains("Branch release"));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "release".into(),
+        })
+    );
+}
+
+#[test]
+fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.key(key(KeyCode::Esc), NOW));
+    assert_eq!(view.next_query(NOW), None, "Esc drops the branch read");
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+        })),
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        })
+    );
+
+    let mut failed = listed(vec![set('1', ChangeState::Pending)]);
+    failed.key(key(KeyCode::Char('a')), NOW);
+    reply(&mut failed, Err("changes_unavailable".into()));
+    let shown = flat(&failed);
+    assert!(
+        shown.contains(
+            "Couldn't list your branches, so these changes land on the checked-out branch."
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("They land as one commit on the branch checked out in your project folder"),
         "{shown}"
     );
 }
