@@ -2356,7 +2356,7 @@ fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
     );
     let rows = render(&mut shell);
     assert!(
-        rows.iter().any(|row| row.contains("s Stop live master")),
+        rows[2].trim_start().starts_with("Live master on."),
         "the switch reads on: {rows:#?}"
     );
     assert_eq!(

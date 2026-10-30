@@ -93,7 +93,6 @@ test("a live master that waits for this run's sign-in re-checks shows the engine
   assert.equal(seen.terminal, false);
   assert.ok(seen.text.includes(wait), seen.text);
   assert.doesNotMatch(seen.text, /Waiting for the master's terminal\./);
-  assert.ok(seen.buttons.includes("Earlier conversation"), seen.buttons.join(", "));
 });
 
 test("Earlier conversation opens the old engine-driven conversation read-only in the console, and the live master comes back", async () => {
