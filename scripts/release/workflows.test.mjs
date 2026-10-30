@@ -302,18 +302,25 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", asyn
   }
 });
 
+/**
+ * Reads one test exclusion list of the CI workflow's top-level env.
+ * Inputs: the workflow text and the list's name. Output: the set of excluded target names,
+ * from the key's own line and every following line indented deeper than the key.
+ */
+function excluded(text, name) {
+  const lines = text.split("\n");
+  const start = lines.findIndex((line) => line.startsWith(`  ${name}:`));
+  assert(start >= 0, `no ${name} in the CI env`);
+  const end = lines.findIndex((line, index) => index > start && line.length - line.trimStart().length <= 2);
+  return new Set([lines[start].slice(lines[start].indexOf(":") + 1), ...lines.slice(start + 1, end)].join(" ").split(/\s+/).filter((word) => word && word !== ">-"));
+}
+
 test("every Rust test target that needs the staged RCLI host is left out of CI, which stages none", async () => {
-  const lines = (await workflow("ci.yml")).split("\n");
-  const excluded = (name) => {
-    const start = lines.findIndex((line) => line.startsWith(`  ${name}:`));
-    assert(start >= 0, `no ${name} in the CI env`);
-    const end = lines.findIndex((line, index) => index > start && line.length - line.trimStart().length <= 2);
-    return new Set([lines[start].slice(lines[start].indexOf(":") + 1), ...lines.slice(start + 1, end)].join(" ").split(/\s+/).filter((word) => word && word !== ">-"));
-  };
+  const ci = await workflow("ci.yml");
   const root = new URL("../../", import.meta.url);
   let needing = 0;
   for (const [folder, list] of [["crates/crazyagent/tests/", "ENGINE_TESTS_EXCLUDE"], ["apps/desktop/src-tauri/tests/", "DESKTOP_TESTS_EXCLUDE"]]) {
-    const skipped = excluded(list);
+    const skipped = excluded(ci, list);
     for (const name of (await readdir(new URL(folder, root))).filter((name) => name.endsWith(".rs"))) {
       if (!(await readFile(new URL(folder + name, root), "utf8")).includes("CRAZYAGENT_RCLI")) continue;
       needing += 1;
@@ -321,4 +328,14 @@ test("every Rust test target that needs the staged RCLI host is left out of CI, 
     }
   }
   assert(needing > 0, "the check found the tests that need the RCLI host");
+});
+
+test("every live Rust test target, named *_live, is left out of CI, which has no live accounts, harnesses or local models", async () => {
+  const skipped = excluded(await workflow("ci.yml"), "ENGINE_TESTS_EXCLUDE");
+  const folder = new URL("../../crates/crazyagent/tests/", import.meta.url);
+  const live = (await readdir(folder)).filter((name) => name.endsWith("_live.rs")).map((name) => name.slice(0, -3));
+  assert(live.includes("codex_bridge_live"), "the check found the live targets");
+  for (const name of live) {
+    assert(skipped.has(name), `crates/crazyagent/tests/${name}.rs is a live target but is not in ENGINE_TESTS_EXCLUDE`);
+  }
 });
