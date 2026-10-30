@@ -6870,7 +6870,9 @@ fn asleep_lists_idle_per_turn_sub_agents_and_idle_kept_native_leads() {
 /// F2: an asleep agent with a waking message gets one `WAKE_TASK` task pinned to it, with
 /// its lead as the task's parent; with no pool for the project the task waits as
 /// needs_pool, with a usable account it is queued, and no second task is made while one
-/// waits. A plain note wakes no one.
+/// waits. A plain note wakes no one and stays Sent until the agent's own wake. Dispatch
+/// then sends the woken agent's kept session one turn that runs `WAKE_TASK` and ends with
+/// its messages under "Messages for you", and marks exactly those Delivered.
 #[test]
 fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     let fixture = Fixture::new(2);
@@ -6887,10 +6889,10 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
             [lead, worker],
         )
         .unwrap();
-    for id in [worker, noted] {
-        team.workers
-            .insert(id, between_turns(&project, AgentRole::Sub, true, false));
-    }
+    team.workers
+        .insert(worker, between_turns(&project, AgentRole::Sub, true, false));
+    team.workers
+        .insert(noted, between_turns(&project, AgentRole::Sub, true, true));
     let send = |to: i64, kind: crate::coord::MessageKind| {
         crate::coord::send(
             &fixture.connection,
@@ -6909,8 +6911,18 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
         )
         .unwrap()
     };
-    send(worker, crate::coord::MessageKind::Prompt);
-    send(noted, crate::coord::MessageKind::Note);
+    let ordered = send(worker, crate::coord::MessageKind::Prompt);
+    let note = send(noted, crate::coord::MessageKind::Note);
+    let receipt = |message: crate::coord::MessageId| -> String {
+        fixture
+            .connection
+            .query_row(
+                "SELECT receipt FROM coord_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
     let pinned = |agent: i64| -> Vec<(String, String, Option<i64>)> {
         let mut statement = fixture
             .connection
@@ -6948,7 +6960,8 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
         pinned(noted).is_empty(),
         "a plain note waits for the next turn"
     );
-    send(noted, crate::coord::MessageKind::Prompt);
+    assert_eq!(receipt(note), "sent");
+    let asked = send(noted, crate::coord::MessageKind::Prompt);
     team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
         .unwrap();
     assert_eq!(pinned(worker).len(), 1, "one pinned task at a time");
@@ -6957,6 +6970,38 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
         [(
             super::super::master::WAKE_TASK.to_owned(),
             "queued".to_owned(),
+            None
+        )]
+    );
+    assert_eq!(receipt(note), "sent", "untouched until its own wake runs");
+
+    let (orders, turns) = channel();
+    team.workers.get_mut(&noted).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the woken agent's kept session got no turn");
+    };
+    assert!(typed.contains(super::super::master::WAKE_TASK), "{typed}");
+    let from = crate::team::events::label(&fixture.connection, lead).unwrap();
+    assert!(
+        typed.ends_with(&format!(
+            "\n\nMessages for you:\n[crazyagent msg {note}] from {from}: note, it takes no reply: Merge your branch\n[crazyagent msg {asked}] from {from}: work for you, answer with update_work: Merge your branch\n"
+        )),
+        "{typed}"
+    );
+    assert_eq!(receipt(note), "delivered");
+    assert_eq!(receipt(asked), "delivered");
+    assert_eq!(
+        receipt(ordered),
+        "sent",
+        "the worker's wake still waits for a pool"
+    );
+    assert_eq!(
+        pinned(noted),
+        [(
+            super::super::master::WAKE_TASK.to_owned(),
+            "running".to_owned(),
             None
         )]
     );
