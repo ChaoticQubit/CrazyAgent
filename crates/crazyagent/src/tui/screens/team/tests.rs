@@ -2334,7 +2334,7 @@ fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
     for line in [
         "Instruction files",
         "CLAUDE.md  1.2 KB, given",
-        "AGENTS.md  300 bytes, left out: the same text as a file above",
+        "AGENTS.md  300 bytes, left out: the same text as the instructions or a file above",
         "CLAUDE.local.md  0 bytes, left out: a link or not a plain file",
         "~/.claude/CLAUDE.md  39.1 KB, left out: larger than CrazyAgent gives",
     ] {
