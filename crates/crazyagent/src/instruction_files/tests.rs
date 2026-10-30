@@ -301,3 +301,316 @@ mod launch {
         );
     }
 }
+
+#[cfg(unix)]
+mod import {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    const TRACKED_RULE: &str = "TRACKED-CLAUDE-RULE-81";
+    const TRACKED_DOT_RULE: &str = "TRACKED-DOT-CLAUDE-RULE-82";
+
+    /// One owner checkout on `main` with its instruction files committed, a bare remote it
+    /// pushed to, and an owner home with no git config, so the engine reads only the
+    /// repository's own identity.
+    struct Checkout {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        home: PathBuf,
+        folder: PathBuf,
+        remote: PathBuf,
+    }
+
+    /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
+    /// Inputs: the owner home, the folder and the arguments. Output: standard output.
+    fn git(home: &Path, dir: &Path, args: &[&str]) -> String {
+        let output = crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("LC_ALL", "C")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    impl Checkout {
+        fn new() -> Self {
+            let tmp = tempfile::Builder::new()
+                .prefix("ca-icommit-")
+                .tempdir_in(fs::canonicalize("/tmp").unwrap())
+                .unwrap();
+            let root = fs::canonicalize(tmp.path()).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+            let (home, folder, remote) = (
+                root.join("home"),
+                root.join("repo"),
+                root.join("remote.git"),
+            );
+            for made in [&home, &folder] {
+                fs::create_dir(made).unwrap();
+            }
+            git(&home, &folder, &["init", "-q", "--template=", "-b", "main"]);
+            git(&home, &folder, &["config", "user.name", "Repo Owner"]);
+            git(
+                &home,
+                &folder,
+                &["config", "user.email", "repo@example.invalid"],
+            );
+            git(&home, &folder, &["config", "commit.gpgSign", "false"]);
+            write(
+                &folder.join("CLAUDE.md"),
+                &format!("# Rules\n\n{TRACKED_RULE}\n"),
+            );
+            write(
+                &folder.join(".claude/CLAUDE.md"),
+                &format!("{TRACKED_DOT_RULE}\n"),
+            );
+            write(&folder.join("README.md"), "Read me.\n");
+            write(
+                &folder.join(".gitignore"),
+                ".crazyagent/\nCLAUDE.local.md\n",
+            );
+            git(&home, &folder, &["add", "-A"]);
+            git(&home, &folder, &["commit", "-q", "-m", "Start"]);
+            git(
+                &home,
+                &root,
+                &["init", "-q", "--bare", "--template=", "remote.git"],
+            );
+            git(
+                &home,
+                &folder,
+                &["remote", "add", "origin", remote.to_str().unwrap()],
+            );
+            git(&home, &folder, &["push", "-q", "origin", "main"]);
+            Self {
+                _tmp: tmp,
+                root,
+                home,
+                folder,
+                remote,
+            }
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            git(&self.home, &self.folder, args)
+        }
+
+        fn tip(&self) -> String {
+            self.git(&["rev-parse", "main"]).trim().to_owned()
+        }
+    }
+
+    fn marks(files: &[ImportFile]) -> Vec<(&str, bool, bool)> {
+        files
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect()
+    }
+
+    #[test]
+    fn committing_the_import_move_holds_only_the_moved_tracked_files_and_keeps_other_work() {
+        let checkout = Checkout::new();
+        write(
+            &checkout.folder.join("CLAUDE.local.md"),
+            "UNTRACKED-LOCAL-RULE\n",
+        );
+        let start = checkout.tip();
+        let moved = import(&checkout.folder).unwrap();
+        assert_eq!(
+            marks(&moved),
+            [
+                ("CLAUDE.md", true, true),
+                (".claude/CLAUDE.md", true, true),
+                ("CLAUDE.local.md", false, false)
+            ]
+        );
+        assert_eq!(
+            uncommitted(&checkout.folder).unwrap(),
+            ["CLAUDE.md", ".claude/CLAUDE.md"]
+        );
+        write(&checkout.folder.join("README.md"), "Read me twice.\n");
+        let made = commit(&checkout.folder, &checkout.home).unwrap();
+        assert_eq!(made.branch, "main");
+        assert_eq!(made.files, ["CLAUDE.md", ".claude/CLAUDE.md"]);
+        assert_eq!(checkout.tip(), made.commit);
+        assert_eq!(
+            checkout
+                .git(&[
+                    "log",
+                    "-1",
+                    "--format=%P|%an <%ae>|%cn <%ce>|%s",
+                    &made.commit
+                ])
+                .trim(),
+            format!(
+                "{start}|Repo Owner <repo@example.invalid>|Repo Owner <repo@example.invalid>|Move CLAUDE.md, .claude/CLAUDE.md into .crazyagent/imported/"
+            )
+        );
+        assert_eq!(
+            checkout.git(&[
+                "diff",
+                "--name-status",
+                "--no-renames",
+                &start,
+                &made.commit
+            ]),
+            "D\t.claude/CLAUDE.md\nD\tCLAUDE.md\n",
+            "the commit holds the two tracked deletions and nothing else"
+        );
+        assert_eq!(
+            checkout.git(&["status", "--porcelain"]),
+            " M README.md\n",
+            "the owner's own edit stays unstaged and out of the commit"
+        );
+        assert_eq!(
+            git(&checkout.home, &checkout.remote, &["rev-parse", "main"]).trim(),
+            start,
+            "nothing was pushed"
+        );
+        assert_eq!(
+            checkout
+                .git(&["rev-parse", "refs/remotes/origin/main"])
+                .trim(),
+            start
+        );
+        assert!(uncommitted(&checkout.folder).unwrap().is_empty());
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+        let instructions =
+            fs::read_to_string(checkout.folder.join(".crazyagent/instructions.md")).unwrap();
+        assert!(instructions.contains(TRACKED_RULE) && instructions.contains(TRACKED_DOT_RULE));
+    }
+
+    #[test]
+    fn the_import_commit_refuses_and_changes_nothing() {
+        let checkout = Checkout::new();
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none",
+            "nothing was moved"
+        );
+        import(&checkout.folder).unwrap();
+        let start = checkout.tip();
+        let unchanged = |staged: &str| {
+            assert_eq!(checkout.tip(), start);
+            assert_eq!(checkout.git(&["diff", "--cached", "--name-only"]), staged);
+            assert_eq!(
+                uncommitted(&checkout.folder).unwrap(),
+                ["CLAUDE.md", ".claude/CLAUDE.md"]
+            );
+        };
+        write(&checkout.folder.join("NEW.md"), "new\n");
+        checkout.git(&["add", "NEW.md"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_staged"
+        );
+        unchanged("NEW.md\n");
+        checkout.git(&["rm", "-q", "--cached", "NEW.md"]);
+        for state in ["MERGE_HEAD", "index.lock"] {
+            let path = checkout.folder.join(".git").join(state);
+            fs::write(&path, format!("{start}\n")).unwrap();
+            assert_eq!(
+                commit(&checkout.folder, &checkout.home).unwrap_err().0,
+                "process_commit_busy",
+                "{state}"
+            );
+            fs::remove_file(&path).unwrap();
+            unchanged("");
+        }
+        checkout.git(&["config", "--unset", "user.name"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_identity"
+        );
+        unchanged("");
+        checkout.git(&["config", "user.name", "Repo Owner"]);
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_detached"
+        );
+        assert_eq!(checkout.git(&["rev-parse", "HEAD"]).trim(), start);
+        checkout.git(&["checkout", "-q", "main"]);
+        unchanged("");
+        checkout.git(&["checkout", "-q", "--", "CLAUDE.md", ".claude/CLAUDE.md"]);
+        assert!(
+            uncommitted(&checkout.folder).unwrap().is_empty(),
+            "restored originals need no commit"
+        );
+        assert_eq!(
+            commit(&checkout.folder, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+        assert_eq!(checkout.tip(), start);
+    }
+
+    #[test]
+    fn a_folder_without_git_moves_its_files_with_nothing_to_commit() {
+        let checkout = Checkout::new();
+        let plain = checkout.root.join("plain");
+        write(&plain.join("CLAUDE.md"), "PLAIN-RULE\n");
+        let moved = import(&plain).unwrap();
+        assert_eq!(marks(&moved), [("CLAUDE.md", false, false)]);
+        assert!(plain.join(".crazyagent/imported/CLAUDE.md").is_file());
+        assert!(uncommitted(&plain).unwrap().is_empty());
+        assert_eq!(
+            commit(&plain, &checkout.home).unwrap_err().0,
+            "process_commit_none"
+        );
+    }
+
+    #[test]
+    fn the_onboarding_moved_list_marks_a_tracked_move_until_it_is_committed() {
+        let checkout = Checkout::new();
+        let connection = Connection::open_in_memory().unwrap();
+        initialize(&connection).unwrap();
+        let project = ProjectId::new("import-commit").unwrap();
+        record_moved(&connection, &project, &import(&checkout.folder).unwrap()).unwrap();
+        let listed = || {
+            moved(&connection, &project, &checkout.folder)
+                .unwrap()
+                .into_iter()
+                .map(|file| (file.path, file.uncommitted))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            listed(),
+            [
+                ("CLAUDE.md".to_owned(), true),
+                (".claude/CLAUDE.md".to_owned(), true)
+            ]
+        );
+        commit(&checkout.folder, &checkout.home).unwrap();
+        assert_eq!(
+            listed(),
+            [
+                ("CLAUDE.md".to_owned(), false),
+                (".claude/CLAUDE.md".to_owned(), false)
+            ]
+        );
+    }
+}

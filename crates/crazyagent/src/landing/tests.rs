@@ -3460,3 +3460,105 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         Some(&case.workspace.worktree),
     );
 }
+
+#[test]
+fn an_import_commit_that_loses_the_branch_race_leaves_only_the_staged_deletion_and_a_retry_lands() {
+    let case = Case::new();
+    let start = case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    std::fs::remove_file(case.repo.join("CLAUDE.md")).unwrap();
+    let elsewhere = std::cell::RefCell::new(String::new());
+    let lost = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {
+            let moved = case
+                .owner(&[
+                    "commit-tree",
+                    "main^{tree}",
+                    "-p",
+                    "main",
+                    "-m",
+                    "Elsewhere",
+                ])
+                .trim()
+                .to_owned();
+            case.owner(&["update-ref", "refs/heads/main", &moved]);
+            *elsewhere.borrow_mut() = moved;
+        },
+    );
+    assert_eq!(refused(lost), "changes_branch_moved");
+    let elsewhere = elsewhere.into_inner();
+    assert_eq!(case.tip(), elsewhere);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &elsewhere]).trim(),
+        start
+    );
+    assert_eq!(
+        case.owner(&["status", "--porcelain"]),
+        "D  CLAUDE.md\n",
+        "only the deletion is staged; the owner's files are untouched"
+    );
+    let (commit, branch, files) = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {},
+    )
+    .unwrap();
+    assert_eq!(
+        (branch.as_str(), files),
+        ("main", vec!["CLAUDE.md".to_owned()])
+    );
+    assert_eq!(case.tip(), commit);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>|%s", &commit])
+            .trim(),
+        format!("{elsewhere}|Repo Owner <owner@example.invalid>|Move CLAUDE.md")
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move_is_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    let moved = crate::instruction_files::import(&case.repo).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true, true)]
+    );
+    let head = case.view(&id).head;
+    assert_eq!(
+        refused(accept_into(&case.db, &case.home, &id, &head, None, "main")),
+        "changes_owner_dirty"
+    );
+    assert_eq!(
+        crate::instruction_files::uncommitted(&case.repo).unwrap(),
+        ["CLAUDE.md"]
+    );
+    let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
+    assert_eq!(made.files, ["CLAUDE.md"]);
+    let AcceptOutcome::Landed { commit, branch } =
+        accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        made.commit
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
