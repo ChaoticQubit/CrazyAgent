@@ -6261,3 +6261,742 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         "a teammate whose pane ended stops"
     );
 }
+
+/// A plan for one start of `harness` with the hooks state `hookless`, launched nowhere.
+fn hooks_plan(harness: &str, hookless: bool) -> Plan {
+    Plan {
+        harness: harness.into(),
+        executable: PathBuf::from("/bin/sh"),
+        working_dir: PathBuf::from("/tmp"),
+        model: None,
+        tools: true,
+        sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        access: AgentAccess::OwnBranch,
+        layout: Layout::Linked,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+        pane: None,
+        live: false,
+        resume: None,
+        continues: true,
+        native: false,
+        tmux: None,
+        hookless,
+    }
+}
+
+fn endpoint_binding() -> AccountBinding {
+    AccountBinding::Url {
+        home: PathBuf::from("/tmp/home"),
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        key: None,
+    }
+}
+
+fn endpoint_account() -> TeamAccount {
+    TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    }
+}
+
+fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
+    fixture
+        .connection
+        .query_row(
+            "SELECT hookless FROM team_agents WHERE id=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// Opens a team runtime whose only harness is a stand-in Claude Code that exits at once.
+fn claude_runtime(fixture: &Fixture) -> TeamRuntime {
+    let bin = fixture.base.join("claude-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = fixture.access.clone();
+    TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("claude-code", claude)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn plan_request_keeps_the_hooks_state_its_binding_gives() {
+    let signed_in = || AccountBinding::Subscription {
+        home: PathBuf::from("/tmp/home"),
+    };
+    for (harness, hookless, account) in [
+        ("claude-code", true, endpoint_binding()),
+        ("claude-code", false, signed_in()),
+        ("codex", false, endpoint_binding()),
+        ("codex", false, signed_in()),
+    ] {
+        let request = hooks_plan(harness, hookless)
+            .request(account, AgentAccess::OwnBranch)
+            .unwrap();
+        assert_eq!(request.harness, harness);
+    }
+}
+
+#[test]
+#[should_panic(expected = "an agent's recorded hooks state is the one its launch gets")]
+fn plan_request_asserts_hookless_matches_binding() {
+    let _ = hooks_plan("claude-code", false).request(endpoint_binding(), AgentAccess::OwnBranch);
+}
+
+#[test]
+fn native_plan_gives_team_context() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let context = || {
+        crate::launch_context::for_project(&fixture.connection, &project, Layout::Linked).unwrap()
+    };
+    let home = |name: &str| {
+        let home = fixture.base.join(name);
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        home
+    };
+    let worktree = fixture.base.join("project");
+    let native = Plan {
+        working_dir: worktree.clone(),
+        native: true,
+        tmux: Some(fixture.tmux.clone()),
+        ..hooks_plan("claude-code", false)
+    };
+    let installed = native
+        .team_context(context())
+        .install("claude-code", &home("native-lead"), true)
+        .unwrap();
+    let team = installed
+        .native()
+        .expect("a native plan's launch runs an agent team");
+    assert_eq!(team.tmux, fixture.tmux);
+    let teammate = std::fs::read_to_string(&team.instructions).unwrap();
+    assert!(
+        teammate.contains(&format!(
+            "--graph {}/graphify-out/graph.json",
+            worktree.display()
+        )),
+        "{teammate}"
+    );
+    drop(installed);
+
+    let installed = hooks_plan("claude-code", false)
+        .team_context(context())
+        .install("claude-code", &home("plain-lead"), true)
+        .unwrap();
+    assert!(
+        installed.native().is_none(),
+        "a plan without native mode keeps the context as it is"
+    );
+}
+
+#[test]
+#[should_panic(expected = "assertion `left == right` failed")]
+fn a_native_plan_without_its_tmux_is_a_caller_bug() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let context =
+        crate::launch_context::for_project(&fixture.connection, &project, Layout::Linked).unwrap();
+    let plan = Plan {
+        native: true,
+        ..hooks_plan("claude-code", false)
+    };
+    let _ = plan.team_context(context);
+}
+
+#[test]
+fn native_mode_only_for_master_started_claude_lead() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let sub = |harness: &str, parent: Option<i64>| {
+        let id = fixture.agent(AgentRole::Sub, harness, AgentStatus::Starting);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?1 WHERE id=?2",
+                params![parent, id],
+            )
+            .unwrap();
+        id
+    };
+    let lead = sub("claude-code", None);
+    let nested = sub("claude-code", Some(lead));
+    let codex = sub("codex", None);
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Starting);
+
+    let mut hostless = fixture.runtime();
+    let refused = hostless
+        .native_lead(&project, lead, AgentRole::Sub, "claude-code")
+        .unwrap_err();
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_mode_unavailable")),
+        "{refused}"
+    );
+    hostless.shutdown().unwrap();
+
+    let mut team = fixture.runtime().with_terminal(fixture.host()).unwrap();
+    assert_eq!(
+        team.native_lead(&project, lead, AgentRole::Sub, "claude-code"),
+        Ok(true)
+    );
+    assert_eq!(
+        team.native_lead(&project, nested, AgentRole::Sub, "claude-code"),
+        Ok(false),
+        "a sub-agent another agent leads is app-spawned"
+    );
+    assert_eq!(
+        team.native_lead(&project, codex, AgentRole::Sub, "codex"),
+        Ok(false)
+    );
+    assert_eq!(
+        team.native_lead(&project, master, AgentRole::Master, "claude-code"),
+        Ok(false)
+    );
+
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::AppSpawned,
+    )
+    .unwrap();
+    assert_eq!(
+        team.native_lead(&project, lead, AgentRole::Sub, "claude-code"),
+        Ok(true),
+        "a lead keeps the mode of its first start"
+    );
+    let later = sub("claude-code", None);
+    assert_eq!(
+        team.native_lead(&project, later, AgentRole::Sub, "claude-code"),
+        Ok(false)
+    );
+    let planted = sub("claude-code", Some(lead));
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET mode='native' WHERE id=?1",
+            [planted],
+        )
+        .unwrap();
+    let refused = team
+        .native_lead(&project, planted, AgentRole::Sub, "claude-code")
+        .unwrap_err();
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_mode_unsupported")),
+        "{refused}"
+    );
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
+    use crate::coord::settings::{CoordSettings, Overlaps, write};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = claude_runtime(&fixture);
+    let overlaps = |overlaps: Overlaps| {
+        write(
+            &fixture.connection,
+            &project,
+            &CoordSettings {
+                overlaps,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+    };
+    let prepare = |runtime: &TeamRuntime, id: i64, tools: bool| {
+        runtime.prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            tools,
+            &endpoint_account(),
+            false,
+            Layout::Linked,
+        )
+    };
+
+    overlaps(Overlaps::Block);
+    let with_tools = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let Err(refused) = prepare(&runtime, with_tools, true) else {
+        panic!("a hookless agent with tools started under Overlaps Block");
+    };
+    assert!(refused.contains(OVERLAP_BLOCK_NEEDS_HOOKS), "{refused}");
+    assert!(
+        refused.contains(crate::protocol::plain_code("overlap_block_needs_hooks")),
+        "{refused}"
+    );
+    assert!(hookless_saved(&fixture, with_tools));
+
+    let tools_off = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = prepare(&runtime, tools_off, false).unwrap();
+    assert!(plan.hookless && hookless_saved(&fixture, tools_off));
+
+    overlaps(Overlaps::Warn);
+    let warned = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = prepare(&runtime, warned, true).unwrap();
+    assert!(plan.hookless, "under Warn it starts, still without hooks");
+    runtime.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_lead_on_endpoint_refused() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let mut runtime = claude_runtime(&fixture)
+        .with_terminal(fixture.host())
+        .unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        lead,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &endpoint_account(),
+        false,
+        Layout::Linked,
+    ) else {
+        panic!("a native lead on an endpoint account started");
+    };
+    assert!(refused.contains(NATIVE_NEEDS_HOOKS), "{refused}");
+    assert!(
+        refused.contains(crate::protocol::plain_code("native_team_needs_hooks")),
+        "{refused}"
+    );
+    assert!(hookless_saved(&fixture, lead));
+    let root = fixture.setup.project_folder().canonicalize().unwrap();
+    let worktree = crate::projects_home::state_folder(&root)
+        .join("worktrees")
+        .join(format!("agent-{lead}"));
+    assert!(!worktree.exists(), "no worktree is made for a refused lead");
+    runtime.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_lead_own_turn_reports_result_and_lands() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = claude_runtime(&fixture);
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let (root, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            lead,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &endpoint_account(),
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let landing = agent_git_dir(&root, &plan.working_dir, Layout::Linked).unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![lead, PROJECT, landing[0], landing[1], landing[2]],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let paths = landing.each_ref().map(Path::new);
+    crate::landing::record_worktree_start(&db, paths[0], paths[1], paths[2]).unwrap();
+    std::fs::write(plan.working_dir.join("page.md"), "teammates wrote it\n").unwrap();
+
+    runtime
+        .own_turn_ended(
+            lead,
+            &project,
+            1,
+            "  The teammates finished the page.  ",
+            TurnEnd::Success,
+        )
+        .unwrap();
+    type Task = (
+        String,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+    );
+    let tasks = || -> Vec<Task> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT source,agent,prompt,status,result,error,delivered FROM team_tasks
+                 WHERE project=?1 ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([PROJECT], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        tasks(),
+        vec![(
+            "master".to_owned(),
+            lead,
+            OWN_TURN_TASK.to_owned(),
+            "done".to_owned(),
+            Some("The teammates finished the page.".to_owned()),
+            None,
+            false
+        )],
+        "an own turn is one done master task of the lead, its result not yet delivered"
+    );
+    let sets = crate::landing::list(&db, &project).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].agent.id, lead.to_string());
+    assert_eq!(sets[0].files, 1);
+
+    for (end, status, problem) in [
+        (TurnEnd::Interrupted, "cancelled", "Interrupted by you"),
+        (
+            TurnEnd::RateLimited,
+            "failed",
+            "The account hit its rate limit",
+        ),
+        (TurnEnd::Closed, "failed", OWN_TURN_FAILED),
+    ] {
+        runtime.own_turn_ended(lead, &project, 1, " ", end).unwrap();
+        let last = tasks().pop().unwrap();
+        assert_eq!(
+            (last.3.as_str(), last.4, last.5.as_deref()),
+            (status, None, Some(problem))
+        );
+    }
+    let before = tasks().len();
+    runtime
+        .own_turn_ended(lead + 100, &project, 1, "text", TurnEnd::Success)
+        .unwrap();
+    assert_eq!(
+        tasks().len(),
+        before,
+        "no task for an agent that is not there"
+    );
+    runtime.shutdown().unwrap();
+}
+
+#[test]
+fn reap_skips_lead_with_working_teammate_or_sent_message() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    assert!(
+        !team.lead_waits(lead).unwrap(),
+        "a lead alone has nothing to wait on"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,'working',1,1,?2,'%3')",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    let teammate = fixture.connection.last_insert_rowid();
+    let teammate_is = |status: &str| {
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET status=?2 WHERE id=?1",
+                params![teammate, status],
+            )
+            .unwrap();
+    };
+    for (status, waits) in [
+        ("working", true),
+        ("starting", true),
+        ("idle", false),
+        ("stopped", false),
+    ] {
+        teammate_is(status);
+        assert_eq!(team.lead_waits(lead).unwrap(), waits, "teammate {status}");
+    }
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::coord::send(
+        &tx,
+        crate::coord::NewMessage {
+            project: ProjectId::new(PROJECT).unwrap(),
+            from: crate::coord::Party::Owner,
+            to: crate::coord::Party::Agent(lead),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Check the page".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(
+        team.lead_waits(lead).unwrap(),
+        "a message no channel carried yet holds the lead"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE coord_messages SET receipt='delivered' WHERE to_agent=?1",
+            [lead],
+        )
+        .unwrap();
+    assert!(!team.lead_waits(lead).unwrap());
+    team.shutdown().unwrap();
+}
+
+/// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
+/// lead an earlier engine left running. A Stop before any order, or a first order without
+/// the signed-in account, ends its pane; a Stop while the engine leaves panes running
+/// keeps it.
+#[test]
+fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    for (first, leave) in [
+        (Order::Stop, false),
+        (Order::Turn("Plan the page".into(), None, None), false),
+        (Order::Start("Your brief".into(), None), false),
+        (Order::Stop, true),
+    ] {
+        let taken = matches!(first, Order::Turn(..));
+        let stopped = matches!(first, Order::Stop);
+        let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+        let record = fixture.pane(&host, id);
+        let agent = AgentId::team(id).unwrap();
+        assert!(host.alive().unwrap().contains(&agent));
+        let adoption = Adoption {
+            host: host.clone(),
+            agent: agent.clone(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join(format!("lead-home-{id}")),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+        };
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders.send(first).unwrap();
+        let problem = native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(leave),
+        );
+        drop(reports);
+        let reports: Vec<Report> = reported.iter().collect();
+        assert_eq!(
+            host.alive().unwrap().contains(&agent),
+            leave,
+            "taken {taken}, leave {leave}: the pane runs on only when the engine leaves it"
+        );
+        if stopped {
+            assert_eq!(problem, None);
+        } else {
+            assert_eq!(
+                problem.as_deref(),
+                Some("The native lead was taken over without its signed-in account")
+            );
+        }
+        assert_eq!(reports.len(), usize::from(taken), "taken {taken}");
+        assert!(reports.iter().all(|report| matches!(
+            report,
+            Report::Finished {
+                end: TurnEnd::Closed,
+                cause: None,
+                ..
+            }
+        )));
+        if leave {
+            host.kill(&agent).unwrap();
+        }
+    }
+}
+
+/// Wiring test of engine mechanics, not Claude Code: a native lead's first order without
+/// the signed-in account starts no pane, closes the turn it was given and names why.
+#[test]
+fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let agent = AgentId::team(7).unwrap();
+    let plan = Plan {
+        native: true,
+        tmux: Some(fixture.tmux.clone()),
+        pane: Some((crate::terminal::own_server(host.clone()), agent.clone())),
+        ..hooks_plan("claude-code", false)
+    };
+    let home = fixture.base.join("lead-home");
+    for (first, taken) in [
+        (Order::Turn("Plan the page".into(), None, None), true),
+        (Order::Start("Your brief".into(), None), false),
+    ] {
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders.send(first).unwrap();
+        let problem = native_session(
+            &plan,
+            &home,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        drop(reports);
+        assert_eq!(
+            problem.as_deref(),
+            Some("The native lead was started without its signed-in account")
+        );
+        let reports: Vec<Report> = reported.iter().collect();
+        assert_eq!(reports.len(), usize::from(taken));
+        assert!(reports.iter().all(|report| matches!(
+            report,
+            Report::Finished {
+                end: TurnEnd::Closed,
+                ..
+            }
+        )));
+        assert!(!host.alive().unwrap().contains(&agent));
+    }
+    let (orders, ordered) = channel();
+    let (reports, reported) = channel();
+    orders.send(Order::Stop).unwrap();
+    assert_eq!(
+        native_session(
+            &plan,
+            &home,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        ),
+        None
+    );
+    drop(reports);
+    assert_eq!(reported.iter().count(), 0);
+}
+
+/// Wiring test of engine mechanics: a pane an earlier engine left for a sub-agent on a
+/// signed-in account that starts it again for each turn is not taken over, and the refusal
+/// says why; one whose account left the pool says that instead.
+#[test]
+fn adopt_refuses_per_turn_pane_with_reason() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let managed = ModelConnection {
+        id: reference("codex-managed"),
+        provider: reference("openai"),
+        harness: reference("codex"),
+        protocol: reference("native"),
+        account_ref: reference("codex-account"),
+        endpoint: ModelEndpoint::Native {},
+        model: ModelReference {
+            id: "native-default".into(),
+            author: reference("openai"),
+        },
+        auth: ModelAuthentication::NativeManaged {
+            profile_ref: reference("codex-profile"),
+        },
+    };
+    let mut access = fixture.access.clone();
+    access.accounts.push(managed.account_ref.clone());
+    access.connections.push(managed.clone());
+    access.pools[0].members.push(managed.id.clone());
+    let mut team = fixture.runtime();
+    for (connection, reason) in [
+        (
+            "codex-managed",
+            "its signed-in account starts it again for each turn",
+        ),
+        (
+            "codex-gone",
+            "its account is no longer in the project's pool",
+        ),
+    ] {
+        let id = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET connection=?2 WHERE id=?1",
+                params![id, connection],
+            )
+            .unwrap();
+        let record = fixture.pane(&host, id);
+        assert_eq!(
+            team.adopt(&host, id, &record, &access).unwrap(),
+            Err(reason.to_owned())
+        );
+        let status: String = fixture
+            .connection
+            .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            status, "stopped",
+            "a refused pane leaves its agent as it was"
+        );
+        host.kill(&AgentId::team(id).unwrap()).unwrap();
+    }
+    team.shutdown().unwrap();
+}

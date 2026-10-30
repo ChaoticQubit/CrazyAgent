@@ -233,3 +233,7 @@ pub(super) fn end_orphans(connection: &Connection, at: i64) -> Result<(), Engine
         .map_err(error)?;
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "teammates/tests.rs"]
+mod tests;

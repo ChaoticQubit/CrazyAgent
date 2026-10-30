@@ -857,3 +857,65 @@ fn custody_with_mixed_or_moved_pins_is_still_refused() {
         .prepare(&moved_root.host, &moved_root.connection);
     assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
 }
+
+/// Names a configured case's custody root manifest and its profile slot manifest.
+/// Input: the case. Output: the two `identity.json` paths.
+fn configured_manifests(case: &ConfiguredCase) -> (PathBuf, PathBuf) {
+    let root = case.root.path().join("state").join(ROOT);
+    let slot = root.join(digest(case.profile.as_str().as_bytes()));
+    (root.join(MANIFEST), slot.join(MANIFEST))
+}
+
+#[test]
+fn configured_profile_survives_a_volume_renumber() {
+    let mut case = ConfiguredCase::new(true, true);
+    let first = case.register();
+    let (root_manifest, slot_manifest) = configured_manifests(&case);
+    rewrite_in_place(&root_manifest, |value| renumber(value, 1));
+    rewrite_in_place(&slot_manifest, |value| renumber(value, 1));
+    let written = (
+        std::fs::read(&root_manifest).unwrap(),
+        std::fs::read(&slot_manifest).unwrap(),
+    );
+    case.custody = recapture(&case);
+    let loaded = case
+        .custody
+        .configured_rcli_profile(&case.host, &case.connection, &case.profile)
+        .unwrap();
+    assert_eq!(loaded.profile_generation, first.profile_generation);
+    assert_eq!(loaded.profile_config_sha256, first.profile_config_sha256);
+    assert_eq!(loaded.custody_id, digest(&written.1));
+    let registered = case.register();
+    assert_eq!(registered, loaded);
+    let connection = case.connection.clone();
+    drop(acquire(&mut case, &connection, &registered).unwrap());
+    assert_eq!(
+        (
+            std::fs::read(&root_manifest).unwrap(),
+            std::fs::read(&slot_manifest).unwrap()
+        ),
+        written
+    );
+}
+
+#[test]
+fn a_configured_sdk_pinned_on_another_device_alone_is_refused() {
+    let mut case = ConfiguredCase::new(true, true);
+    case.register();
+    let (_, slot_manifest) = configured_manifests(&case);
+    rewrite_in_place(&slot_manifest, |value| {
+        renumber(&mut value["configured"]["sdk"], 1)
+    });
+    case.custody = recapture(&case);
+    let loaded = case
+        .custody
+        .configured_rcli_profile(&case.host, &case.connection, &case.profile);
+    assert_eq!(loaded.unwrap_err().0, "rcli_profile_identity_changed");
+    let registered = case.custody.register_configured_rcli_profile(
+        &case.host,
+        &case.connection,
+        &case.profile,
+        &case.home,
+    );
+    assert_eq!(registered.unwrap_err().0, "rcli_profile_identity_changed");
+}
