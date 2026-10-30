@@ -114,6 +114,7 @@ impl Rig {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
+        private_file(&base.join("engine.db"), b"");
         let settings = Volume::new(&base, "settings");
         settings.attach();
         private_folder(&settings.mount.join("s"));
