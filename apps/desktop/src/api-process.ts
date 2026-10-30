@@ -297,20 +297,14 @@ export function reportedLine(value: Pick<AgentInstructions, "sessions" | "loaded
   return `Instructions: ${files} - Skills used: ${used}`;
 }
 
-const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;
-
 /** Names the team agent whose instructions a graph card shows. Input: the card's node.
  * Output: null for the master card, which the engine reads as the project's newest master,
  * the agent id for a lead, sub-agent or teammate card, or undefined for a card with no agent,
- * such as a native teammate known only by its pane, or one whose agent id is null or not
- * valid. Only a node from an older engine, with no agent field, is named by its card id. */
-export function agentOf(node: Pick<GraphNode, "id" | "kind" | "agent">): number | null | undefined {
+ * such as a native teammate known only by its pane, or one whose agent id is missing, null
+ * or not a positive safe integer. */
+export function agentOf(node: Pick<GraphNode, "kind" | "agent">): number | null | undefined {
   if (node.kind === "master") return null;
-  if (node.agent !== undefined) {
-    return typeof node.agent === "number" && Number.isSafeInteger(node.agent) && node.agent > 0 ? node.agent : undefined;
-  }
-  const id = node.kind === "teammate" ? undefined : TEAM_AGENT.exec(node.id)?.[1];
-  return id === undefined ? undefined : Number(id);
+  return typeof node.agent === "number" && Number.isSafeInteger(node.agent) && node.agent > 0 ? node.agent : undefined;
 }
 
 /** Reads what one team agent received at its last launch. Inputs: the project id and the
