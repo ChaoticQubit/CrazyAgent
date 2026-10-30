@@ -1028,7 +1028,7 @@ fn the_master_fixes_a_lead_s_mode_at_spawn_and_a_lead_cannot_pick_one() {
     };
     assert_eq!(
         answer_sub(&mut fixture.connection, &answering, lead, call).unwrap(),
-        Some((LEAD_MODE_REFUSED.to_owned(), true))
+        Some(("Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).".to_owned(), true))
     );
     assert_eq!(task_modes(&fixture).len(), 3);
 }
@@ -1079,7 +1079,7 @@ fn a_lead_s_own_mode_decides_its_app_spawns_whatever_the_setting_says_later() {
     .unwrap();
     assert_eq!(
         spawn(&mut fixture, native),
-        (NATIVE_LEAD_REFUSED.to_owned(), true)
+        ("Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.".to_owned(), true)
     );
     set_mode(
         &fixture.connection,
@@ -1098,7 +1098,7 @@ fn a_lead_s_own_mode_decides_its_app_spawns_whatever_the_setting_says_later() {
     );
     assert_eq!(
         spawn(&mut fixture, native),
-        (NATIVE_LEAD_REFUSED.to_owned(), true)
+        ("Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.".to_owned(), true)
     );
     assert!(task_modes(&fixture).is_empty());
 }
