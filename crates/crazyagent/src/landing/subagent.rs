@@ -243,6 +243,77 @@ pub(super) fn close_orphaned(
     Ok(())
 }
 
+/// The lead whose branch a change set's agent lands on while the owner's Lands setting is
+/// Lead (DEC-107), with the place the lead works, read from the store only. Inputs: the
+/// store, the project, the change set's agent and its repository. Output: the lead and its
+/// place, None for an agent that is not a lead's worker or while Lands is Owner, or
+/// `changes_workspace_invalid` for a lead's worker whose lead has no worktree in that
+/// repository now, which is never measured against the owner's branch instead.
+pub(super) fn lead_of(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+    repository: &Path,
+) -> Result<Option<(i64, Place)>, EngineError> {
+    if agent.kind != super::AgentKind::Sub || !leads_merge(db, project)? {
+        return Ok(None);
+    }
+    let Ok(id) = agent.id.parse::<i64>() else {
+        return Ok(None);
+    };
+    let lead: Option<i64> = db
+        .query_row(
+            "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            params![id, project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?
+        .flatten();
+    let Some(lead) = lead else {
+        return Ok(None);
+    };
+    match place(db, project, lead)? {
+        Some(lead_place) if lead_place.repository == repository => Ok(Some((lead, lead_place))),
+        _ => Err(failure("changes_workspace_invalid")),
+    }
+}
+
+/// The tip of the branch a lead's worker lands on while the owner's Lands setting is Lead
+/// (DEC-107): its lead's branch, read from the lead's linked worktree or fetched from the
+/// lead's own clone with the engine's checked fetch. It never takes the repository hold,
+/// so a caller reads it before taking the hold. Inputs: the store and the lead's place.
+/// Output: the tip.
+pub(super) fn read_lead_tip(db: &Connection, lead: &Place) -> Result<String, EngineError> {
+    super::flow::read_tip(db, &lead.repository, &lead.worktree, &lead.git_dir)
+}
+
+/// The tip a change set's agent lands on when it is a lead's worker, as [`lead_of`] finds
+/// the lead and [`read_lead_tip`] reads its branch. Inputs: the store, the project, the
+/// change set's agent and its repository. Output: the tip, None for an agent that is not a
+/// lead's worker or while Lands is Owner, or the failure that kept the lead's tip unread.
+pub(super) fn lead_tip(
+    db: &Connection,
+    project: &ProjectId,
+    agent: &super::ChangeAgent,
+    repository: &Path,
+) -> Result<Option<String>, EngineError> {
+    match lead_of(db, project, agent, repository)? {
+        Some((_, lead)) => read_lead_tip(db, &lead).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The name of the branch a lead works on, for the text its workers read about it, read
+/// without git. Inputs: the store and the lead's place. Output: the branch, None when its
+/// place or name cannot be read.
+pub(super) fn lead_branch(db: &Connection, lead: &Place) -> Option<String> {
+    let layout = check_places(&lead.repository, &lead.worktree, &lead.git_dir).ok()?;
+    super::flow::agent_branch(db, &lead.worktree, layout)
+        .ok()
+        .flatten()
+}
+
 /// Tells whether a project's lead merges its workers' change sets, so the owner's lists
 /// leave them out: the owner's Lands setting is Lead. Inputs: the store and the project.
 /// Output: the answer, false where the engine keeps no team tables.
