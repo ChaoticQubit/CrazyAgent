@@ -1584,7 +1584,7 @@ pub(crate) fn create_project(
     let case_clash: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1) AND id<>?1)",
-            params![project_id.as_str(), project_id.as_str()],
+            [project_id.as_str()],
             |row| row.get(0),
         )
         .map_err(error)?;
