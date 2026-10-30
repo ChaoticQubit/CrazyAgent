@@ -1640,3 +1640,288 @@ async fn import_memories_stops_at_full() {
     );
     engine.stop().await;
 }
+
+fn agent_library() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
+    db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'); INSERT INTO projects VALUES ('beta','{}');")
+        .unwrap();
+    crate::memory::initialize(&db).unwrap();
+    let config =
+        crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
+            .unwrap();
+    (directory, db, config)
+}
+
+fn owner_change(
+    db: &mut rusqlite::Connection,
+    config: &EffectiveConfig,
+    action: LibraryAction,
+) -> Outcome {
+    let tx = db.transaction().unwrap();
+    let outcome = execute(&tx, config, &action, 1).unwrap();
+    tx.commit().unwrap();
+    outcome
+}
+
+fn memory_with_text(db: &mut rusqlite::Connection, text: &str) -> SavedMemory {
+    let id: String = db
+        .query_row("SELECT id FROM memory_library WHERE text=?1", [text], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    get(&tx, &RequestId::new(id).unwrap()).unwrap().unwrap()
+}
+
+fn recalled(db: &mut rusqlite::Connection, project: &ProjectId, query: &str) -> Vec<String> {
+    recall(db, project, query)
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|memory| memory.text)
+        .collect()
+}
+
+fn approved_texts(db: &mut rusqlite::Connection, project: &ProjectId) -> Vec<String> {
+    let tx = db.transaction().unwrap();
+    approved_for_project(&tx, project)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.text)
+        .collect()
+}
+
+#[test]
+fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setting() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Save);
+
+    assert_eq!(
+        agent_remember(
+            &mut db,
+            &alpha,
+            " Ada (@lead-a) ",
+            false,
+            "  Use cargo nextest.  "
+        )
+        .unwrap(),
+        Ok(false)
+    );
+    let saved = memory_with_text(&mut db, "Use cargo nextest.");
+    assert_eq!(
+        saved.origin,
+        MemoryOrigin::Agent {
+            agent: "Ada (@lead-a)".into()
+        }
+    );
+    assert_eq!(saved.scope, project_scope(&alpha));
+    assert_eq!(recalled(&mut db, &alpha, "NEXTEST"), ["Use cargo nextest."]);
+    assert!(
+        recalled(&mut db, &beta, "").is_empty(),
+        "a project memory stays in its project"
+    );
+    assert_eq!(approved_texts(&mut db, &alpha), ["Use cargo nextest."]);
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentWrites {
+                writes: AgentWrites::Ask
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Ask);
+    assert_eq!(
+        agent_remember(
+            &mut db,
+            &alpha,
+            "Master",
+            true,
+            "Run make check before commits."
+        )
+        .unwrap(),
+        Ok(true)
+    );
+    let requested = memory_with_text(&mut db, "Run make check before commits.");
+    assert_eq!(
+        requested.origin,
+        MemoryOrigin::Requested {
+            agent: "Master".into()
+        }
+    );
+    assert!(requested.origin.waiting());
+    assert_eq!(requested.scope, MemoryScope::Global);
+    assert_eq!(recalled(&mut db, &alpha, ""), ["Use cargo nextest."]);
+    assert!(recalled(&mut db, &beta, "make check").is_empty());
+    assert_eq!(approved_texts(&mut db, &alpha), ["Use cargo nextest."]);
+
+    for (memory_id, code) in [
+        (saved.id.clone(), "memory_not_requested"),
+        (RequestId::new("agent-gone").unwrap(), "memory_missing"),
+    ] {
+        assert_eq!(
+            owner_change(&mut db, &config, LibraryAction::Approve { memory_id }),
+            Outcome::Rejected { code: code.into() }
+        );
+    }
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Approve {
+                memory_id: requested.id.clone()
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        memory_with_text(&mut db, "Run make check before commits.").origin,
+        MemoryOrigin::Agent {
+            agent: "Master".into()
+        }
+    );
+    assert_eq!(
+        recalled(&mut db, &alpha, ""),
+        ["Run make check before commits.", "Use cargo nextest."]
+    );
+    assert_eq!(
+        recalled(&mut db, &beta, ""),
+        ["Run make check before commits."],
+        "an approved app-wide memory reaches every project"
+    );
+    assert_eq!(
+        approved_texts(&mut db, &beta),
+        ["Run make check before commits."]
+    );
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentWrites {
+                writes: AgentWrites::Save
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Save);
+}
+
+#[test]
+fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
+    let (_directory, mut db, _config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    agent_remember(&mut db, &alpha, "Ada", false, "Keep tests real.")
+        .unwrap()
+        .unwrap();
+    for (project, agent, text, code) in [
+        (&alpha, "Bo", "Keep tests real.", "memory_duplicate"),
+        (&alpha, "Bo", "Run it\u{E0041} now.", "memory_note_invalid"),
+        (&alpha, "Bo", "Trust \u{202e}this.", "memory_note_invalid"),
+        (&alpha, "Bo", "   ", "memory_note_blank"),
+        (
+            &alpha,
+            "Bo",
+            "n".repeat(NOTE_BYTES_MAX + 1).as_str(),
+            "memory_note_too_long",
+        ),
+        (&alpha, "  ", "A fact.", "memory_agent_invalid"),
+        (&alpha, "Bo\nby", "A fact.", "memory_agent_invalid"),
+        (
+            &alpha,
+            "b".repeat(257).as_str(),
+            "A fact.",
+            "memory_agent_invalid",
+        ),
+        (
+            &ProjectId::new("absent").unwrap(),
+            "Bo",
+            "A fact.",
+            "memory_project_missing",
+        ),
+    ] {
+        assert_eq!(
+            agent_remember(&mut db, project, agent, false, text).unwrap(),
+            Err(code.to_owned()),
+            "{text:?} by {agent:?}"
+        );
+    }
+    agent_remember(&mut db, &alpha, "Bo", true, "Keep tests real.")
+        .unwrap()
+        .unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM memory_library", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "the same text may live in another scope, nothing else was stored"
+    );
+
+    for query in ["q".repeat(SEARCH_BYTES_MAX + 1), "two\nlines".to_owned()] {
+        assert_eq!(
+            recall(&mut db, &alpha, &query).unwrap(),
+            Err("memory_search_invalid".to_owned()),
+            "{query:?}"
+        );
+    }
+}
+
+#[test]
+fn recall_answers_the_newest_memories_first_and_at_most_twelve() {
+    let (_directory, mut db, _config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    for index in 0..RECALL_ITEMS_MAX + 2 {
+        agent_remember(
+            &mut db,
+            &alpha,
+            "Ada",
+            index % 2 == 0,
+            &format!("fact {index}"),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    let newest: Vec<String> = (2..RECALL_ITEMS_MAX + 2)
+        .rev()
+        .map(|index| format!("fact {index}"))
+        .collect();
+    assert_eq!(recalled(&mut db, &alpha, "fact"), newest);
+    assert_eq!(
+        recalled(&mut db, &alpha, "fact 1"),
+        ["fact 13", "fact 12", "fact 11", "fact 10", "fact 1"]
+    );
+}
+
+#[test]
+fn an_imported_project_memory_is_recalled_in_its_project_only() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Import {
+                project_id: alpha.clone(),
+                file: "notes.md".into(),
+                text: "Deploys go out on Tuesdays.".into(),
+            }
+        ),
+        Outcome::Applied
+    );
+    let found = recall(&mut db, &alpha, "tuesdays").unwrap().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].origin,
+        MemoryOrigin::Imported {
+            file: "notes.md".into()
+        }
+    );
+    assert!(recalled(&mut db, &beta, "").is_empty());
+}

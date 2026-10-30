@@ -886,3 +886,6 @@ fn one_line(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+#[cfg(all(test, unix))]
+mod tests;

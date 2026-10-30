@@ -515,3 +515,66 @@ async fn desktop_imports_a_memory_folder_through_the_real_engine() {
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();
 }
+
+async fn agent_writes_flow(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::memory::library::AgentWrites;
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_writes,
+        AgentWrites::Save,
+        "agents save directly until the owner chooses"
+    );
+    let asked = bridge.set_agent_memory_writes(AgentWrites::Ask, 2).await?;
+    assert!(matches!(asked.outcome, ActionOutcome::Applied), "{asked:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_writes,
+        AgentWrites::Ask
+    );
+
+    let added = bridge
+        .add_memory(None, "Prefer plain words in every screen.".into(), 3)
+        .await?;
+    assert!(matches!(added.outcome, ActionOutcome::Applied), "{added:?}");
+    let listed = bridge.memories(None, None, None).await?;
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].origin, "written");
+    assert_eq!(listed.items[0].agent, None);
+    let refused = bridge.approve_memory(&listed.items[0].id, 4).await?;
+    assert_eq!(refused.rejection.as_deref(), Some("memory_not_requested"));
+    let missing = bridge.approve_memory("agent-gone", 5).await?;
+    assert_eq!(missing.rejection.as_deref(), Some("memory_missing"));
+    assert_eq!(
+        bridge.approve_memory("bad id", 6).await.unwrap_err().code,
+        "invalid_memory"
+    );
+
+    let saved = bridge.set_agent_memory_writes(AgentWrites::Save, 7).await?;
+    assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_writes,
+        AgentWrites::Save
+    );
+    assert!(bridge.pending_intent()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_changes_agent_memory_writes_and_approve_refuses_what_no_agent_asked_for() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-mem-writes-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result =
+        tokio::time::timeout(Duration::from_secs(20), agent_writes_flow(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
