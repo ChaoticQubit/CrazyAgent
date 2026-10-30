@@ -902,7 +902,7 @@ mod import {
     }
 
     #[test]
-    fn an_import_leaves_links_out_a_fifo_and_another_owners_file_in_place() {
+    fn an_import_leaves_links_out_and_a_fifo_in_place() {
         let checkout = Checkout::new();
         let folder = checkout.root.join("refusing");
         fs::create_dir_all(folder.join(".crazyagent")).unwrap();
@@ -922,12 +922,10 @@ mod import {
         )
         .unwrap();
         assert!(fifo.status.success(), "{fifo:?}");
-        fs::hard_link("/private/etc/hosts", folder.join("CLAUDE.local.md")).unwrap();
         let refused = [
             ("CLAUDE.md", Some("process_import_outside")),
             (".claude/CLAUDE.md", Some("process_import_outside")),
             ("AGENTS.md", Some("process_import_unsafe")),
-            ("CLAUDE.local.md", Some("process_import_unsafe")),
         ];
         assert_eq!(refusals(&pending(&folder).unwrap()), refused);
         assert!(import(&folder).unwrap().is_empty());
@@ -935,7 +933,7 @@ mod import {
             fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
             ""
         );
-        for path in PROJECT_FILES {
+        for (path, _) in refused {
             assert!(fs::symlink_metadata(folder.join(path)).is_ok(), "{path}");
             assert!(
                 fs::symlink_metadata(folder.join(".crazyagent/imported").join(path)).is_err(),
@@ -1017,9 +1015,28 @@ mod import {
             read_picked(&picks.join("binary.md")).unwrap_err().0,
             "process_text_invalid"
         );
-        fs::hard_link("/private/etc/hosts", picks.join("hosts.md")).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn another_owners_file_is_never_imported_or_read_as_a_pick() {
+        let checkout = Checkout::new();
+        let folder = checkout.root.join("foreign");
+        fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        fs::hard_link("/private/etc/hosts", folder.join("CLAUDE.local.md")).unwrap();
+        let refused = [("CLAUDE.local.md", Some("process_import_unsafe"))];
+        assert_eq!(refusals(&pending(&folder).unwrap()), refused);
+        assert!(import(&folder).unwrap().is_empty());
         assert_eq!(
-            read_picked(&picks.join("hosts.md")).unwrap_err().0,
+            fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap(),
+            ""
+        );
+        assert!(fs::symlink_metadata(folder.join("CLAUDE.local.md")).is_ok());
+        assert!(
+            fs::symlink_metadata(folder.join(".crazyagent/imported/CLAUDE.local.md")).is_err()
+        );
+        assert_eq!(
+            read_picked(&folder.join("CLAUDE.local.md")).unwrap_err().0,
             "process_import_unsafe"
         );
     }
