@@ -235,9 +235,7 @@ fn mode_note(mode: Mode) -> &'static str {
     match mode {
         Mode::ProjectOnly => "Agents get only this project's instructions.md.",
         Mode::AppOnly => "Agents get only the app instructions from Settings.",
-        Mode::Both => {
-            "Agents get the app instructions, then this project's instructions.md appended."
-        }
+        Mode::Both => "Agents get app instructions, then this project's instructions.md appended.",
     }
 }
 
