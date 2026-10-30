@@ -1896,6 +1896,38 @@ async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
     assert!(shown.contains("Team settings"), "{shown}");
 }
 
+fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
+             VALUES (?1, 'sub', 'codex', 0, 'stopped', 1, 1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    crate::coord::send(
+        &connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(agent),
+            to: crate::coord::Party::Owner,
+            kind: crate::coord::MessageKind::Question,
+            question: Some((
+                crate::coord::QuestionFor::Me,
+                crate::coord::Severity::Normal,
+            )),
+            work: None,
+            reply_to: None,
+            body: text.into(),
+            idempotency_key: None,
+        },
+        2,
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn the_team_screen_opens_its_settings_on_s_and_esc_returns_to_the_tree() {
     let mut engine = Engine::start().await;
@@ -2029,4 +2061,44 @@ async fn the_team_settings_reach_the_coordination_editor_and_spread_accounts() {
             .unwrap()
             .spread_accounts
     );
+}
+
+#[tokio::test]
+async fn the_team_settings_and_questions_do_not_take_each_others_keys() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    seed_question(&engine, &notes, "Which port does the buoy feed use?");
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('q'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Which port"), "{shown}");
+
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["coord questions"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(
+        shown.contains("Which port does the buoy feed use?"),
+        "{shown}"
+    );
+    shell.key(Key::Char('s'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+
+    shell.key(Key::Enter);
+    for character in "use 4000 so".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("use 4000 so"), "{shown}");
+    assert!(!shown.contains("Team settings"), "{shown}");
 }
