@@ -963,8 +963,10 @@ struct Shown {
 /// counted or landed again, whatever the set started from. The stored base instead when
 /// the engine's own Accept of an earlier set with that head landed on the tip as a squash
 /// commit git cannot see as a merge base, and that base lies between the merge base and
-/// the head; also for a head that shares no history with the tip. Inputs: the store, the
-/// repository, the change set and the tip. Output: the commit.
+/// the head; also for a head that shares no history with the tip. A landed commit the
+/// repository no longer holds, as after the owner resets below it and gc prunes it, counts
+/// as not landed. Inputs: the store, the repository, the change set and the tip. Output:
+/// the commit.
 pub(super) fn measured_from(
     db: &Connection,
     owner: &Repo,
@@ -984,6 +986,9 @@ pub(super) fn measured_from(
     else {
         return Ok(joined);
     };
+    if owner.commit_of(&landed)?.as_deref() != Some(landed.as_str()) {
+        return Ok(joined);
+    }
     let ancestor =
         |older: &str, newer: &str| owner.test(&["merge-base", "--is-ancestor", older, newer]);
     if ancestor(&landed, tip)?
