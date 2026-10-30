@@ -896,8 +896,9 @@ fn each_import_from_file_refusal_reads_as_a_plain_sentence_and_keeps_the_editor(
 /// A project's adoption view read by the real coordination store: a master that called
 /// nothing, a Codex sub-agent that edited with no declared work, queried the graph twice,
 /// ran one context-mode call and read the tdd skill and a skill the project does not
-/// enable, and was reminded of its flag, and a newer agent whose launch fires no hooks.
-/// Input: the project. Output: the view and the master, sub-agent and hookless ids.
+/// enable, and was reminded of its flag with the project's nudges turned on, and a newer
+/// agent whose launch fires no hooks. Input: the project. Output: the view and the master,
+/// sub-agent and hookless ids.
 fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
     const NOW: i64 = 1_800_000_000_000;
     let root = tempfile::tempdir().unwrap();
@@ -939,6 +940,11 @@ fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
     ] {
         crate::coord::record_tool(&db, sub, tool, NOW).unwrap();
     }
+    let nudges = crate::coord::settings::CoordSettings {
+        nudges: true,
+        ..Default::default()
+    };
+    crate::coord::settings::write(&db, project, &nudges).unwrap();
     crate::coord::adoption::tick(&db, project, NOW).unwrap();
     let skills = ["zeta".to_owned(), "tdd".to_owned()];
     let view = crate::coord::adoption::view(&db, project, &skills, NOW).unwrap();

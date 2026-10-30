@@ -321,6 +321,15 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
     let stopped = agent_row(&db, &project, "stopped", true, long_ago, false);
     call(&db, stopped, "Edit", &json!({}), 1);
 
+    assert!(
+        !crate::coord::settings::CoordSettings::default().nudges,
+        "nudges default to off (DEC-109)"
+    );
+    tick(&db, &project, NOW).unwrap();
+    assert!(
+        notes(&db, flagged).is_empty(),
+        "a project that never set nudges sends nothing"
+    );
     let off = crate::coord::settings::CoordSettings {
         nudges: false,
         ..Default::default()
@@ -336,7 +345,11 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
         "the flags still show with nudges off"
     );
 
-    crate::coord::settings::write(&db, &project, &Default::default()).unwrap();
+    let on = crate::coord::settings::CoordSettings {
+        nudges: true,
+        ..Default::default()
+    };
+    crate::coord::settings::write(&db, &project, &on).unwrap();
     tick(&db, &project, NOW).unwrap();
     assert_eq!(
         notes(&db, flagged),
