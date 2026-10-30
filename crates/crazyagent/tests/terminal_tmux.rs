@@ -1465,6 +1465,73 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_restart() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let [ann, bob, missing] = [2, 3, 9].map(|id| AgentId::team(id).unwrap());
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let own_pane = host.panes(&leader).unwrap()[0].id.clone();
+    let ann_out = root.join("ann.txt");
+    let ann_pane = lead.new_pane(
+        host.as_ref(),
+        &leader,
+        "split-window -d",
+        &format!("cat > {}", ann_out.display()),
+    );
+    let bob_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    let window = lead.new_pane(host.as_ref(), &leader, "new-window -d", "sleep 600");
+
+    for (pane, code) in [
+        (&own_pane, "terminal_pane_unknown"),
+        (&window, "terminal_pane_unknown"),
+    ] {
+        assert_eq!(host.adopt_pane(&ann, &leader, pane).unwrap_err().0, code);
+    }
+    assert_eq!(
+        host.adopt_pane(&ann, &missing, &ann_pane).unwrap_err().0,
+        "terminal_own_server_unavailable"
+    );
+    assert_eq!(
+        host.adopt_pane(&leader, &leader, &ann_pane).unwrap_err().0,
+        "terminal_agent_running"
+    );
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    host.adopt_pane(&bob, &leader, &bob_pane).unwrap();
+
+    host.input(&ann, b"to-ann\n").unwrap();
+    assert_eq!(wait_text(&ann_out), "to-ann\n");
+    host.kill(&ann).unwrap();
+    let left: Vec<String> = host
+        .panes(&leader)
+        .unwrap()
+        .into_iter()
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(left, [own_pane.clone(), bob_pane.clone()]);
+
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    restarted.kill(&bob).unwrap();
+    let left: Vec<String> = restarted
+        .panes(&leader)
+        .unwrap()
+        .into_iter()
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(left, [own_pane]);
+    assert_eq!(restarted.alive().unwrap(), std::slice::from_ref(&leader));
+    assert_eq!(
+        restarted.kill(&missing).unwrap_err().0,
+        "terminal_agent_unknown"
+    );
+    restarted.close(&[]).unwrap();
+}
+
 #[test]
 fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     let root = root();
