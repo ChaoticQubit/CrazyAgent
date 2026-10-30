@@ -22,7 +22,8 @@ const NOTIFIED_TASKS_MAX: usize = 16;
 /// One fact read from a harness's own session record, whatever the harness.
 /// `Waiting` means the harness waits for the owner, such as an approval or a question.
 /// `BackgroundStarted` and `BackgroundEnded` follow a command the harness runs on after its
-/// tool call returns, such as Claude Code's Bash `run_in_background`, by its task id.
+/// tool call returns, such as Claude Code's Bash `run_in_background`, by its task id: it
+/// ends with its task notification, or with the agent's own stop of it, which brings none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
     TurnStarted,
@@ -506,6 +507,10 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                 conversation_id(&value["toolUseResult"]["backgroundTaskId"])
                     .map(|id| TranscriptEvent::BackgroundStarted { id })
                     .into_iter()
+                    .chain(
+                        conversation_id(&value["toolUseResult"]["task_id"])
+                            .map(|id| TranscriptEvent::BackgroundEnded { id }),
+                    )
                     .collect();
             facts.extend(
                 texts

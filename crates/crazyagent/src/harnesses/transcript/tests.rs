@@ -225,6 +225,35 @@ fn claude_background_commands_are_followed_by_task_id() {
     );
 }
 
+/// A background command the agent stops itself with TaskStop gets no task notification, so
+/// the stop's tool result, which names the task, ends it (w-review LTK-H1, the record shape
+/// a real Claude Code session wrote on 2026-10-29).
+#[test]
+fn claude_a_background_command_the_agent_stops_ends_by_its_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b20nv1bx6."}]},"toolUseResult":{"backgroundTaskId":"b20nv1bx6"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Successfully stopped task: b20nv1bx6 (npm run dev)"}]},"toolUseResult":{"message":"Successfully stopped task: b20nv1bx6 (npm run dev)","task_id":"b20nv1bx6","task_type":"local_bash"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted {
+                id: "b20nv1bx6".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "b20nv1bx6".into()
+            },
+        ]
+    );
+}
+
 #[test]
 fn claude_transcript_behind_a_symlink_is_not_followed() {
     let case = Case::new();

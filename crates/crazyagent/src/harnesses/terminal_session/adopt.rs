@@ -257,6 +257,7 @@ impl TerminalSession {
             events,
             ready: true,
             turn: false,
+            held: false,
             live: false,
             own: false,
             facts: VecDeque::new(),

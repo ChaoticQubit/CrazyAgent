@@ -47,6 +47,7 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     turn: bool,
+    held: bool,
     live: bool,
     own: bool,
     facts: VecDeque<TranscriptEvent>,
@@ -223,6 +224,7 @@ impl TerminalSession {
             events: 0,
             ready: false,
             turn: false,
+            held: false,
             live: false,
             own: false,
             facts: VecDeque::new(),
@@ -300,12 +302,23 @@ impl TerminalSession {
         Ok(())
     }
 
-    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code.
-    /// Output: Ok once typed, or `launch_not_running` with no turn.
+    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code. A
+    /// turn held open for the app's background commands has no request running for Escape
+    /// to stop, so it ends here as interrupted, its commands still counted as running.
+    /// Output: Ok once typed or ended, or `launch_not_running` with no turn.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.require_live()?;
         if !self.turn {
             return Err(failure("launch_not_running"));
+        }
+        if self.held {
+            self.held = false;
+            self.turn = false;
+            self.queue.extend([
+                LaunchEvent::Interrupted,
+                LaunchEvent::TurnFinished { success: false },
+            ]);
+            return Ok(());
         }
         self.type_bytes(ESCAPE)
     }
@@ -518,13 +531,18 @@ impl TerminalSession {
                 }
                 TranscriptEvent::TurnFinished { success } => {
                     if success && !self.background.is_empty() {
+                        self.held = true;
                         continue;
                     }
+                    self.held = false;
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
-                TranscriptEvent::TurnStarted
-                | TranscriptEvent::Waiting
+                TranscriptEvent::TurnStarted => {
+                    self.held = false;
+                    continue;
+                }
+                TranscriptEvent::Waiting
                 | TranscriptEvent::BackgroundStarted { .. }
                 | TranscriptEvent::BackgroundEnded { .. } => continue,
             };
