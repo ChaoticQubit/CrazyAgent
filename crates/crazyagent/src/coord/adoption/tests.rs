@@ -55,7 +55,7 @@ fn call(db: &Connection, agent: AgentId, name: &str, input: &Value, times: usize
     }
 }
 
-fn row<'a>(view: &'a Adoption, agent: AgentId) -> &'a AgentAdoption {
+fn row(view: &Adoption, agent: AgentId) -> &AgentAdoption {
     view.agents.iter().find(|row| row.agent == agent).unwrap()
 }
 
