@@ -903,11 +903,22 @@ fn holds_reading_control(host: &Tmux) -> bool {
         .is_some_and(|control| !control.closed())
 }
 
+/// Gives the inode of the file at a host's socket path, which changes when another server
+/// binds the path. Input: the host. Output: the inode, or none when no file is there.
+#[cfg(target_os = "macos")]
+fn socket_inode(host: &Tmux) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(host.socket())
+        .ok()
+        .map(|metadata| metadata.ino())
+}
+
 /// Starts a private host with one agent in a fresh 0700 folder, then ends its server from
 /// outside with kill-server, as another tmux client or a crash would. Takes the temp home
-/// and the agent. Returns the host, still holding the control it read with, and its server.
+/// and the agent. Returns the host, still holding the control it read with, its server and
+/// the inode of the socket that server bound.
 #[cfg(target_os = "macos")]
-fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
+fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server, u64) {
     use std::os::unix::fs::PermissionsExt;
     let folder = home.join("terminal");
     std::fs::create_dir(&folder).unwrap();
@@ -930,6 +941,7 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
         holds_reading_control(&host),
         "the host holds a reading control"
     );
+    let bound = socket_inode(&host).expect("the server bound its socket");
     let ended = crate::spawn_gate::status(
         Command::new(&tmux)
             .arg("-S")
@@ -942,7 +954,7 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
     )
     .unwrap();
     assert!(ended.success(), "tmux ended the server");
-    (host, server)
+    (host, server, bound)
 }
 
 /// A server ended from outside leaves its socket file behind. Once its control saw it end
@@ -952,7 +964,7 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server) {
 fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
     let home = tempfile::tempdir().unwrap();
     let agent = AgentId::team(1).unwrap();
-    let (host, _server) = ended_from_outside(home.path(), &agent);
+    let (host, _server, _) = ended_from_outside(home.path(), &agent);
     let until = Instant::now() + REPLY_TIME;
     while holds_reading_control(&host) || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
     {
@@ -976,7 +988,8 @@ fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
 
 /// Asks for the live agents at once after an outside kill-server, while the held control may
 /// still read, the server may still be ending, or both are gone. Every round has no live
-/// agents, never a closed or unavailable terminal.
+/// agents, never a closed or unavailable terminal, and no other server binds the socket
+/// path: it is gone or still the file the ended server bound.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_server_ended_from_outside_has_no_live_agents_while_its_control_still_reads() {
@@ -985,8 +998,102 @@ fn a_server_ended_from_outside_has_no_live_agents_while_its_control_still_reads(
     for _ in 0..ROUNDS {
         let home = tempfile::tempdir().unwrap();
         let agent = AgentId::team(1).unwrap();
-        let (host, _server) = ended_from_outside(home.path(), &agent);
-        answers.push(host.alive().map_err(|error| error.0));
+        let (host, _server, bound) = ended_from_outside(home.path(), &agent);
+        let answer = host.alive().map_err(|error| error.0);
+        let rebound = socket_inode(&host).is_some_and(|inode| inode != bound);
+        answers.push((answer, rebound));
     }
-    assert_eq!(answers, vec![Ok(Vec::new()); ROUNDS]);
+    assert_eq!(answers, vec![(Ok(Vec::new()), false); ROUNDS]);
+}
+
+const PROBE_FOLDER: &str = "CRAZYAGENT_TMUX_PROBE_FOLDER";
+const PROBE_HELPER: &str = "terminal::tmux::tests::probing_a_live_server_out_of_descriptors";
+
+/// A probe of a live server that fails without a refusal keeps the server's socket. A helper
+/// process that can open no more descriptors asks a fresh host for the live agents: it is
+/// told the terminal is unavailable, and the server keeps its socket and its agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_server_keeps_its_socket_when_a_probe_of_it_fails_without_a_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let bound = socket_inode(&host).expect("the server bound its socket");
+    let ran = crate::spawn_gate::status(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", PROBE_HELPER, "--ignored", "--test-threads", "1"])
+            .env(PROBE_FOLDER, &folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ran.success(), "the probing helper ran");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("answer")).unwrap(),
+        r#"Err("terminal_unavailable")"#
+    );
+    assert_eq!(
+        socket_inode(&host),
+        Some(bound),
+        "the live server keeps its socket"
+    );
+    assert_eq!(
+        Tmux::open(Some(tmux), &folder).alive().unwrap(),
+        vec![agent]
+    );
+}
+
+/// Opens descriptors until the process can open no more, then asks a fresh host for the
+/// live agents of the server in the folder `PROBE_FOLDER` names, and writes the answer
+/// beside that folder. Run only by the probe descriptor test as its helper process.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "run only by the probe descriptor test as its helper process"]
+fn probing_a_live_server_out_of_descriptors() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let Some(folder) = std::env::var_os(PROBE_FOLDER).map(PathBuf::from) else {
+        return;
+    };
+    let home = folder.parent().unwrap().to_path_buf();
+    let host = Tmux::open(installed(&home), &folder);
+    let limit = getrlimit(Resource::Nofile);
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(128),
+            maximum: limit.maximum,
+        },
+    )
+    .unwrap();
+    let mut held = Vec::new();
+    let full = loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(file) => held.push(file),
+            Err(error) => break error,
+        }
+        assert!(held.len() <= 128, "the lowered limit bounds the open files");
+    };
+    assert_eq!(
+        rustix::io::Errno::from_io_error(&full),
+        Some(rustix::io::Errno::MFILE)
+    );
+    let answer = host.alive().map_err(|error| error.0);
+    drop(held);
+    std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }
