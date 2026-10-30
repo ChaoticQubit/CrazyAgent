@@ -217,6 +217,7 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
     let mut connection = Connection::open(base.join("engine.db")).unwrap();
     initialize(&connection).unwrap();
     crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
     let setup = stored("team-finished", vec![]);
     connection
         .execute(
@@ -3721,4 +3722,138 @@ fn the_owner_messages_one_agent_through_the_coordination_layer_and_bad_text_is_r
     let graph = owner_graph(&connection, &setup).unwrap();
     assert_eq!(graph.messages.len(), 1);
     assert_eq!(graph.messages[0].to, format!("team-{lead}"));
+}
+
+#[test]
+fn a_lead_s_idle_workers_stay_in_view_and_keep_their_tasks_once_every_agent_stops() {
+    let (_directory, connection) = database();
+    let setup = graph_project(&connection, "team-lead-workers");
+    let project = setup.project_id.clone();
+    graph_agent(&connection, &project, "master", "idle", None);
+    let lead = graph_agent(&connection, &project, "sub", "idle", None);
+    let workers = [
+        graph_agent(&connection, &project, "sub", "idle", Some(lead)),
+        graph_agent(&connection, &project, "sub", "idle", Some(lead)),
+    ];
+    for (index, worker) in workers.iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,result,delivered,created_ms,started_ms,finished_ms,parent)
+                 VALUES (?1,'master','codex',0,?2,'done',?3,1,'Done',1,?4,?4,?4,?5)",
+                params![
+                    project.as_str(),
+                    format!("Worker task {}", index + 1),
+                    worker,
+                    now_ms(),
+                    lead
+                ],
+            )
+            .unwrap();
+    }
+    let idle = status(&connection, &setup).unwrap();
+    assert_eq!(idle.agents.len(), 4);
+    assert!(
+        idle.agents.iter().all(|agent| !agent.finished),
+        "idle agents wait for work in view: {:#?}",
+        idle.agents
+    );
+    assert!(
+        idle.tasks
+            .iter()
+            .all(|task| task.parent == Some(lead) && workers.contains(&task.agent.unwrap()))
+    );
+    let lead_node = format!("team-{lead}");
+    let worker_nodes: Vec<String> = workers.iter().map(|id| format!("team-{id}")).collect();
+    let graph = owner_graph(&connection, &setup).unwrap();
+    let tree: Vec<(&str, Option<&str>)> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.parent.as_deref()))
+        .collect();
+    assert_eq!(
+        tree,
+        [
+            ("master", None),
+            (lead_node.as_str(), Some("master")),
+            (worker_nodes[0].as_str(), Some(lead_node.as_str())),
+            (worker_nodes[1].as_str(), Some(lead_node.as_str())),
+        ]
+    );
+    let edges: Vec<(&str, &str, Option<&str>)> = graph
+        .edges
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.lead.as_deref()))
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            (
+                lead_node.as_str(),
+                worker_nodes[0].as_str(),
+                Some(lead_node.as_str())
+            ),
+            (
+                lead_node.as_str(),
+                worker_nodes[1].as_str(),
+                Some(lead_node.as_str())
+            ),
+        ],
+        "each worker's task runs from the lead that handed it out"
+    );
+
+    connection
+        .execute(
+            "UPDATE team_agents SET status='stopped', task=NULL, stopped_ms=?2
+             WHERE project=?1 AND role<>'master'",
+            params![project.as_str(), now_ms()],
+        )
+        .unwrap();
+    let stopped = status(&connection, &setup).unwrap();
+    assert!(!stopped.show_finished, "Finished agents is Hide by default");
+    assert!(
+        stopped
+            .agents
+            .iter()
+            .filter(|agent| agent.role != AgentRole::Master)
+            .all(|agent| agent.finished),
+        "{:#?}",
+        stopped.agents
+    );
+    let hidden = owner_graph(&connection, &setup).unwrap();
+    assert!(
+        hidden.nodes.iter().all(|node| !node.kind.agent()),
+        "Hide leaves only the master: {:#?}",
+        hidden.nodes
+    );
+    let kept: Vec<(&str, &str, Option<&str>)> = hidden
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.from.as_str(),
+                edge.to.as_str(),
+                edge.agent_label.as_deref(),
+            )
+        })
+        .collect();
+    let labels: Vec<String> = workers
+        .iter()
+        .map(|id| {
+            stopped
+                .agents
+                .iter()
+                .find(|agent| agent.id == *id)
+                .unwrap()
+                .label
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            ("master", worker_nodes[0].as_str(), Some(labels[0].as_str())),
+            ("master", worker_nodes[1].as_str(), Some(labels[1].as_str())),
+        ],
+        "a stopped worker's task keeps its worker and name, never the lead's or the master's"
+    );
 }
