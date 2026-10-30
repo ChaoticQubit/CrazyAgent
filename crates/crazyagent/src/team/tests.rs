@@ -3484,3 +3484,125 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         "a stopped teammate never comes back as Idle"
     );
 }
+
+/// Applies one owner change through the engine's own `execute`, as a client's change is.
+/// Takes the connection and the action. Panics unless the engine applied it.
+fn applied(connection: &mut Connection, action: TeamAction) {
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &ModelAccess::default(), &action).unwrap(),
+        Outcome::Applied,
+        "{action:?}"
+    );
+    tx.commit().unwrap();
+}
+
+/// A team database holding one stored project, for the owner changes that read its setup.
+/// Takes the project id. Returns the folder guard, the connection and the project.
+fn team_database(project: &str) -> (tempfile::TempDir, Connection, ProjectId) {
+    let (directory, connection) = database();
+    let setup = stored(project, vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![project, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    (directory, connection, setup.project_id)
+}
+
+/// Records tokens an agent used in the usage hour that holds `at`, as usage capture does,
+/// one row per session. Takes the connection, the project, the session, the time and the
+/// input and output tokens.
+fn used_tokens(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    at: i64,
+    input: i64,
+    output: i64,
+) {
+    connection
+        .execute(
+            "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+             VALUES (?1,'agent',?2,'pool-a','account-a','7','codex',?3,?4,?5,0,0)",
+            params![hour_of(at), project.as_str(), session, input, output],
+        )
+        .unwrap();
+}
+
+/// The owner's token budget stops the whole team once, at the budget, for every budget
+/// choice (S4): use earlier in the hour the budget was set never counts, one token short
+/// leaves the team running, reaching it pauses the project and sends one budget_stopped
+/// notification, and starting the team again restarts the count.
+#[test]
+fn token_budget_each_choice_pauses_and_notifies_once_at_the_budget() {
+    for tokens in BUDGET_CHOICES {
+        let (_directory, mut connection, project) = team_database("team-budget");
+        crate::usage::initialize(&connection).unwrap();
+        let earlier = now_ms();
+        used_tokens(&connection, &project, "before", earlier, 4_000, 1_000);
+        applied(
+            &mut connection,
+            TeamAction::TokenBudget {
+                project_id: project.clone(),
+                tokens: Some(tokens),
+            },
+        );
+        let read = budget(&connection, &project).unwrap().unwrap();
+        assert_eq!(
+            (read.tokens, read.used, read.reached),
+            (tokens, 0, false),
+            "{tokens}: the hour's earlier use is left out"
+        );
+        let now = now_ms();
+        let short = i64::try_from(tokens).unwrap() - 1;
+        used_tokens(&connection, &project, "short", now, short - 10, 10);
+        assert!(
+            !budget_stop(&connection, &project, now).unwrap(),
+            "{tokens}"
+        );
+        assert!(!paused(&connection, &project).unwrap());
+        used_tokens(&connection, &project, "last", now, 1, 0);
+        assert!(budget_stop(&connection, &project, now).unwrap(), "{tokens}");
+        assert!(
+            !budget_stop(&connection, &project, now + 1).unwrap(),
+            "only once"
+        );
+        assert!(paused(&connection, &project).unwrap());
+        let notes: Vec<(String, String)> = connection
+            .prepare("SELECT kind,text FROM team_notifications WHERE project=?1")
+            .unwrap()
+            .query_map([project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            notes,
+            vec![(
+                "budget_stopped".to_owned(),
+                format!(
+                    "The team stopped: its agents used {} of the {} token budget. Raise the budget or start the team again to continue.",
+                    token_words(tokens),
+                    token_words(tokens)
+                )
+            )],
+            "{tokens}"
+        );
+
+        applied(
+            &mut connection,
+            TeamAction::Resume {
+                project_id: project.clone(),
+            },
+        );
+        let again = budget(&connection, &project).unwrap().unwrap();
+        assert_eq!(
+            (again.used, again.reached),
+            (0, false),
+            "{tokens}: starting the team again restarts the count"
+        );
+        assert!(!paused(&connection, &project).unwrap());
+        assert!(!budget_stop(&connection, &project, now_ms()).unwrap());
+    }
+}

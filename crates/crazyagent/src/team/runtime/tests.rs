@@ -3243,11 +3243,13 @@ open=0
 while IFS= read -r line; do
   case "$line" in
     *"$e[201~"*) open=0 ;;
-    *"$e[200~"*) open=1; continue ;;
-    *) [ "$open" = 1 ] && continue ;;
+    *"$e[200~"*) open=1; seen=$line; continue ;;
+    *) [ "$open" = 1 ] && { seen="$seen $line"; continue; } ;;
   esac
+  all="$seen $line"
+  seen=
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
-  case "$line" in *"short summary"*|*"for a long time"*) exec /bin/sleep 300 ;; esac
+  case "$all" in *"short summary"*|*"for a long time"*) exec /bin/sleep 300 ;; esac
   /bin/sleep 0.3
   printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
@@ -6551,5 +6553,495 @@ fn idle_worker_reused_only_within_its_lead() {
     assert_eq!(parent_of(&fixture, fresh), None);
     assert_eq!(subs(&fixture), vec![lead, worker, fresh]);
     assert!(idle(&fixture, worker));
+    team.shutdown().unwrap();
+}
+
+/// A codex stand-in that keeps every line typed into it in `heard.txt` of its worktree, so a
+/// test reads what the engine told it; each turn ends with "Done.".
+#[cfg(target_os = "macos")]
+const HEARING_CODEX: &str = r#"#!/bin/sh
+d="$CODEX_HOME/sessions/2026/10/27"
+/bin/mkdir -p "$d" || exit 1
+f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
+printf '{"type":"session_meta","payload":{"cwd":"%s"}}\n' "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0 ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && continue ;;
+  esac
+  printf '%s\n' "$line" >> heard.txt
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}\n' >> "$f"
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// Runs tmux on the fixture's own test terminal server. Takes the fixture and the
+/// arguments. Returns tmux's standard output; panics unless tmux succeeds.
+#[cfg(target_os = "macos")]
+fn test_tmux(fixture: &Fixture, arguments: &[&str]) -> String {
+    let done = crate::spawn_gate::output(
+        Command::new(&fixture.tmux)
+            .arg("-S")
+            .arg(fixture.base.join(FOLDER).join(SOCKET))
+            .args(arguments)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(done.status.success(), "tmux {arguments:?}: {done:?}");
+    String::from_utf8(done.stdout).unwrap().trim().to_owned()
+}
+
+/// Opens one teammate pane in a harness's window, as a native harness splits its window
+/// for a teammate, and tiles the window so many fit. Takes the fixture and the harness's
+/// own pane. Returns the new pane's id.
+#[cfg(target_os = "macos")]
+fn teammate_split(fixture: &Fixture, lead_pane: &str) -> String {
+    let pane = test_tmux(
+        fixture,
+        &[
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            lead_pane,
+            "exec /bin/sleep 300",
+        ],
+    );
+    test_tmux(fixture, &["select-layout", "-t", lead_pane, "tiled"]);
+    assert!(crate::terminal::pane_id_valid(&pane), "{pane}");
+    pane
+}
+
+/// The live teammate panes of a harness's window, oldest first: every live pane but its own.
+/// Takes the terminal host, the harness and its own pane.
+#[cfg(target_os = "macos")]
+fn teammate_panes(host: &Arc<dyn Host>, lead: i64, lead_pane: &str) -> Vec<String> {
+    let mut panes: Vec<String> = host
+        .panes(&AgentId::team(lead).unwrap())
+        .unwrap()
+        .into_iter()
+        .filter(|pane| !pane.dead && pane.id != lead_pane)
+        .map(|pane| pane.id)
+        .collect();
+    panes.sort_by_key(|pane| pane[1..].parse::<u64>().unwrap());
+    panes
+}
+
+/// The recorded teammate panes of a harness: pane, ended, stopped by the owner. Takes the
+/// fixture and the harness.
+#[cfg(target_os = "macos")]
+fn teammate_rows(fixture: &Fixture, lead: i64) -> Vec<(String, bool, bool)> {
+    fixture
+        .connection
+        .prepare(
+            "SELECT pane,ended_ms IS NOT NULL,stopped_ms IS NOT NULL FROM team_teammates
+             WHERE agent=?1 ORDER BY CAST(substr(pane,2) AS INTEGER)",
+        )
+        .unwrap()
+        .query_map([lead], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// What the harness's terminal was typed so far. Takes the fixture and the harness.
+#[cfg(target_os = "macos")]
+fn heard(fixture: &Fixture, lead: i64) -> String {
+    std::fs::read_to_string(worktree_of(fixture, lead).join("heard.txt")).unwrap_or_default()
+}
+
+/// Starts one idle harness under the hearing stand-in and widens its window for teammate
+/// panes. Takes the fixture, its runtime and its terminal host. Returns the harness and its
+/// own pane.
+#[cfg(target_os = "macos")]
+fn hearing_lead(fixture: &Fixture, team: &mut TeamRuntime, host: &Arc<dyn Host>) -> (i64, String) {
+    let lead = idle_sub_agent(fixture, team);
+    let own = host.panes(&AgentId::team(lead).unwrap()).unwrap();
+    assert_eq!(own.len(), 1, "{own:?}");
+    let lead_pane = own[0].id.clone();
+    test_tmux(
+        fixture,
+        &["resize-window", "-t", &lead_pane, "-x", "240", "-y", "120"],
+    );
+    (lead, lead_pane)
+}
+
+/// The owner stops one teammate pane of a harness (S4): the engine records the panes it
+/// sees, ends only the stopped pane, marks it stopped and ended and tells the harness in
+/// its terminal; a pane that closes by itself is marked ended but not stopped, and a pane
+/// that already ended or was never seen cannot be stopped.
+#[cfg(target_os = "macos")]
+#[test]
+fn stop_teammate_kills_only_that_pane_and_tells_the_lead() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, HEARING_CODEX, TeamLimits::default());
+    let (lead, lead_pane) = hearing_lead(&fixture, &mut team, &host);
+    let first = teammate_split(&fixture, &lead_pane);
+    let second = teammate_split(&fixture, &lead_pane);
+    fixture.until(&mut team, "the engine records both teammate panes", |f| {
+        teammate_rows(f, lead)
+            == vec![
+                (first.clone(), false, false),
+                (second.clone(), false, false),
+            ]
+    });
+
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopTeammate {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+            pane: first.clone(),
+        }],
+    );
+    let told = format!(
+        "The owner stopped your teammate in pane {first}. Do not start it again unless the owner asks."
+    );
+    fixture.until(
+        &mut team,
+        "the stopped pane ends and the lead hears why",
+        |f| {
+            teammate_panes(&host, lead, &lead_pane) == vec![second.clone()]
+                && teammate_rows(f, lead)
+                    == vec![(first.clone(), true, true), (second.clone(), false, false)]
+                && heard(f, lead).contains(&told)
+        },
+    );
+    assert_eq!(
+        host.panes(&AgentId::team(lead).unwrap())
+            .unwrap()
+            .iter()
+            .filter(|pane| pane.id == lead_pane)
+            .count(),
+        1,
+        "the lead's own pane stays"
+    );
+
+    test_tmux(&fixture, &["kill-pane", "-t", &second]);
+    fixture.until(
+        &mut team,
+        "a pane that closed by itself is marked ended",
+        |f| {
+            teammate_rows(f, lead)
+                == vec![(first.clone(), true, true), (second.clone(), true, false)]
+        },
+    );
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    for pane in [second.as_str(), "%999999"] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &crate::team::TeamAction::StopTeammate {
+                    project_id: fixture.setup.project_id.clone(),
+                    agent: lead,
+                    pane: pane.into(),
+                },
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Rejected {
+                code: "team_teammate_not_found".into()
+            },
+            "{pane}"
+        );
+    }
+    assert_eq!(
+        heard(&fixture, lead).matches("The owner stopped").count(),
+        1
+    );
+    team.shutdown().unwrap();
+}
+
+/// Max teammates per harness closes the newest panes past each choice (S4): for every
+/// choice, with two panes more than it allows, the engine closes the two newest in one
+/// scan, keeps the oldest ones, marks the closed ones stopped and tells the harness the
+/// cap and the panes; past 32 recorded panes it keeps only the 32 newest rows.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_teammates_each_choice_closes_newest_over_cap_and_keeps_32_rows() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, HEARING_CODEX, TeamLimits::default());
+    let (lead, lead_pane) = hearing_lead(&fixture, &mut team, &host);
+    let cap_to = |max| crate::team::TeamAction::MaxTeammates {
+        project_id: fixture.setup.project_id.clone(),
+        max,
+    };
+    let mut live: Vec<String> = Vec::new();
+    let mut opened = 0;
+    for cap in crate::team::CAP_CHOICES {
+        owner(&fixture, &[cap_to(None)]);
+        while live.len() < usize::from(cap) + 2 {
+            live.push(teammate_split(&fixture, &lead_pane));
+            opened += 1;
+        }
+        fixture.until(&mut team, "the engine records every open pane", |f| {
+            let open: Vec<String> = teammate_rows(f, lead)
+                .into_iter()
+                .filter(|(_, ended, _)| !ended)
+                .map(|(pane, ..)| pane)
+                .collect();
+            open == live
+        });
+        owner(&fixture, &[cap_to(Some(cap))]);
+        let closed = live.split_off(usize::from(cap));
+        let told = format!(
+            "The owner allows at most {cap} teammates per harness, so the engine closed your newest teammate pane {}. Keep at most {cap} teammates.",
+            closed.join(", ")
+        );
+        fixture.until(&mut team, "the two newest panes close", |f| {
+            teammate_panes(&host, lead, &lead_pane) == live && heard(f, lead).contains(&told)
+        });
+        let rows = teammate_rows(&fixture, lead);
+        for pane in &closed {
+            assert!(
+                rows.contains(&(pane.clone(), true, true)),
+                "{cap}: {pane} {rows:?}"
+            );
+        }
+        for pane in &live {
+            assert!(
+                rows.contains(&(pane.clone(), false, false)),
+                "{cap}: {pane} {rows:?}"
+            );
+        }
+    }
+    assert!(opened > 32, "{opened}");
+    fixture.until(&mut team, "only the 32 newest rows stay", |f| {
+        teammate_rows(f, lead).len() == 32
+    });
+    let rows = teammate_rows(&fixture, lead);
+    assert_eq!(
+        rows.iter().filter(|(_, ended, _)| !ended).count(),
+        usize::from(crate::team::CAP_CHOICES[crate::team::CAP_CHOICES.len() - 1]),
+        "{rows:?}"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(teammate_rows(&fixture, lead).len(), 32);
+    team.shutdown().unwrap();
+}
+
+/// The master task a busy harness keeps working on in the owner stop tests.
+#[cfg(target_os = "macos")]
+const HELD_TASK: &str = "Plan the next release.";
+
+/// Starts a harness under the lead stand-in and gives it a master task it keeps working on,
+/// as an owner's stop finds a busy harness. Takes the fixture and its runtime. Returns the
+/// harness.
+#[cfg(target_os = "macos")]
+fn busy_harness(fixture: &Fixture, team: &mut TeamRuntime) -> i64 {
+    let lead = idle_sub_agent(fixture, team);
+    std::fs::write(worktree_of(fixture, lead).join("hold"), "").unwrap();
+    owner(fixture, &[hand_off(fixture, HELD_TASK)]);
+    fixture.until(team, "the harness works on the task", |f| {
+        task_of(f, HELD_TASK).0 == "running" && task_and_agent(f, HELD_TASK).1 == Some(lead)
+    });
+    lead
+}
+
+/// The agent a task waits for, when it is pinned to one. Takes the fixture and the task.
+#[cfg(target_os = "macos")]
+fn pinned_to(fixture: &Fixture, task: i64) -> Option<i64> {
+    fixture
+        .connection
+        .query_row(
+            "SELECT agent FROM team_task_pins WHERE task=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+/// Stop harness holds across an engine restart and only the owner's wake ends it (S4): the
+/// stopped harness's running task waits for it, pinned, a restarted engine starts neither it
+/// nor another agent for that task, and the owner's Wake starts the same harness in its own
+/// worktree, which finishes the task.
+#[cfg(target_os = "macos")]
+#[test]
+fn stop_harness_persists_across_restart_task_waits_and_owner_wake_resumes_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = busy_harness(&fixture, &mut team);
+    let worktree = agent_worktree(&fixture, lead);
+    let (task, _) = task_and_agent(&fixture, HELD_TASK);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+        }],
+    );
+    fixture.until(&mut team, "the owner's stop ends the harness", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "queued"
+    });
+    assert!(crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+    assert_eq!(
+        pinned_to(&fixture, task),
+        Some(lead),
+        "its task waits for it"
+    );
+    team.shutdown().unwrap();
+
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    idle_ticks(&mut team);
+    assert_eq!(
+        fixture.agent_status(lead).0,
+        AgentStatus::Stopped,
+        "the stop holds across an engine restart"
+    );
+    assert!(crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+    assert_eq!(task_of(&fixture, HELD_TASK).0, "queued");
+    assert_eq!(subs(&fixture), vec![lead], "no other agent takes its task");
+
+    std::fs::remove_file(worktree_of(&fixture, lead).join("hold")).unwrap();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::WakeAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+        }],
+    );
+    fixture.until(&mut team, "the owner's wake finishes the task", |f| {
+        task_of(f, HELD_TASK).0 == "done"
+    });
+    assert_eq!(task_and_agent(&fixture, HELD_TASK).1, Some(lead));
+    assert!(!crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+    assert_eq!(agent_worktree(&fixture, lead), worktree);
+    assert_eq!(subs(&fixture), vec![lead]);
+    team.shutdown().unwrap();
+}
+
+/// Stop all holds across an engine restart and Start all wakes the same agent (S4): the
+/// paused team's busy harness stops with its task waiting for it, a restarted engine keeps
+/// the team paused and starts nothing, and the owner's resume wakes that harness in its own
+/// worktree to finish the task.
+#[cfg(target_os = "macos")]
+#[test]
+fn stop_all_persists_across_engine_restart_and_resume_wakes_the_same_agent_in_its_worktree() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = busy_harness(&fixture, &mut team);
+    let worktree = agent_worktree(&fixture, lead);
+    let (task, _) = task_and_agent(&fixture, HELD_TASK);
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Pause {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "Stop all ends the busy harness", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "queued"
+    });
+    assert_eq!(pinned_to(&fixture, task), Some(lead));
+    team.shutdown().unwrap();
+
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    idle_ticks(&mut team);
+    assert!(crate::team::paused(&fixture.connection, &project).unwrap());
+    assert_eq!(
+        fixture.agent_status(lead).0,
+        AgentStatus::Stopped,
+        "the team stays stopped across an engine restart"
+    );
+    assert_eq!(task_of(&fixture, HELD_TASK).0, "queued");
+    assert_eq!(subs(&fixture), vec![lead]);
+
+    std::fs::remove_file(worktree_of(&fixture, lead).join("hold")).unwrap();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Resume {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "the resumed team finishes the task", |f| {
+        task_of(f, HELD_TASK).0 == "done"
+    });
+    assert_eq!(task_and_agent(&fixture, HELD_TASK).1, Some(lead));
+    assert_eq!(agent_worktree(&fixture, lead), worktree);
+    assert_eq!(subs(&fixture), vec![lead], "the same agent wakes");
+    team.shutdown().unwrap();
+}
+
+/// The tasks of a project in one state, oldest first. Takes the fixture and the state.
+#[cfg(target_os = "macos")]
+fn tasks_in(fixture: &Fixture, status: &str) -> Vec<String> {
+    fixture
+        .connection
+        .prepare("SELECT prompt FROM team_tasks WHERE project=?1 AND status=?2 ORDER BY id")
+        .unwrap()
+        .query_map(params![PROJECT, status], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Max harnesses per project holds new harnesses at every choice (S4): with that many
+/// harnesses busy, the next master task waits, and raising the choice lets the waiting
+/// task and the next ones start, up to 15, where the project's pane bound also holds.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_harnesses_each_choice_holds_the_next_harness_until_the_cap_rises() {
+    let fixture = Fixture::new(15);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::TimeLimits {
+            project_id: project.clone(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None,
+        }],
+    );
+    let mut handed = 0;
+    for cap in crate::team::CAP_CHOICES {
+        owner(
+            &fixture,
+            &[crate::team::TeamAction::MaxHarnesses {
+                project_id: project.clone(),
+                max: Some(cap),
+            }],
+        );
+        while handed < usize::from(cap) + 1 {
+            handed += 1;
+            owner(
+                &fixture,
+                &[hand_off(&fixture, &format!("Write page {handed}."))],
+            );
+        }
+        fixture.until(&mut team, "the harnesses the cap allows work", |f| {
+            tasks_in(f, "running").len() == usize::from(cap)
+        });
+        idle_ticks(&mut team);
+        assert_eq!(
+            tasks_in(&fixture, "running").len(),
+            usize::from(cap),
+            "{cap}"
+        );
+        assert_eq!(
+            tasks_in(&fixture, "queued"),
+            vec![format!("Write page {handed}.")],
+            "{cap}: the next harness waits for the cap"
+        );
+        assert_eq!(subs(&fixture).len(), usize::from(cap), "{cap}");
+    }
     team.shutdown().unwrap();
 }

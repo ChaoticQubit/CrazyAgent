@@ -1261,7 +1261,7 @@ fn a_long_notification_list_stays_inside_a_short_window() {
     assert!(text.iter().any(|row| row.contains("Question number 20")));
     let more = text
         .iter()
-        .find(|row| row.contains("older"))
+        .find(|row| row.contains(" older"))
         .unwrap_or_else(|| panic!("{text:?}"));
     let shown = text
         .iter()
@@ -1722,5 +1722,127 @@ fn sub_agent_depth_and_worker_landing_step_through_every_choice() {
             Some(Notice::plain(note))
         );
         assert!(shows(&view, &format!("Worker lands  {words}")), "{words}");
+    }
+}
+
+/// Max harnesses (v), Max teammates (u) and Token budget (T) each step through every choice
+/// and back to No limit or Off, and Spread accounts (P) turns on and off (S4, DEC-104 K8):
+/// each key sends its change, the engine's answer says the new choice and the team rows
+/// show what the engine stored.
+#[test]
+fn caps_budget_and_spread_step_through_every_choice() {
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    let mut stored = team();
+    let mut at = NOW;
+    for (key, label, done) in [
+        ('v', "Max harnesses", "Max harnesses is now"),
+        ('u', "Max teammates", "Max teammates per harness is now"),
+    ] {
+        assert!(shows(&view, &format!("{label}  No limit")), "{label}");
+        for max in crate::team::CAP_CHOICES
+            .iter()
+            .copied()
+            .map(Some)
+            .chain([None])
+        {
+            let reply = view.key(press(KeyCode::Char(key)));
+            let wanted = if key == 'v' {
+                TeamAction::MaxHarnesses {
+                    project_id: project(),
+                    max,
+                }
+            } else {
+                TeamAction::MaxTeammates {
+                    project_id: project(),
+                    max,
+                }
+            };
+            assert_eq!(reply, TeamReply::Change(wanted), "{label} {max:?}");
+            if key == 'v' {
+                stored.max_harnesses = max;
+            } else {
+                stored.max_teammates = max;
+            }
+            at += 60_000;
+            assert_eq!(
+                settled(&mut view, reply, &stored, at),
+                Some(Notice::plain(format!("{done} {}.", cap_words(max))))
+            );
+            assert!(
+                shows(&view, &format!("{label}  {}", cap_words(max))),
+                "{label} {max:?}"
+            );
+        }
+    }
+
+    assert!(shows(&view, "Token budget  Off"));
+    for tokens in crate::team::BUDGET_CHOICES
+        .iter()
+        .copied()
+        .map(Some)
+        .chain([None])
+    {
+        let reply = view.key(press(KeyCode::Char('T')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::TokenBudget {
+                project_id: project(),
+                tokens,
+            }),
+            "{tokens:?}"
+        );
+        stored.token_budget = tokens;
+        stored.budget_used = tokens.map(|_| 0);
+        at += 60_000;
+        let done = match tokens {
+            Some(tokens) => format!(
+                "The team now stops after {} from now.",
+                crate::team::token_words(tokens)
+            ),
+            None => "The token budget is off.".to_owned(),
+        };
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(
+            shows(
+                &view,
+                &format!("Token budget  {}", budget_words(tokens, Some(0)))
+            ),
+            "{tokens:?}"
+        );
+    }
+
+    assert!(shows(&view, "Spread accounts  Off"));
+    for (on, done, words) in [
+        (
+            true,
+            "New agents now prefer a pool account no running agent of this project uses.",
+            "On",
+        ),
+        (
+            false,
+            "New agents now take the account your account strategy picks.",
+            "Off",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('P')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SpreadAccounts {
+                project_id: project(),
+                on,
+            })
+        );
+        stored.spread_accounts = on;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(shows(&view, &format!("Spread accounts  {words}")), "{on}");
     }
 }
