@@ -2802,10 +2802,12 @@ fn a_refused_start_all_from_the_master_view_says_why_and_keeps_the_offer() {
         requests(&mut shell).is_empty(),
         "a refused change reads nothing"
     );
+    let lead = shell.ctx.message().unwrap().lead.clone();
     assert_eq!(
-        shell.ctx.message().unwrap().lead,
-        "trusted_connection_unavailable"
+        lead, "Not connected to the engine. Retrying.",
+        "the same words as the team panel's Start all"
     );
+    assert!(!lead.contains('_'), "no raw code reaches the owner: {lead}");
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[4], 2, 78),
@@ -2819,6 +2821,38 @@ fn a_refused_start_all_from_the_master_view_says_why_and_keeps_the_offer() {
     assert!(
         matches!(sent.as_slice(), [change] if resume_sent(change)),
         "S asks again after a refusal: {sent:?}"
+    );
+}
+
+#[test]
+fn a_refused_live_master_start_says_why_in_words_not_its_code() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: crate::project_setup::SetupQuery::TeamChange {
+                action: crate::team::TeamAction::LiveMaster {
+                    project_id: project(),
+                    on: true,
+                },
+                generation: 1,
+            },
+            result: Err("trusted_connection_unavailable".into()),
+        },
+    )))));
+    let rows = render(&mut shell);
+    assert_eq!(
+        chars(&rows[4], 2, 78),
+        format!("│{:<74}│", "The master terminal could not start.")
+    );
+    assert_eq!(
+        chars(&rows[5], 2, 78),
+        format!("│{:<74}│", "Not connected to the engine. Retrying.")
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("trusted_connection_unavailable")),
+        "{rows:#?}"
     );
 }
 
