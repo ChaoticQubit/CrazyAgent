@@ -376,7 +376,11 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     crazyagent::team::questions::tick(&mut connection, now).unwrap();
     assert_eq!(raised(&connection), urgent);
     crazyagent::team::questions::tick(&mut connection, now + 1).unwrap();
-    assert_eq!(raised(&connection), urgent, "a second tick raises no second alert");
+    assert_eq!(
+        raised(&connection),
+        urgent,
+        "a second tick raises no second alert"
+    );
     assert_eq!(answers.len(), 9, "{output}");
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
     drop(terminals);

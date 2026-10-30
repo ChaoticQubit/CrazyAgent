@@ -1265,7 +1265,12 @@ fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges()
         .map(|message| message.body.as_str())
         .collect();
     assert_eq!(bodies, ["High?", "Normal?", "Low?"]);
-    assert_eq!(snapshot.unread_edges.len(), 2, "{:?}", snapshot.unread_edges);
+    assert_eq!(
+        snapshot.unread_edges.len(),
+        2,
+        "{:?}",
+        snapshot.unread_edges
+    );
     assert!(
         snapshot
             .unread_edges

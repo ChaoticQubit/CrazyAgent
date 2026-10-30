@@ -976,7 +976,10 @@ fn opening_accept_drops_an_older_notice_about_the_set() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(flat(&view).contains(&refused), "{}", flat(&view));
-    let query = reply(&mut view, Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])));
+    let query = reply(
+        &mut view,
+        Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])),
+    );
     assert_eq!(query, ChangesQuery::List { project: project() });
     assert!(flat(&view).contains(&refused), "{}", flat(&view));
     assert!(view.key(key(KeyCode::Char('a')), NOW));
