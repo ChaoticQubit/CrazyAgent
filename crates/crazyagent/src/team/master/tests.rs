@@ -783,6 +783,36 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
     assert_eq!(tasks, 0);
 }
 
+/// D6: a project's live master answers a turn only with the live switch on, an agent and an
+/// open turn; a database without the live master table has none.
+#[test]
+fn a_live_master_turn_runs_only_while_live_with_an_agent_and_an_open_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    let project = ProjectId::new("live-turn").unwrap();
+    assert!(!turn_running(&connection, &project).unwrap());
+    initialize(&connection).unwrap();
+    assert!(!turn_running(&connection, &project).unwrap());
+    let set = |live: i64, agent: Option<i64>, open: i64| {
+        connection
+            .execute(
+                "INSERT INTO team_live_masters(project,live,agent,turn_open) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(project) DO UPDATE SET live=?2, agent=?3, turn_open=?4",
+                params![project.as_str(), live, agent, open],
+            )
+            .unwrap();
+    };
+    set(1, Some(4), 0);
+    assert!(!turn_running(&connection, &project).unwrap());
+    set(1, None, 1);
+    assert!(!turn_running(&connection, &project).unwrap());
+    set(0, Some(4), 1);
+    assert!(!turn_running(&connection, &project).unwrap());
+    set(1, Some(4), 1);
+    assert!(turn_running(&connection, &project).unwrap());
+    assert!(!turn_running(&connection, &ProjectId::new("other").unwrap()).unwrap());
+}
+
 /// Inserts a working app-spawned sub-agent with team tools, started by `lead` or by the
 /// master when none. Takes the fixture, its role and the lead. Returns its id.
 fn worker(fixture: &Fixture, role: &str, lead: Option<i64>) -> i64 {

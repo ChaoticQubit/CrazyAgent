@@ -1131,3 +1131,67 @@ async fn turns_whose_input_an_older_engine_pruned_still_read_and_end() {
     );
     case.close().await;
 }
+
+/// D6: while the live master answers a turn in its terminal (`team_live_masters` live, an
+/// agent and an open turn), New session and Resume are refused with `master_turn_running`
+/// and change nothing, unless the owner confirmed stopping that reply; once the turn
+/// closed, Resume applies.
+#[tokio::test]
+async fn a_live_master_turn_holds_new_session_and_resume_until_the_owner_stops_it() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-live").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    let db = case.db();
+    crate::team::master::initialize(&db).unwrap();
+    crate::master_sessions::mark_owner_turn(&db, &case.project, first.session_id.as_str()).unwrap();
+    db.execute(
+        "INSERT INTO team_live_masters(project,live,agent,turn_open) VALUES (?1,1,7,1)
+         ON CONFLICT(project) DO UPDATE SET live=1, agent=7, turn_open=1",
+        [case.project.as_str()],
+    )
+    .unwrap();
+    assert!(crate::team::master::turn_running(&db, &case.project).unwrap());
+
+    let before = case.phases();
+    assert_eq!(
+        case.renew("renew-live-turn", false).await,
+        OwnerResult::Rejected {
+            code: "master_turn_running".into()
+        }
+    );
+    assert_eq!(
+        case.phases(),
+        before,
+        "a refused New session changes nothing"
+    );
+    assert_eq!(
+        case.renew("renew-live-turn-stopped", true).await,
+        OwnerResult::Applied
+    );
+    let second = case.shown().await;
+    assert_ne!(second.session_id, first.session_id);
+    crate::master_sessions::mark_owner_turn(&db, &case.project, second.session_id.as_str())
+        .unwrap();
+
+    let before = case.phases();
+    assert_eq!(
+        case.resume("resume-live-turn", &first.session_id, false)
+            .await,
+        OwnerResult::Rejected {
+            code: "master_turn_running".into()
+        }
+    );
+    assert_eq!(case.phases(), before, "a refused Resume changes nothing");
+    db.execute(
+        "UPDATE team_live_masters SET turn_open=0 WHERE project=?1",
+        [case.project.as_str()],
+    )
+    .unwrap();
+    assert!(!crate::team::master::turn_running(&db, &case.project).unwrap());
+    assert_eq!(
+        case.resume("resume-closed-turn", &first.session_id, false)
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.shown().await.session_id, first.session_id);
+}

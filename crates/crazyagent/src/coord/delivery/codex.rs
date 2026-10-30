@@ -81,6 +81,9 @@ fn supported(user_agent: &str) -> bool {
         .is_some_and(|release| VERSIONS.contains(&(release.major, release.minor)))
 }
 
+#[cfg(all(test, unix))]
+mod tests;
+
 #[cfg(target_os = "macos")]
 mod wire {
     use super::supported;

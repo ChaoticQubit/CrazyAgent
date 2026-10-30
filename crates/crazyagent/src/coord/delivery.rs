@@ -13,6 +13,8 @@ use std::path::Path;
 use typing::Typing;
 
 pub mod codex;
+#[cfg(all(test, unix))]
+mod tests;
 pub mod typing;
 
 /// How long a Claude Code agent's message waits for the CrazyAgent relay (K2a) before the

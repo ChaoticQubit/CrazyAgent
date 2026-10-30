@@ -870,3 +870,6 @@ fn utc(at_ms: i64) -> String {
         _ => "unknown".to_owned(),
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests;

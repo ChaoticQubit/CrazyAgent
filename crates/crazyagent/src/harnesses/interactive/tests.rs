@@ -250,8 +250,11 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
     );
 }
 
+/// K2b: Codex runs its own app through the bridge script, which gets the executable and an
+/// empty resume id before the headless settings; the settings are the same for the app
+/// server the script starts first and for the app.
 #[test]
-fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
+fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
     let case = Case::new();
     let mut request = case.request("codex", case.subscription(), false);
     request.model = Some("gpt-5.5".into());
@@ -260,7 +263,12 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
         SANDBOX_EXEC,
         "-f",
         case.profile().to_str().unwrap(),
+        "/bin/sh",
+        "-c",
+        CODEX_BRIDGE_SCRIPT,
+        "codex-bridge",
         request.executable.to_str().unwrap(),
+        "",
     ]);
     for setting in [
         "cli_auth_credentials_store=\"file\"",
@@ -291,7 +299,6 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
         ),
     ]));
     assert_eq!(built.argv, argv);
-    assert!(!built.argv.iter().any(|argument| argument == "app-server"));
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
         built.env,
@@ -330,8 +337,9 @@ fn codex_runs_its_own_app_with_the_headless_settings_and_no_app_server() {
 }
 
 /// A resumed Codex or Claude Code app continues the conversation it recorded under the
-/// stored id, Codex through its `resume` subcommand after its settings and Claude Code
-/// through `--resume` in place of a new `--session-id`, with the same transcript source.
+/// stored id, Codex through the bridge's resume id in place of the empty one, which the
+/// bridge runs as the `resume` subcommand after its settings, and Claude Code through
+/// `--resume` in place of a new `--session-id`, with the same transcript source.
 #[test]
 fn a_resumed_harness_continues_the_conversation_it_recorded() {
     let case = Case::new();
@@ -342,8 +350,15 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
     let codex = case.request("codex", case.subscription(), false);
     let fresh = command(&codex, None, &run(None)).unwrap();
     let again = command(&codex, None, &resumed).unwrap();
+    let resume = fresh
+        .argv
+        .iter()
+        .position(|argument| argument == "codex-bridge")
+        .unwrap()
+        + 2;
+    assert_eq!(fresh.argv[resume], "");
     let mut argv = fresh.argv.clone();
-    argv.extend(strings(&["resume", SESSION]));
+    argv[resume] = SESSION.into();
     assert_eq!(again.argv, argv);
     assert_eq!(again.transcript, fresh.transcript);
     assert_eq!(again.env, fresh.env);
@@ -393,12 +408,17 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
     let built = command(&request, None, &run(Some(&key_file))).unwrap();
     no_secret(&built);
     assert_eq!(
-        built.argv[..4],
+        built.argv[..9],
         strings(&[
             SANDBOX_EXEC,
             "-f",
             case.profile().to_str().unwrap(),
+            "/bin/sh",
+            "-c",
+            CODEX_BRIDGE_SCRIPT,
+            "codex-bridge",
             request.executable.to_str().unwrap(),
+            "",
         ])
     );
     let provider = format!(
@@ -443,6 +463,94 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
             .unwrap_err()
             .0,
         "launch_key_file_invalid"
+    );
+}
+
+/// K2b: the real bridge script starts the Codex app server on its control socket, then the
+/// app attached to it with `--remote unix://` and the resume id, returns the app's exit code
+/// and stops the app server; with no socket from the app server the app runs on its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_codex_bridge_attaches_the_app_to_its_app_server_and_stops_the_server_after() {
+    let case = Case::new();
+    let home = case.home();
+    std::fs::create_dir_all(home.join("app-server-control")).unwrap();
+    let calls = case.path().join("calls");
+    let server = case.path().join("server.pid");
+    let stand_in = |name: &str, server_runs: &str| {
+        case.executable(
+            name,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = app-server ]; then {server_runs}; fi\nexit 7\n",
+                calls.display()
+            ),
+        )
+    };
+    let bridge = |codex: &Path, resume: &str| {
+        crate::spawn_gate::output(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", CODEX_BRIDGE_SCRIPT, "codex-bridge"])
+                .arg(codex)
+                .args([resume, "-c", "model=\"gpt-5.5\""])
+                .env_clear()
+                .env("CODEX_HOME", &home)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap()
+    };
+    let called = || -> Vec<String> {
+        let text = std::fs::read_to_string(&calls).unwrap();
+        std::fs::remove_file(&calls).unwrap();
+        text.lines().map(str::to_owned).collect()
+    };
+
+    let attached = stand_in(
+        "codex-attached",
+        &format!(
+            "echo $$ > '{}'; exec /usr/bin/nc -dlU \"$CODEX_HOME/app-server-control/app-server-control.sock\"",
+            server.display()
+        ),
+    );
+    let output = bridge(&attached, SESSION);
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        called(),
+        [
+            "app-server --listen unix:// -c model=\"gpt-5.5\"".to_owned(),
+            format!("--remote unix:// -c model=\"gpt-5.5\" resume {SESSION}"),
+        ]
+    );
+    let pid = std::fs::read_to_string(&server).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::spawn_gate::output(
+        std::process::Command::new("/bin/kill")
+            .args(["-0", pid.trim()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap()
+    .status
+    .success()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the app server {pid} still runs"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let alone = stand_in("codex-alone", "exit 0");
+    let output = bridge(&alone, "");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        called(),
+        [
+            "app-server --listen unix:// -c model=\"gpt-5.5\"",
+            "-c model=\"gpt-5.5\"",
+        ]
     );
 }
 

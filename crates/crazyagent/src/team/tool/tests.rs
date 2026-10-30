@@ -730,3 +730,102 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     .unwrap();
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
 }
+
+/// S1: `sessions` takes plain words up to `QUERY_BYTES_MAX` bytes or nothing; `session` takes
+/// a plain id and a message number given as a number, as text or left out, and the engine
+/// reads both the same way again from a mailbox.
+#[test]
+fn past_conversation_calls_keep_plain_ids_bounded_words_and_any_offset_form() {
+    let sessions = |arguments: Value| live_call(SESSIONS_TOOL, Some(&arguments));
+    assert_eq!(
+        sessions(json!({"query": "  zebra plan "})),
+        Some(Ok(Call::Sessions {
+            query: "zebra plan".into()
+        }))
+    );
+    assert_eq!(
+        live_call(SESSIONS_TOOL, None),
+        Some(Ok(Call::Sessions {
+            query: String::new()
+        }))
+    );
+    assert_eq!(
+        sessions(json!({"query": "x".repeat(super::super::history::QUERY_BYTES_MAX)})),
+        Some(Ok(Call::Sessions {
+            query: "x".repeat(super::super::history::QUERY_BYTES_MAX)
+        }))
+    );
+    for refused in [
+        json!({"query": "x".repeat(super::super::history::QUERY_BYTES_MAX + 1)}),
+        json!({"query": "zebra\u{7}"}),
+        json!({"query": "line\nbreak"}),
+    ] {
+        assert_eq!(sessions(refused), Some(Err(SESSIONS_INVALID)));
+    }
+
+    let session = |arguments: Value| live_call(SESSION_TOOL, Some(&arguments));
+    let read = |offset| {
+        Some(Ok(Call::Session {
+            id: "agent-3/rollout-1".into(),
+            offset,
+        }))
+    };
+    assert_eq!(
+        session(json!({"id": " agent-3/rollout-1 ", "offset": 7})),
+        read(7)
+    );
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": " 12 "})),
+        read(12)
+    );
+    assert_eq!(session(json!({"id": "agent-3/rollout-1"})), read(0));
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": null})),
+        read(0)
+    );
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": super::super::history::OFFSET_MAX})),
+        read(super::super::history::OFFSET_MAX)
+    );
+    for refused in [
+        json!({"id": "agent-3/../../etc/passwd"}),
+        json!({"id": "x".repeat(super::super::history::ID_BYTES_MAX + 1)}),
+        json!({"id": "agent-3/roll\u{1b}out"}),
+        json!({"id": "agent 3"}),
+        json!({"offset": 1}),
+        json!({"id": "agent-3/rollout-1", "offset": -1}),
+        json!({"id": "agent-3/rollout-1", "offset": "seven"}),
+        json!({"id": "agent-3/rollout-1", "offset": super::super::history::OFFSET_MAX + 1}),
+    ] {
+        assert_eq!(
+            session(refused.clone()),
+            Some(Err(SESSION_INVALID)),
+            "{refused}"
+        );
+    }
+
+    for call in [
+        Call::Sessions {
+            query: "zebra plan".into(),
+        },
+        Call::Session {
+            id: "session/abc".into(),
+            offset: 40,
+        },
+    ] {
+        assert_eq!(checked(call.clone()), Ok(call));
+    }
+    assert_eq!(
+        checked(Call::Session {
+            id: "agent-3/../x".into(),
+            offset: 0,
+        }),
+        Err(SESSION_INVALID)
+    );
+    assert_eq!(
+        checked(Call::Sessions {
+            query: "a\u{0}b".into()
+        }),
+        Err(SESSIONS_INVALID)
+    );
+}
