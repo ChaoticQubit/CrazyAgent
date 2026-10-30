@@ -195,7 +195,11 @@ impl Plan {
     /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. Other plans
     /// keep the context as it is. Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
-        assert_eq!(self.native, self.tmux.is_some(), "a native plan carries its tmux");
+        assert_eq!(
+            self.native,
+            self.tmux.is_some(),
+            "a native plan carries its tmux"
+        );
         match &self.tmux {
             Some(tmux) => context.with_native_team(tmux, &self.working_dir),
             None => context,
