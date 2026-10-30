@@ -398,7 +398,14 @@ fn a_bare_repository_layout_an_agent_leaves_is_refused_when_its_turn_is_committe
 /// current branch tip, as the engine adds one for a sibling sub-agent. Input: the case.
 /// Output: the second agent's workspace.
 fn second_agent(case: &Case) -> Workspace {
-    let worktree = case.repo.parent().unwrap().join("agent-2");
+    numbered_agent(case, 2)
+}
+
+/// Adds sub-agent `number` with its own linked detached worktree of the owner repository.
+/// Inputs: the case and the agent number. Output: the agent's workspace.
+fn numbered_agent(case: &Case, number: usize) -> Workspace {
+    let name = format!("agent-{number}");
+    let worktree = case.repo.parent().unwrap().join(&name);
     case.owner(&[
         "worktree",
         "add",
@@ -410,11 +417,11 @@ fn second_agent(case: &Case) -> Workspace {
     Workspace {
         agent: ChangeAgent {
             kind: AgentKind::Sub,
-            id: "agent-2".into(),
-            label: "Agent 2".into(),
+            id: name.clone(),
+            label: format!("Agent {number}"),
         },
         worktree,
-        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        git_dir: case.repo.join(".git/worktrees").join(&name),
         ..case.workspace.clone()
     }
 }
@@ -3601,4 +3608,308 @@ fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
     );
     assert_eq!(case.agent_head(), merged);
     assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+impl Case {
+    fn observe(&self) {
+        observe(&self.db, Some(&self.workspace.project)).unwrap();
+    }
+
+    /// Checks a change set closed as landed outside the app: accepted, marked outside, its
+    /// pending ref gone, no action left, the quiet agent worktree on the owner's tip and
+    /// no change set opened by the next turn. Inputs: the change set and its head.
+    fn landed_outside(&self, id: &ChangeSetId, head: &str) {
+        let view = self.view(id);
+        assert_eq!(
+            (view.state, view.outside),
+            (ChangeState::Accepted, true),
+            "{view:?}"
+        );
+        assert_eq!(self.owner_refs("refs/crazyagent"), "");
+        assert_eq!(refused(self.accept(id)), "changes_stale");
+        assert_eq!(
+            refused(discard(&self.db, id, head, NOW_MS)),
+            "changes_stale"
+        );
+        assert_eq!(self.agent_head(), self.tip());
+        assert_eq!(self.turn(TurnOutcome::Succeeded), None);
+    }
+
+    /// Checks a change set closed as removed outside the app: discarded, marked outside,
+    /// never restorable, its pending ref gone and no action left. Inputs: the change set
+    /// and its head.
+    fn removed_outside(&self, id: &ChangeSetId, head: &str) {
+        let view = self.view(id);
+        assert_eq!(
+            (view.state, view.outside, view.restorable_until_ms),
+            (ChangeState::Discarded, true, None),
+            "{view:?}"
+        );
+        assert_eq!(self.owner_refs("refs/crazyagent"), "");
+        assert_eq!(
+            refused(restore(&self.db, id, NOW_MS)),
+            "changes_restore_expired"
+        );
+        assert_eq!(
+            refused(discard(&self.db, id, head, NOW_MS)),
+            "changes_stale"
+        );
+    }
+}
+
+#[test]
+fn a_change_set_the_owner_merged_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.outside, view.files, view.added),
+        (ChangeState::Pending, false, 1, 1)
+    );
+    case.owner(&[
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        "Merge the agent work",
+        &head,
+    ]);
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_cherry_picked_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.owner(&["cherry-pick", &head]);
+    assert_eq!(
+        case.owner(&["branch", "--contains", &head]),
+        "",
+        "the pick copied the change, not the commit"
+    );
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_squashed_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_eq!(case.view(&id).files, 2);
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.owner(&["merge", "--squash", "-q", &head]);
+    case.owner(&["commit", "-q", "-m", "Squash the agent work"]);
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_of_it_lands() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner adds the line");
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.outside,
+            view.files,
+            view.added,
+            view.removed
+        ),
+        (ChangeState::Pending, false, 1, 1, 0)
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    let files: Vec<_> = page.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(files, ["src/new.rs"]);
+    assert!(!page.text.contains("+four"), "{}", page.text);
+    assert!(page.text.contains("+fn main() {}"), "{}", page.text);
+    case.owner_commit("src/new.rs", "fn main() {}\n", "Owner adds main");
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_whose_worktree_was_deleted_outside_the_app_closes_as_removed_outside() {
+    for removal in ["git worktree remove", "rm -rf"] {
+        let case = Case::new();
+        case.edit("src/new.rs", "fn main() {}\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        case.observe();
+        assert_eq!(case.view(&id).state, ChangeState::Pending, "{removal}");
+        let worktree = case.workspace.worktree.to_str().unwrap();
+        match removal {
+            "git worktree remove" => {
+                case.owner(&["worktree", "remove", "--force", worktree]);
+            }
+            _ => std::fs::remove_dir_all(worktree).unwrap(),
+        }
+        case.observe();
+        case.removed_outside(&id, &head);
+    }
+}
+
+#[test]
+fn an_own_branch_change_set_whose_branch_was_deleted_outside_the_app_closes_as_removed_outside() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    case.agent(&["checkout", "-q", "--detach"]);
+    case.agent(&["branch", "-q", "-D", "agent/agent-own"]);
+    case.observe();
+    case.removed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_whose_commit_is_gone_closes_as_removed_outside() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    let object = case
+        .repo
+        .join(".git/objects")
+        .join(&head[..2])
+        .join(&head[2..]);
+    std::fs::remove_file(&object).unwrap();
+    case.observe();
+    case.removed_outside(&id, &head);
+}
+
+#[test]
+fn a_poll_checks_every_open_head_with_one_git_run_for_the_repository() {
+    let case = Case::new();
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    case.edit("agent-1.txt", "one\n");
+    let mut ids = vec![case.turn(TurnOutcome::Succeeded).unwrap()];
+    let open = |number: usize| {
+        let agent = numbered_agent(&case, number);
+        write(
+            &agent.worktree.join(format!("agent-{number}.txt")),
+            &format!("{number}\n"),
+        );
+        record_turn_end(&case.db, &agent, &turn)
+            .unwrap()
+            .expect("the agent's work opens a change set")
+    };
+    let runs = || {
+        case.observe();
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        case.observe();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    ids.push(open(2));
+    let two = runs();
+    assert!(two >= 1, "the poll checks the heads");
+    ids.extend((3..=6).map(open));
+    assert_eq!(runs(), two, "six open sets cost the git runs two do");
+    let heads: Vec<String> = ids.iter().map(|id| case.view(id).head).collect();
+    assert_eq!(
+        heads
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        6
+    );
+    assert!(
+        ids.iter()
+            .all(|id| case.view(id).state == ChangeState::Pending)
+    );
+
+    let gone = &heads[3];
+    std::fs::remove_file(
+        case.repo
+            .join(".git/objects")
+            .join(&gone[..2])
+            .join(&gone[2..]),
+    )
+    .unwrap();
+    case.observe();
+    for (id, head) in ids.iter().zip(&heads) {
+        let view = case.view(id);
+        let expected = if head == gone {
+            (ChangeState::Discarded, true)
+        } else {
+            (ChangeState::Pending, false)
+        };
+        assert_eq!((view.state, view.outside), expected, "{view:?}");
+    }
+}
+
+#[test]
+fn a_change_set_the_owner_has_not_landed_stays_open_with_its_whole_change() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let before = case.view(&id);
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.observe();
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.outside,
+            view.files,
+            view.added,
+            view.removed
+        ),
+        (
+            ChangeState::Pending,
+            false,
+            before.files,
+            before.added,
+            before.removed
+        )
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert!(page.text.contains("+four"), "{}", page.text);
+
+    case.owner(&[
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        "Merge the agent work",
+        &head,
+    ]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.outside),
+        (ChangeState::Pending, false),
+        "a detached owner HEAD judges nothing"
+    );
+    case.owner(&["checkout", "-q", "main"]);
+    case.observe();
+    case.landed_outside(&id, &head);
 }

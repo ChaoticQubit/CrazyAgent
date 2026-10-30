@@ -708,6 +708,84 @@ mod tests {
             .unwrap();
     }
 
+    /// An owner List after the owner merged an open change set by hand replies with that
+    /// set closed as landed outside the app, so every client shows it without an action.
+    #[cfg(unix)]
+    #[test]
+    fn a_list_after_a_hand_merge_replies_with_the_set_landed_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let owner = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=O", "-c", "user.email=o@example.invalid"];
+            full.extend_from_slice(args);
+            git(&home, &repo, &full)
+        };
+        owner(&["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        owner(&["add", "README"]);
+        owner(&["commit", "-q", "-m", "Start"]);
+        owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ]);
+        std::fs::write(worktree.join("NEW"), "new\n").unwrap();
+        let project = crate::protocol::ProjectId::new("project-1").unwrap();
+        let db = landing::open(&root).unwrap();
+        let workspace = landing::Workspace {
+            project: project.clone(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        let head = landing::list(&db, &project).unwrap()[0].head.clone();
+        drop(db);
+        let listed = |root: &Path| match run(
+            root,
+            Action::List {
+                project: project.clone(),
+            },
+        )
+        .unwrap()
+        {
+            (Reply::List { change_sets }, false) => change_sets,
+            _ => panic!("expected a list reply"),
+        };
+        let open = listed(&root);
+        assert_eq!(
+            (open.len(), open[0].state, open[0].outside),
+            (1, landing::ChangeState::Pending, false)
+        );
+        owner(&["merge", "--no-ff", "-q", "-m", "Merge by hand", &head]);
+        let closed = listed(&root);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, id);
+        assert_eq!(
+            (closed[0].state, closed[0].outside),
+            (landing::ChangeState::Accepted, true)
+        );
+    }
+
     /// Reads the plain codes a source file refuses with, before its tests.
     /// Input: the file text. Output: each `changes_` code once.
     fn refusals(source: &str) -> std::collections::BTreeSet<&str> {

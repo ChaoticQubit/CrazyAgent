@@ -1236,3 +1236,24 @@ async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list(
         .expect("typing in the box removed no server");
     assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
 }
+
+#[test]
+fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
+    let mut view = loaded();
+    let every = vec![
+        ("pl0xgithub".to_owned(), "github".to_owned()),
+        ("pl0xpostgres".to_owned(), "postgres".to_owned()),
+    ];
+    match view.key(press(KeyCode::Char('l'))) {
+        PluginsReply::Tools { servers, at } => assert_eq!((servers, at), (every.clone(), 0)),
+        _ => panic!("l opens the tools page"),
+    }
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    match view.key(press(KeyCode::Char('l'))) {
+        PluginsReply::Tools { servers, at } => assert_eq!((servers, at), (every, 2)),
+        _ => panic!("l opens the tools page"),
+    }
+    assert!(view.help().contains(&("l", "Tools")), "{:?}", view.help());
+}

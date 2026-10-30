@@ -1,5 +1,6 @@
 use super::*;
 use crate::client_controller::OwnerController;
+use crate::coord::settings::CoordSettings;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -1617,4 +1618,201 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
         shown.iter().all(|row| !row.contains("in Finished")),
         "Show keeps finished agents in the list with no pointer"
     );
+}
+
+async fn coord_send(
+    view: &mut TeamView,
+    controller: &mut OwnerController,
+    reply: TeamReply,
+    generation: u64,
+) -> TeamAction {
+    let TeamReply::Change(action) = reply else {
+        panic!("the key must ask the engine, got {reply:?}");
+    };
+    let response = controller
+        .team_action(action.clone(), generation)
+        .await
+        .unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("coordination change not applied: {other:?}"),
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action: action.clone(),
+            generation,
+        },
+        Ok(result),
+    );
+    assert!(!view.notice.as_ref().unwrap().error, "{:?}", view.notice);
+    read_team(controller, view, NOW + i64::try_from(generation).unwrap()).await;
+    action
+}
+
+fn coordination_of(view: &TeamView) -> CoordinationView {
+    view.status.as_ref().unwrap().coordination.clone().unwrap()
+}
+
+fn harness_row(view: &TeamView, harness: HarnessKind) -> (SubagentMode, Delivery) {
+    let row = coordination_of(view)
+        .harnesses
+        .into_iter()
+        .find(|row| row.harness == harness)
+        .unwrap();
+    (row.mode, row.delivery)
+}
+
+fn clear_counted(view: &mut TeamView) {
+    let typed = view
+        .coord
+        .as_ref()
+        .and_then(|edit| edit.counted.as_ref())
+        .unwrap()
+        .value()
+        .chars()
+        .count();
+    for _ in 0..typed {
+        assert_eq!(view.key(press(KeyCode::Backspace)), TeamReply::Handled);
+    }
+}
+
+#[tokio::test]
+async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
+    let mut old = loaded();
+    assert_eq!(old.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(
+        old.notice,
+        Some(Notice::plain(
+            "This engine does not report coordination settings yet."
+        ))
+    );
+    assert!(old.coord.is_none());
+
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-coord-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    read_team(&mut controller, &mut view, NOW).await;
+    let (_, help) = view.rows(116, 30, &accounts(), &Look::plain());
+    assert!(help.contains(&("c", "Coordination")), "{help:?}");
+    assert_eq!(coordination_of(&view).settings, CoordSettings::default());
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(view.coord.as_ref().unwrap().row, 0);
+    assert!(!view.typing());
+
+    let reply = view.key(press(KeyCode::Right));
+    coord_send(&mut view, &mut controller, reply, 2).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::ClaudeCode).0,
+        SubagentMode::Native
+    );
+
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+    assert!(
+        view.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("has no native teammates"),
+        "{:?}",
+        view.notice
+    );
+    assert!(!view.busy(), "a refused mode sends nothing");
+
+    view.key(press(KeyCode::Down));
+    let reply = view.key(press(KeyCode::Left));
+    coord_send(&mut view, &mut controller, reply, 3).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::Codex),
+        (SubagentMode::AppSpawned, Delivery::TypingOnly)
+    );
+
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 7);
+    for (generation, overlaps) in [
+        (4, Overlaps::Block),
+        (5, Overlaps::Off),
+        (6, Overlaps::Warn),
+    ] {
+        let reply = view.key(press(KeyCode::Right));
+        coord_send(&mut view, &mut controller, reply, generation).await;
+        assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
+    }
+
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.coord.as_ref().unwrap().row, 9);
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(view.typing());
+    clear_counted(&mut view);
+    typed(&mut view, "bad name!");
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(team_plain("coord_settings_invalid")))
+    );
+    assert!(view.typing(), "a refused list stays open for editing");
+    clear_counted(&mut view);
+    typed(&mut view, "a, a b*");
+    let reply = view.key(press(KeyCode::Enter));
+    coord_send(&mut view, &mut controller, reply, 7).await;
+    assert!(!view.typing(), "an applied list closes the input");
+    assert_eq!(coordination_of(&view).settings.counted_tools, ["a", "b*"]);
+
+    let reply = view.key(press(KeyCode::Char('r')));
+    coord_send(&mut view, &mut controller, reply, 8).await;
+    assert_eq!(
+        coordination_of(&view).settings.counted_tools,
+        COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec()
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.coord.is_none());
 }

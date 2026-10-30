@@ -865,3 +865,46 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
         "{shown}"
     );
 }
+
+#[test]
+fn a_set_closed_outside_the_app_says_how_keeps_its_note_and_takes_no_action_keys() {
+    let mut landed = set('1', ChangeState::Accepted);
+    landed.outside = true;
+    let mut removed = set('2', ChangeState::Discarded);
+    removed.outside = true;
+    for (closed, word, note) in [
+        (
+            landed,
+            "Landed outside the app",
+            "Your branch already has these changes. They were landed outside the app.",
+        ),
+        (
+            removed,
+            "Removed outside the app",
+            "The agent's copy of these changes was removed outside the app, so they cannot be restored.",
+        ),
+    ] {
+        let mut view = listed(vec![closed]);
+        let shown = tall(&view).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(shown.contains(word), "{word} missing in\n{shown}");
+        assert!(shown.contains(note), "{note} missing in\n{shown}");
+        assert!(!shown.contains("You can restore"), "{shown}");
+        let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+        assert!(
+            !help
+                .iter()
+                .any(|(key, _)| ["a", "d", "r", "u"].contains(key)),
+            "{help:?}"
+        );
+        for action in ['a', 'd', 'r', 'u'] {
+            assert!(!view.key(key(KeyCode::Char(action)), NOW), "{action}");
+        }
+        assert_eq!(view.next_query(NOW), None);
+    }
+
+    let mut accepted = listed(vec![set('3', ChangeState::Accepted)]);
+    let shown = tall(&accepted);
+    assert!(shown.contains("Accepted"), "{shown}");
+    assert!(!shown.contains("outside the app"), "{shown}");
+    assert!(!accepted.key(key(KeyCode::Char('r')), NOW));
+}
