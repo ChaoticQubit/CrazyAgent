@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
-use std::os::unix::net::UnixListener;
+use crazyagent::spawn_gate;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -132,15 +132,15 @@ fn the_profile_holds_exact_rules_for_each_granted_socket() {
 
 /// K2b: inside the real Seatbelt sandbox an agent connects to its granted socket and is
 /// refused the socket next to it in the same folder.
-#[test]
-fn a_sandboxed_agent_reaches_only_its_granted_socket() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sandboxed_agent_reaches_only_its_granted_socket() {
     let case = case();
     let granted = case.daemon.join("granted.sock");
     let other = case.daemon.join("other.sock");
-    let granted_listener = UnixListener::bind(&granted).unwrap();
-    let _other_listener = UnixListener::bind(&other).unwrap();
-    let accepting = std::thread::spawn(move || {
-        let (stream, _) = granted_listener.accept().unwrap();
+    let granted_listener = spawn_gate::bind_unix(&granted).unwrap();
+    let _other_listener = spawn_gate::bind_unix(&other).unwrap();
+    let accepting = tokio::spawn(async move {
+        let (stream, _) = spawn_gate::accept_unix(&granted_listener).await.unwrap();
         drop(stream);
     });
     let profiles = case.tmp.parent().unwrap().join("profiles");
@@ -155,5 +155,5 @@ fn a_sandboxed_agent_reaches_only_its_granted_socket() {
         &other
     ));
     assert!(connects(&widened, &profiles.join("widened.sb"), &granted));
-    accepting.join().unwrap();
+    accepting.await.unwrap();
 }
