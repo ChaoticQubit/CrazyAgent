@@ -1209,6 +1209,7 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     say(&mut shell, &mut connection, "Plan the second slice").await;
     let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
     assert_eq!(second.session_id, fresh.session_id);
+    shell.key(Key::Esc);
     let shown = until(&mut shell, &mut connection, |shown| {
         shown.contains("1 earlier") && shown.contains("Plan the second slice")
     })
