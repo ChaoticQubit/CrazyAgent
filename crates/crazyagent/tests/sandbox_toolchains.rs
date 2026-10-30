@@ -631,6 +631,161 @@ fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_reada
     );
 }
 
+fn agent_git_script(tmp: &Path) -> String {
+    fs::read_to_string(tmp.join("bin/git")).unwrap()
+}
+
+fn real_git_of(script: &str) -> PathBuf {
+    let line = script
+        .lines()
+        .find_map(|line| line.strip_prefix("git='"))
+        .unwrap();
+    PathBuf::from(line.strip_suffix('\'').unwrap())
+}
+
+#[test]
+fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_a_planted_link() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let git = tmp.join("bin/git");
+    let script = agent_git_script(&tmp);
+    assert!(script.starts_with("#!/bin/sh\ngit='/"), "{script}");
+    assert!(script.contains("\nlead=0\n"), "{script}");
+    assert!(script.ends_with("exec \"$git\" \"$@\"\n"), "{script}");
+    let real = real_git_of(&script);
+    assert_ne!(real, Path::new("/usr/bin/git"));
+    assert!(fs::metadata(&real).unwrap().is_file());
+    let first = fs::symlink_metadata(&git).unwrap();
+    assert_eq!(first.permissions().mode() & 0o777, 0o700);
+    assert_eq!(
+        fs::symlink_metadata(tmp.join("bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+
+    toolchains::make_tmp(&case.home).unwrap();
+    assert_eq!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
+
+    fs::write(&git, "#!/bin/sh\nexit 7\n").unwrap();
+    toolchains::make_tmp(&case.home).unwrap();
+    assert_eq!(agent_git_script(&tmp), script);
+    assert_ne!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
+
+    toolchains::lead_git(&tmp).unwrap();
+    assert!(agent_git_script(&tmp).contains("\nlead=1\n"));
+    toolchains::make_tmp(&case.home).unwrap();
+    assert_eq!(agent_git_script(&tmp), script);
+
+    fs::remove_file(&git).unwrap();
+    fs::remove_dir(tmp.join("bin")).unwrap();
+    let elsewhere = case.tmp.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, tmp.join("bin")).unwrap();
+    assert_eq!(toolchains::make_tmp(&case.home).unwrap(), tmp);
+    assert!(names(&elsewhere).is_empty());
+    assert!(
+        fs::symlink_metadata(tmp.join("bin"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(toolchains::lead_git(&tmp).is_err());
+    assert!(names(&elsewhere).is_empty());
+    assert_eq!(
+        toolchains::with_agent_git(&case.home, "/usr/bin:/bin".to_owned()),
+        "/usr/bin:/bin"
+    );
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() {
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let agent_bin = tmp.join("bin");
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let profile = case.profiles.join("git.sb");
+    sandbox.install(&profile).unwrap();
+    let path_of = |command: &std::process::Command| -> String {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let engine = sandbox.command(&profile, Path::new("/bin/sh"));
+    assert!(!path_of(&engine).contains(agent_bin.to_str().unwrap()));
+    let unconfined = sandbox
+        .wrap_unconfined(std::process::Command::new("/bin/sh").current_dir(&case.project))
+        .unwrap();
+    assert!(!path_of(&unconfined).contains(agent_bin.to_str().unwrap()));
+
+    let real = real_git_of(&agent_git_script(&tmp));
+    for arguments in [
+        &["init", "-q", "--template="][..],
+        &[
+            "-c",
+            "user.name=A",
+            "-c",
+            "user.email=a@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "one",
+        ],
+    ] {
+        let mut owner = std::process::Command::new(&real);
+        owner
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &case.home)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(arguments)
+            .current_dir(&case.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let made = crazyagent::spawn_gate::output(&mut owner).unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+    let mut harness = std::process::Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg("command -v git && git status --short >/dev/null && git log --format=%s")
+        .current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    assert!(path_of(&wrapped).starts_with(&format!("{}:", agent_bin.display())));
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("xcrun"), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\none\n", agent_bin.join("git").display())
+    );
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
 fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
     let mut command = std::process::Command::new(tmux);
     command
