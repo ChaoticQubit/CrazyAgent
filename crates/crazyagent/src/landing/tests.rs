@@ -3468,23 +3468,16 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
     );
 }
 
-/// Puts a test change set's agent under a lead as the team tables record it, with the
-/// lead's own linked worktree on branch `lead` cut from the owner's `main` and `files`
-/// lead commits ahead of it, the worker's worktree moved to the lead's tip and its start
-/// recorded there. Inputs: the case and how many files the lead adds. Output: the lead's
-/// tip.
-fn worker_of_lead(case: &mut Case, files: usize) -> String {
-    let root = case.repo.parent().unwrap().to_path_buf();
-    let lead = root.join("agent-35");
-    case.owner(&["branch", "lead", "main"]);
-    case.owner(&["worktree", "add", "-q", lead.to_str().unwrap(), "lead"]);
-    for at in 0..files {
-        write(&lead.join(format!("lead/file-{at}.txt")), "lead work\n");
+/// Commits every given file in a lead's worktree as the lead would. Inputs: the case, the
+/// lead's worktree and the files. Output: none; the commit is on the lead's branch.
+fn lead_commit(case: &Case, lead: &Path, files: &[String]) {
+    for file in files {
+        write(&lead.join(file), "lead work\n");
     }
-    git_in(&case.home, &lead, &["add", "-A"]);
+    git_in(&case.home, lead, &["add", "-A"]);
     git_in(
         &case.home,
-        &lead,
+        lead,
         &[
             "-c",
             "user.name=Lead",
@@ -3496,43 +3489,133 @@ fn worker_of_lead(case: &mut Case, files: usize) -> String {
             "Lead work",
         ],
     );
-    let lead_tip = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
-        .trim()
-        .to_owned();
+}
+
+/// Makes team agent 35 a lead of the case's project with `files` lead files committed
+/// ahead of the owner's `main`: in a linked worktree on the branch the engine names for
+/// it, or in its own clone, recorded in the team tables. Inputs: the case, how many files
+/// the lead adds and whether it works in its own clone. Output: the lead's worktree and
+/// its tip as the engine reads it into the owner repository.
+fn lead_35(case: &Case, files: usize, own_clone: bool) -> (PathBuf, String) {
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    let git_dir = if own_clone {
+        add_agent_clone(&case.repo, &lead).unwrap();
+        crate::agent_git::git_dir(&lead)
+    } else {
+        case.owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "crazyagent/agent-35",
+            lead.to_str().unwrap(),
+            "main",
+        ]);
+        case.repo.join(".git/worktrees/agent-35")
+    };
+    let made: Vec<String> = (0..files).map(|at| format!("lead/file-{at}.txt")).collect();
+    lead_commit(case, &lead, &made);
     crate::team::initialize(&case.db).unwrap();
-    let project = case.workspace.project.as_str().to_owned();
+    let project = case.workspace.project.as_str();
     case.db
-        .execute_batch(&format!(
+        .execute(
             "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
-             VALUES (35,'{project}','sub','claude',0,'idle',1,1,NULL),
-                    (52,'{project}','sub','claude',0,'idle',1,1,35);"
-        ))
+             VALUES (35,?1,'sub','claude',0,'idle',1,1,NULL)",
+            [project],
+        )
         .unwrap();
-    for (agent, worktree, git_dir) in [
-        (35, lead.clone(), case.repo.join(".git/worktrees/agent-35")),
-        (
-            52,
-            case.workspace.worktree.clone(),
-            case.workspace.git_dir.clone(),
-        ),
-    ] {
-        case.db
-            .execute(
-                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
-                rusqlite::params![
-                    agent,
-                    project,
-                    case.repo.to_str().unwrap(),
-                    worktree.to_str().unwrap(),
-                    git_dir.to_str().unwrap()
-                ],
-            )
-            .unwrap();
-    }
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (35,?1,?2,?3,?4)",
+            [
+                project,
+                case.repo.to_str().unwrap(),
+                lead.to_str().unwrap(),
+                git_dir.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+    let tip = flow::tip(&case.db, &case.repo, &lead, &git_dir).unwrap();
+    (lead, tip)
+}
+
+/// Records a worker of lead 35 in the team tables at its workspace, whose agent id is its
+/// team id, moves its worktree to the lead's tip and records its start there, as the
+/// engine cuts a worker from its lead (N1). Inputs: the case, the worker's workspace and
+/// the lead's tip. Output: none; the worker is in place.
+fn put_under_lead(case: &Case, workspace: &Workspace, lead_tip: &str) {
+    let agent: i64 = workspace.agent.id.parse().unwrap();
+    let project = workspace.project.as_str();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (?1,?2,'sub','claude',0,'idle',1,1,35)",
+            rusqlite::params![agent, project],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                agent,
+                project,
+                workspace.repository.to_str().unwrap(),
+                workspace.worktree.to_str().unwrap(),
+                workspace.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    git_in(
+        &case.home,
+        &workspace.worktree,
+        &["checkout", "-q", "--detach", lead_tip],
+    );
+    record_worktree_start(
+        &case.db,
+        &workspace.repository,
+        &workspace.worktree,
+        &workspace.git_dir,
+    )
+    .unwrap();
+}
+
+/// Puts a test change set's agent, as team agent 52, under lead 35 whose linked worktree
+/// is `files` lead files ahead of the owner's `main`. Inputs: the case and how many files
+/// the lead adds. Output: the lead's tip.
+fn worker_of_lead(case: &mut Case, files: usize) -> String {
+    let (_, lead_tip) = lead_35(case, files, false);
     case.workspace.agent.id = "52".into();
-    case.agent(&["checkout", "-q", "--detach", &lead_tip]);
-    case.start();
+    put_under_lead(case, &case.workspace, &lead_tip);
     lead_tip
+}
+
+/// Sets the project's Lands setting as the owner picks it in Team settings. Inputs: the
+/// case and the setting's name. Output: none; the setting is stored.
+fn set_lands(case: &Case, lands: &str) {
+    case.db
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,2,?2)",
+            [case.workspace.project.as_str(), lands],
+        )
+        .unwrap();
+}
+
+/// Reads the counts a change set holds after its turn end and after a poll, and every path
+/// its diff pages show. Inputs: the case and the change set. Output: both counts and the
+/// paths.
+fn measured(case: &Case, id: &ChangeSetId) -> ((u32, u32, u32), (u32, u32, u32), Vec<String>) {
+    let counts = |view: ChangeSetView| (view.files, view.added, view.removed);
+    let recorded = counts(case.view(id));
+    observe(&case.db, None).unwrap();
+    let view = case.view(id);
+    assert_eq!(view.state, ChangeState::Pending);
+    let mut paths: Vec<String> = all_pages(case, id)
+        .iter()
+        .flat_map(|page| page.files.iter().map(|file| file.path.clone()))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    (recorded, counts(view), paths)
 }
 
 /// A lead's worker lands on its lead's branch, so its change set holds only what would
@@ -3563,6 +3646,171 @@ fn a_lead_worker_s_set_is_measured_against_its_lead_s_branch() {
     let page = diff(&case.db, &id, 0).unwrap();
     let paths: Vec<&str> = page.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, ["worker.txt"], "the diff showed the lead's work");
+}
+
+/// While the owner's Lands setting is Owner, the owner accepts a lead's worker's set onto
+/// the owner's branch, so it is measured against that branch: the lead's work the owner's
+/// branch lacks is part of it (Q16, current rule).
+#[test]
+fn a_lead_worker_s_set_is_measured_against_the_owner_s_branch_while_lands_is_owner() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 30);
+    set_lands(&case, "owner");
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((31, 31, 0), (31, 31, 0)),
+        "a Lands Owner worker set was measured against its lead's branch"
+    );
+    assert_eq!(paths.len(), 31);
+    assert!(paths.iter().any(|path| path == "worker.txt"));
+    assert!(paths.iter().any(|path| path == "lead/file-0.txt"));
+}
+
+/// A worker of a lead in its own clone is measured against the lead's clone branch, read
+/// through the engine's checked fetch.
+#[test]
+fn a_clone_lead_s_worker_set_is_measured_against_the_lead_s_clone_branch() {
+    let mut case = Case::new();
+    let (_, lead_tip) = lead_35(&case, 30, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    assert_ne!(case.tip(), lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((1, 1, 0), (1, 1, 0)),
+        "the clone lead's work was counted"
+    );
+    assert_eq!(paths, ["worker.txt"]);
+}
+
+/// Update merges a lead's worker's set with its lead's branch, the branch it lands on, and
+/// the merge commit and the resolve prompt name that branch, never the owner's.
+#[test]
+fn update_merges_a_lead_worker_s_set_with_its_lead_s_branch_and_names_it() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 3);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let worker_head = case.view(&id).head;
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    lead_commit(&case, &lead, &["lead/later.txt".to_owned()]);
+    let later = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    update(&case.db, &id).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%s", &view.head])
+            .trim(),
+        format!(
+            "{worker_head} {later}|Merge the lead's branch crazyagent/agent-35 into this agent's work"
+        )
+    );
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Updating, later.as_str())
+    );
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.starts_with(
+            "Your lead's branch crazyagent/agent-35 changed while your work waited for your lead's merge, so CrazyAgent merged it into your worktree.\n"
+        ),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("owner"), "{prompt}");
+}
+
+/// A lead's worker whose lead's worktree is no longer recorded keeps its stored change and
+/// is never measured against the owner's branch, and Update refuses it instead of merging
+/// the owner's branch into a worker that lands on its lead's.
+#[test]
+fn a_lead_worker_whose_lead_s_worktree_is_gone_keeps_its_change_and_update_refuses() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 30);
+    case.db
+        .execute("DELETE FROM team_worktrees WHERE agent=35", [])
+        .unwrap();
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((1, 1, 0), (1, 1, 0)),
+        "the set was measured against the owner's branch"
+    );
+    assert_eq!(paths, ["worker.txt"]);
+    let before = case.view(&id);
+    assert_eq!(refused(update(&case.db, &id)), "changes_workspace_invalid");
+    assert_eq!(case.view(&id), before);
+}
+
+/// A Changes poll reads one lead's branch once for all of its workers' sets: six worker
+/// sets of one lead cost the git runs two do.
+#[test]
+fn a_poll_reads_a_lead_s_tip_once_for_all_of_its_workers() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 3);
+    case.edit("worker.txt", "worker work\n");
+    let mut ids = vec![case.turn(TurnOutcome::Succeeded).unwrap()];
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let open = |agent: usize| {
+        let name = format!("agent-{agent}");
+        let worktree = case.repo.parent().unwrap().join(&name);
+        case.owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "main",
+        ]);
+        let workspace = Workspace {
+            agent: ChangeAgent {
+                kind: AgentKind::Sub,
+                id: agent.to_string(),
+                label: format!("Worker {agent}"),
+            },
+            worktree,
+            git_dir: case.repo.join(".git/worktrees").join(&name),
+            ..case.workspace.clone()
+        };
+        put_under_lead(&case, &workspace, &lead_tip);
+        write(&workspace.worktree.join(format!("{name}.txt")), "notes\n");
+        record_turn_end(&case.db, &workspace, &turn)
+            .unwrap()
+            .expect("the worker's work opens a change set")
+    };
+    let runs = || {
+        case.observe();
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        case.observe();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    ids.push(open(60));
+    let two = runs();
+    ids.extend((61..=64).map(open));
+    assert_eq!(
+        runs(),
+        two,
+        "six worker sets of one lead cost more git runs than two"
+    );
+    for id in &ids {
+        let view = case.view(id);
+        assert_eq!(
+            (view.state, view.files, view.added, view.removed),
+            (ChangeState::Pending, 1, 1, 0)
+        );
+    }
 }
 
 impl Case {
