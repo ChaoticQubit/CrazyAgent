@@ -1857,7 +1857,7 @@ async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
         "t types while the input is focused"
     );
     let shown = render(&mut shell, 120, 24);
-    assert!(shown.contains("start the sync"), "{shown}");
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
     assert!(shown.contains("Ctrl-T Team"), "{shown}");
 
     shell.key(Key::Ctrl('t'));
@@ -1873,7 +1873,13 @@ async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
     shell.key(Key::Esc);
     assert_eq!(shell.place(), conversation);
     let shown = render(&mut shell, 120, 24);
-    assert!(shown.contains("start the sync"), "{shown}");
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
+}
+
+fn cell_reads(shown: &str, text: &str) -> bool {
+    shown
+        .lines()
+        .any(|line| line.split('│').any(|cell| cell.trim() == text))
 }
 
 fn team_shell(project: &ProjectId) -> Shell {
