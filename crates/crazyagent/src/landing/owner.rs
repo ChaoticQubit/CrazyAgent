@@ -643,7 +643,7 @@ pub(super) fn accept_to(
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
     let (reference, tip, target) = landing_target(db, &owner, &repository, target)?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
-    let from = measured_from(&owner, &record.base, &record.head, &tip)?;
+    let from = measured_from(db, &owner, &record, &tip)?;
     let paths = diff::changed_paths(&owner, &from, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -814,7 +814,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
         ),
     };
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
-    let from = measured_from(&owner, &record.base, &record.head, &tip)?;
+    let from = measured_from(db, &owner, &record, &tip)?;
     let paths = diff::changed_paths(&owner, &from, &record.head)?;
     if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
         return Err(failure("changes_git_unsupported"));
@@ -960,21 +960,39 @@ struct Shown {
 
 /// The commit a change set's work is measured from against a branch tip (DEC-107): the
 /// merge base of the tip and the set's head, so work the tip already holds is never shown,
-/// counted or landed again, whatever the set started from; the stored base for a head that
-/// shares no history with the tip. Inputs: the repository, the stored base, the head and
-/// the tip. Output: the commit.
+/// counted or landed again, whatever the set started from. The stored base instead when
+/// the engine's own Accept of an earlier set with that head landed on the tip as a squash
+/// commit git cannot see as a merge base, and that base lies between the merge base and
+/// the head; also for a head that shares no history with the tip. Inputs: the store, the
+/// repository, the change set and the tip. Output: the commit.
 pub(super) fn measured_from(
+    db: &Connection,
     owner: &Repo,
-    base: &str,
-    head: &str,
+    record: &Record,
     tip: &str,
 ) -> Result<String, EngineError> {
-    let output = owner.exec(&["merge-base", tip, head], None, &[], 256)?;
-    match output.code {
-        0 => super::git::object_id(&output.stdout),
-        1 => Ok(base.to_owned()),
-        _ => Err(failure("changes_git_failed")),
+    let output = owner.exec(&["merge-base", tip, &record.head], None, &[], 256)?;
+    let joined = match output.code {
+        0 => super::git::object_id(&output.stdout)?,
+        1 => return Ok(record.base.clone()),
+        _ => return Err(failure("changes_git_failed")),
+    };
+    if joined == record.base {
+        return Ok(joined);
     }
+    let Some(landed) = store::landed_head(db, &record.project, &record.repository, &record.base)?
+    else {
+        return Ok(joined);
+    };
+    let ancestor =
+        |older: &str, newer: &str| owner.test(&["merge-base", "--is-ancestor", older, newer]);
+    if ancestor(&landed, tip)?
+        && ancestor(&joined, &record.base)?
+        && ancestor(&record.base, &record.head)?
+    {
+        return Ok(record.base.clone());
+    }
+    Ok(joined)
 }
 
 /// The tip of the owner's checked-out branch, None while it cannot be read: a detached
@@ -1042,11 +1060,12 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// Judges one open change set whose head commit exists against the owner's branch tip with
 /// engine git only, reading and writing objects but never a work tree: landed when the tip
 /// holds its head or merging its work onto the tip changes nothing, else the remainder a
-/// clean merge adds. An empty change, a conflicting merge or a configured filter or merge
-/// driver leaves the whole change shown, measured from the merge base of the tip and its
-/// head (DEC-107). Inputs: the owner repository, the change set and the tip. Output: the
-/// judgement.
-fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
+/// clean merge adds. A set whose work starts at the tip, so that merge is a fast-forward,
+/// shows its whole change without a merge, the same range a stored change shows. An empty
+/// change, a conflicting merge or a configured filter or merge driver leaves the whole
+/// change shown, measured as [`measured_from`] says (DEC-107). Inputs: the store, the
+/// owner repository, the change set and the tip. Output: the judgement.
+fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
     let whole = |from: &str| -> Result<Judged, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
         Ok(Judged::Open(Shown {
@@ -1060,7 +1079,13 @@ fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError
     if owner.test(&["merge-base", "--is-ancestor", &record.head, tip])? {
         return Ok(Judged::Landed);
     }
-    let from = measured_from(owner, &record.base, &record.head, tip)?;
+    let from = measured_from(db, owner, record, tip)?;
+    if from == tip {
+        if owner.tree_of(tip)? == owner.tree_of(&record.head)? {
+            return Ok(Judged::Landed);
+        }
+        return whole(&from);
+    }
     let paths = diff::changed_paths(owner, &from, &record.head)?;
     if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from);
@@ -1083,9 +1108,10 @@ fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError
 /// Judges a change set: removed when its head commit is gone, else the judgement made for
 /// the same repository, base, head and tip when one is kept. A head the repository's one
 /// batch check found is not checked again; any other head is checked on its own. Inputs:
-/// the owner repository, the change set, the tip and the heads found. Output: the
-/// judgement.
+/// the store, the owner repository, the change set, the tip and the heads found. Output:
+/// the judgement.
 fn judged(
+    db: &Connection,
     owner: &Repo,
     record: &Record,
     tip: &str,
@@ -1111,7 +1137,7 @@ fn judged(
     if let Some(shown) = kept {
         return Ok(Judged::Open(shown));
     }
-    let found = judge(owner, record, tip)?;
+    let found = judge(db, owner, record, tip)?;
     if let Judged::Open(shown) = &found {
         let mut recent = JUDGED.lock().unwrap_or_else(PoisonError::into_inner);
         recent.retain(|(seen, _)| *seen != key);
@@ -1186,7 +1212,7 @@ fn observe_one(
         }
         (Against::Owner, None) | (Against::Lead(None), _) => return Ok(None),
     };
-    match judged(owner, &record, tip, present)? {
+    match judged(db, owner, &record, tip, present)? {
         Judged::Removed => {
             close_removed(db, &mut record)?;
             Ok(None)

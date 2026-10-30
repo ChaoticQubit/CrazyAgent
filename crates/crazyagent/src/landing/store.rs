@@ -482,6 +482,32 @@ pub(super) fn find(db: &Connection, id: &ChangeSetId) -> Result<Option<Record>, 
     .map_err(storage)
 }
 
+/// Reads the commit the engine landed for the newest accepted change set of a project's
+/// repository whose head is the given commit, so a later set starting there is known to
+/// start from work already landed. Inputs: the store, the project, the repository and the
+/// head. Output: the landed commit, None when no accepted set has that head.
+pub(super) fn landed_head(
+    db: &Connection,
+    project: &ProjectId,
+    repository: &std::path::Path,
+    head: &str,
+) -> Result<Option<String>, EngineError> {
+    let landed: Option<Option<String>> = db
+        .query_row(
+            "SELECT landed FROM landing_change_sets WHERE project=?1 AND repository=?2 \
+             AND head=?3 AND state='accepted' AND landed IS NOT NULL \
+             ORDER BY updated_ms DESC LIMIT 1",
+            params![project.as_str(), path_text(repository)?, head],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match landed.flatten() {
+        Some(landed) if !super::git::is_object_id(&landed) => Err(failure("changes_unavailable")),
+        landed => Ok(landed),
+    }
+}
+
 /// Reads the open change set of one worktree. Inputs: the store and the worktree path.
 /// Output: the record, or None when nothing is open there.
 pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>, EngineError> {

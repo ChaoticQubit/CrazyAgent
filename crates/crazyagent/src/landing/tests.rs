@@ -1821,15 +1821,19 @@ fn the_worktree_start_moves_to_where_accept_or_discard_leaves_the_worktree() {
     }
 }
 
+/// A worktree with no recorded start opens its set above the head it had, and the set is
+/// measured against the owner's branch (DEC-107 rule 1), so the agent's earlier commit the
+/// owner's branch lacks is counted with the new file.
 #[test]
 fn a_worktree_with_no_recorded_start_keeps_opening_above_its_head() {
     let case = Case::new();
     case.edit("A", "a\n");
-    case.agent_commit("Add A");
+    let first = case.agent_commit("Add A");
     assert_eq!(case.turn(TurnOutcome::Succeeded), None);
     case.edit("B", "b\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    assert_eq!(case.view(&id).files, 1);
+    let view = case.view(&id);
+    assert_eq!((view.base.as_str(), view.files), (first.as_str(), 2));
 }
 
 #[test]
@@ -2401,20 +2405,20 @@ fn an_agent_head_naming_another_branch_is_refused_and_moves_no_branch() {
     std::fs::write(&head_file, &detached).unwrap();
     std::fs::remove_file(case.workspace.worktree.join("evil.txt")).unwrap();
     assert_eq!(case.agent_head(), head);
-    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
+    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-2"]);
     case.edit("lease.txt", "lease\n");
     assert_eq!(
         refused(record_turn_end(&case.db, &case.workspace, &turn)),
         "changes_workspace_invalid",
-        "a sub-agent worktree must stay detached"
+        "a sub-agent worktree must stay detached or on its own branch"
     );
-    let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"]);
+    let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"]);
     assert_eq!(named.trim(), head);
     assert_eq!(case.view(&id).head, head);
     assert_eq!(case.tip(), tip, "a lease turn end moved the owner's branch");
     assert_eq!(
         std::fs::read_to_string(&head_file).unwrap(),
-        "ref: refs/heads/crazyagent/agent-1\n"
+        "ref: refs/heads/crazyagent/agent-2\n"
     );
 }
 

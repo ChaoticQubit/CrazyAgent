@@ -601,8 +601,8 @@ fn plain_log(git_dir: &Path, reference: &str) -> Result<(), EngineError> {
 }
 
 /// Opens a linked agent worktree for engine work through the git folder the engine
-/// computed, with the HEAD shape its kind requires: detached for a sub-agent, the lease
-/// branch of its worktree for the master. An agent's own clone is never opened: its
+/// computed, with the HEAD shape its kind requires: detached or on its own branch
+/// ([`agent_branch`]) for a sub-agent, the lease branch of its worktree for the master. An agent's own clone is never opened: its
 /// config is the agent's, so the engine runs no git there but the fetch in
 /// [`clone::fetch`]. Inputs: the store, the kind and the three paths. Output: the agent,
 /// or `changes_workspace_invalid`, also for a clone.
@@ -1651,7 +1651,7 @@ pub(super) fn record(
     record.turn = turn_id;
     record.head = current.clone();
     let from = match &tip {
-        Some(tip) => super::owner::measured_from(&shared, &record.base, &record.head, tip)?,
+        Some(tip) => super::owner::measured_from(db, &shared, &record, tip)?,
         None => record.base.clone(),
     };
     check_new_folders(
