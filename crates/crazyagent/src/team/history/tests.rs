@@ -5,6 +5,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 const PROJECT: &str = "history-project";
 
+const OTHER: &str = "other-project";
+
 struct Fixture {
     _root: tempfile::TempDir,
     agents: PathBuf,
@@ -43,11 +45,17 @@ impl Fixture {
     }
 
     fn agent(&self, harness: &str) -> (i64, PathBuf) {
+        self.agent_of(PROJECT, harness)
+    }
+
+    /// Records a sub-agent of a project with its home in the engine's one agents folder.
+    /// Inputs: the project and the harness. Output: the agent id and its home.
+    fn agent_of(&self, project: &str, harness: &str) -> (i64, PathBuf) {
         self.db
             .execute(
                 "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
                  VALUES (?1,'sub',?2,1,'idle',1,1)",
-                params![PROJECT, harness],
+                params![project, harness],
             )
             .unwrap();
         let id = self.db.last_insert_rowid();
@@ -57,18 +65,33 @@ impl Fixture {
     }
 
     fn turn(&self, session: &str, ordinal: i64, owner: &str, reply: &str, active_ms: i64) {
+        self.turn_of(PROJECT, session, ordinal, owner, reply, active_ms);
+    }
+
+    /// Records one finished engine turn of a project's master session: the owner's message
+    /// and the master's reply, with the session's last activity. Inputs: the project, the
+    /// session, the turn's ordinal, both texts and the activity time.
+    fn turn_of(
+        &self,
+        project: &str,
+        session: &str,
+        ordinal: i64,
+        owner: &str,
+        reply: &str,
+        active_ms: i64,
+    ) {
         self.db
             .execute(
                 "INSERT OR IGNORE INTO master_sessions(id,project,created,version,phase,body)
                  VALUES (?1,?2,?3,?3,'parked','{}')",
-                params![session, PROJECT, active_ms],
+                params![session, project, active_ms],
             )
             .unwrap();
         let input = active_ms + ordinal;
         self.db
             .execute(
                 "INSERT INTO conversation_entries(event_cursor,project,kind,text) VALUES (?1,?2,'message',?3)",
-                params![input, PROJECT, owner],
+                params![input, project, owner],
             )
             .unwrap();
         self.db
@@ -92,10 +115,16 @@ impl Fixture {
     }
 
     fn team_message(&self, author: &str, text: &str, at_ms: i64) {
+        self.team_message_of(PROJECT, author, text, at_ms);
+    }
+
+    /// Records one read team message of a project. Inputs: the project, the author, the
+    /// text and the time.
+    fn team_message_of(&self, project: &str, author: &str, text: &str, at_ms: i64) {
         self.db
             .execute(
                 "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES (?1,?2,?3,'read',?4)",
-                params![PROJECT, author, text, at_ms],
+                params![project, author, text, at_ms],
             )
             .unwrap();
     }
@@ -140,6 +169,83 @@ fn record(path: &Path, lines: &[String]) {
 
 fn hit_lines(text: &str) -> Vec<&str> {
     text.lines().filter(|line| line.starts_with("- ")).collect()
+}
+
+/// Reads the conversation ids of a `sessions("")` listing, in its order.
+fn listed_ids(text: &str) -> Vec<&str> {
+    hit_lines(text)
+        .iter()
+        .map(|line| line[2..].split(' ').next().unwrap())
+        .collect()
+}
+
+/// S1, project scope: another project's master session, with a turn holding the search
+/// word, is never listed, found or read from this project; its id reads as not found.
+#[test]
+fn another_projects_master_session_is_never_listed_found_or_read() {
+    let fixture = Fixture::new();
+    fixture.turn("mine", 1, "Plan the page", "Planned", 1_000);
+    fixture.turn_of(
+        OTHER,
+        "theirs",
+        1,
+        "The okapi plan",
+        "The okapi plan is ready",
+        2_000,
+    );
+    let listed = fixture.sessions("");
+    assert_eq!(listed_ids(&listed), ["session/mine"], "{listed}");
+    let found = fixture.sessions("okapi");
+    assert!(hit_lines(&found).is_empty(), "{found}");
+    assert_eq!(
+        fixture.session("session/theirs", 0),
+        (NOT_FOUND.to_owned(), true)
+    );
+}
+
+/// S1, project scope: another project's team messages never join this project's team
+/// conversation, in a search or a read of it.
+#[test]
+fn another_projects_team_messages_are_never_found_or_read() {
+    let fixture = Fixture::new();
+    fixture.team_message("engine", "Worker found a bug", 1_000);
+    fixture.team_message_of(OTHER, "engine", "The okapi plan is ready", 2_000);
+    let found = fixture.sessions("okapi");
+    assert!(hit_lines(&found).is_empty(), "{found}");
+    let (page, error) = fixture.session("team", 0);
+    assert!(!error, "{page}");
+    assert!(page.contains("Worker found a bug"), "{page}");
+    assert!(!page.contains("okapi"), "{page}");
+}
+
+/// S1, project scope: another project's team agent record, in the same engine agents
+/// folder and holding the search word, is never listed, found or read from this project;
+/// its id reads as not found.
+#[test]
+fn another_projects_agent_records_are_never_listed_found_or_read() {
+    let fixture = Fixture::new();
+    let (mine, home) = fixture.agent("claude-code");
+    record(
+        &home.join("projects").join("p").join("mine.jsonl"),
+        &[claude("user", "Plan the page")],
+    );
+    let (theirs, their_home) = fixture.agent_of(OTHER, "claude-code");
+    record(
+        &their_home.join("projects").join("p").join("theirs.jsonl"),
+        &[claude("user", "The okapi plan")],
+    );
+    let listed = fixture.sessions("");
+    assert_eq!(
+        listed_ids(&listed),
+        [format!("agent-{mine}/mine")],
+        "{listed}"
+    );
+    let found = fixture.sessions("okapi");
+    assert!(hit_lines(&found).is_empty(), "{found}");
+    assert_eq!(
+        fixture.session(&format!("agent-{theirs}/theirs"), 0),
+        (NOT_FOUND.to_owned(), true)
+    );
 }
 
 /// S1: a search finds every word in one message of a master session's engine turns, the
