@@ -10,7 +10,7 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, agent, channel_message, plain_code, request_valid,
+    Terminals, VIEWERS_MAX, agent, channel_message, pane, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -83,6 +83,29 @@ fn terminal_names_from_the_window_are_checked_before_use() {
             agent(bad).unwrap_err().code,
             "terminal_agent_invalid",
             "{bad}"
+        );
+    }
+}
+
+#[test]
+fn teammate_pane_ids_from_the_window_are_checked_before_the_engine_sees_them() {
+    assert_eq!(pane("%12").unwrap(), "%12");
+    for bad in [
+        "%x",
+        "",
+        "12",
+        "%",
+        "%-1",
+        "% 1",
+        "%1\n",
+        "%1;kill",
+        "..%1",
+        &format!("%{}", "9".repeat(40)),
+    ] {
+        assert_eq!(
+            pane(bad).unwrap_err().code,
+            "terminal_pane_invalid",
+            "{bad:?}"
         );
     }
 }

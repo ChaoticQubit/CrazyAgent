@@ -3484,3 +3484,241 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         "a stopped teammate never comes back as Idle"
     );
 }
+
+fn graph_project(connection: &Connection, project: &str) -> StoredSetup {
+    let setup = stored(
+        project,
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 3,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    setup
+}
+
+fn graph_agent(
+    connection: &Connection,
+    project: &ProjectId,
+    role: &str,
+    status: &str,
+    parent: Option<i64>,
+) -> i64 {
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,turns,parent)
+             VALUES (?1,?2,'codex',0,'local-a',?3,?4,?4,1,?5)",
+            params![project.as_str(), role, status, now_ms(), parent],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
+fn owner_note(connection: &Connection, project: &ProjectId, to: i64, body: &str) -> i64 {
+    crate::coord::send(
+        connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Owner,
+            to: crate::coord::Party::Agent(to),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: body.into(),
+            idempotency_key: None,
+        },
+        now_ms(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_owner_graph_reads_its_tree_presence_unread_messages_and_overlaps_from_the_engine_db() {
+    let (_directory, connection) = database();
+    let setup = graph_project(&connection, "team-graph");
+    let project = setup.project_id.clone();
+    let now = now_ms();
+    graph_agent(&connection, &project, "master", "idle", None);
+    let lead = graph_agent(&connection, &project, "sub", "working", None);
+    let worker = graph_agent(&connection, &project, "sub", "working", Some(lead));
+    let other = graph_agent(&connection, &project, "sub", "working", None);
+    owner_note(&connection, &project, worker, "Check the login page");
+    let read = owner_note(&connection, &project, lead, "Thanks");
+    crate::coord::mark(&connection, read, crate::coord::Receipt::Read, now).unwrap();
+    crate::coord::touch(&connection, lead, now).unwrap();
+    crate::coord::start_work(
+        &connection,
+        &project,
+        lead,
+        "Login form".into(),
+        vec!["src/login.rs".into()],
+        now,
+    )
+    .unwrap();
+    let (_, shared) = crate::coord::start_work(
+        &connection,
+        &project,
+        worker,
+        "Login tests".into(),
+        vec!["src/login.rs".into()],
+        now,
+    )
+    .unwrap();
+    assert!(
+        shared.is_empty(),
+        "a lead and its own worker share their scope, never an overlap: {shared:?}"
+    );
+    let (_, overlaps) = crate::coord::start_work(
+        &connection,
+        &project,
+        other,
+        "Login styles".into(),
+        vec!["src/login.rs".into()],
+        now,
+    )
+    .unwrap();
+    assert_eq!(
+        overlaps.len(),
+        2,
+        "an unrelated agent claiming src/login.rs overlaps the lead and its worker"
+    );
+
+    let graph = owner_graph(&connection, &setup).unwrap();
+    let lead_node = format!("team-{lead}");
+    let worker_node = format!("team-{worker}");
+    let other_node = format!("team-{other}");
+    let tree: Vec<(&str, NodeKind, Option<&str>)> = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.kind, node.parent.as_deref()))
+        .collect();
+    assert_eq!(
+        tree,
+        [
+            ("master", NodeKind::Master, None),
+            (lead_node.as_str(), NodeKind::Lead, Some("master")),
+            (
+                worker_node.as_str(),
+                NodeKind::Sub,
+                Some(lead_node.as_str())
+            ),
+            (other_node.as_str(), NodeKind::Lead, Some("master")),
+        ],
+        "the master leads both leads, the first lead its worker"
+    );
+    let lead_row = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == lead_node)
+        .unwrap();
+    assert_eq!(lead_row.presence, Some(crate::coord::Presence::Live));
+    assert_eq!(lead_row.agent, Some(lead));
+    assert_eq!(
+        graph.messages,
+        [MessageEdge {
+            from: graph::OWNER_PARTY.into(),
+            to: worker_node.clone(),
+            unread: 1,
+            receipt: crate::coord::Receipt::Sent,
+        }],
+        "only the unread message is an edge"
+    );
+    let ends: BTreeSet<BTreeSet<&str>> = graph
+        .overlaps
+        .iter()
+        .map(|overlap| BTreeSet::from([overlap.from.as_str(), overlap.to.as_str()]))
+        .collect();
+    assert_eq!(
+        ends,
+        BTreeSet::from([
+            BTreeSet::from([lead_node.as_str(), other_node.as_str()]),
+            BTreeSet::from([worker_node.as_str(), other_node.as_str()]),
+        ]),
+        "red lines join the unrelated agents only: {:?}",
+        graph.overlaps
+    );
+    assert_eq!(
+        graph.overlaps.len(),
+        2,
+        "each pair once: {:?}",
+        graph.overlaps
+    );
+    for overlap in &graph.overlaps {
+        assert_eq!(overlap.count, 1, "{overlap:?}");
+        assert!(!overlap.stale, "{overlap:?}");
+    }
+}
+
+#[test]
+fn the_owner_messages_one_agent_through_the_coordination_layer_and_bad_text_is_refused() {
+    let (_directory, mut connection) = database();
+    let setup = graph_project(&connection, "team-message");
+    let project = setup.project_id.clone();
+    let lead = graph_agent(&connection, &project, "sub", "working", None);
+    let pool = access("team-message", &["local-a"]);
+    let message = |agent: i64, text: String| TeamAction::MessageAgent {
+        project_id: project.clone(),
+        agent,
+        text,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &message(lead, "Look at the login page".into())).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &message(lead + 99, "Anyone there?".into())).unwrap(),
+        Outcome::Rejected {
+            code: "coord_agent_unknown".into()
+        }
+    );
+    for text in [
+        "x".repeat(crate::coord::BODY_BYTES_MAX + 1),
+        "Stop\u{7} now".into(),
+        "  \n ".into(),
+    ] {
+        let action = message(lead, text);
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "team_agent_message_invalid"
+        );
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap_err().0,
+            "team_agent_message_invalid"
+        );
+    }
+    assert_eq!(
+        message(0, "Hello".into()).validate().unwrap_err().0,
+        "team_agent_message_invalid"
+    );
+    assert!(
+        message(lead, "x".repeat(crate::coord::BODY_BYTES_MAX))
+            .validate()
+            .is_ok()
+    );
+    tx.commit().unwrap();
+
+    let snapshot = crate::coord::snapshot(&connection, &project, now_ms()).unwrap();
+    assert_eq!(
+        snapshot.unread_edges,
+        [(
+            crate::coord::Party::Owner,
+            crate::coord::Party::Agent(lead),
+            1,
+            crate::coord::Receipt::Sent
+        )]
+    );
+    let graph = owner_graph(&connection, &setup).unwrap();
+    assert_eq!(graph.messages.len(), 1);
+    assert_eq!(graph.messages[0].to, format!("team-{lead}"));
+}

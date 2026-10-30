@@ -5951,3 +5951,98 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         "a teammate whose pane ended stops"
     );
 }
+
+#[test]
+fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let setup = StoredSetup {
+        project_id: project.clone(),
+        name: "Panes".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![HarnessSlot {
+                harness: "claude-code".into(),
+                agents: 1,
+                tools: true,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        },
+        documents: vec![],
+        folder: directory.path().to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1)",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (?1,?2,'%7',1)",
+            params![lead, PROJECT],
+        )
+        .unwrap();
+    let home = directory.path().join("home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(
+        team.join("config.json"),
+        r#"{"members":[{"name":"team-lead","tmuxPaneId":"leader"},{"name":"greet","tmuxPaneId":"%7"}]}"#,
+    )
+    .unwrap();
+
+    let before = crate::team::owner_graph(&connection, &setup).unwrap();
+    let pane_node = format!("teammate-{lead}-7");
+    assert!(
+        before.nodes.iter().any(|node| node.id == pane_node),
+        "before the row exists the pane shows as its lead's teammate pane: {:#?}",
+        before.nodes
+    );
+
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    let mate: i64 = connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE role='teammate' AND parent=?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let graph = crate::team::owner_graph(&connection, &setup).unwrap();
+    let teammates: Vec<&crate::team::GraphNode> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == crate::team::NodeKind::Teammate)
+        .collect();
+    assert_eq!(teammates.len(), 1, "{:#?}", graph.nodes);
+    let row = teammates[0];
+    assert_eq!(row.id, format!("team-{mate}"));
+    assert_eq!(row.agent, Some(mate));
+    assert_eq!(row.pane.as_deref(), Some("%7"));
+    assert_eq!(row.parent, Some(format!("team-{lead}")));
+    assert!(
+        graph.nodes.iter().all(|node| node.id != pane_node),
+        "the adopted pane shows once, as its row"
+    );
+}
