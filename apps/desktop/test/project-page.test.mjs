@@ -169,7 +169,11 @@ test("a master turn names its account, and a turn no account could run names eac
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
-  const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  const { SessionContext, useSession } = await import("../src/state.ts");
+  function InApp() {
+    return createElement(SessionContext.Provider, { value: useSession() }, createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  }
+  const markup = renderToStaticMarkup(createElement(InApp));
   assert.match(markup, /role="tablist"/);
   for (const tab of ["Overview", "Conversation", "Agents", "Changes", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
   assert.match(markup, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true" tabindex="0"><svg[\s\S]*?<\/svg>Overview</);
