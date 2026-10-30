@@ -966,7 +966,8 @@ enum Judged {
 }
 
 /// The change set judgements made for a repository, base, head and tip, newest last, so a
-/// Changes read whose owner branch and change set did not move runs no git for it.
+/// Changes read whose owner branch and change set did not move runs only its head commit
+/// check.
 type JudgedKey = (PathBuf, String, String, String);
 static JUDGED: Mutex<VecDeque<(JudgedKey, Shown)>> = Mutex::new(VecDeque::new());
 
@@ -985,17 +986,14 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
     Ok(false)
 }
 
-/// Judges one open change set against the owner's branch tip with engine git only, reading
-/// and writing objects but never a work tree: removed when its head commit is gone, landed
-/// when the tip holds its head or merging its work onto the tip changes nothing, else the
-/// remainder a clean merge adds. An empty change, a conflicting merge or a configured
-/// filter or merge driver leaves the whole change shown, measured from the merge base of
-/// the tip and its head (DEC-107). Inputs: the owner repository, the change set and the
-/// tip. Output: the judgement.
+/// Judges one open change set whose head commit exists against the owner's branch tip with
+/// engine git only, reading and writing objects but never a work tree: landed when the tip
+/// holds its head or merging its work onto the tip changes nothing, else the remainder a
+/// clean merge adds. An empty change, a conflicting merge or a configured filter or merge
+/// driver leaves the whole change shown, measured from the merge base of the tip and its
+/// head (DEC-107). Inputs: the owner repository, the change set and the tip. Output: the
+/// judgement.
 fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
-    if owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str()) {
-        return Ok(Judged::Removed);
-    }
     let whole = |from: &str| -> Result<Judged, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
         Ok(Judged::Open(Shown {
@@ -1029,9 +1027,13 @@ fn judge(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError
     }))
 }
 
-/// Judges a change set, reusing the judgement made for the same repository, base, head and
-/// tip. Inputs: the owner repository, the change set and the tip. Output: the judgement.
+/// Judges a change set: removed when its head commit is gone, else the judgement made for
+/// the same repository, base, head and tip when one is kept. Inputs: the owner repository,
+/// the change set and the tip. Output: the judgement.
 fn judged(owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
+    if owner.commit_of(&record.head)?.as_deref() != Some(record.head.as_str()) {
+        return Ok(Judged::Removed);
+    }
     let key = (
         record.repository.clone(),
         record.base.clone(),
