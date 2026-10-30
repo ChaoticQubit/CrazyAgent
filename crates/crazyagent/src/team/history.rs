@@ -733,23 +733,14 @@ fn team_last(connection: &Connection, project: &ProjectId) -> rusqlite::Result<O
     )
 }
 
-/// Reads the team's messages and engine notes of a project, with what the master and the
-/// owner sent each sub-agent, oldest first.
+/// Reads the team's messages and engine notes of a project, oldest first.
 fn team_messages(
     connection: &Connection,
     project: &ProjectId,
 ) -> rusqlite::Result<Vec<(String, String)>> {
-    let sent = if table_exists(connection, "team_agent_messages")? {
-        format!(
-            " UNION ALL SELECT author||' to agent-'||agent, text, created_ms, id FROM team_agent_messages
-              WHERE project=?1 AND text IS NOT NULL AND length(CAST(text AS BLOB))<={ROW_TEXT_BYTES_MAX}"
-        )
-    } else {
-        String::new()
-    };
     let mut statement = connection.prepare(&format!(
         "SELECT author, text, created_ms, id FROM team_messages
-         WHERE project=?1 AND text IS NOT NULL AND length(CAST(text AS BLOB))<={ROW_TEXT_BYTES_MAX}{sent}
+         WHERE project=?1 AND text IS NOT NULL AND length(CAST(text AS BLOB))<={ROW_TEXT_BYTES_MAX}
          ORDER BY 3, 4 LIMIT {ROWS_MAX}"
     ))?;
     let rows = statement.query_map([project.as_str()], |row| {
