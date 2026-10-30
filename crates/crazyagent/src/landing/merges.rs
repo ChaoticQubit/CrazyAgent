@@ -21,10 +21,12 @@ const UNCOVERED_BYTES_MAX: usize = ID_FIELD_BYTES_MAX;
 /// rule 2), which the agent git wrapper alone cannot stop, since an agent can run git by
 /// its full path. A merge passes when every parent after its first is already in the
 /// owner's current branch, as the engine's own update merges are, or in the commit the
-/// agent's worktree starts from, or, for a lead, in the tip of one of its own workers.
-/// The caller holds the repository hold, so nothing here takes it. Inputs: the store, the
-/// workspace, the owner repository and the agent's head. Output: Ok, else
-/// `changes_outside_merge`, `changes_too_large` or a plain git or store code.
+/// agent's worktree starts from, or in the head of the agent's open change set, which the
+/// engine recorded at an earlier turn end or made itself as the update merge it hands the
+/// agent, or, for a lead, in the tip of one of its own workers. The caller holds the
+/// repository hold, so nothing here takes it. Inputs: the store, the workspace, the owner
+/// repository and the agent's head. Output: Ok, else `changes_outside_merge`,
+/// `changes_too_large` or a plain git or store code.
 pub(super) fn refuse_outside_merges(
     db: &Connection,
     workspace: &Workspace,
@@ -41,6 +43,11 @@ pub(super) fn refuse_outside_merges(
         && shared.commit_of(&start)?.as_deref() == Some(start.as_str())
     {
         known.push(start);
+    }
+    if let Some(open) = store::open_for(db, worktree)?
+        && shared.commit_of(&open.head)?.as_deref() == Some(open.head.as_str())
+    {
+        known.push(open.head);
     }
     let parents = merged_parents(shared, head, &known)?;
     if parents.is_empty() || covered(shared, &parents, &known)? {

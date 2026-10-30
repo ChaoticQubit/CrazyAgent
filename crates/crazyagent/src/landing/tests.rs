@@ -1821,15 +1821,77 @@ fn the_worktree_start_moves_to_where_accept_or_discard_leaves_the_worktree() {
     }
 }
 
+/// A set that starts where an accepted set's head was is measured from that head only
+/// while the owner's branch still holds the commit the engine landed. Once the owner
+/// resets the branch below it, the earlier work counts again, and once gc prunes the
+/// landed commit, a turn end still records the set and counts it from the joined range,
+/// while the set keeps its stored start.
+#[test]
+fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_breaks_no_turn() {
+    let case = Case::new();
+    case.start();
+    let start = case.tip();
+    case.edit("B", "b\n");
+    let reviewed = case.agent_commit("Add B");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.edit("C", "c\n");
+    let newer = case.agent_commit("Add C");
+    let AcceptOutcome::Landed { commit: squash, .. } = case.accept(&second).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["rev-parse", &format!("{squash}^")]).trim(),
+        start
+    );
+    case.owner(&["reset", "-q", "--hard", &start]);
+    let third = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&third);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (reviewed.as_str(), newer.as_str(), 2)
+    );
+    case.owner(&["reflog", "expire", "--expire=now", "--all"]);
+    case.owner(&["gc", "-q", "--prune=now"]);
+    let objects = case.owner(&[
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname)",
+    ]);
+    assert!(!objects.lines().any(|id| id == squash));
+    assert!(objects.lines().any(|id| id == reviewed));
+    case.edit("D", "d\n");
+    let latest = case.agent_commit("Add D");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add D".into(),
+    };
+    let recorded = record_turn_end(&case.db, &case.workspace, &turn);
+    assert_eq!(
+        recorded.as_ref().ok(),
+        Some(&Some(third.clone())),
+        "{recorded:?}"
+    );
+    let view = case.view(&third);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (reviewed.as_str(), latest.as_str(), 3)
+    );
+}
+
+/// A worktree with no recorded start opens its set above the head it had, and the set is
+/// measured against the owner's branch (DEC-107 rule 1), so the agent's earlier commit the
+/// owner's branch lacks is counted with the new file.
 #[test]
 fn a_worktree_with_no_recorded_start_keeps_opening_above_its_head() {
     let case = Case::new();
     case.edit("A", "a\n");
-    case.agent_commit("Add A");
+    let first = case.agent_commit("Add A");
     assert_eq!(case.turn(TurnOutcome::Succeeded), None);
     case.edit("B", "b\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    assert_eq!(case.view(&id).files, 1);
+    let view = case.view(&id);
+    assert_eq!((view.base.as_str(), view.files), (first.as_str(), 2));
 }
 
 #[test]
@@ -2401,20 +2463,20 @@ fn an_agent_head_naming_another_branch_is_refused_and_moves_no_branch() {
     std::fs::write(&head_file, &detached).unwrap();
     std::fs::remove_file(case.workspace.worktree.join("evil.txt")).unwrap();
     assert_eq!(case.agent_head(), head);
-    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
+    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-2"]);
     case.edit("lease.txt", "lease\n");
     assert_eq!(
         refused(record_turn_end(&case.db, &case.workspace, &turn)),
         "changes_workspace_invalid",
-        "a sub-agent worktree must stay detached"
+        "a sub-agent worktree must stay detached or on its own branch"
     );
-    let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"]);
+    let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"]);
     assert_eq!(named.trim(), head);
     assert_eq!(case.view(&id).head, head);
     assert_eq!(case.tip(), tip, "a lease turn end moved the owner's branch");
     assert_eq!(
         std::fs::read_to_string(&head_file).unwrap(),
-        "ref: refs/heads/crazyagent/agent-1\n"
+        "ref: refs/heads/crazyagent/agent-2\n"
     );
 }
 
@@ -3727,6 +3789,35 @@ fn update_merges_a_lead_worker_s_set_with_its_lead_s_branch_and_names_it() {
         "{prompt}"
     );
     assert!(!prompt.contains("owner"), "{prompt}");
+}
+
+/// Update merges a clone lead's worker's set with the lead's clone branch as the engine
+/// fetches it now: the merge's second parent is the lead's newest commit, never the tip
+/// the worker started from, and the merge names the lead's clone branch.
+#[test]
+fn update_merges_a_clone_lead_s_newest_tip_into_its_worker_s_set() {
+    let mut case = Case::new();
+    let (lead, lead_tip) = lead_35(&case, 3, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let worker_head = case.view(&id).head;
+    lead_commit(&case, &lead, &["lead/later.txt".to_owned()]);
+    let later = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_ne!(later, lead_tip);
+    update(&case.db, &id).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%s", &view.head])
+            .trim(),
+        format!(
+            "{worker_head} {later}|Merge the lead's branch agent/agent-35 into this agent's work"
+        )
+    );
+    assert_eq!(view.base, later);
 }
 
 /// A lead's worker whose lead's worktree is no longer recorded keeps its stored change and
