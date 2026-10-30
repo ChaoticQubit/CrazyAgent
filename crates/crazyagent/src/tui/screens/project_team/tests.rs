@@ -1618,3 +1618,36 @@ fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
         "Show keeps finished agents in the list with no pointer"
     );
 }
+
+/// Workflow nudges show Off in the coordination editor of a project with no saved settings,
+/// read from a real engine database, and Space on the row turns them On (DEC-109).
+#[test]
+fn workflow_nudges_show_off_by_default_and_space_turns_them_on() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let coordination = crate::team::coordination(&connection, &project()).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut status = team();
+    status.coordination = Some(coordination.clone());
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let nudges = find(&frame(&view, 120, 40), "Workflow nudges").to_owned();
+    assert!(
+        nudges.contains("Off") && !nudges.contains(" On "),
+        "{nudges}"
+    );
+    for _ in 0..8 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    let mut on = coordination.settings;
+    on.nudges = true;
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Change(TeamAction::CoordSettings {
+            project_id: project(),
+            settings: on,
+        })
+    );
+}

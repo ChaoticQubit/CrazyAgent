@@ -5951,3 +5951,95 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         "a teammate whose pane ended stops"
     );
 }
+
+fn reminders(connection: &Connection) -> Vec<String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT body FROM coord_messages WHERE project=?1 AND from_kind='engine'
+             AND substr(idem_key,1,9)='adoption-' ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([PROJECT], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+fn flagged_agent(fixture: &Fixture) -> i64 {
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET tools=1 WHERE id=?1", [agent])
+        .unwrap();
+    crate::coord::record_tool(&fixture.connection, agent, "Edit", now_ms()).unwrap();
+    let view = crate::coord::adoption::view(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &[],
+        now_ms(),
+    )
+    .unwrap();
+    let flags = &view
+        .agents
+        .iter()
+        .find(|row| row.agent == agent)
+        .unwrap()
+        .flags;
+    assert_eq!(
+        flags,
+        &crate::coord::adoption::Flag::ALL,
+        "the agent edited without declared work and worked ten minutes ungrounded"
+    );
+    agent
+}
+
+/// The owner rejected workflow nudges (DEC-109): a real runtime ticking a project with no
+/// saved coordination settings sends no reminder, though an agent raised both flags.
+#[test]
+fn a_runtime_with_default_settings_sends_no_workflow_reminder() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    flagged_agent(&fixture);
+    for _ in 0..3 {
+        team.tick().unwrap();
+    }
+    assert_eq!(reminders(&fixture.connection), Vec::<String>::new());
+    let view = crate::coord::adoption::view(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &[],
+        now_ms(),
+    )
+    .unwrap();
+    assert!(!view.nudges, "workflow nudges are off by default");
+    assert!(team.shutdown().unwrap().is_empty());
+}
+
+/// Workflow nudges the owner turned on send an agent exactly one reminder per flag it
+/// raised, however often the runtime ticks.
+#[test]
+fn workflow_nudges_the_owner_turned_on_send_one_reminder_per_flag() {
+    let fixture = Fixture::new(1);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            nudges: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut team = fixture.runtime();
+    flagged_agent(&fixture);
+    for _ in 0..3 {
+        team.tick().unwrap();
+    }
+    assert_eq!(
+        reminders(&fixture.connection),
+        crate::coord::adoption::Flag::ALL
+            .map(|flag| flag.reminder().to_owned())
+            .to_vec()
+    );
+    assert!(team.shutdown().unwrap().is_empty());
+}
