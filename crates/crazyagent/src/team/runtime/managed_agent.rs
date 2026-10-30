@@ -1,11 +1,13 @@
-use super::{Grant, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd, per_turn};
+use super::{
+    Adoption, Grant, Managed, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd, per_turn,
+};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
-use crate::harnesses::terminal_session::Resume;
+use crate::harnesses::terminal_session::{PaneRecord, Resume};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::team::{AgentRole, TeamAccount, TeamReach};
@@ -486,6 +488,134 @@ impl ManagedAgent {
             _ => None,
         });
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
+    }
+
+    /// Makes this agent a native-mode lead (DEC-104) that runs in a tmux server of its own,
+    /// as the runtime plans a native lead on a signed-in account. Input: none. Output: none.
+    fn make_native(&mut self) {
+        if self.plan.native {
+            return;
+        }
+        let (host, agent) = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        self.plan.native = true;
+        self.plan.tmux =
+            Some(crate::terminal::tmux::installed(&self.base).expect("tmux must be installed"));
+        self.plan.pane = Some((crate::terminal::own_server(host), agent));
+    }
+
+    /// The first order of a signed-in native lead: a turn carrying the held profile, the
+    /// project context and the saved access level. Inputs: the profile, the prompt and the
+    /// turn's time. Output: the order.
+    fn granted_turn(&self, profile: NativeProfileUse, prompt: &str, turn_time: Duration) -> Order {
+        let project = ProjectId::new(PROJECT).unwrap();
+        let context = self
+            .runtime
+            .context(
+                &project,
+                AGENT,
+                self.role,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
+        Order::Turn(
+            prompt.to_owned(),
+            Some(Box::new(Grant {
+                profile,
+                context,
+                access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            })),
+            Some(turn_time),
+        )
+    }
+
+    /// Runs this agent as a native-mode lead on one kept session the way the runtime runs a
+    /// signed-in native lead: its own tmux server, the first turn carrying the held profile
+    /// and later turns none, then a Stop, leaving the pane running when `leave` is set.
+    /// Inputs: the profile, the prompts, each turn's time and whether the engine leaves the
+    /// pane. Output: every report the lead's worker sent and the problem that ended it.
+    pub(super) fn run_native_lead(
+        &mut self,
+        profile: NativeProfileUse,
+        prompts: &[&str],
+        turn_time: Duration,
+        leave: bool,
+    ) -> (Vec<Report>, Option<String>) {
+        assert!(!prompts.is_empty());
+        self.make_native();
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders
+            .send(self.granted_turn(profile, prompts[0], turn_time))
+            .unwrap();
+        for prompt in &prompts[1..] {
+            orders
+                .send(Order::Turn((*prompt).to_owned(), None, Some(turn_time)))
+                .unwrap();
+        }
+        orders.send(Order::Stop).unwrap();
+        let problem = super::native_session(
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(leave),
+        );
+        drop(reports);
+        (reported.iter().collect(), problem)
+    }
+
+    /// Takes over the native lead a run with `leave` set left in its pane, as the next engine
+    /// adopts it as Managed: the first turn carries a fresh held profile, whose credential is
+    /// handed to the lead's home again, then a Stop. Inputs: the lead's pane record, the
+    /// profile, the prompt and the turn's time. Output: every report and the ending problem.
+    pub(super) fn adopt_native_lead(
+        &mut self,
+        record: PaneRecord,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+    ) -> (Vec<Report>, Option<String>) {
+        self.make_native();
+        let (host, agent) = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        let adoption = Adoption {
+            host,
+            agent,
+            record,
+            limits: self.plan.limits,
+            live: false,
+            managed: Some(Managed {
+                home: self.home.clone(),
+                executable: self.plan.executable.clone(),
+            }),
+            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        };
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders
+            .send(self.granted_turn(profile, prompt, turn_time))
+            .unwrap();
+        orders.send(Order::Stop).unwrap();
+        let problem = super::native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        drop(reports);
+        (reported.iter().collect(), problem)
     }
 
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
