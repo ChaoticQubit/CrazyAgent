@@ -293,3 +293,25 @@ test("the import prompt lists each found file with its size, a tracked note or w
   assert.doesNotMatch(refused, /Git tracks some/);
   assert.match(prompt([importFile("AGENTS.md")], { failure: "The instruction files couldn't be moved aside." }), /class="notice danger" role="alert">.*The instruction files couldn&#x27;t be moved aside\./s);
 });
+
+test("the move notice names the files, says this or these deletions, offers Leave it only when given and shows a refusal as an alert", () => {
+  const notice = (files, extra = {}) => renderToStaticMarkup(createElement(view.ImportMoveView, {
+    files, busy: false, failure: "", onCommit: never("onCommit"), ...extra,
+  }));
+  const one = notice(["CLAUDE.md"], { onLeave: never("onLeave") });
+  assert.match(one, /Git still shows CLAUDE\.md as deleted, and merges into this branch are refused until the move is committed\./);
+  assert.match(one, /holding only this deletion; it is never pushed\./);
+  assert.match(one, />Leave it</);
+  assert.match(one, />Commit the move</);
+  assert.doesNotMatch(one, /role="alert"/);
+  const two = notice(["CLAUDE.md", ".claude/CLAUDE.md"]);
+  assert.match(two, /Git still shows CLAUDE\.md, \.claude\/CLAUDE\.md as deleted/);
+  assert.match(two, /holding only these deletions;/);
+  assert.doesNotMatch(two, /Leave it/, "the banner offers no Leave it");
+  const refused = notice(["CLAUDE.md"], { failure: client.processMessage({ kind: "error", code: "process_commit_staged", message: "" }) });
+  assert.match(refused, /class="import-move-failure" role="alert">Other files are staged/);
+  for (const code of ["process_commit_staged", "process_commit_none", "process_commit_busy", "process_commit_detached", "process_commit_moved", "process_commit_identity", "process_commit_failed"]) {
+    assert.ok(client.PROCESS_REFUSALS.includes(code), code);
+    assert.doesNotMatch(client.processMessage({ kind: "error", code, message: "" }), /process_/, code);
+  }
+});

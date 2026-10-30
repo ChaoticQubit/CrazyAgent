@@ -3460,3 +3460,63 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         Some(&case.workspace.worktree),
     );
 }
+
+#[test]
+fn an_instruction_import_move_blocks_accept_until_the_owner_commits_it() {
+    let case = Case::new();
+    case.owner_commit("CLAUDE.md", "Owner rule\n", "Add the owner's rules");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let moved = crate::instruction_files::import(&case.repo).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.refused.is_none()))
+            .collect::<Vec<_>>(),
+        vec![("CLAUDE.md", true, true)]
+    );
+    assert_eq!(
+        crate::instruction_files::uncommitted(&case.repo).unwrap(),
+        vec!["CLAUDE.md".to_owned()]
+    );
+    let before = case.tip();
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    assert_eq!(case.tip(), before, "a refused accept moves no branch");
+
+    let commit = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
+    assert_eq!(
+        (commit.branch.as_str(), commit.files.clone()),
+        ("main", vec!["CLAUDE.md".to_owned()])
+    );
+    assert_eq!(case.tip(), commit.commit);
+    assert!(
+        crate::instruction_files::uncommitted(&case.repo)
+            .unwrap()
+            .is_empty()
+    );
+    let AcceptOutcome::Landed {
+        commit: landed,
+        branch,
+    } = case.accept(&id).unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(branch, "main");
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &landed]).trim(),
+        commit.commit,
+        "the change set lands on top of the move's commit"
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &landed]),
+        "README\nsrc/new.rs\n"
+    );
+    assert_eq!(
+        case.owner(&["status", "--porcelain", "--untracked-files=no"]),
+        ""
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join(".crazyagent/imported/CLAUDE.md")).unwrap(),
+        "Owner rule\n"
+    );
+}
