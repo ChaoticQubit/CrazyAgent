@@ -1281,9 +1281,9 @@ async fn a_new_session_on_a_live_master_turns_the_switch_on() {
     );
 }
 
-/// A new session asked for while no session is in view opens the master, and once the
-/// engine confirms that open the live switch turns on, as it does for a new session of a
-/// master that already had one.
+/// A new session asked for while no session is in view turns the live switch on at once,
+/// since there is no earlier session the live master could start on, and the engine takes
+/// the change.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
     let mut engine = Engine::start().await;
@@ -1326,14 +1326,6 @@ async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
         sent.extend(pump(&mut shell, &mut connection).await);
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    let open = sent.iter().position(|label| *label == "master");
-    let change = sent.iter().position(|label| *label == "team change");
-    assert!(
-        open.is_some() && open < change,
-        "the switch turns on after the master opens: {sent:?}"
-    );
-    let (opened, _) = latest_master(&mut engine, &notes).await;
-    assert!(opened.is_some(), "the new session opened the master");
     let after = engine.controller.team_status(notes.clone()).await.unwrap();
     assert!(
         after.live_master.is_some(),

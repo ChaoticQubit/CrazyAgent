@@ -200,7 +200,6 @@ pub(in crate::tui) struct ProjectPage {
     covered: bool,
     from_master: bool,
     reopen_master: bool,
-    live_on_new: bool,
     import: Option<Vec<ImportFile>>,
     import_asked: bool,
     import_sent: Option<ProcessQuery>,
@@ -263,7 +262,6 @@ impl ProjectPage {
             covered: false,
             from_master: false,
             reopen_master: false,
-            live_on_new: false,
             import: None,
             import_asked: false,
             import_sent: None,
@@ -790,10 +788,9 @@ impl ProjectPage {
 
     /// Carries on after the engine confirmed a master request: an opened master takes the
     /// waiting message, a conversation ended for a renewal opens a new one, a session
-    /// switch the owner started from the live master view opens that view again, and the
-    /// new session the owner asked for on a master that runs live (a NewSession, or the
-    /// Open it becomes when no session is in view) turns the live switch on, so the live
-    /// master starts on the fresh session. Takes the confirmed action and the context.
+    /// switch the owner started from the live master view opens that view again, and a new
+    /// session of a master that runs live turns the live switch on, so the live master
+    /// starts on the fresh session. Takes the confirmed action and the context.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
             MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. } => {
@@ -802,15 +799,12 @@ impl ProjectPage {
                     self.reopen_master = true;
                 }
                 if matches!(action, MasterOwnerAction::NewSession { .. })
-                    && std::mem::take(&mut self.live_on_new)
+                    && self.screen.live_master()
                 {
                     self.turn_live_on(ctx);
                 }
             }
             MasterOwnerAction::Open { .. } => {
-                if std::mem::take(&mut self.live_on_new) {
-                    self.turn_live_on(ctx);
-                }
                 let Some(waiting) = self.waiting.take() else {
                     return;
                 };
@@ -834,9 +828,8 @@ impl ProjectPage {
         }
     }
 
-    /// Turns the project's live master switch on, as the engine's confirmation of a new
-    /// session the owner asked for does. Takes the context; the change goes out with a
-    /// fresh generation.
+    /// Turns the project's live master switch on, for a new session the owner asked for.
+    /// Takes the context; the change goes out with a fresh generation.
     fn turn_live_on(&self, ctx: &mut Ctx) {
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
@@ -1192,10 +1185,17 @@ impl ProjectPage {
                 Flow::Handled
             }
             ProjectReply::Session(action) => {
+                let in_view = self
+                    .master
+                    .transcript()
+                    .is_some_and(|(session, _, _)| session.is_some());
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
-                } else if matches!(action, super::sessions::SessionsAction::New { .. }) {
-                    self.live_on_new = self.screen.live_master();
+                } else if matches!(action, super::sessions::SessionsAction::New { .. })
+                    && !in_view
+                    && self.screen.live_master()
+                {
+                    self.turn_live_on(ctx);
                 }
                 Flow::Handled
             }
