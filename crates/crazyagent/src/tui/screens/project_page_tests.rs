@@ -2100,11 +2100,11 @@ async fn the_team_settings_and_questions_do_not_take_each_others_keys() {
     assert!(!shown.contains("Team settings"), "{shown}");
 
     shell.key(Key::Enter);
-    for character in "use 4000 so".chars() {
+    for character in "use 4000 so?[]".chars() {
         shell.key(Key::Char(character));
     }
     assert!(pump(&mut shell, &mut connection).await.is_empty());
     let shown = render(&mut shell, 200, 40);
-    assert!(shown.contains("use 4000 so"), "{shown}");
+    assert!(cell_reads(&shown, "use 4000 so?[]"), "{shown}");
     assert!(!shown.contains("Team settings"), "{shown}");
 }
