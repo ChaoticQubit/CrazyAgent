@@ -2,6 +2,8 @@ use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
 #[cfg(all(test, unix))]
+mod dispatch_identity_tests;
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
 #[cfg(all(test, unix))]
