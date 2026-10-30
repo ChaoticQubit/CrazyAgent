@@ -1859,3 +1859,139 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
 }
+
+fn event_state(connection: &Connection, id: i64) -> String {
+    connection
+        .query_row("SELECT state FROM team_events WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// K2b: a worker's queued events go to its own lead as one engine note keyed `events-<first
+/// id>` and end Delivered; a kind its wake rule mutes ends Muted; the master's wake check
+/// never sees a worker's events, only its leads'.
+#[test]
+fn a_workers_events_reach_its_lead_as_one_note_and_never_wake_the_master() {
+    let fixture = Fixture::new();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let connection = &fixture.connection;
+    let master = fixture.agent(PROJECT, "master", "claude-code", "idle");
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            [lead, worker],
+        )
+        .unwrap();
+    let finished = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Finished,
+        "Wrote page.md",
+        10,
+    )
+    .unwrap()
+    .unwrap();
+    let failed = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Failed,
+        "Tests did not build",
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    let progress = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Progress,
+        "Half way",
+        12,
+    )
+    .unwrap()
+    .unwrap();
+
+    let tx = immediate(connection).unwrap();
+    assert_eq!(due(&tx, &project(), 13).unwrap(), None);
+    drop(tx);
+
+    forward_to_parents(connection, &project(), 14).unwrap();
+    assert_eq!(event_state(connection, finished), "delivered");
+    assert_eq!(event_state(connection, failed), "delivered");
+    assert_eq!(event_state(connection, progress), "muted");
+    let notes = crate::coord::pending(connection, lead, crate::coord::PENDING_MAX).unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].from, crate::coord::Party::Engine);
+    assert_eq!(notes[0].kind, crate::coord::MessageKind::Note);
+    assert!(notes[0].body.contains("Wrote page.md"), "{}", notes[0].body);
+    assert!(
+        notes[0].body.contains("Tests did not build"),
+        "{}",
+        notes[0].body
+    );
+    let key: String = connection
+        .query_row(
+            "SELECT idem_key FROM coord_messages WHERE id=?1",
+            [notes[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        key,
+        format!("{}{finished}", crate::coord::delivery::EVENTS_KEY)
+    );
+    assert!(
+        crate::coord::pending(connection, master, crate::coord::PENDING_MAX)
+            .unwrap()
+            .is_empty()
+    );
+
+    let own = record(
+        connection,
+        &project(),
+        lead,
+        None,
+        EventKind::Finished,
+        "Merged both workers",
+        15,
+    )
+    .unwrap()
+    .unwrap();
+    forward_to_parents(connection, &project(), 16).unwrap();
+    assert_eq!(event_state(connection, own), "queued");
+    let tx = immediate(connection).unwrap();
+    let wake = due(&tx, &project(), 17)
+        .unwrap()
+        .expect("the lead's event wakes the master");
+    assert_eq!(wake.events, [own]);
+}
+
+/// K2b: a task a lead handed to its worker ends Carried, since its result reaches the lead,
+/// while a task the owner gave an agent with no lead is queued for the master.
+#[test]
+fn a_task_a_lead_delegated_ends_carried() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let delegated = fixture.task(worker, "lead", "done", Some("Wrote page.md"));
+    connection
+        .execute(
+            "UPDATE team_tasks SET parent=?1 WHERE id=?2",
+            [lead, delegated],
+        )
+        .unwrap();
+    let owned = fixture.task(lead, "owner", "done", Some("Merged"));
+    let carried = task_ended(connection, delegated, 20).unwrap().unwrap();
+    let queued = task_ended(connection, owned, 21).unwrap().unwrap();
+    assert_eq!(event_state(connection, carried), "carried");
+    assert_eq!(event_state(connection, queued), "queued");
+}

@@ -2148,7 +2148,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
     let codex = bin.join("codex");
     std::fs::write(
         &codex,
-        "#!/bin/sh\necho run >> runs.txt\nexec /bin/sleep 300\n",
+        "#!/bin/sh\n[ \"$1\" = app-server ] && exit 0\necho run >> runs.txt\nexec /bin/sleep 300\n",
     )
     .unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -2321,6 +2321,7 @@ fn asking_a_sub_agent_to_update_runs_the_resolve_task_in_its_own_worktree() {
 
 #[cfg(target_os = "macos")]
 const LIVE_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -2493,6 +2494,7 @@ fn a_live_master_that_cannot_start_turns_off_after_one_try() {
 
 #[cfg(target_os = "macos")]
 const LIMITED_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -2645,6 +2647,7 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
 
 #[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 printf '%s\n' "$*" >> "$CODEX_HOME/launches"
@@ -3020,6 +3023,7 @@ fn a_resume_whose_revive_fails_leaves_no_resume_for_the_next_session() {
 
 #[cfg(target_os = "macos")]
 const CRASHING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -3226,6 +3230,7 @@ fn a_live_master_counts_and_lands_every_turn_and_a_restarted_engine_keeps_its_pa
 
 #[cfg(target_os = "macos")]
 const WORKING_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
 /bin/mkdir -p "$d" || exit 1
 f="$d/rollout-2026-10-27T00-00-00-$$.jsonl"
@@ -5949,5 +5954,268 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         row(),
         (mate, "stopped".to_owned()),
         "a teammate whose pane ended stops"
+    );
+}
+
+/// A worker record for an agent that has no session thread, as a per-turn agent between
+/// turns. Takes the project, the role, whether it runs one session per turn and whether
+/// it keeps a native lead's session. Returns the worker, idle and not live.
+fn between_turns(
+    project: &ProjectId,
+    role: AgentRole,
+    managed: bool,
+    kept_session: bool,
+) -> Worker {
+    let (orders, _) = channel();
+    let (_, reports) = channel();
+    Worker {
+        project: project.clone(),
+        role,
+        harness: "codex".into(),
+        connection: reference(ENDPOINT),
+        orders,
+        reports,
+        cancel: Arc::new(AtomicBool::new(false)),
+        leave: Arc::new(AtomicBool::new(false)),
+        busy: None,
+        idle_since: Instant::now(),
+        stopping: false,
+        held: false,
+        restarting: false,
+        warm: false,
+        worked: true,
+        managed,
+        tools: true,
+        team_tool: true,
+        grants: 0,
+        thread: None,
+        hosted: None,
+        live: false,
+        briefed: true,
+        kept_session,
+        own_turn: None,
+        turn_started: None,
+        session: None,
+        seed: None,
+        bound: None,
+        spawned: Instant::now(),
+        handoff: None,
+        access: AgentAccess::Sandboxed,
+        lowered: false,
+        ran_before: Duration::ZERO,
+        told_finished: BTreeSet::new(),
+        parent: None,
+    }
+}
+
+/// F2 and FAIL C: the agents the engine wakes for their messages are the project's idle
+/// sub-agents on a signed-in account between turns, kept native-lead sessions included;
+/// busy, live, stopping, endpoint (kept) agents, the master and other projects are not.
+#[test]
+fn asleep_lists_idle_per_turn_sub_agents_and_idle_kept_native_leads() {
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let other = ProjectId::new("other-project").unwrap();
+    let per_turn = 101;
+    let native_lead = 102;
+    team.workers.insert(
+        per_turn,
+        between_turns(&project, AgentRole::Sub, true, false),
+    );
+    team.workers.insert(
+        native_lead,
+        between_turns(&project, AgentRole::Sub, true, true),
+    );
+    let mut busy = between_turns(&project, AgentRole::Sub, true, true);
+    busy.busy = Some(Busy::Task(9));
+    team.workers.insert(103, busy);
+    let mut live = between_turns(&project, AgentRole::Sub, true, false);
+    live.live = true;
+    team.workers.insert(104, live);
+    let mut stopping = between_turns(&project, AgentRole::Sub, true, false);
+    stopping.stopping = true;
+    team.workers.insert(105, stopping);
+    team.workers
+        .insert(106, between_turns(&project, AgentRole::Sub, false, false));
+    team.workers
+        .insert(107, between_turns(&project, AgentRole::Master, true, false));
+    team.workers
+        .insert(108, between_turns(&other, AgentRole::Sub, true, false));
+    assert_eq!(
+        team.asleep(&project),
+        BTreeSet::from([per_turn, native_lead])
+    );
+
+    let lead = team.workers.get_mut(&native_lead).unwrap();
+    lead.busy = Some(Busy::Message(3));
+    assert_eq!(team.asleep(&project), BTreeSet::from([per_turn]));
+    team.workers.get_mut(&native_lead).unwrap().busy = None;
+    assert!(team.asleep(&project).contains(&native_lead));
+    team.workers.clear();
+}
+
+/// F2: an asleep agent with a waking message gets one `WAKE_TASK` task pinned to it, with
+/// its lead as the task's parent; with no pool for the project the task waits as
+/// needs_pool, with a usable account it is queued, and no second task is made while one
+/// waits. A plain note wakes no one.
+#[test]
+fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let noted = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            [lead, worker],
+        )
+        .unwrap();
+    for id in [worker, noted] {
+        team.workers
+            .insert(id, between_turns(&project, AgentRole::Sub, true, false));
+    }
+    let send = |to: i64, kind: crate::coord::MessageKind| {
+        crate::coord::send(
+            &fixture.connection,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Agent(lead),
+                to: crate::coord::Party::Agent(to),
+                kind,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: "Merge your branch".into(),
+                idempotency_key: None,
+            },
+            1,
+        )
+        .unwrap()
+    };
+    send(worker, crate::coord::MessageKind::Prompt);
+    send(noted, crate::coord::MessageKind::Note);
+    let pinned = |agent: i64| -> Vec<(String, String, Option<i64>)> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT t.prompt,t.status,t.parent FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                 WHERE p.project=?1 AND p.agent=?2 ORDER BY t.id",
+            )
+            .unwrap();
+        statement
+            .query_map(params![PROJECT, agent], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+
+    let asleep = team.asleep(&project);
+    assert_eq!(asleep, BTreeSet::from([worker, noted]));
+    let no_pool = ModelAccess {
+        pools: Vec::new(),
+        ..fixture.access.clone()
+    };
+    team.wake_for_messages(&fixture.setup, &no_pool, &asleep)
+        .unwrap();
+    assert_eq!(
+        pinned(worker),
+        [(
+            super::super::master::WAKE_TASK.to_owned(),
+            "needs_pool".to_owned(),
+            Some(lead)
+        )]
+    );
+    assert!(
+        pinned(noted).is_empty(),
+        "a plain note waits for the next turn"
+    );
+    send(noted, crate::coord::MessageKind::Prompt);
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    assert_eq!(pinned(worker).len(), 1, "one pinned task at a time");
+    assert_eq!(
+        pinned(noted),
+        [(
+            super::super::master::WAKE_TASK.to_owned(),
+            "queued".to_owned(),
+            None
+        )]
+    );
+    team.workers.clear();
+}
+
+/// Audit A: a delivery database failure no longer ends the team step: when putting back a
+/// stopped agent's message fails, the same tick still dispatches, here ending a queued
+/// task whose harness left the team plan.
+#[test]
+fn a_failing_delivery_still_lets_the_team_step_dispatch() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let gone = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let message = crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project,
+            from: crate::coord::Party::Agent(lead),
+            to: crate::coord::Party::Agent(gone),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Merge your branch".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    fixture
+        .connection
+        .execute_batch(
+            "UPDATE coord_messages SET receipt='delivered';
+             CREATE TRIGGER requeue_refused BEFORE UPDATE OF receipt ON coord_messages
+             WHEN NEW.receipt='sent' BEGIN SELECT RAISE(ABORT,'requeue refused'); END;",
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms)
+             VALUES (?1,'owner','gemini',0,'Write the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.tick().unwrap();
+    let receipt: String = fixture
+        .connection
+        .query_row(
+            "SELECT receipt FROM coord_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(receipt, "delivered", "the delivery tick failed");
+    let (status, problem): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(
+        problem.as_deref(),
+        Some("The team plan no longer has this harness")
     );
 }
