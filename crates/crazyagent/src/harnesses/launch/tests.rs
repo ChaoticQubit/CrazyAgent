@@ -283,6 +283,26 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
 
 #[cfg(unix)]
 #[test]
+fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect() {
+    let connect_limit = |command: &std::process::Command| {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "MCP_TIMEOUT")
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_owned))
+    };
+    let mut off = team_launch("claude-code");
+    off.request.tools = false;
+    assert_eq!(connect_limit(&super::command(&off.request).unwrap()), None);
+    let on = team_launch("claude-code");
+    assert_eq!(
+        connect_limit(&super::command(&on.request).unwrap()),
+        Some("60000".into()),
+        "Claude Code's own 30 s connect limit drops context-mode on a busy machine"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
     let launch = team_launch("codex");
     let mut features = std::process::Command::new(&launch.request.executable);

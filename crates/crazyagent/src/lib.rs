@@ -8,6 +8,8 @@ pub mod agents;
 pub mod assets;
 pub mod client_controller;
 pub mod config;
+#[cfg(unix)]
+pub mod context_mode;
 pub mod conversation;
 pub mod coord;
 pub mod coordination;
