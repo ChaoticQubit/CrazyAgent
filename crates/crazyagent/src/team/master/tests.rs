@@ -781,4 +781,386 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
         .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
         .unwrap();
     assert_eq!(tasks, 0);
+/// Answers one team call as the fixture's master through the engine's own path. Takes the
+/// fixture, the tool and its arguments. Returns the sentence and whether it is a refusal.
+fn as_master(fixture: &mut Fixture, tool: &str, arguments: Value) -> (String, bool) {
+    let call = tool::live_call(tool, Some(&arguments)).unwrap().unwrap();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    answer(&mut fixture.connection, &answering, MASTER, call).unwrap()
+}
+
+/// Makes `worker` one of `lead`'s own workers. Takes the fixture, the lead and the worker.
+#[cfg(target_os = "macos")]
+fn lead_of(fixture: &Fixture, lead: i64, worker: i64) {
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![worker, lead],
+        )
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn bodies(fixture: &Fixture, sql: &str, agent: i64) -> Vec<String> {
+    let mut statement = fixture.connection.prepare(sql).unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// Runs git in `dir` with an isolated home and no system config, as the owner or an agent
+/// would in a merge test. Takes the folder and the arguments. Returns standard output.
+#[cfg(target_os = "macos")]
+fn git_at(fixture: &Fixture, dir: &Path, args: &[&str]) -> String {
+    let home = fixture.base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Makes the fixture's project folder a git repository on `main` with the owner's own
+/// identity, two committed files and a bare `origin` that holds `main`. Takes the
+/// fixture. Returns the checkout and the bare remote.
+#[cfg(target_os = "macos")]
+fn project_repo(fixture: &Fixture) -> (PathBuf, PathBuf) {
+    let repo = fixture.setup.project_folder();
+    git_at(fixture, &repo, &["init", "-q", "--template=", "-b", "main"]);
+    git_at(fixture, &repo, &["config", "user.name", "Repo Owner"]);
+    git_at(
+        fixture,
+        &repo,
+        &["config", "user.email", "owner@example.invalid"],
+    );
+    std::fs::write(repo.join("README"), "one\n").unwrap();
+    std::fs::write(repo.join("notes.txt"), "notes\n").unwrap();
+    git_at(fixture, &repo, &["add", "README", "notes.txt"]);
+    git_at(fixture, &repo, &["commit", "-q", "-m", "Start"]);
+    let remote = fixture.base.join("remote.git");
+    git_at(
+        fixture,
+        &fixture.base,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--template=",
+            remote.to_str().unwrap(),
+        ],
+    );
+    git_at(
+        fixture,
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_at(fixture, &repo, &["push", "-q", "origin", "main"]);
+    (repo, remote)
+}
+
+/// Adds a finished harness the master started, in its own clone on the task branch the
+/// engine claimed, that committed `text` to README and ended its turn, so its change set
+/// waits. Takes the fixture, the checkout, the name, the task and the text. Returns the
+/// agent and the change set.
+#[cfg(target_os = "macos")]
+fn finished_harness(
+    fixture: &Fixture,
+    repo: &Path,
+    role: &str,
+    task: &str,
+    text: &str,
+) -> (i64, crate::landing::ChangeSetId) {
+    let agent = named_sub(fixture, role, "stopped");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{agent}"));
+    let branch = crate::landing::claim_task_branch(&db, repo, &worktree, task).unwrap();
+    crate::landing::add_agent_clone_on(repo, &worktree, None, &branch).unwrap();
+    let git_dir = crate::agent_git::git_dir(&worktree);
+    crate::landing::record_worktree_start(&db, repo, &worktree, &git_dir).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_worktrees SET repository=?2, worktree=?3, git_dir=?4 WHERE agent=?1",
+            params![
+                agent,
+                repo.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    std::fs::write(worktree.join("README"), text).unwrap();
+    git_at(
+        fixture,
+        &worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-am",
+            "Write the README",
+        ],
+    );
+    let workspace = crate::landing::Workspace {
+        project: ProjectId::new(PROJECT).unwrap(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Sub,
+            id: agent.to_string(),
+            label: super::super::events::label(&fixture.connection, agent).unwrap(),
+        },
+        repository: repo.to_path_buf(),
+        worktree,
+        git_dir,
+    };
+    let turn = crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write the README".into(),
+    };
+    let id = crate::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("a committed turn leaves a change set");
+    (agent, id)
+}
+
+/// The state of one change set as Changes lists it. Takes the fixture and the set.
+/// Returns its state.
+#[cfg(target_os = "macos")]
+fn set_state(fixture: &Fixture, id: &crate::landing::ChangeSetId) -> crate::landing::ChangeState {
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::landing::list(&db, &ProjectId::new(PROJECT).unwrap())
+        .unwrap()
+        .into_iter()
+        .find(|set| &set.id == id)
+        .unwrap()
+        .state
+}
+
+/// With "Ask me before merging" on, the master's merge lands nothing: the change set stays
+/// in Changes and the owner gets one notification. Off, it lands on the Master's branch as
+/// one commit under the owner's own git identity, pushes nothing, notes it for the owner
+/// and leaves nothing more to merge (DEC-100 S3).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_merges_a_finished_harness_locally_unless_the_owner_asks_first() {
+    let mut fixture = Fixture::new();
+    let (repo, remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    fixture
+        .connection
+        .execute("INSERT INTO team_merge_ask VALUES (?1,1)", [PROJECT])
+        .unwrap();
+    let merge = |fixture: &mut Fixture| {
+        as_master(fixture, tool::MERGE_TOOL, json!({"agent": "@docs-writer"}))
+    };
+    assert_eq!(
+        merge(&mut fixture),
+        (
+            format!(
+                "Waiting for the owner: the owner's setting asks before merging into main. {label}'s change set waits in Changes. The owner got a notification."
+            ),
+            false
+        )
+    );
+    let alerts = |fixture: &Fixture| {
+        bodies(
+            fixture,
+            "SELECT text FROM team_notifications WHERE project=(SELECT project FROM team_agents WHERE id=?1) ORDER BY id",
+            agent,
+        )
+    };
+    assert_eq!(
+        alerts(&fixture),
+        vec![format!(
+            "{label} finished its branch crazyagent/docs. Its change set waits in Changes for your Accept into main."
+        )]
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Pending
+    );
+
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_merge_ask SET ask=0 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    let (said, refused) = merge(&mut fixture);
+    let tip = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    assert_ne!(tip, start);
+    assert_eq!(
+        (said.as_str(), refused),
+        (
+            format!(
+                "Merged {label}'s work from its branch crazyagent/docs into main as {}. Nothing was pushed; the owner was told.",
+                &tip[..12]
+            )
+            .as_str(),
+            false
+        )
+    );
+    assert_eq!(
+        git_at(
+            &fixture,
+            &repo,
+            &["log", "-1", "--format=%an <%ae> %cn <%ce>", "main"]
+        ),
+        "Repo Owner <owner@example.invalid> Repo Owner <owner@example.invalid>"
+    );
+    assert_eq!(
+        git_at(
+            &fixture,
+            &repo,
+            &["rev-list", "--count", &format!("{start}..main")]
+        ),
+        "1",
+        "the work lands as one commit"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README")).unwrap(),
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        git_at(&fixture, &remote, &["rev-parse", "main"]),
+        start,
+        "nothing was pushed"
+    );
+    let notes = bodies(
+        &fixture,
+        "SELECT text FROM team_messages WHERE project=(SELECT project FROM team_agents WHERE id=?1) AND author='engine' ORDER BY id",
+        agent,
+    );
+    assert_eq!(
+        notes.last().unwrap(),
+        &format!(
+            "The master merged {label}'s work from its branch crazyagent/docs into main as {}. Nothing was pushed.",
+            &tip[..12]
+        )
+    );
+    assert_eq!(alerts(&fixture).len(), 1, "a merge raises no owner alert");
+    assert_ne!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Pending
+    );
+    let (again, refused) = merge(&mut fixture);
+    assert!(
+        refused
+            && again.starts_with(&format!(
+                "Nothing to merge: {label} has no change set waiting."
+            )),
+        "{again}"
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), tip);
+}
+
+/// The master's merge refuses, in plain words and landing nothing, an unknown name, a
+/// harness still working, a worker a lead started, an owner checkout with uncommitted
+/// changes and work that conflicts with the Master's branch (DEC-100 S3).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_merge_refuses_what_it_must_not_land() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let (agent, _) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let merge = |fixture: &mut Fixture, name: &str| {
+        as_master(fixture, tool::MERGE_TOOL, json!({"agent": name}))
+    };
+    assert_eq!(
+        merge(&mut fixture, "Zzyzx"),
+        (
+            "Not merged: no harness of this project is called Zzyzx. Call inspect_work() for their names.".to_owned(),
+            true
+        )
+    );
+    let running = named_sub(&fixture, "api", "working");
+    let running_label = super::super::events::label(&fixture.connection, running).unwrap();
+    assert_eq!(
+        merge(&mut fixture, "@api"),
+        (
+            format!("Not merged: {running_label} is still working. Merge it once it reports done."),
+            true
+        )
+    );
+    let lead = named_sub(&fixture, "lead-charts", "stopped");
+    let worker = named_sub(&fixture, "bar-chart", "stopped");
+    lead_of(&fixture, lead, worker);
+    let worker_label = super::super::events::label(&fixture.connection, worker).unwrap();
+    assert_eq!(
+        merge(&mut fixture, "@bar-chart"),
+        (
+            format!("Not merged: {worker_label} is not a harness you started."),
+            true
+        )
+    );
+
+    std::fs::write(repo.join("notes.txt"), "owner's edit\n").unwrap();
+    assert_eq!(
+        merge(&mut fixture, "@docs-writer"),
+        (
+            "Not merged into main: the owner's checkout of that branch has uncommitted changes. Ask the owner to commit or stash them, then merge again.".to_owned(),
+            true
+        )
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("notes.txt")).unwrap(),
+        "owner's edit\n"
+    );
+    git_at(&fixture, &repo, &["checkout", "-q", "--", "notes.txt"]);
+
+    std::fs::write(repo.join("README"), "one\nowner\n").unwrap();
+    git_at(&fixture, &repo, &["commit", "-q", "-am", "Owner's README"]);
+    let owner_tip = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    let (said, refused) = merge(&mut fixture, "@docs-writer");
+    assert!(
+        refused
+            && said.starts_with(&format!("Not merged: {label}'s work conflicts with "))
+            && said.contains("README"),
+        "{said}"
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), owner_tip);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README")).unwrap(),
+        "one\nowner\n"
+    );
 }

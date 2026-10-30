@@ -3772,3 +3772,292 @@ fn accept_into_refuses_invalid_and_externally_checked_out_targets() {
     assert_eq!(case.owner(&["rev-parse", "release"]), release);
     assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
+
+impl Case {
+    /// The same owner repository with a harness in its own clone on the task branch the
+    /// engine claimed for it (DEC-100), its start recorded. Input: the task name.
+    /// Output: the case and the branch.
+    fn harness(name: &str) -> (Self, String) {
+        let mut case = Self::new();
+        let worktree = case.repo.parent().unwrap().join("agent-own");
+        let branch = claim_task_branch(&case.db, &case.repo, &worktree, name).unwrap();
+        add_agent_clone_on(&case.repo, &worktree, None, &branch).unwrap();
+        case.workspace.git_dir = crate::agent_git::git_dir(&worktree);
+        case.workspace.worktree = worktree;
+        case.start();
+        (case, branch)
+    }
+}
+
+#[test]
+fn a_harness_clone_works_on_its_task_branch() {
+    let (case, branch) = Case::harness("docs");
+    assert_eq!(branch, "crazyagent/docs");
+    assert_eq!(
+        case.agent(&["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/crazyagent/docs"
+    );
+    let exclude = std::fs::read_to_string(case.workspace.git_dir.join("info/exclude")).unwrap();
+    assert!(
+        exclude.lines().any(|line| line == "/.worktrees/"),
+        "{exclude}"
+    );
+    assert_eq!(
+        agent_branch(&case.db, &case.workspace.worktree, &case.workspace.git_dir).unwrap(),
+        Some(branch.clone())
+    );
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 1);
+    let AcceptOutcome::Landed {
+        commit,
+        branch: landed,
+    } = case.accept(&id).unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((landed.as_str(), case.tip()), ("main", commit));
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+}
+
+#[test]
+fn claiming_a_taken_task_branch_takes_the_next_suffix() {
+    let case = Case::new();
+    let root = case.repo.parent().unwrap().to_path_buf();
+    let (other, mine) = (root.join("agent-other"), root.join("agent-mine"));
+    let claim =
+        |worktree: &Path, name: &str| claim_task_branch(&case.db, &case.repo, worktree, name);
+    assert_eq!(claim(&other, "x").unwrap(), "crazyagent/x");
+    case.owner(&["branch", "crazyagent/x-2"]);
+    case.owner(&["branch", "crazyagent/x-3/y"]);
+    assert_eq!(claim(&mine, "x").unwrap(), "crazyagent/x-4");
+    assert_eq!(
+        claim(&mine, "x").unwrap(),
+        "crazyagent/x-4",
+        "its own stored row does not count as taken"
+    );
+    case.owner(&["branch", "crazyagent/z"]);
+    for suffix in 2..=64 {
+        case.owner(&["branch", &format!("crazyagent/z-{suffix}")]);
+    }
+    assert_eq!(refused(claim(&mine, "z")), "changes_agent_branch_exists");
+    for invalid in ["Bad", "", "a--b", "-a"] {
+        assert_eq!(
+            refused(claim(&mine, invalid)),
+            "changes_agent_branch_invalid",
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn the_masters_branch_resolves_choice_then_origin_head_then_checkout() {
+    let case = Case::new();
+    let tip = case.tip();
+    case.owner(&["branch", "trunk"]);
+    assert_eq!(
+        master_branch(&case.repo, Some("trunk")).unwrap(),
+        Some(("trunk".to_owned(), tip.clone()))
+    );
+    for missing in ["missing", "-x", "a..b", ""] {
+        assert_eq!(
+            refused(master_branch(&case.repo, Some(missing))),
+            "changes_target_invalid",
+            "{missing:?}"
+        );
+    }
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("main".to_owned(), tip.clone()))
+    );
+    case.owner(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/trunk",
+    ]);
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("trunk".to_owned(), tip.clone()))
+    );
+    case.owner(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/gone",
+    ]);
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("main".to_owned(), tip.clone())),
+        "an origin HEAD with no local branch falls back to the checkout"
+    );
+    case.owner(&["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    assert_eq!(master_branch(&case.repo, None).unwrap(), None);
+}
+
+impl Case {
+    /// Adds a teammate worktree to a harness clone at `.worktrees/<name>` on
+    /// `<task branch>--<name>` with one committed file, as a native teammate is told to.
+    /// Inputs: the task branch and the teammate's name. Output: the teammate's folder and
+    /// branch.
+    fn teammate(&self, branch: &str, name: &str) -> (PathBuf, String) {
+        let teammate_branch = format!("{branch}--{name}");
+        let folder = format!(".worktrees/{name}");
+        self.agent(&["worktree", "add", "-q", &folder, "-b", &teammate_branch]);
+        let teammate = self.workspace.worktree.join(&folder);
+        write(&teammate.join("NOTES"), "teammate\n");
+        git_in(&self.home, &teammate, &["add", "NOTES"]);
+        git_in(
+            &self.home,
+            &teammate,
+            &[
+                "-c",
+                "user.name=Teammate",
+                "-c",
+                "user.email=teammate@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Teammate notes",
+            ],
+        );
+        (teammate, teammate_branch)
+    }
+
+    fn merge_in_clone(&self, branch: &str) {
+        self.agent(&[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-edit",
+            branch,
+        ]);
+    }
+
+    fn land(&self) {
+        let id = self.turn(TurnOutcome::Succeeded).unwrap();
+        assert!(matches!(
+            self.accept(&id).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+    }
+
+    fn blocker(&self) -> Option<&'static str> {
+        retire_blocker(
+            &self.db,
+            &self.repo,
+            &self.workspace.worktree,
+            &self.workspace.git_dir,
+            NOW_MS,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn teammate_worktrees_never_reach_the_change_set() {
+    let (case, branch) = Case::harness("docs");
+    let (_, teammate_branch) = case.teammate(&branch, "a");
+    case.merge_in_clone(&teammate_branch);
+    write(
+        &case.workspace.worktree.join(".worktrees/stray.txt"),
+        "left by an agent\n",
+    );
+    case.agent(&["add", "-f", ".worktrees/stray.txt"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let tip = |case: &Case| {
+        agent_tip(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+        )
+        .unwrap()
+    };
+    let first = tip(&case);
+    assert_eq!(
+        first,
+        tip(&case),
+        "the same clone tip fetches to the same head"
+    );
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut files: Vec<String> = diff(&case.db, &id, 0)
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    files.sort();
+    assert_eq!(files, vec!["NOTES".to_owned(), "README".to_owned()]);
+    assert_eq!(case.view(&id).head, first);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let landed = case.owner(&["ls-tree", "-r", "--name-only", &commit]);
+    assert!(!landed.contains(".worktrees"), "{landed}");
+    assert!(landed.lines().any(|path| path == "NOTES"), "{landed}");
+}
+
+#[test]
+fn cleanup_keeps_a_harness_with_unmerged_or_dirty_teammates() {
+    let (mut case, branch) = Case::harness("docs");
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,mode) VALUES (?1,'sub','claude-code',1,'working',1,1,'native')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    case.workspace.agent.id = case.db.last_insert_rowid().to_string();
+    let (teammate, teammate_branch) = case.teammate(&branch, "a");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.land();
+    let unlanded = |case: &Case| {
+        unlanded_teammates(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(case.blocker(), Some("cleanup_refs_unlanded"));
+    assert!(!unlanded(&case).is_empty());
+
+    case.merge_in_clone(&teammate_branch);
+    case.land();
+    write(&teammate.join("SCRATCH"), "not committed\n");
+    assert_eq!(case.blocker(), Some("cleanup_worktree_dirty"));
+
+    std::fs::remove_file(teammate.join("SCRATCH")).unwrap();
+    assert_eq!(case.blocker(), None);
+    assert_eq!(unlanded(&case), Vec::<String>::new());
+    assert_eq!(
+        retire_worktree(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+            NOW_MS
+        )
+        .unwrap(),
+        Ok(())
+    );
+    assert!(!case.workspace.worktree.exists());
+    let stored: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM landing_agent_branches", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, 0, "the stored task branch goes with the worktree");
+}

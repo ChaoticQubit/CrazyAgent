@@ -1856,6 +1856,8 @@ impl TeamView {
     }
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
+    /// The question or notice at the bottom stays in view on a short screen: the selected
+    /// agent's panel above it is cut first, unless the owner is typing in that panel.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -2023,7 +2025,13 @@ impl TeamView {
         }
         lines.push(Row::default());
         let cursor = caret.map(|(row, column)| (lines.len() + row, column));
-        lines.extend(panel);
+        let spare = room.saturating_sub(lines.len() + footer.len());
+        let shown = if caret.is_none() {
+            panel.len().min(spare)
+        } else {
+            panel.len()
+        };
+        lines.extend(panel.into_iter().take(shown));
         lines.extend(footer);
         (lines, self.help(), cursor)
     }
