@@ -1032,9 +1032,7 @@ mod import {
             ""
         );
         assert!(fs::symlink_metadata(folder.join("CLAUDE.local.md")).is_ok());
-        assert!(
-            fs::symlink_metadata(folder.join(".crazyagent/imported/CLAUDE.local.md")).is_err()
-        );
+        assert!(fs::symlink_metadata(folder.join(".crazyagent/imported/CLAUDE.local.md")).is_err());
         assert_eq!(
             read_picked(&folder.join("CLAUDE.local.md")).unwrap_err().0,
             "process_import_unsafe"
