@@ -6315,7 +6315,7 @@ fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
 }
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code that exits at once.
-fn claude_runtime(fixture: &Fixture) -> TeamRuntime {
+fn exiting_claude_runtime(fixture: &Fixture) -> TeamRuntime {
     let bin = fixture.base.join("claude-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
@@ -6516,7 +6516,7 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
     use crate::coord::settings::{CoordSettings, Overlaps, write};
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
-    let mut runtime = claude_runtime(&fixture);
+    let mut runtime = exiting_claude_runtime(&fixture);
     let overlaps = |overlaps: Overlaps| {
         write(
             &fixture.connection,
@@ -6577,7 +6577,7 @@ fn native_lead_on_endpoint_refused() {
         SubagentMode::Native,
     )
     .unwrap();
-    let mut runtime = claude_runtime(&fixture)
+    let mut runtime = exiting_claude_runtime(&fixture)
         .with_terminal(fixture.host())
         .unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
@@ -6612,7 +6612,7 @@ fn native_lead_on_endpoint_refused() {
 fn native_lead_own_turn_reports_result_and_lands() {
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
-    let mut runtime = claude_runtime(&fixture);
+    let mut runtime = exiting_claude_runtime(&fixture);
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let (root, plan, _) = runtime
         .prepare(
