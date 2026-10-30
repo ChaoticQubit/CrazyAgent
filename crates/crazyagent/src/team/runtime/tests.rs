@@ -1851,11 +1851,33 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
     let sub = runtime
         .context(&project, 2, AgentRole::Sub, true, Layout::Linked)
         .unwrap();
+    let team: Vec<&crate::plugins::LaunchServer> = sub
+        .plugins()
+        .servers
+        .iter()
+        .filter(|server| server.name == tool::SERVER_NAME)
+        .collect();
+    assert_eq!(
+        team.len(),
+        1,
+        "a sub-agent with tools has only its own team server"
+    );
+    let crate::plugins::ServerSpec::Stdio { command, args } = &team[0].spec else {
+        panic!("the sub-agent's team server is a stdio server");
+    };
+    assert_eq!(Some(command.as_str()), engine.to_str());
+    let mailbox = runtime.mailbox(2);
+    assert_eq!(
+        args[..2],
+        [tool::AGENT_SERVER_COMMAND, mailbox.to_str().unwrap()],
+        "a sub-agent never gets the master's delegate server: {args:?}"
+    );
+    let record = runtime.tool_record(1);
     assert!(
-        sub.plugins()
-            .servers
+        !args
             .iter()
-            .all(|server| server.name != tool::SERVER_NAME)
+            .any(|arg| arg == tool::SERVER_COMMAND || Path::new(arg) == record),
+        "{args:?}"
     );
 
     let replacement = folder.join("replacement");
@@ -1868,10 +1890,12 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
         swapped.contains("native_auth_host_executable_changed"),
         "{swapped}"
     );
+    let Err(swapped) = runtime.context(&project, 2, AgentRole::Sub, true, Layout::Linked) else {
+        panic!("a sub-agent context was built on a replaced engine");
+    };
     assert!(
-        runtime
-            .context(&project, 2, AgentRole::Sub, true, Layout::Linked)
-            .is_ok()
+        swapped.contains("native_auth_host_executable_changed"),
+        "{swapped}"
     );
 }
 
@@ -3669,8 +3693,10 @@ fn wake_call(
     let id = format!("{call:032x}");
     std::fs::write(
         mailbox.join(format!("{id}.call")),
-        serde_json::to_vec(&serde_json::json!({"tool": "update_work", "to": agent, "text": text}))
-            .unwrap(),
+        serde_json::to_vec(
+            &serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
+        )
+        .unwrap(),
     )
     .unwrap();
     let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
@@ -3701,11 +3727,12 @@ fn wake_call(
     )
 }
 
-/// The master wakes a finished sub-agent by its name (DEC-102): it starts again under the
-/// same id, name and worktree, continuing its own Codex conversation through `resume <id>`
-/// with the master's text as its next task. A running or unknown name gets a plain refusal.
-/// Once its conversation record is gone, the next wake starts a fresh conversation that
-/// carries the agent's last result as a handoff.
+/// The master's `update_work` message wakes a finished sub-agent it names (DEC-102, K1b): it
+/// starts again under the same id, name and worktree, continuing its own Codex conversation
+/// through `resume <id>`, with the message under its next task. An unknown name is refused
+/// in plain words; a message to a running sub-agent is stored for its next turn and wakes
+/// nothing. Once its conversation record is gone, the next wake starts a fresh conversation
+/// that carries the agent's last result as a handoff.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
@@ -3739,19 +3766,31 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     assert_eq!(masters(&fixture.connection), [master]);
     let mailbox = fixture.base.join("mailbox");
     std::fs::create_dir(&mailbox).unwrap();
+    let sent = |f: &Fixture| -> i64 {
+        f.connection
+            .query_row(
+                "SELECT max(id) FROM coord_messages WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
     assert_eq!(
         wake_call(&fixture, &mailbox, 1, "Zzyzx", "Hello"),
         (
-            "Not woken: no finished sub-agent of this project is called Zzyzx. Call status() for their names.".to_owned(),
+            "Not sent: no agent of this project is called Zzyzx. Call inspect_work() for the team."
+                .to_owned(),
             true
         )
     );
     let label = super::super::events::label(&fixture.connection, member).unwrap();
+    let woken = wake_call(&fixture, &mailbox, 2, &persona, "Add a footer to page.md.");
     assert_eq!(
-        wake_call(&fixture, &mailbox, 2, &persona, "Add a footer to page.md."),
+        woken,
         (
             format!(
-                "Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+                "Sent #{}. Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.",
+                sent(&fixture)
             ),
             false
         )
@@ -3762,11 +3801,15 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         |f| launches(f, member).len() == 2 && typed(f, member).contains("Add a footer to page.md."),
     );
     let label = super::super::events::label(&fixture.connection, member).unwrap();
+    let stored = wake_call(&fixture, &mailbox, 3, &persona, "Again");
     assert_eq!(
-        wake_call(&fixture, &mailbox, 3, &persona, "Again"),
+        stored,
         (
-            format!("Not woken: {label} is running. Reach it with message()."),
-            true
+            format!(
+                "Sent #{} to {label}. It reaches {label} at its next turn or once it is idle; inspect_work() shows when it is read.",
+                sent(&fixture)
+            ),
+            false
         )
     );
     assert!(
