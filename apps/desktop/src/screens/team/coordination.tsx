@@ -16,7 +16,7 @@ export const COORD_HARNESSES: CoordHarness[] = ["claude-code", "codex", "rcli"];
 export const COORD_DEFAULTS: CoordSettings = {
   questions_to: "lead",
   overlaps: "warn",
-  nudges: true,
+  nudges: false,
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
 };
 
