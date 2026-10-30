@@ -3629,6 +3629,16 @@ fn stop_agent_on_teammate_records_an_owner_stop_and_stop_teammate_marks_its_pane
     );
 }
 
+/// RSF2-L2: clearing one agent's owner stop takes a stored agent id; id 0, which no
+/// agent row has, trips the assertion before any row is touched.
+#[test]
+#[should_panic(expected = "owner_start_alone_needs_a_stored_agent")]
+fn owner_start_alone_refuses_an_agent_id_no_row_can_have() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-stop").unwrap();
+    let _ = owner_start_alone(&connection, &project, 0);
+}
+
 #[test]
 fn add_late_columns_upgrades_an_old_database_once() {
     let directory = tempfile::tempdir().unwrap();

@@ -3332,7 +3332,7 @@ pub(crate) fn owner_start_alone(
     project: &ProjectId,
     agent: i64,
 ) -> Result<(), EngineError> {
-    assert!(agent > 0);
+    assert!(agent > 0, "owner_start_alone_needs_a_stored_agent");
     connection
         .execute(
             "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2",
