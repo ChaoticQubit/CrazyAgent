@@ -2,12 +2,13 @@ use crate::plugins::ServerSpec;
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
 use rustix::fs::{FlockOperation, Mode, OFlags};
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PACKAGE: &str = "context-mode";
 const PROGRAM: &str = "cli.bundle.mjs";
@@ -127,7 +128,7 @@ fn replace(root: &Path, folder: &Path, bin: &Path, version: &str) -> Result<(), 
     let staged = staging_folder(parent, &prefix)?;
     let work = staging_folder(parent, &format!("{prefix}-work"));
     let result = work.and_then(|work| {
-        let filled = fill(root, &staged, &work, bin, version)
+        let filled = fill(root, &staged, &work, bin, version, prefix.as_ref())
             .and_then(|()| checked(&staged, version).map_err(InstallError))
             .and_then(|()| {
                 std::fs::rename(&staged, folder)
@@ -353,31 +354,48 @@ fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
 }
 
+/// Installs `source` into the staging folder with package scripts off, checks npm's record
+/// of the tarball hash against the pin before any package script can run or rewrite it,
+/// then runs the scripts with `npm rebuild`. Both npm runs share one time limit. Inputs:
+/// the engine root, staging and work folders, npm's folder, the version and what npm
+/// installs. Output: Ok once rebuilt; the caller re-checks before the rename.
 fn fill(
     root: &Path,
     staged: &Path,
     work: &Path,
     bin: &Path,
     version: &str,
+    source: &OsStr,
 ) -> Result<(), InstallError> {
-    let mut command = npm_command(root, staged, work, bin, version)?;
-    command
-        .arg("install")
-        .arg("--prefix")
-        .arg(staged)
-        .args([
-            "--no-save",
-            "--no-audit",
-            "--no-fund",
-            "--no-update-notifier",
-            "--loglevel=error",
-        ])
-        .arg(format!("{PACKAGE}@{version}"));
-    let (ok, _) = run_command(command, INSTALL_TIME)?;
-    if !ok {
-        return Err(InstallError("context_mode_install_failed"));
-    }
-    Ok(())
+    let deadline = Instant::now() + INSTALL_TIME;
+    let npm = |task: &str, extra: &[&OsStr]| -> Result<(), InstallError> {
+        let mut command = npm_command(root, staged, work, bin, version)?;
+        command
+            .arg(task)
+            .arg("--prefix")
+            .arg(staged)
+            .args([
+                "--no-audit",
+                "--no-fund",
+                "--no-update-notifier",
+                "--loglevel=error",
+            ])
+            .args(extra);
+        match run_command(command, deadline.saturating_duration_since(Instant::now()))? {
+            (true, _) => Ok(()),
+            (false, _) => Err(InstallError("context_mode_install_failed")),
+        }
+    };
+    npm(
+        "install",
+        &[
+            OsStr::new("--ignore-scripts"),
+            OsStr::new("--no-save"),
+            source,
+        ],
+    )?;
+    checked(staged, version).map_err(InstallError)?;
+    npm("rebuild", &[])
 }
 
 fn npm_command(
