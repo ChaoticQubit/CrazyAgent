@@ -627,7 +627,7 @@ pub fn commit_deletions(
     message: &str,
 ) -> Result<(String, String, Vec<String>), EngineError> {
     #[cfg(unix)]
-    return owner::commit_deletions(repository, owner_home, paths, message);
+    return owner::commit_deletions(repository, owner_home, paths, message, &|| {});
     #[cfg(not(unix))]
     {
         let _ = (repository, owner_home, paths, message);

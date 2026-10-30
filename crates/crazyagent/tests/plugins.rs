@@ -889,3 +889,131 @@ async fn a_server_check_folder_swapped_for_a_link_is_refused() {
     assert_eq!(second.problem.as_deref(), Some("The server can't start."));
     case.close().await;
 }
+
+#[tokio::test]
+async fn tool_switches_round_trip_through_the_owner_socket() {
+    use crazyagent::coord::tool_switches::{BUILTIN_TOOLS, Switch};
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = create_project(&mut controller, "app").await;
+    let root = case.root.path().to_path_buf();
+
+    let builtins = controller.tool_switches(None, None).await.unwrap();
+    assert_eq!(builtins.len(), BUILTIN_TOOLS.len());
+    assert!(
+        builtins
+            .iter()
+            .all(|view| view.builtin && view.global == Switch::On && view.here.is_none())
+    );
+    let off = controller
+        .set_tool_switch(None, None, "start_work".into(), Switch::Off)
+        .await
+        .unwrap();
+    let start = off.iter().find(|view| view.tool == "start_work").unwrap();
+    assert_eq!(start.global, Switch::Off);
+    let on = controller
+        .set_tool_switch(Some(project.clone()), None, "start_work".into(), Switch::On)
+        .await
+        .unwrap();
+    let start = on.iter().find(|view| view.tool == "start_work").unwrap();
+    assert_eq!((start.global, start.here), (Switch::Off, Some(Switch::On)));
+
+    second_client_reads(&case, &project).await;
+
+    let restored = controller
+        .restore_tool_switches(Some(project.clone()), None)
+        .await
+        .unwrap();
+    assert!(restored.iter().all(|view| view.here.is_none()));
+    let start = restored
+        .iter()
+        .find(|view| view.tool == "start_work")
+        .unwrap();
+    assert_eq!(start.global, Switch::Off);
+
+    let server = controller
+        .add_mcp_server(
+            Scope::Global,
+            "fixture".into(),
+            ServerSpec::Stdio {
+                command: fixture(&root),
+                args: vec![],
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let checked = controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(checked.tools, vec!["echo", "anonymous"]);
+    let listed = controller
+        .tool_switches(Some(project.clone()), Some(server.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|view| view.tool.as_str())
+            .collect::<Vec<_>>(),
+        ["echo", "anonymous"]
+    );
+    let echo_off = controller
+        .set_tool_switch(
+            Some(project.clone()),
+            Some(server.id.clone()),
+            "echo".into(),
+            Switch::Off,
+        )
+        .await
+        .unwrap();
+    assert_eq!(echo_off[0].here, Some(Switch::Off));
+    for (server_id, tool, switch, code) in [
+        (
+            Some(server.id.clone()),
+            "echo",
+            Switch::Hidden,
+            "tool_delete_builtin_only",
+        ),
+        (None, "nope", Switch::Off, "tool_unknown"),
+        (
+            Some("Bad_Id".to_owned()),
+            "echo",
+            Switch::Off,
+            "server_not_found",
+        ),
+        (
+            Some("absent-1".to_owned()),
+            "echo",
+            Switch::Off,
+            "server_not_found",
+        ),
+    ] {
+        assert_eq!(
+            controller
+                .set_tool_switch(Some(project.clone()), server_id, tool.into(), switch)
+                .await
+                .unwrap_err()
+                .0,
+            code,
+            "{tool}"
+        );
+        assert!(plain_problem(code).is_some(), "{code}");
+    }
+    case.close().await;
+}
+
+/// Reads the built-in tools of a project through a second owner client, so the switches the
+/// first client set are stored engine state, not a client cache. Inputs: the case and project.
+/// Output: none; panics when the project read differs.
+async fn second_client_reads(case: &Case, project: &ProjectId) {
+    use crazyagent::coord::tool_switches::Switch;
+    let reader = case.controller().await;
+    let views = reader
+        .tool_switches(Some(project.clone()), None)
+        .await
+        .unwrap();
+    let start = views.iter().find(|view| view.tool == "start_work").unwrap();
+    assert_eq!((start.global, start.here), (Switch::Off, Some(Switch::On)));
+}

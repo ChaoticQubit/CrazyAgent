@@ -88,6 +88,10 @@ pub(crate) const CLAUDE_NATIVE_TEAM_TOOLS: [&str; 2] = ["Agent", "TeamCreate"];
 /// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+/// Gives a tools-on Claude Code agent 60 s, not its own 30 s, to connect its MCP servers.
+/// context-mode from the engine's shared install answers in about 1 s; the margin covers a
+/// machine busy with builds, and a server that never answers delays the start by 60 s only.
+pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
@@ -698,6 +702,10 @@ fn claude_invocation(
         environment.push((
             CLAUDE_BACKGROUND_TASKS_OFF.0,
             OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
+        ));
+        environment.push((
+            CLAUDE_MCP_CONNECT_LIMIT.0,
+            OsString::from(CLAUDE_MCP_CONNECT_LIMIT.1),
         ));
     }
     if claude_bare(&request.account) {

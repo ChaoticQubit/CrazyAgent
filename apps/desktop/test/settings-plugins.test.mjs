@@ -160,7 +160,7 @@ test("server rows use the design status words, show tools and a plain reason wit
   const markup = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [broken, checked] })));
   assert.match(markup, /Can&#x27;t start: command not found/);
   assert.match(markup, /Check again/);
-  assert.match(markup, /Tools: read_file, list_dir/);
+  assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">(?:<svg[\s\S]*?<\/svg>)?\s*2 tools<\/button>/);
   const empty = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [] })));
   assert.match(empty, /No MCP servers yet/);
   assert.match(empty, /Add MCP server/);
@@ -225,7 +225,7 @@ test("every plugins and folder chooser command the settings call is registered i
   const handler = lib.slice(lib.indexOf("generate_handler!["));
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
   const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|skill_detail|skill_import|import_skill|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
-  assert.equal(new Set(commands).size, 17);
+  assert.equal(new Set(commands).size, 18);
   assert.ok(commands.includes("desktop_skill_import_scan") && commands.includes("desktop_import_skill"));
   for (const command of commands) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);

@@ -465,3 +465,6 @@ fn read(
         snapshot: Box::new(snapshot),
     })
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

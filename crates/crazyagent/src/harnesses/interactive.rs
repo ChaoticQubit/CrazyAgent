@@ -1,8 +1,8 @@
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_NATIVE_TEAM_TOOLS, CLAUDE_NO_MCP,
-    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
-    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
-    key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
+    CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
+    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
+    harness_id, key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -505,6 +505,10 @@ fn claude_environment(
     ];
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));
+        environment.push((
+            CLAUDE_MCP_CONNECT_LIMIT.0.to_owned(),
+            CLAUDE_MCP_CONNECT_LIMIT.1.to_owned(),
+        ));
     }
     if let Some(command) = teammates {
         assert!(request.tools);

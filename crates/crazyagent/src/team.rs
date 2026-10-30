@@ -1620,8 +1620,10 @@ pub fn admit(
 /// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
 /// worktree and lands in the same change set; the team master gets an engine message. A
 /// sub-agent holds at most one queued resolve task, whose prompt the newest update
-/// replaces, so the global task cap never refuses a merge already made. Takes the
-/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
+/// replaces, so the global task cap never refuses a merge already made. The update is
+/// the owner's, so it clears the owner stop of that sub-agent alone; the agents it leads
+/// stay stopped. Takes the transaction, project, agent, prompt and time. Returns Ok, or a
+/// plain refusal code.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -1645,7 +1647,7 @@ pub fn admit_resolve(
         return Ok(Err("team_agent_not_found"));
     };
     match AgentRole::parse(&role) {
-        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Sub) => owner_start_alone(tx, project, agent)?,
         Some(AgentRole::Master) => {
             return append_message(
                 tx,
@@ -3298,7 +3300,9 @@ pub(crate) fn owner_stop(
 
 /// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a
 /// woken harness brings its stopped sub-agents back with it: their held tasks wake them.
-/// Takes a connection, the project and the agent. Returns any SQLite failure.
+/// Only the owner's own Wake or restart of that agent clears the tree (AW-1); any other
+/// start uses [`owner_start_alone`]. Takes a connection, the project and the agent.
+/// Returns any SQLite failure.
 pub(crate) fn owner_start(
     connection: &Connection,
     project: &ProjectId,
@@ -3314,6 +3318,25 @@ pub(crate) fn owner_start(
              )
              DELETE FROM team_owner_stops WHERE agent IN (SELECT id FROM led)",
             params![agent, project.as_str(), DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the owner's stop of one agent that starts again for anything but the owner's
+/// Wake or restart of it, such as the owner's change-set Update or a pinned task. The
+/// stops of the agents it leads stay, so each of them waits for the owner (AW-1). Takes a
+/// connection, the project and the agent. Returns any SQLite failure.
+pub(crate) fn owner_start_alone(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    assert!(agent > 0, "owner_start_alone_needs_a_stored_agent");
+    connection
+        .execute(
+            "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
         )
         .map_err(error)?;
     Ok(())
@@ -3439,7 +3462,7 @@ pub fn token_words(tokens: u64) -> String {
         return format!("{tokens} tokens");
     }
     let tenths = tokens / 100_000;
-    if tenths % 10 == 0 {
+    if tenths.is_multiple_of(10) {
         format!("{}M tokens", tenths / 10)
     } else {
         format!("{}.{}M tokens", tenths / 10, tenths % 10)

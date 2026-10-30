@@ -601,8 +601,8 @@ fn plain_log(git_dir: &Path, reference: &str) -> Result<(), EngineError> {
 }
 
 /// Opens a linked agent worktree for engine work through the git folder the engine
-/// computed, with the HEAD shape its kind requires: detached for a sub-agent, the lease
-/// branch of its worktree for the master. An agent's own clone is never opened: its
+/// computed, with the HEAD shape its kind requires: detached or on its own branch
+/// ([`agent_branch`]) for a sub-agent, the lease branch of its worktree for the master. An agent's own clone is never opened: its
 /// config is the agent's, so the engine runs no git there but the fetch in
 /// [`clone::fetch`]. Inputs: the store, the kind and the three paths. Output: the agent,
 /// or `changes_workspace_invalid`, also for a clone.
@@ -1468,6 +1468,19 @@ pub(super) fn tip(
 ) -> Result<String, EngineError> {
     store::initialize(db)?;
     let _held = hold(repository);
+    read_tip(db, repository, worktree, git_dir)
+}
+
+/// The commit an agent worktree holds now, read as [`tip`] reads it, without taking the
+/// repository hold, for a caller that holds it already or reads before taking it.
+/// Inputs: the store, the owner checkout, the worktree and its git folder. Output: the
+/// commit id.
+pub(super) fn read_tip(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<String, EngineError> {
     match check_places(repository, worktree, git_dir)? {
         Layout::Linked => open_agent(db, AgentKind::Sub, repository, worktree, git_dir)?.head(),
         Layout::Clone => clone::fetch(
@@ -1489,7 +1502,8 @@ pub(super) fn tip(
 /// files included,
 /// must stay within the bounds before anything is stored. The change set is stored
 /// before HEAD moves, so a stop between the two loses nothing: the next turn end
-/// commits the same tree again.
+/// commits the same tree again. Its counts are measured against the tip it lands on,
+/// read before the hold as the clone fetch is (`owner::landing_tip`, DEC-107).
 /// Inputs: the store, the workspace, the turn end, the bounds and the time now.
 /// Output: the open change set, None when nothing is pending, or
 /// `changes_branch_not_above_base` for a clone branch that dropped the base; an updating
@@ -1522,6 +1536,13 @@ pub(super) fn record(
         )?),
         Layout::Linked => None,
     };
+    let tip = super::owner::landing_tip(
+        db,
+        &shared,
+        &workspace.repository,
+        &workspace.project,
+        &workspace.agent,
+    );
     let _held = hold(&workspace.repository);
     let open = store::open_for(db, worktree)?;
     if open
@@ -1629,9 +1650,8 @@ pub(super) fn record(
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();
-    let tip = super::owner::checked_out_tip(&shared, &workspace.repository);
     let from = match &tip {
-        Some(tip) => super::owner::measured_from(&shared, &record.base, &record.head, tip)?,
+        Some(tip) => super::owner::measured_from(db, &shared, &record, tip)?,
         None => record.base.clone(),
     };
     check_new_folders(
@@ -1674,27 +1694,40 @@ pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(
 }
 
 /// The task prompt for resolving the conflict markers an update left in a worktree,
-/// each conflicting file on one line with its control characters replaced, newlines
-/// included. Inputs: the store and the change set. Output: the prompt.
+/// naming the branch it merged: its lead's branch for a lead's worker while Lands is Lead,
+/// else the owner's. Each conflicting file is on one line with its control characters
+/// replaced, newlines included. Inputs: the store and the change set. Output: the prompt.
 pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, EngineError> {
     store::initialize(db)?;
     let record = store::load(db, id)?;
     if record.state != ChangeState::Updating {
         return Err(failure("changes_stale"));
     }
+    let (merged, wait, whose) =
+        match super::subagent::lead_of(db, &record.project, &record.agent, &record.repository) {
+            Ok(Some((_, lead))) => (
+                match super::subagent::lead_branch(db, &lead) {
+                    Some(branch) => format!("Your lead's branch {branch}"),
+                    None => String::from("Your lead's branch"),
+                },
+                "your lead's merge",
+                "your lead's",
+            ),
+            _ => (String::from("The owner's branch"), "review", "the owner's"),
+        };
     let clone = in_clone(&record);
     let mut prompt = if clone {
         format!(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
+            "{merged} changed while your work waited for {wait}, so CrazyAgent merged it with your branch as commit {}. First run `git merge {}` in your worktree on your branch.\n",
             record.head, record.head
         )
     } else {
-        String::from(
-            "The owner's branch changed while your work waited for review, so CrazyAgent merged it into your worktree.\n",
+        format!(
+            "{merged} changed while your work waited for {wait}, so CrazyAgent merged it into your worktree.\n",
         )
     };
     if record.conflicts.is_empty() {
-        prompt.push_str("The merge had no conflicts. Check that your work still fits the owner's changes and fix anything that no longer works.\n");
+        prompt.push_str(&format!("The merge had no conflicts. Check that your work still fits {whose} changes and fix anything that no longer works.\n"));
     } else {
         prompt.push_str("These files have conflict markers (<<<<<<<, ======= and >>>>>>>):\n");
         for file in record.conflicts.iter().take(CONFLICTS_SHOWN_MAX) {

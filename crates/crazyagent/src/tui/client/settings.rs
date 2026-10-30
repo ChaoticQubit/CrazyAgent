@@ -1910,6 +1910,101 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is_approved() {
+        use crate::memory::library::MemoryOrigin;
+        let root = tempfile::Builder::new()
+            .prefix("ca-twrites-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut service, _stop) = engine(root.path()).await;
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let _ = native.attach().await;
+        assert!(native.ready);
+        let writes = |set| SettingsJob::AgentWrites { set };
+        assert!(matches!(
+            native.settings(writes(None)).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
+        ));
+        assert!(matches!(
+            native.settings(writes(Some((AgentWrites::Ask, 1)))).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
+        ));
+        assert!(matches!(
+            native.settings(writes(None)).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
+        ));
+
+        let mut db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
+            .unwrap();
+        assert_eq!(
+            crate::memory::library::agent_remember(
+                &mut db,
+                &ProjectId::new("alpha").unwrap(),
+                "Ada (@lead-a)",
+                true,
+                "Ship on Fridays.",
+            )
+            .unwrap(),
+            Ok(true)
+        );
+        drop(db);
+        let agent = "Ada (@lead-a)".to_owned();
+        let listed = |event: SettingsEvent| {
+            let SettingsEvent::Memories(Ok(list)) = event else {
+                panic!("the memories were not listed");
+            };
+            list
+        };
+        let global = || SettingsJob::Memories {
+            scopes: vec![MemoryScope::Global],
+        };
+        let memories = listed(native.settings(global()).await);
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].origin,
+            MemoryOrigin::Requested {
+                agent: agent.clone()
+            }
+        );
+        let id = memories[0].id.clone();
+        assert!(matches!(
+            native
+                .settings(SettingsJob::ApproveMemory {
+                    memory: id.clone(),
+                    generation: 2,
+                })
+                .await,
+            SettingsEvent::MemoryApproved(Ok(()))
+        ));
+        let memories = listed(native.settings(global()).await);
+        assert_eq!(memories[0].origin, MemoryOrigin::Agent { agent });
+        assert!(matches!(
+            native
+                .settings(SettingsJob::ApproveMemory {
+                    memory: id,
+                    generation: 3,
+                })
+                .await,
+            SettingsEvent::MemoryApproved(Err(code)) if code == "memory_not_requested"
+        ));
+        assert!(matches!(
+            native.settings(writes(Some((AgentWrites::Save, 4)))).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
+        ));
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     async fn engine(root: &std::path::Path) -> (EngineService, tokio::sync::watch::Sender<bool>) {
         let global = root.join("global.toml");
         std::fs::write(&global, "version = 1\ntimeout_ms = 10000\n").unwrap();

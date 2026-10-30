@@ -98,7 +98,7 @@ pub enum Overlaps {
 }
 
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges on and `COUNTED_TOOLS_DEFAULT`.
+/// are Lead, Warn, nudges off and `COUNTED_TOOLS_DEFAULT`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -113,7 +113,7 @@ impl Default for CoordSettings {
         Self {
             questions_to: QuestionsTo::Lead,
             overlaps: Overlaps::Warn,
-            nudges: true,
+            nudges: false,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
         }
     }

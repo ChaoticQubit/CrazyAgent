@@ -301,3 +301,24 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun", asyn
     assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
   }
 });
+
+test("every Rust test target that needs the staged RCLI host is left out of CI, which stages none", async () => {
+  const lines = (await workflow("ci.yml")).split("\n");
+  const excluded = (name) => {
+    const start = lines.findIndex((line) => line.startsWith(`  ${name}:`));
+    assert(start >= 0, `no ${name} in the CI env`);
+    const end = lines.findIndex((line, index) => index > start && line.length - line.trimStart().length <= 2);
+    return new Set([lines[start].slice(lines[start].indexOf(":") + 1), ...lines.slice(start + 1, end)].join(" ").split(/\s+/).filter((word) => word && word !== ">-"));
+  };
+  const root = new URL("../../", import.meta.url);
+  let needing = 0;
+  for (const [folder, list] of [["crates/crazyagent/tests/", "ENGINE_TESTS_EXCLUDE"], ["apps/desktop/src-tauri/tests/", "DESKTOP_TESTS_EXCLUDE"]]) {
+    const skipped = excluded(list);
+    for (const name of (await readdir(new URL(folder, root))).filter((name) => name.endsWith(".rs"))) {
+      if (!(await readFile(new URL(folder + name, root), "utf8")).includes("CRAZYAGENT_RCLI")) continue;
+      needing += 1;
+      assert(skipped.has(name.slice(0, -3)), `${folder}${name} reads CRAZYAGENT_RCLI but is not in ${list}`);
+    }
+  }
+  assert(needing > 0, "the check found the tests that need the RCLI host");
+});

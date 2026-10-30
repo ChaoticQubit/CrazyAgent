@@ -887,5 +887,5 @@ fn one_line(text: &str) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

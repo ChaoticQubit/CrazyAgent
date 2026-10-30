@@ -1856,8 +1856,8 @@ impl TeamView {
     }
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
-    /// The question or notice at the bottom stays in view on a short screen: the selected
-    /// agent's panel above it is cut first, unless the owner is typing in that panel.
+    /// While the footer asks a question, the settings summary folds toward its first row
+    /// when the window is too short to keep the question beside the lists and the panel.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -1870,6 +1870,7 @@ impl TeamView {
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
         let mut lines = self.summary(content, look);
+        let summary_rows = lines.len();
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
@@ -1918,6 +1919,21 @@ impl TeamView {
         let footer = self.footer(look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
+        let folded = if footer.is_empty() {
+            0
+        } else {
+            (fixed + 2)
+                .saturating_sub(room)
+                .min(summary_rows.saturating_sub(1))
+        };
+        assert!(
+            folded < summary_rows.max(1),
+            "the summary's first row stays"
+        );
+        if folded > 0 {
+            lines.drain(1..=folded);
+        }
+        let fixed = fixed - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -2025,13 +2041,7 @@ impl TeamView {
         }
         lines.push(Row::default());
         let cursor = caret.map(|(row, column)| (lines.len() + row, column));
-        let spare = room.saturating_sub(lines.len() + footer.len());
-        let shown = if caret.is_none() {
-            panel.len().min(spare)
-        } else {
-            panel.len()
-        };
-        lines.extend(panel.into_iter().take(shown));
+        lines.extend(panel);
         lines.extend(footer);
         (lines, self.help(), cursor)
     }
