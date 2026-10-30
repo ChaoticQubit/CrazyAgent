@@ -6179,6 +6179,199 @@ fn an_agent_the_owner_stopped_wakes_only_by_the_owner() {
     host.close(&[]).unwrap();
 }
 
+/// Runs two sub-agents to their end, makes the second a worker the first leads, and has
+/// the owner stop only that worker with an owner task pinned to it, which the stop holds
+/// (AW-1). Takes the fixture and its runtime. Returns the lead, the worker and the task.
+#[cfg(target_os = "macos")]
+fn lead_with_owner_stopped_worker(fixture: &Fixture, team: &mut TeamRuntime) -> (i64, i64, i64) {
+    idle_stop(fixture, WAKE_IDLE);
+    for prompt in ["Write page.md", "Write notes.md"] {
+        let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &crate::team::TeamAction::Delegate {
+                    project_id: fixture.setup.project_id.clone(),
+                    harness: Some("codex".into()),
+                    prompt: prompt.into(),
+                },
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+    }
+    fixture.until(team, "both sub-agents finish and stop", |f| {
+        let ran = subs(f);
+        ran.len() == 2
+            && ran
+                .iter()
+                .all(|id| f.agent_status(*id).0 == AgentStatus::Stopped)
+    });
+    let ran = subs(fixture);
+    let (lead, worker) = (ran[0], ran[1]);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![worker, lead],
+        )
+        .unwrap();
+    crate::team::owner_stop(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        worker,
+        now_ms(),
+    )
+    .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'owner','codex',0,'Finish the notes.','queued',?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, worker],
+        )
+        .unwrap();
+    idle_ticks(team);
+    assert!(!crate::team::owner_stopped(&fixture.connection, lead).unwrap());
+    worker_stays_stopped(fixture, worker, task, "nothing");
+    (lead, worker, task)
+}
+
+/// Requires the owner's stop of a worker to hold: the stop is recorded, the worker is
+/// still stopped with one launch, and its task still waits. Takes the fixture, the worker,
+/// its held task and what started its lead. Panics naming what lifted the stop.
+#[cfg(target_os = "macos")]
+fn worker_stays_stopped(fixture: &Fixture, worker: i64, task: i64, what: &str) {
+    assert!(
+        crate::team::owner_stopped(&fixture.connection, worker).unwrap(),
+        "{what} lifted the owner's stop of a worker the lead leads"
+    );
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued", "{what}: the worker's task is still held");
+    assert_eq!(fixture.agent_status(worker).0, AgentStatus::Stopped);
+    assert_eq!(
+        launches(fixture, worker).len(),
+        1,
+        "{what} started the worker"
+    );
+}
+
+/// RSF-M1 (AW-1): the owner's change-set Update of a lead starts that lead, and the owner's
+/// stop of a worker it leads stays, with the worker's task held: the owner acted on the
+/// lead's change set, not on the worker.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_update_of_a_lead_leaves_its_owner_stopped_worker_stopped() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let (lead, worker, task) = lead_with_owner_stopped_worker(&fixture, &mut team);
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::admit_resolve(
+            &tx,
+            &fixture.setup.project_id,
+            lead,
+            "Update the page to the new trunk.",
+            now_ms()
+        )
+        .unwrap(),
+        Ok(())
+    );
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the owner's Update starts the lead", |f| {
+        launches(f, lead).len() == 2
+    });
+    idle_ticks(&mut team);
+    worker_stays_stopped(&fixture, worker, task, "the owner's Update of its lead");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// RSF-M1 (AW-1): the master's `update_work` message wakes a finished lead, and the owner's
+/// stop of a worker that lead leads stays, with the worker's task held.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_master_wake_of_a_lead_leaves_its_owner_stopped_worker_stopped() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let (lead, worker, task) = lead_with_owner_stopped_worker(&fixture, &mut team);
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let persona = names::name(&fixture.connection, lead)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let (said, refused) = wake_call(&fixture, &mailbox, 1, &persona, "Review page.md.");
+    assert!(!refused, "{said}");
+    assert!(said.contains("Waking"), "{said}");
+    fixture.until(&mut team, "the master's message wakes the lead", |f| {
+        launches(f, lead).len() == 2
+    });
+    idle_ticks(&mut team);
+    worker_stays_stopped(&fixture, worker, task, "the master's wake of its lead");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// K8: the owner's Wake of a lead clears the owner's stops of the agents it leads too, so
+/// the worker's held task starts it again.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_owners_wake_of_a_lead_clears_its_workers_stops_and_their_held_tasks_start_them() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let (lead, worker, _) = lead_with_owner_stopped_worker(&fixture, &mut team);
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::WakeAgent {
+                project_id: fixture.setup.project_id.clone(),
+                agent: lead,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's Wake starts the lead and its worker's held task starts the worker",
+        |f| launches(f, lead).len() == 2 && launches(f, worker).len() == 2,
+    );
+    assert!(!crate::team::owner_stopped(&fixture.connection, worker).unwrap());
+    assert!(
+        typed(&fixture, worker).contains("Finish the notes."),
+        "{}",
+        typed(&fixture, worker)
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// The session limit counts from when the agent's terminal started, also across an engine
 /// restart: a sub-agent the next engine adopts keeps the time it ran before, so a session
 /// it already passed ends it.
