@@ -2726,6 +2726,17 @@ fn launches(fixture: &Fixture, master: i64) -> Vec<String> {
         .collect()
 }
 
+/// The app starts of one agent: its launch lines without the `app-server` line the Codex
+/// bridge (DEC-104 K2b) logs beside each start. Takes the fixture and the agent id.
+/// Returns the start lines, oldest first.
+#[cfg(target_os = "macos")]
+fn app_starts(fixture: &Fixture, agent: i64) -> Vec<String> {
+    launches(fixture, agent)
+        .into_iter()
+        .filter(|line| !line.starts_with("app-server "))
+        .collect()
+}
+
 #[cfg(target_os = "macos")]
 fn noted(fixture: &Fixture, text: &str) -> usize {
     fixture
@@ -3639,7 +3650,9 @@ fn wake_call(
     let id = format!("{call:032x}");
     std::fs::write(
         mailbox.join(format!("{id}.call")),
-        serde_json::to_vec(&serde_json::json!({"tool": "update_work", "to": agent, "text": text}))
+        serde_json::to_vec(
+            &serde_json::json!({"tool": "update_work", "kind": "message", "to": agent, "text": text}),
+        )
             .unwrap(),
     )
     .unwrap();
@@ -3671,11 +3684,12 @@ fn wake_call(
     )
 }
 
-/// The master wakes a finished sub-agent by its name (DEC-102): it starts again under the
-/// same id, name and worktree, continuing its own Codex conversation through `resume <id>`
-/// with the master's text as its next task. A running or unknown name gets a plain refusal.
-/// Once its conversation record is gone, the next wake starts a fresh conversation that
-/// carries the agent's last result as a handoff.
+/// The master's `update_work` message wakes a finished sub-agent by its name (DEC-102,
+/// K1b): it starts again under the same id, name and worktree, continuing its own Codex
+/// conversation through `resume <id>` with the master's text as its next task. An unknown
+/// name gets a plain refusal and a running agent gets the message without a wake. Once its
+/// conversation record is gone, the next wake starts a fresh conversation that carries the
+/// agent's last result as a handoff.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
@@ -3707,38 +3721,69 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
         .persona;
     let mailbox = fixture.base.join("mailbox");
     std::fs::create_dir(&mailbox).unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'master','codex',1,'stopped',1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let last_sent = |f: &Fixture| -> i64 {
+        f.connection
+            .query_row(
+                "SELECT MAX(id) FROM coord_messages WHERE to_agent=?1",
+                [member],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
     assert_eq!(
         wake_call(&fixture, &mailbox, 1, "Zzyzx", "Hello"),
         (
-            "Not woken: no finished sub-agent of this project is called Zzyzx. Call status() for their names.".to_owned(),
+            "Not sent: no agent of this project is called Zzyzx. Call inspect_work() for the team."
+                .to_owned(),
             true
         )
     );
     let label = super::super::events::label(&fixture.connection, member).unwrap();
+    let woken = wake_call(&fixture, &mailbox, 2, &persona, "Add a footer to page.md.");
     assert_eq!(
-        wake_call(&fixture, &mailbox, 2, &persona, "Add a footer to page.md."),
+        woken,
         (
             format!(
-                "Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+                "Sent #{}. Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.",
+                last_sent(&fixture)
             ),
             false
         )
     );
     fixture.until(
         &mut team,
-        "the woken sub-agent continues its conversation with the new task",
-        |f| launches(f, member).len() == 2 && typed(f, member).contains("Add a footer to page.md."),
+        "the woken sub-agent continues its conversation with the message",
+        |f| {
+            app_starts(f, member).len() == 2
+                && typed(f, member).contains("Add a footer to page.md.")
+        },
     );
     let label = super::super::events::label(&fixture.connection, member).unwrap();
+    let reached = wake_call(&fixture, &mailbox, 3, &persona, "Again");
     assert_eq!(
-        wake_call(&fixture, &mailbox, 3, &persona, "Again"),
+        reached,
         (
-            format!("Not woken: {label} is running. Reach it with message()."),
-            true
+            format!(
+                "Sent #{} to {label}. It reaches {label} at its next turn or once it is idle; inspect_work() shows when it is read.",
+                last_sent(&fixture)
+            ),
+            false
         )
     );
+    assert_eq!(
+        app_starts(&fixture, member).len(),
+        2,
+        "a running agent is not woken"
+    );
     assert!(
-        launches(&fixture, member)[1].ends_with(&format!(" resume {conversation}")),
+        app_starts(&fixture, member)[1].ends_with(&format!(" resume {conversation}")),
         "{:?}",
         launches(&fixture, member)
     );
@@ -3776,10 +3821,10 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     fixture.until(
         &mut team,
         "the sub-agent without its conversation starts a fresh one",
-        |f| launches(f, member).len() == 3 && typed(f, member).contains("Check page.md."),
+        |f| app_starts(f, member).len() == 3 && typed(f, member).contains("Check page.md."),
     );
     assert!(
-        !launches(&fixture, member)[2].contains("resume"),
+        !app_starts(&fixture, member)[2].contains("resume"),
         "{:?}",
         launches(&fixture, member)
     );
@@ -5950,4 +5995,180 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
         (mate, "stopped".to_owned()),
         "a teammate whose pane ended stops"
     );
+}
+
+/// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
+/// merge, a tool the owner switched off is left out for every agent and both sections
+/// say so; the same calls planted in the worker's mailbox anyway are refused.
+#[test]
+fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_planted() {
+    let mut f = Fixture::new(1);
+    let folder = f.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let runtime = f.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::tool_switches::set(
+        &f.connection,
+        None,
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        tool::REMEMBER_TOOL,
+        crate::coord::tool_switches::Switch::Off,
+    )
+    .unwrap();
+    let lead = f.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let worker = f.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    f.connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![worker, lead],
+        )
+        .unwrap();
+    for (id, leads) in [(lead, true), (worker, false)] {
+        std::fs::create_dir_all(runtime.mailbox(id).parent().unwrap()).unwrap();
+        let context = runtime
+            .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+            .unwrap();
+        let home = f.base.join(format!("home-{id}"));
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let installed = context.install("codex", &home, true).unwrap();
+        let config: toml::Table = std::fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let args: Vec<String> = config["mcp_servers"][tool::SERVER_NAME]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|arg| arg.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(args[0], tool::AGENT_SERVER_COMMAND);
+        assert_eq!(args[1], runtime.mailbox(id).to_str().unwrap());
+        let mut off: Vec<&str> = args[2..].iter().map(String::as_str).collect();
+        off.sort_unstable();
+        let mut wanted = vec![tool::REMEMBER_TOOL];
+        if !leads {
+            wanted.extend(tool::LEAD_TOOLS);
+        }
+        wanted.sort_unstable();
+        assert_eq!(off, wanted, "agent {id}");
+        let told = context.instructions();
+        assert!(
+            !told.contains(&format!("\n- {}: ", tool::REMEMBER_TOOL)),
+            "{told}"
+        );
+        assert!(
+            told.contains(&format!("\n- {}: ", tool::INSPECT_WORK_TOOL)),
+            "{told}"
+        );
+        for name in tool::LEAD_TOOLS {
+            assert_eq!(
+                told.contains(&format!("\n- {name}: ")),
+                leads,
+                "{name}: {told}"
+            );
+        }
+        drop(installed);
+    }
+
+    let mailbox = f.base.join("worker-mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let calls = [
+        tool::Call::Spawn {
+            task: "Write the docs.".into(),
+            harness: None,
+            role: None,
+            mode: None,
+        },
+        tool::Call::Remember {
+            text: "The docs live in docs/guide.".into(),
+            scope: tool::MemoryReach::Project,
+        },
+    ];
+    let mut ids = Vec::new();
+    for (index, call) in calls.iter().enumerate() {
+        let id = format!("{:032x}", index + 1);
+        std::fs::write(
+            mailbox.join(format!("{id}.call")),
+            serde_json::to_vec(call).unwrap(),
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(mailbox.join(format!("{id}.call")))
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + index as u64))
+            .unwrap();
+        ids.push(id);
+    }
+    let agents_folder = f.base.join("team").join("agents");
+    let answering = super::super::master::Answering {
+        access: &f.access,
+        stored: &f.setup,
+        landing: &f.base,
+        agents: &agents_folder,
+        events: None,
+        host: None,
+    };
+    let label = super::super::events::label(&f.connection, worker).unwrap();
+    let base = f.base.clone();
+    let mut served = 0;
+    loop {
+        let taken = super::super::history::serve_agent_calls(
+            &mut f.connection,
+            &project,
+            (worker, &label),
+            &agents_folder,
+            &mailbox,
+            &mut |connection, pane| {
+                team_caller(
+                    connection,
+                    None,
+                    Some(&base),
+                    &project,
+                    (worker, &label),
+                    pane,
+                )
+            },
+            &mut |connection, caller, call| {
+                super::super::master::answer_sub(connection, &answering, caller, call)
+                    .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+            },
+        );
+        if taken == 0 {
+            break;
+        }
+        served += taken;
+    }
+    assert_eq!(served, calls.len());
+    let answers: Vec<(String, bool)> = ids
+        .iter()
+        .map(|id| {
+            let reply: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap(),
+            )
+            .unwrap();
+            (
+                reply["text"].as_str().unwrap().to_owned(),
+                reply["error"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        answers,
+        vec![
+            (
+                "Not started: the owner's Sub-agent depth setting is 2, so workers this deep cannot start more of their own. Do the work yourself or tell the master.".to_owned(),
+                true
+            ),
+            ("Not done: the owner switched this tool off.".to_owned(), true),
+        ]
+    );
+    let tasks: i64 = f
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tasks, 0);
 }

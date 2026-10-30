@@ -499,7 +499,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
     let second = "1".repeat(32);
     std::fs::write(
         mailbox.join(format!("{first}{CALL_SUFFIX}")),
-        b"{\"tool\":\"status\"}\n",
+        b"{\"tool\":\"inspect_work\"}\n",
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -511,7 +511,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32))),
     )
     .unwrap();
-    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"status\"}").unwrap();
+    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"inspect_work\"}").unwrap();
     std::fs::write(
         mailbox.join(format!("{}{CALL_SUFFIX}", "3".repeat(32))),
         vec![b' '; CALL_BYTES_MAX as usize + 1],
@@ -559,7 +559,7 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(
             folder.join(format!("{id}{CALL_SUFFIX}")),
-            b"{\"tool\":\"status\"}\n",
+            b"{\"tool\":\"inspect_work\"}\n",
         )
         .unwrap();
         let reply = folder.join(format!("{stale}{REPLY_SUFFIX}"));
@@ -697,7 +697,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     let blocked = "c".repeat(32);
     std::fs::write(
         mailbox.join(format!("{blocked}{CALL_SUFFIX}")),
-        br#"{"tool":"status"}"#,
+        br#"{"tool":"inspect_work"}"#,
     )
     .unwrap();
     std::fs::create_dir(mailbox.join(format!("{blocked}{TAKEN_SUFFIX}"))).unwrap();
@@ -729,4 +729,39 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     )
     .unwrap();
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
+}
+
+#[test]
+fn a_switched_off_tool_is_refused_by_its_server_and_never_reaches_the_mailbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let input = requests(&[json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": STOP_TOOL, "arguments": {"agent": "3"}}
+    })]);
+    let mut output = Vec::new();
+    serve_live(input, &mut output, &mailbox, &[STOP_TOOL.to_owned()], None).unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        json!(SWITCHED_OFF),
+        "{answer}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+#[test]
+fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
+    let names =
+        |list: &[&str]| -> Vec<String> { list.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(known_tools(&[]));
+    assert!(known_tools(&names(&TEAM_TOOLS)));
+    assert!(known_tools(&names(&[STOP_TOOL, MERGE_TOOL])));
+    assert!(!known_tools(&names(&["status"])));
+    assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
+    assert!(known_tools(&names(&[STOP_TOOL; 12])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 13])));
 }

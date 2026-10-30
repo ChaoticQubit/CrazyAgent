@@ -1,8 +1,8 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER, SERVER_COMMAND,
-    TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
+    AGENT_SERVER_COMMAND, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER,
+    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -193,4 +193,33 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     )
     .unwrap();
     assert!(!wrong.status.success());
+}
+
+#[test]
+fn both_live_servers_refuse_an_unknown_tool_to_switch_off_with_their_usage() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    for command in [LIVE_SERVER_COMMAND, AGENT_SERVER_COMMAND] {
+        for off in [&["status"][..], &["stop", "Stop"][..]] {
+            let ran = crazyagent::spawn_gate::output(
+                Command::new(env!("CARGO_BIN_EXE_crazyagent"))
+                    .arg(command)
+                    .arg(&mailbox)
+                    .args(off)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(!ran.status.success(), "{command} {off:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&ran.stderr).trim(),
+                format!("usage: crazyagent {command} MAILBOX_DIR [OFF_TOOL ...]"),
+                "{command} {off:?}"
+            );
+            assert!(ran.stdout.is_empty());
+        }
+    }
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }

@@ -507,9 +507,13 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
         "{answers:#?}"
     );
     assert!(!text(&answers[3]).1, "{answers:#?}");
-    assert_eq!(
-        text(&answers[4]),
-        ("No change set is waiting for the owner.", false)
+    let (inspected, refused) = text(&answers[4]);
+    assert!(
+        !refused
+            && inspected.starts_with("Your work: none open.")
+            && inspected.contains("\n\nThe team:\n")
+            && inspected.ends_with("No change set is waiting for the owner."),
+        "{inspected}"
     );
     let tasks: i64 = fixture
         .connection
@@ -553,10 +557,10 @@ fn a_planted_mailbox_call_is_checked_again_before_it_takes_effect() {
     };
     assert_eq!(reply(&planted)["error"], true);
     assert!(
+        reply(&planted)["text"].as_str().unwrap()
+            == "Not done: the engine could not read this call. Call the tool again.",
+        "a planted call live_call would read differently is refused: {}",
         reply(&planted)["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("Not handed off")
     );
     assert_eq!(reply(&unreadable)["text"], UNREAD);
     let tasks: i64 = fixture
@@ -616,16 +620,16 @@ fn pinned(fixture: &Fixture, agent: i64) -> Vec<i64> {
         .unwrap()
 }
 
-/// A handle a finished sub-agent and a running one share wakes the finished one (WK-R2):
-/// the master's `wake` looks among finished sub-agents first, so a live namesake never
-/// answers "running", and the running agent is still reached by its number. The woken
-/// agent's handle is settled when the wake is admitted and the reply names it (WKC-2): the
-/// old handle still reaches only the running namesake, the new one reaches nobody else
-/// while it waits and is not given away, and the agent starts under it.
+/// A handle a finished sub-agent and a running one share reaches the running one, and the
+/// master wakes the finished one by its number from the finished list (K1b `update_work`,
+/// WK-R2). The woken agent's handle is settled when the wake is admitted and the reply
+/// names it (WKC-2): the old handle still reaches only the running namesake, the new one
+/// reaches nobody else while it waits and is not given away, and the agent starts under it.
 #[cfg(target_os = "macos")]
 #[test]
 fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
     let mut fixture = Fixture::new();
+    master_row(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let finished = named_sub(&fixture, "onboarding-fix", "stopped");
@@ -640,29 +644,50 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
             tool_call(
                 1,
                 tool::UPDATE_WORK_TOOL,
-                json!({"to": "@onboarding-fix", "text": "Fix the onboarding copy."}),
+                json!({"to": format!("Sub-agent {finished}"), "text": "Fix the onboarding copy."}),
             ),
             tool_call(
                 2,
                 tool::UPDATE_WORK_TOOL,
-                json!({"to": format!("Sub-agent {live}"), "text": "Stop."}),
+                json!({"to": "@onboarding-fix", "text": "Stop."}),
             ),
         ],
     );
     assert_eq!(answers.len(), 2, "{answers:#?}");
     let settled = super::super::events::label(&fixture.connection, finished).unwrap();
     assert!(settled.ends_with("(@onboarding-fix-2)"), "{settled}");
+    let sent: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE to_agent=?1",
+            [finished],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(
         text(&answers[0]),
         (
-            format!("Waking {settled}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
+            format!("Sent #{sent}. Waking {settled}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends.").as_str(),
             false
         )
     );
     assert_eq!(pinned(&fixture, finished).len(), 1);
     assert!(pinned(&fixture, live).is_empty());
     let (said, refused) = text(&answers[1]);
-    assert!(refused && said.contains("is running"), "{said}");
+    let live_label = super::super::events::label(&fixture.connection, live).unwrap();
+    assert!(
+        !refused && said.starts_with("Sent #") && said.contains(&format!(" to {live_label}. ")),
+        "the shared handle reaches the running namesake, which is not woken: {said}"
+    );
+    let to_live: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE to_agent=?1",
+            [live],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(to_live, 1);
     let resolve =
         |name: &str| super::super::names::resolve(&fixture.connection, &project, name).unwrap();
     assert_eq!(resolve("@onboarding-fix"), Some(live));
@@ -707,6 +732,7 @@ fn wake_by_a_shared_handle_reaches_the_finished_agent_not_its_live_namesake() {
 #[test]
 fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
     let mut fixture = Fixture::new();
+    master_row(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
@@ -735,7 +761,7 @@ fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
     assert_eq!(answers.len(), 1, "{answers:#?}");
     let (said, refused) = text(&answers[0]);
     assert!(
-        !refused && said.starts_with(&format!("Waking {label}:")),
+        !refused && said.starts_with("Sent #") && said.contains(&format!(". Waking {label}:")),
         "{said}"
     );
     assert_eq!(pinned(&fixture, agent).len(), 1);
@@ -747,6 +773,7 @@ fn an_agent_that_finishes_after_the_briefing_is_listed_by_status_and_wakes() {
 #[test]
 fn the_master_cannot_wake_an_agent_the_owner_stopped() {
     let mut fixture = Fixture::new();
+    master_row(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let agent = named_sub(&fixture, "page-writer", "stopped");
@@ -781,6 +808,39 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
         .query_row("SELECT COUNT(*) FROM team_tasks", [], |row| row.get(0))
         .unwrap();
     assert_eq!(tasks, 0);
+    let stored: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE to_agent=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 0, "a refused message is not stored");
+}
+
+/// Answers one team call as the sub-agent `agent` through the engine's own path, the way
+/// `serve_agent_calls` does for a call read from its mailbox. Takes the fixture, the
+/// caller, the tool and its arguments. Returns the sentence and whether it is a refusal.
+#[cfg(target_os = "macos")]
+fn as_sub(fixture: &mut Fixture, agent: i64, tool: &str, arguments: Value) -> (String, bool) {
+    let call = tool::live_call(tool, Some(&arguments)).unwrap().unwrap();
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    answer_sub(&mut fixture.connection, &answering, agent, call)
+        .unwrap()
+        .unwrap()
+}
+
 /// Answers one team call as the fixture's master through the engine's own path. Takes the
 /// fixture, the tool and its arguments. Returns the sentence and whether it is a refusal.
 fn as_master(fixture: &mut Fixture, tool: &str, arguments: Value) -> (String, bool) {
@@ -799,6 +859,38 @@ fn as_master(fixture: &mut Fixture, tool: &str, arguments: Value) -> (String, bo
     answer(&mut fixture.connection, &answering, MASTER, call).unwrap()
 }
 
+/// Records the fixture's project in `projects`, as the engine does when the owner adds it,
+/// so its coordination settings can be written. Takes the fixture.
+fn known_project(fixture: &Fixture) {
+    let row = crate::protocol::StoredProject {
+        project_id: fixture.setup.project_id.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: fixture.setup.name.clone(),
+            repositories: vec![],
+        },
+    };
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&row).unwrap()],
+        )
+        .unwrap();
+}
+
+/// Adds the fixture's master as a team agent row, so its own work and messages have an
+/// owner the coordination layer knows. Takes the fixture.
+#[cfg(target_os = "macos")]
+fn master_row(fixture: &Fixture) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,?2,'master','claude-code',1,'idle',?3,?3)",
+            params![MASTER, PROJECT, NOW],
+        )
+        .unwrap();
+}
+
 /// Makes `worker` one of `lead`'s own workers. Takes the fixture, the lead and the worker.
 #[cfg(target_os = "macos")]
 fn lead_of(fixture: &Fixture, lead: i64, worker: i64) {
@@ -812,6 +904,24 @@ fn lead_of(fixture: &Fixture, lead: i64, worker: i64) {
 }
 
 #[cfg(target_os = "macos")]
+fn no_worktree(fixture: &Fixture, agent: i64) {
+    fixture
+        .connection
+        .execute("DELETE FROM team_worktrees WHERE agent=?1", [agent])
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn work_id(fixture: &Fixture, title: &str) -> i64 {
+    fixture
+        .connection
+        .query_row("SELECT id FROM coord_work WHERE title=?1", [title], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+#[cfg(target_os = "macos")]
 fn bodies(fixture: &Fixture, sql: &str, agent: i64) -> Vec<String> {
     let mut statement = fixture.connection.prepare(sql).unwrap();
     statement
@@ -819,6 +929,570 @@ fn bodies(fixture: &Fixture, sql: &str, agent: i64) -> Vec<String> {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap()
+}
+
+/// The master's start_work over a running sub-agent's claim tells the master whom to
+/// write to and sends the sub-agent one engine note, a claim covering 200 project files
+/// is called wide, and with Overlapping edits Off neither side is told.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_off() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    known_project(&fixture);
+    let folder = fixture.base.join("project");
+    crate::spawn_gate::status(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let generated = folder.join("src/gen");
+    std::fs::create_dir_all(&generated).unwrap();
+    for file in 0..200 {
+        std::fs::write(generated.join(format!("f{file}.ts")), "x").unwrap();
+    }
+    let charts = named_sub(&fixture, "charts", "working");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        charts,
+        tool::START_WORK_TOOL,
+        json!({"title": "Draw the chart", "claims": ["src/ui/chart.ts"]}),
+    );
+    assert!(!refused, "{said}");
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Refactor the app", "claims": ["src/**"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "Refactor the app");
+    assert!(
+        said.starts_with(&format!(
+            "Started work #{work} at version 1: Refactor the app."
+        )),
+        "{said}"
+    );
+    assert!(said.contains("src/** covers 200 or more files"), "{said}");
+    assert!(
+        said.contains("Your claims overlap other agents' active claims."),
+        "{said}"
+    );
+    assert!(said.contains(&format!(", to {charts}: ")), "{said}");
+    let notes = "SELECT body FROM coord_messages WHERE from_kind='engine' AND to_agent=?1 AND kind='note' ORDER BY id";
+    let told = bodies(&fixture, notes, charts);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(
+        told[0].starts_with(&format!(
+            "the master started work #{work} \"Refactor the app\" claiming src/**, which overlaps your claim src/ui/chart.ts"
+        )),
+        "{}",
+        told[0]
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::settings::write(
+        &fixture.connection,
+        &project,
+        &crate::coord::settings::CoordSettings {
+            overlaps: crate::coord::settings::Overlaps::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Rename the charts", "claims": ["src/ui/**"]}),
+    );
+    assert!(!refused && !said.contains("overlap"), "{said}");
+    assert_eq!(
+        bodies(&fixture, notes, charts).len(),
+        1,
+        "Off sends no note"
+    );
+}
+
+/// A lead's inspect_work shows its work, its workers' work and not another agent's, what
+/// waits for it (then marked read), its workers' questions for the owner, what it sent
+/// and its workers; a plain sub-agent sees only its own sections.
+#[cfg(target_os = "macos")]
+#[test]
+fn inspect_work_shows_a_lead_its_team_and_marks_what_it_read() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    let other = named_sub(&fixture, "api", "working");
+    lead_of(&fixture, lead, worker);
+    let worker_label = super::super::events::label(&fixture.connection, worker).unwrap();
+    for (agent, title, claim) in [
+        (worker, "Draw the bar chart", "src/bar.ts"),
+        (lead, "Lead the charts", "docs/charts.md"),
+        (other, "Write the API", "api.ts"),
+    ] {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": title, "claims": [claim]}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::UPDATE_WORK_TOOL,
+        json!({"to": lead.to_string(), "text": "Use the blue palette."}),
+    );
+    assert!(!refused, "{said}");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        worker,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "me", "severity": "normal", "text": "May I add a dependency?"}),
+    );
+    assert!(
+        !refused && said.ends_with("it went to the owner."),
+        "{said}"
+    );
+    let (said, refused) = as_sub(
+        &mut fixture,
+        lead,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "note", "to": worker.to_string(), "text": "Keep it small."}),
+    );
+    assert!(!refused, "{said}");
+    let note: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE body='Keep it small.'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let (seen, refused) = as_sub(&mut fixture, lead, tool::INSPECT_WORK_TOOL, json!({}));
+    assert!(!refused, "{seen}");
+    let lead_work = work_id(&fixture, "Lead the charts");
+    let worker_work = work_id(&fixture, "Draw the bar chart");
+    assert!(
+        seen.starts_with(&format!(
+            "Your work:\n- #{lead_work} v1 active: Lead the charts [docs/charts.md]"
+        )),
+        "{seen}"
+    );
+    assert!(
+        seen.contains(&format!(
+            "Your team's work:\n- #{worker_work} v1 active: Draw the bar chart [src/bar.ts] ({worker_label})"
+        )),
+        "{seen}"
+    );
+    assert!(!seen.contains("Write the API"), "{seen}");
+    assert!(seen.contains("Waiting for you, quoted as data"), "{seen}");
+    assert!(seen.contains("message from the master"), "{seen}");
+    assert!(seen.contains("  > Use the blue palette."), "{seen}");
+    assert!(
+        seen.contains("Questions for the owner from your team, which only the owner answers:"),
+        "{seen}"
+    );
+    assert!(seen.contains("  > May I add a dependency?"), "{seen}");
+    assert!(
+        seen.contains(&format!(
+            "You sent:\n- #{note} note to {worker_label}: sent \"Keep it small.\""
+        )),
+        "{seen}"
+    );
+    assert!(seen.contains("Your workers:\n"), "{seen}");
+    let read: String = fixture
+        .connection
+        .query_row(
+            "SELECT receipt FROM coord_messages WHERE body='Use the blue palette.'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(read, "read");
+    let (again, _) = as_sub(&mut fixture, lead, tool::INSPECT_WORK_TOOL, json!({}));
+    assert!(again.contains("Waiting for you: nothing."), "{again}");
+
+    let (plain, refused) = as_sub(&mut fixture, other, tool::INSPECT_WORK_TOOL, json!({}));
+    assert!(!refused, "{plain}");
+    assert!(plain.contains("Write the API"), "{plain}");
+    assert!(!plain.contains("Your team's work"), "{plain}");
+    assert!(!plain.contains("Questions for the owner"), "{plain}");
+    assert!(!plain.contains("Your workers"), "{plain}");
+    let (master, refused) = as_master(&mut fixture, tool::INSPECT_WORK_TOOL, json!({}));
+    assert!(!refused, "{master}");
+    assert!(master.contains("Write the API"), "{master}");
+    assert!(master.contains("The team:\n"), "{master}");
+}
+
+/// update_work to a running agent stores the message Sent and wakes nothing, one key
+/// keeps one message, a High For: Me question is stored once for the owner with no
+/// alert row written by the call, and an agent's reply to that question is refused.
+#[cfg(target_os = "macos")]
+#[test]
+fn update_work_stores_one_message_per_key_and_leaves_a_question_for_me_to_the_owner() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let api = named_sub(&fixture, "api", "working");
+    let docs = named_sub(&fixture, "docs", "working");
+    let label = super::super::events::label(&fixture.connection, api).unwrap();
+    let send = json!({"to": api.to_string(), "text": "Use the v2 schema.", "key": "schema-1"});
+    let first = as_master(&mut fixture, tool::UPDATE_WORK_TOOL, send.clone());
+    let again = as_master(&mut fixture, tool::UPDATE_WORK_TOOL, send);
+    let id: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE to_agent=?1",
+            [api],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let sent = (
+        format!(
+            "Sent #{id} to {label}. It reaches {label} at its next turn or once it is idle; inspect_work() shows when it is read."
+        ),
+        false,
+    );
+    assert_eq!(first, sent);
+    assert_eq!(again, sent, "one key keeps the first message");
+    assert!(
+        pinned(&fixture, api).is_empty(),
+        "a running agent is not woken"
+    );
+
+    let (said, refused) = as_sub(
+        &mut fixture,
+        api,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "question", "for": "me", "severity": "high", "text": "Drop the users table?"}),
+    );
+    let question: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM coord_messages WHERE kind='question'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        (said.as_str(), refused),
+        (
+            format!("Asked #{question}; it went to the owner. The owner gets an urgent alert. Wait for their answer and do not decide this yourself.").as_str(),
+            false
+        )
+    );
+    let alerts: i64 = fixture
+        .connection
+        .query_row("SELECT COUNT(*) FROM team_notifications", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(alerts, 0, "K7's tick raises the alert, not update_work");
+    let (said, refused) = as_sub(
+        &mut fixture,
+        docs,
+        tool::UPDATE_WORK_TOOL,
+        json!({"kind": "reply", "reply_to": question, "text": "Yes, drop it."}),
+    );
+    assert!(refused && said.starts_with("Not sent: "), "{said}");
+    let replies: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE reply_to=?1",
+            [question],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(replies, 0);
+}
+
+/// transfer_work assign hands the work over and sends the assignee a message from the
+/// caller, a stale version is refused in plain words, the assignee accepts, and an
+/// unknown name changes nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn transfer_work_assign_prompts_the_assignee_and_a_stale_version_is_refused() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let docs = named_sub(&fixture, "docs", "working");
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Write the docs", "claims": ["docs/"]}),
+    );
+    assert!(!refused, "{said}");
+    let work = work_id(&fixture, "Write the docs");
+    let assign = json!({"work": work, "version": 1, "action": "assign", "to": docs.to_string()});
+    assert_eq!(
+        as_master(&mut fixture, tool::TRANSFER_WORK_TOOL, assign.clone()),
+        (format!("Work #{work} is assigned at version 2."), false)
+    );
+    let prompts = bodies(
+        &fixture,
+        "SELECT body FROM coord_messages WHERE to_agent=?1 AND kind='prompt' AND from_kind='agent'",
+        docs,
+    );
+    assert_eq!(
+        prompts,
+        vec![format!(
+            "Work #{work} \"Write the docs\" is yours now at version 2. Accept it with transfer_work(work, version, accept) or decline it."
+        )]
+    );
+    assert_eq!(
+        as_master(&mut fixture, tool::TRANSFER_WORK_TOOL, assign),
+        (
+            "Not changed: the work changed meanwhile; read inspect_work() for its version and try again.".to_owned(),
+            true
+        )
+    );
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            docs,
+            tool::TRANSFER_WORK_TOOL,
+            json!({"work": work, "version": 2, "action": "accept"}),
+        ),
+        (format!("Work #{work} is accepted at version 3."), false)
+    );
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            docs,
+            tool::TRANSFER_WORK_TOOL,
+            json!({"work": work, "version": 3, "action": "handoff", "to": "@nobody"}),
+        ),
+        (
+            "Not changed: no agent of this project is called @nobody. Call inspect_work() for the team.".to_owned(),
+            true
+        )
+    );
+}
+
+/// finish_work review_ready tells the worker's lead, or the master for a parentless
+/// sub-agent, in a message with the evidence; Complete passes for an agent with no clone
+/// and for the master; a stale version is refused in plain words.
+#[cfg(target_os = "macos")]
+#[test]
+fn finish_work_tells_the_lead_or_master_of_review_and_the_master_finishes_unchecked() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    let solo = named_sub(&fixture, "api", "working");
+    lead_of(&fixture, lead, worker);
+    for agent in [lead, worker, solo] {
+        no_worktree(&fixture, agent);
+    }
+    for (agent, title) in [(worker, "Bar chart"), (solo, "API"), (lead, "Charts")] {
+        let (said, refused) = as_sub(
+            &mut fixture,
+            agent,
+            tool::START_WORK_TOOL,
+            json!({"title": title, "claims": [format!("{title}.md")]}),
+        );
+        assert!(!refused, "{said}");
+    }
+    let review = |work: i64| json!({"work": work, "version": 1, "outcome": "review_ready", "evidence": "cargo test passed"});
+    let bar = work_id(&fixture, "Bar chart");
+    assert_eq!(
+        as_sub(&mut fixture, worker, tool::FINISH_WORK_TOOL, review(bar)),
+        (format!("Work #{bar} is review ready at version 2."), false)
+    );
+    let prompts = "SELECT body FROM coord_messages WHERE to_agent=?1 AND kind='prompt'";
+    assert_eq!(
+        bodies(&fixture, prompts, lead),
+        vec![format!(
+            "Work #{bar} \"Bar chart\" is ready for review at version 2. Evidence: cargo test passed"
+        )]
+    );
+    let api = work_id(&fixture, "API");
+    let (said, refused) = as_sub(&mut fixture, solo, tool::FINISH_WORK_TOOL, review(api));
+    assert!(!refused, "{said}");
+    assert_eq!(
+        bodies(&fixture, prompts, MASTER),
+        vec![format!(
+            "Work #{api} \"API\" is ready for review at version 2. Evidence: cargo test passed"
+        )]
+    );
+    assert_eq!(
+        as_sub(&mut fixture, worker, tool::FINISH_WORK_TOOL, review(bar)),
+        (
+            "Not finished: the work changed meanwhile; read inspect_work() for its version and try again.".to_owned(),
+            true
+        )
+    );
+    let charts = work_id(&fixture, "Charts");
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            lead,
+            tool::FINISH_WORK_TOOL,
+            json!({"work": charts, "version": 1, "outcome": "complete", "evidence": "merged"}),
+        ),
+        (format!("Work #{charts} is complete at version 2."), false)
+    );
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::START_WORK_TOOL,
+        json!({"title": "Release", "claims": ["CHANGES"]}),
+    );
+    assert!(!refused, "{said}");
+    let release = work_id(&fixture, "Release");
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::FINISH_WORK_TOOL,
+            json!({"work": release, "version": 1, "outcome": "complete", "evidence": "tagged"}),
+        ),
+        (format!("Work #{release} is complete at version 2."), false)
+    );
+}
+
+/// The stop tool: a lead stops only its own workers and never itself, the master stops
+/// any sub-agent, each stop is the owner's stop, and once it ends a message to the
+/// stopped agent cannot wake it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_lead_stops_only_its_own_workers_and_a_stopped_worker_wakes_only_by_the_owner() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let lead = named_sub(&fixture, "lead-charts", "working");
+    let worker = named_sub(&fixture, "bar-chart", "working");
+    let other = named_sub(&fixture, "api", "working");
+    lead_of(&fixture, lead, worker);
+    let worker_label = super::super::events::label(&fixture.connection, worker).unwrap();
+    let other_label = super::super::events::label(&fixture.connection, other).unwrap();
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            lead,
+            tool::STOP_TOOL,
+            json!({"agent": other.to_string()})
+        ),
+        (
+            format!(
+                "Not stopped: no agent you lead is called {other}. Call inspect_work() for their names."
+            ),
+            true
+        )
+    );
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            lead,
+            tool::STOP_TOOL,
+            json!({"agent": lead.to_string()})
+        ),
+        (
+            "Not stopped: you cannot stop yourself. End your work with finish_work() instead."
+                .to_owned(),
+            true
+        )
+    );
+    assert_eq!(
+        as_sub(
+            &mut fixture,
+            lead,
+            tool::STOP_TOOL,
+            json!({"agent": worker.to_string()})
+        ),
+        (
+            format!("Stopping {worker_label}. Only the owner can wake it again."),
+            false
+        )
+    );
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::STOP_TOOL,
+            json!({"agent": other.to_string()})
+        ),
+        (
+            format!("Stopping {other_label}. Only the owner can wake it again."),
+            false
+        )
+    );
+    let stops = bodies(
+        &fixture,
+        "SELECT CAST(agent AS TEXT) FROM team_owner_stops WHERE project=(SELECT project FROM team_agents WHERE id=?1) ORDER BY agent",
+        lead,
+    );
+    assert_eq!(stops, vec![worker.to_string(), other.to_string()]);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [worker],
+        )
+        .unwrap();
+    let (said, refused) = as_sub(
+        &mut fixture,
+        lead,
+        tool::UPDATE_WORK_TOOL,
+        json!({"to": worker.to_string(), "text": "Go on."}),
+    );
+    assert_eq!(
+        (said.as_str(), refused),
+        (
+            format!("The owner stopped {worker_label}. Only the owner can wake it.").as_str(),
+            true
+        )
+    );
+    assert!(pinned(&fixture, worker).is_empty());
+    let stored: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM coord_messages WHERE to_agent=?1",
+            [worker],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, 0, "a refused message is not stored");
+}
+
+/// A message to a finished agent that cannot wake, here one whose worktree is gone, is
+/// refused with the wake's own sentence and stores nothing, so no message waits for an
+/// agent that never runs again (K1b `update_work`).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_message_to_a_finished_agent_that_cannot_wake_is_refused_and_not_stored() {
+    let mut fixture = Fixture::new();
+    master_row(&fixture);
+    let agent = named_sub(&fixture, "old-job", "stopped");
+    no_worktree(&fixture, agent);
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    assert_eq!(
+        as_master(
+            &mut fixture,
+            tool::UPDATE_WORK_TOOL,
+            json!({"to": "@old-job", "text": "Pick it up again."})
+        ),
+        (
+            format!(
+                "Not woken: the worktree of {label} was cleaned up. Hand the work out with spawn() instead."
+            ),
+            true
+        )
+    );
+    let count = |sql: &str| -> i64 {
+        fixture
+            .connection
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    };
+    assert_eq!(count("SELECT COUNT(*) FROM coord_messages"), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM team_tasks"), 0);
 }
 
 /// Runs git in `dir` with an isolated home and no system config, as the owner or an agent
