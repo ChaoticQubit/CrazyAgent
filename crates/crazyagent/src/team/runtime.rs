@@ -262,7 +262,7 @@ fn confinement(layout: Layout, access: AgentAccess) -> Result<bool, String> {
 enum Mode {
     Kept {
         account: AccountBinding,
-        context: AgentContext,
+        context: Box<AgentContext>,
     },
     PerTurn {
         home: PathBuf,
@@ -1573,7 +1573,8 @@ impl TeamRuntime {
     /// worktree and register entry; no other sub-agent starts again, so a register entry
     /// never moves to another agent. A restarted master starts as a fresh process under its
     /// register entry. A Wake (no `again`) of an agent that is no longer finished does
-    /// nothing, so a stale Wake never stops or replaces a running agent.
+    /// nothing, so a stale Wake never stops or replaces a running agent. A woken sub-agent
+    /// clears the owner stops of the agents it leads too, the one start that does (AW-1).
     fn start_again(
         &mut self,
         reference: i64,
@@ -1677,6 +1678,7 @@ impl TeamRuntime {
             Ok(Some(account)) if role == AgentRole::Sub => {
                 match self.wake(&stored, reference, &harness, tools, &account, again)? {
                     Ok((id, resumed)) => {
+                        super::owner_start(&self.connection, &project, id)?;
                         self.owner_woke(&project, id, resumed, again.is_some())?;
                         Ok(id)
                     }
@@ -4066,10 +4068,12 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. Takes the setup,
-    /// the agent, its role, harness and tools switch, the account to run on and the register
-    /// restart if any. Returns its id, or the plain reason it could not start; the worktree
-    /// must still be the one recorded when it first started.
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. It clears only
+    /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
+    /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
+    /// tools switch, the account to run on and the register restart if any. Returns its id,
+    /// or the plain reason it could not start; the worktree must still be the one recorded
+    /// when it first started.
     #[allow(clippy::too_many_arguments)]
     fn revive(
         &mut self,
@@ -4109,7 +4113,7 @@ impl TeamRuntime {
         if changed != 1 {
             return Ok(Err("the agent is not stopped".into()));
         }
-        super::owner_start(&self.connection, &stored.project_id, id)?;
+        super::owner_start_alone(&self.connection, &stored.project_id, id)?;
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
@@ -4975,7 +4979,7 @@ impl TeamRuntime {
                     base_url: base_url.clone(),
                     key: None,
                 },
-                context,
+                context: Box::new(context),
             },
             TeamReach::Managed { .. } => Mode::PerTurn { home },
         };
@@ -6240,7 +6244,7 @@ fn work(
                 plan.request(account, plan.access).and_then(|request| {
                     AgentSession::start_resuming(
                         request,
-                        plan.team_context(context),
+                        plan.team_context(*context),
                         plan.pane.clone(),
                         resume,
                     )
@@ -6319,7 +6323,7 @@ fn live(
             (
                 AgentSession::start_resuming(
                     request,
-                    plan.team_context(context.with_live_instructions(&instructions)),
+                    plan.team_context((*context).with_live_instructions(&instructions)),
                     plan.pane.clone(),
                     resume,
                 ),
@@ -6524,7 +6528,15 @@ fn live_serve(
                     break;
                 }
             }
-            Ok(Some(TranscriptEvent::ToolUse { .. } | TranscriptEvent::Waiting) | None) => {}
+            Ok(
+                Some(
+                    TranscriptEvent::ToolUse { .. }
+                    | TranscriptEvent::Waiting
+                    | TranscriptEvent::BackgroundStarted { .. }
+                    | TranscriptEvent::BackgroundEnded { .. },
+                )
+                | None,
+            ) => {}
             Err(closed) => {
                 problem = Some(with_code(PROCESS_CLOSED, Some(&closed.0)));
                 break;
@@ -6868,7 +6880,9 @@ fn next_lead_turn(
 /// Serves turns on an agent whose harness keeps running between them, the kept turn first
 /// when one is given. A kept session, a native lead's, also reports the turns its app
 /// starts by itself between orders, so its later work is recorded, landed and told to the
-/// master. At the end it stops the agent, or, when the engine quits with the agent kept,
+/// master. A turn the owner interrupted while commands its agent started in the background
+/// still ran also ends the agent, so those commands stop with its process.
+/// At the end it stops the agent, or, when the engine quits with the agent kept,
 /// stops the running turn and leaves the pane running for the next engine. A kept
 /// session's credential copy and custody use are released once its process stopped or was
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
@@ -6914,7 +6928,7 @@ fn serve(
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
-        );
+        ) && (end != TurnEnd::Interrupted || session.background_running() == 0);
         if end == TurnEnd::Closed {
             problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
@@ -7066,6 +7080,10 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+/// What a task the owner's interrupt ends says when commands its agent started still ran.
+const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
+/// What a task cut by a time limit says when commands its agent started still ran.
+const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// The task line a kept native lead's own turn is recorded under: a turn its app started
 /// by itself, such as after messages from its teammates, with no task given to it.
 const OWN_TURN_TASK: &str =
@@ -7588,7 +7606,19 @@ fn turn(
             Ok(Some(_)) => {}
         }
     };
-    assert!(text.len() <= super::RESULT_BYTES_MAX * 4);
+    if session.background_running() > 0 {
+        match end {
+            TurnEnd::TimedOut => text = format!("{BACKGROUND_CUT}\n{text}"),
+            TurnEnd::Interrupted => text = format!("{BACKGROUND_INTERRUPTED}\n{text}"),
+            _ => {}
+        }
+    }
+    assert!(
+        text.len()
+            <= super::RESULT_BYTES_MAX * 4
+                + BACKGROUND_CUT.len().max(BACKGROUND_INTERRUPTED.len())
+                + 1
+    );
     (text, end, cause)
 }
 
@@ -7965,3 +7995,6 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_native_lead_tests.rs"]
+mod live_native_lead_tests;

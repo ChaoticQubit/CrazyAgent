@@ -140,3 +140,7 @@ pub fn admit_sub_agent(db: &Connection, project: &ProjectId, lead: AgentId) -> R
     }
     Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "caps/tests.rs"]
+mod tests;

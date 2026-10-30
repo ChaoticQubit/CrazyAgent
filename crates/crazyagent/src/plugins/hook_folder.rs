@@ -300,7 +300,7 @@ fn wanted(name: &OsStr, hooks: &[HookSpec]) -> bool {
 }
 
 fn named(command: &str, name: &str) -> bool {
-    let after = [b'/', b'"', b'\'', b' ', b';', b')'];
+    let after = *b"/\"' ;)";
     command.match_indices(name).any(|(at, _)| {
         let before = at.checked_sub(1).map(|index| command.as_bytes()[index]);
         let next = command.as_bytes().get(at + name.len()).copied();
@@ -345,11 +345,12 @@ fn copy_entry(
     if !metadata.is_file() {
         return Ok(());
     }
-    tally.files += 1;
-    tally.bytes = tally.bytes.saturating_add(metadata.len());
-    if tally.files > files_max || tally.bytes > bytes_max {
+    let bytes = tally.bytes.saturating_add(metadata.len());
+    if tally.files >= files_max || bytes > bytes_max {
         return Err("hooks_too_large");
     }
+    tally.files += 1;
+    tally.bytes = bytes;
     copy_file(source, target, metadata.len())
 }
 
@@ -439,3 +440,6 @@ fn read_small(path: &Path, max: u64) -> Result<Option<String>, &'static str> {
     }
     Ok(Some(text))
 }
+
+#[cfg(all(test, unix))]
+mod tests;

@@ -725,3 +725,24 @@ fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
     );
     assert_eq!(ctx.message().unwrap().lead, "Now used in all projects.");
 }
+
+#[test]
+fn an_imported_memory_names_its_file_and_project() {
+    let ctx = memory_ctx(80, 24);
+    let imported = saved(
+        9,
+        "Plan meals on Sunday.",
+        only("tidepool"),
+        MemoryOrigin::Imported {
+            file: "meals.md".into(),
+        },
+    );
+    assert_eq!(source(&imported, &ctx), "Tidepool");
+    assert_eq!(
+        saved_line(&imported, &ctx),
+        "Imported from meals.md for Tidepool only."
+    );
+    for code in ["memory_import_folder_invalid", "memory_import_invalid"] {
+        assert!(!memory_plain(code).contains('_'), "{code}");
+    }
+}

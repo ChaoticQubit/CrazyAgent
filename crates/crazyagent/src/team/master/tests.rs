@@ -782,3 +782,951 @@ fn the_master_cannot_wake_an_agent_the_owner_stopped() {
         .unwrap();
     assert_eq!(tasks, 0);
 }
+
+/// Inserts a working app-spawned sub-agent with team tools, started by `lead` or by the
+/// master when none. Takes the fixture, its role and the lead. Returns its id.
+fn worker(fixture: &Fixture, role: &str, lead: Option<i64>) -> i64 {
+    let agent = named_sub(fixture, role, "working");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2, tools=1, mode='app_spawned', stopped_ms=NULL WHERE id=?1",
+            params![agent, lead],
+        )
+        .unwrap();
+    agent
+}
+
+/// Stores the fixture's setup as the engine does, for the team changes that read it.
+fn store_setup(fixture: &Fixture) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+}
+
+/// A lead starts a worker only while its depth under the master is below the owner's
+/// Sub-agent depth setting (N1): under each setting 1, 2 and 3 a lead at that depth or
+/// deeper is refused in plain words naming the setting, a shallower one passes that check,
+/// and no refused start leaves a task queued.
+#[test]
+fn delegate_refuses_past_sub_agent_depth() {
+    let mut fixture = Fixture::new();
+    store_setup(&fixture);
+    let first = worker(&fixture, "notes-lead", None);
+    let second = worker(&fixture, "notes-worker", Some(first));
+    let third = worker(&fixture, "notes-helper", Some(second));
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let project = ProjectId::new(PROJECT).unwrap();
+    for limit in crate::team::DEPTH_CHOICES {
+        let tx = fixture.connection.transaction().unwrap();
+        let outcome = crate::team::execute(
+            &tx,
+            &access,
+            &crate::team::TeamAction::SubAgentDepth {
+                project_id: project.clone(),
+                depth: limit,
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome, crate::protocol::Outcome::Applied);
+        tx.commit().unwrap();
+        assert_eq!(
+            crate::team::nesting(&fixture.connection, &project)
+                .unwrap()
+                .depth,
+            limit
+        );
+        let reason = if limit == 1 {
+            "only the master starts sub-agents"
+        } else {
+            "workers this deep cannot start more of their own"
+        };
+        for (depth, lead) in [(1, first), (2, second), (3, third)] {
+            assert_eq!(
+                crate::team::agent_depth(&fixture.connection, lead).unwrap(),
+                depth
+            );
+            let (text, refused) = answer_sub(
+                &mut fixture.connection,
+                &answering,
+                lead,
+                Call::Spawn {
+                    task: "Write the notes page.".into(),
+                    harness: None,
+                    role: None,
+                    mode: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+            if depth >= limit {
+                assert!(refused, "depth {depth} under setting {limit}");
+                assert_eq!(
+                    text,
+                    format!(
+                        "Not started: the owner's Sub-agent depth setting is {limit}, so {reason}. Do the work yourself or tell the master."
+                    )
+                );
+            } else {
+                assert!(
+                    !text.contains("Sub-agent depth setting"),
+                    "depth {depth} under setting {limit}: {text}"
+                );
+            }
+        }
+    }
+    let queued: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE parent IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queued, 0, "a refused start queues nothing");
+}
+
+/// A lead's `stop` reaches only the workers it started (N2): a sibling lead's worker and
+/// the sibling itself are refused by name and keep working, while its own worker stops,
+/// and its status lists only its own workers.
+#[test]
+fn lead_tools_reach_only_its_workers() {
+    let mut fixture = Fixture::new();
+    store_setup(&fixture);
+    let lead = worker(&fixture, "notes-lead", None);
+    let mine = worker(&fixture, "notes-page", Some(lead));
+    let sibling = worker(&fixture, "search-lead", None);
+    let theirs = worker(&fixture, "search-index", Some(sibling));
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let status_of = |connection: &Connection, agent: i64| -> String {
+        connection
+            .query_row(
+                "SELECT status FROM team_agents WHERE id=?1",
+                [agent],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    for name in ["@search-index", "@search-lead"] {
+        let (text, refused) = answer_sub(
+            &mut fixture.connection,
+            &answering,
+            lead,
+            Call::Stop { agent: name.into() },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(refused, "{name}: {text}");
+        assert_eq!(
+            text,
+            format!(
+                "Not stopped: no agent you lead is called {name}. Call {}() for their names.",
+                tool::INSPECT_WORK_TOOL
+            )
+        );
+    }
+    assert_eq!(status_of(&fixture.connection, theirs), "working");
+    assert_eq!(status_of(&fixture.connection, sibling), "working");
+
+    let (listed, _) =
+        lead_status(&fixture.connection, &ProjectId::new(PROJECT).unwrap(), lead).unwrap();
+    assert!(listed.starts_with("Your workers:\n"), "{listed}");
+    assert!(listed.contains("notes-page"), "{listed}");
+    for other in ["search-index", "search-lead", "notes-lead"] {
+        assert!(!listed.contains(other), "{other}: {listed}");
+    }
+
+    let (text, refused) = answer_sub(
+        &mut fixture.connection,
+        &answering,
+        lead,
+        Call::Stop {
+            agent: "@notes-page".into(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!refused, "{text}");
+    assert!(text.starts_with("Stopping "), "{text}");
+    assert!(crate::team::owner_stopped(&fixture.connection, mine).unwrap());
+    for other in [theirs, sibling, lead] {
+        assert!(!crate::team::owner_stopped(&fixture.connection, other).unwrap());
+    }
+}
+
+const LEAD: i64 = 51;
+const WORKER: i64 = 52;
+
+/// Runs git as the owner would in a test: an isolated home, no system or global config
+/// and a fixed identity. Takes the home, the folder and the arguments. Returns its
+/// trimmed standard output; a failing git fails the test.
+fn git_in(home: &Path, folder: &Path, arguments: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .args(["-c", "user.email=agent@local", "-c", "user.name=agent"])
+            .arg("-C")
+            .arg(folder)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A managed native Codex account in the project's pool, signed in only when its sign-in
+/// operations say so. Takes nothing. Returns the access a lead's delegation is admitted
+/// against.
+fn codex_pool() -> ModelAccess {
+    use crate::config::{
+        AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
+    };
+    use crate::protocol::CredentialRef;
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    ModelAccess {
+        accounts: vec![reference("local-account")],
+        connections: vec![ModelConnection {
+            id: reference("codex-managed"),
+            provider: reference("openai"),
+            harness: reference("codex"),
+            protocol: reference("native"),
+            account_ref: reference("local-account"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "gpt-5.5".into(),
+                author: reference("openai"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: reference(CODEX_PROFILE),
+            },
+        }],
+        pools: vec![AccountPool {
+            id: reference("team-pool"),
+            name: None,
+            members: vec![reference("codex-managed")],
+            projects: vec![reference(PROJECT)],
+            roles: vec![reference("project_leader")],
+            fallback_allowed: false,
+            provider_quota_policy: Default::default(),
+        }],
+    }
+}
+
+const CODEX_PROFILE: &str = "codex-managed-profile";
+
+/// Records one sign-in operation of the pool's Codex profile as the native sign-in flow
+/// stores it. Takes the fixture, the operation's generation and its phase.
+fn codex_sign_in(fixture: &Fixture, generation: i64, phase: &str) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
+             VALUES (?1,?2,?3,?4,X'01',X'01')",
+            params![
+                format!("operation-{generation}"),
+                crate::memory::hash(CODEX_PROFILE.as_bytes()),
+                generation,
+                phase
+            ],
+        )
+        .unwrap();
+}
+
+/// Records a team agent of the project as the runtime does. Takes the fixture, the id,
+/// the harness, the status and its lead, None for a lead of the master.
+fn team_agent(fixture: &Fixture, id: i64, harness: &str, status: &str, parent: Option<i64>) {
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (?1,?2,'sub',?3,1,?4,?5,?5,?6)",
+            params![id, PROJECT, harness, status, NOW, parent],
+        )
+        .unwrap();
+}
+
+/// Answers one call of a sub-agent as the runtime's mailbox serving does. Takes the
+/// fixture, the access, the folder of agents' own folders, the caller and the call.
+/// Returns the text and whether it is a refusal.
+fn lead_call(
+    fixture: &mut Fixture,
+    access: &ModelAccess,
+    agents: &Path,
+    caller: i64,
+    call: Call,
+) -> (String, bool) {
+    let answering = Answering {
+        access,
+        stored: &fixture.setup,
+        landing: &fixture.base,
+        agents,
+        events: None,
+        host: None,
+    };
+    answer_sub(&mut fixture.connection, &answering, caller, call)
+        .unwrap()
+        .expect("a lead's work calls are answered here")
+}
+
+fn delegate(task: &str) -> Call {
+    Call::Spawn {
+        task: task.into(),
+        harness: None,
+        role: None,
+        mode: None,
+    }
+}
+
+fn tasks(fixture: &Fixture) -> Vec<(i64, Option<i64>)> {
+    let mut statement = fixture
+        .connection
+        .prepare("SELECT id,parent FROM team_tasks ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A lead's delegation starts a worker only of a harness kind with a signed-in account
+/// (feat/coord-spawn 8a85b292): a pool Codex profile with no sign-in, or whose latest
+/// sign-in observed no account, is refused with no task queued; once its latest sign-in
+/// observed an account the same delegation is queued under the lead.
+#[test]
+fn a_lead_delegate_is_refused_for_a_kind_with_no_signed_in_account() {
+    let mut fixture = Fixture::new();
+    let access = codex_pool();
+    let agents = fixture.base.join("team/agents");
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    let refused = "Not started: no account in this project's pool that runs codex is signed in.";
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert!(error && answer.starts_with(refused), "{answer}");
+    assert_eq!(tasks(&fixture), vec![]);
+    codex_sign_in(&fixture, 1, "unauthenticated_observed");
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert!(error && answer.starts_with(refused), "{answer}");
+    assert_eq!(tasks(&fixture), vec![]);
+    codex_sign_in(&fixture, 2, "authenticated_observed");
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert!(!error, "{answer}");
+    let queued = tasks(&fixture);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].1, Some(LEAD));
+    assert!(
+        answer.starts_with(&format!(
+            "Task {} is queued for a codex worker of yours",
+            queued[0].0
+        )),
+        "{answer}"
+    );
+    codex_sign_in(&fixture, 3, "starting");
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the lexer"),
+    );
+    assert!(
+        error && answer.starts_with(refused),
+        "the latest sign-in decides: {answer}"
+    );
+    assert_eq!(tasks(&fixture).len(), 1);
+}
+
+/// A lead whose harness kind the owner set to Native sub-agents is told to start them in
+/// its own agent team, and no task is queued (feat/coord-spawn 372ee630).
+#[test]
+fn native_mode_lead_is_told_to_use_its_agent_team() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let mut fixture = Fixture::new();
+    let access = codex_pool();
+    let agents = fixture.base.join("team/agents");
+    codex_sign_in(&fixture, 1, "authenticated_observed");
+    fixture
+        .connection
+        .execute("INSERT INTO projects VALUES (?1,'{}')", [PROJECT])
+        .unwrap();
+    set_mode(
+        &fixture.connection,
+        &ProjectId::new(PROJECT).unwrap(),
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    let answer = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert_eq!(answer, (NATIVE_LEAD_REFUSED.to_owned(), true));
+    assert_eq!(tasks(&fixture), vec![]);
+    team_agent(&fixture, 61, "codex", "working", None);
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        61,
+        delegate("Fix the parser"),
+    );
+    assert!(!error, "a Codex lead keeps app-spawned workers: {answer}");
+    assert_eq!(tasks(&fixture).len(), 1);
+}
+
+/// A lead already running the owner's Max teammates per harness reads the cap sentence and
+/// no task is queued (feat/coord-spawn 90657f80, DEC-104 K8).
+#[test]
+fn lead_delegate_is_refused_at_max_teammates() {
+    let mut fixture = Fixture::new();
+    let access = codex_pool();
+    let agents = fixture.base.join("team/agents");
+    codex_sign_in(&fixture, 1, "authenticated_observed");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_caps(project,teammates) VALUES (?1,1)",
+            [PROJECT],
+        )
+        .unwrap();
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    team_agent(&fixture, WORKER, "codex", "working", Some(LEAD));
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert!(error, "{answer}");
+    assert!(
+        answer.starts_with("Not started: The owner allows at most 1 sub-agents per harness, and this harness already runs 1."),
+        "{answer}"
+    );
+    assert_eq!(tasks(&fixture), vec![]);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='stopped' WHERE id=?1",
+            [WORKER],
+        )
+        .unwrap();
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        delegate("Fix the parser"),
+    );
+    assert!(!error, "a finished worker frees its place: {answer}");
+    assert_eq!(tasks(&fixture).len(), 1);
+}
+
+/// A lead's `merge` reaches only its own workers: a worker of another lead is not one of
+/// its sub-agents, whatever it is called (feat/coord-spawn 372ee630).
+#[test]
+fn merge_refuses_a_worker_of_another_lead() {
+    let mut fixture = Fixture::new();
+    let access = codex_pool();
+    let agents = fixture.base.join("team/agents");
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    team_agent(&fixture, 61, "claude-code", "working", None);
+    team_agent(&fixture, WORKER, "codex", "idle", Some(LEAD));
+    let answer = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        61,
+        Call::Merge {
+            agent: WORKER.to_string(),
+        },
+    );
+    assert_eq!(
+        answer,
+        (
+            format!(
+                "Not merged: none of your own sub-agents is called {WORKER}. Call {}() for their names.",
+                tool::INSPECT_WORK_TOOL
+            ),
+            true
+        )
+    );
+}
+
+/// Makes the fixture's project folder a real git repository with one commit on `main`, the
+/// engine's state folder excluded and its worktrees folder made. Takes the fixture.
+/// Returns the git home and the project folder.
+fn owner_repository(fixture: &Fixture) -> (PathBuf, PathBuf) {
+    let (home, project) = (fixture.base.join("git-home"), fixture.base.join("project"));
+    std::fs::create_dir(&home).unwrap();
+    git_in(&home, &project, &["init", "-q", "-b", "main"]);
+    git_in(&home, &project, &["config", "user.name", "Repo Owner"]);
+    git_in(
+        &home,
+        &project,
+        &["config", "user.email", "owner@example.invalid"],
+    );
+    std::fs::write(project.join("README"), "one\n").unwrap();
+    git_in(&home, &project, &["add", "README"]);
+    git_in(&home, &project, &["commit", "-q", "-m", "Start"]);
+    std::fs::write(project.join(".git/info/exclude"), ".crazyagent/\n").unwrap();
+    std::fs::create_dir_all(project.join(".crazyagent/worktrees")).unwrap();
+    (home, project)
+}
+
+/// A project that is a real git repository with a lead of the master in its own clone on
+/// `crazyagent/lead` and one worker of it in its own clone on `crazyagent/lead--fix`, both
+/// recorded as the runtime records a team agent's worktree.
+struct Clones {
+    fixture: Fixture,
+    home: PathBuf,
+    project: PathBuf,
+    agents: PathBuf,
+    lead: PathBuf,
+    worker: PathBuf,
+    worker_branch: String,
+}
+
+impl Clones {
+    fn new() -> Self {
+        let fixture = Fixture::new();
+        let (home, project) = owner_repository(&fixture);
+        let db = crate::landing::open(&fixture.base).unwrap();
+        let worktrees = project.join(".crazyagent/worktrees");
+        let lead = worktrees.join(format!("agent-{LEAD}"));
+        let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+        crate::landing::add_agent_clone_on(&project, &lead, None, &branch).unwrap();
+        team_agent(&fixture, LEAD, "claude-code", "working", None);
+        let clones = Self {
+            agents: fixture.base.join("team/agents"),
+            worker: worktrees.join(format!("agent-{WORKER}")),
+            worker_branch: String::new(),
+            fixture,
+            home,
+            project,
+            lead,
+        };
+        clones.record(&db, LEAD, &clones.lead);
+        let base = crate::landing::agent_tip(
+            &db,
+            &clones.project,
+            &clones.lead,
+            &crate::agent_git::git_dir(&clones.lead),
+        )
+        .unwrap();
+        let worker_branch = crate::landing::claim_sub_agent_branch(
+            &db,
+            &clones.project,
+            &clones.worker,
+            &branch,
+            Some(&clones.lead),
+            "fix",
+        )
+        .unwrap()
+        .expect("the lead's task branch carries sub-agent branches");
+        assert_eq!(worker_branch, "crazyagent/lead--fix");
+        crate::landing::add_agent_clone_on(
+            &clones.project,
+            &clones.worker,
+            Some(&base),
+            &worker_branch,
+        )
+        .unwrap();
+        team_agent(&clones.fixture, WORKER, "codex", "working", Some(LEAD));
+        clones.record(&db, WORKER, &clones.worker);
+        Self {
+            worker_branch,
+            ..clones
+        }
+    }
+
+    fn record(&self, db: &Connection, agent: i64, worktree: &Path) {
+        let git_dir = crate::agent_git::git_dir(worktree);
+        self.fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    agent,
+                    PROJECT,
+                    self.project.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        crate::landing::record_worktree_start(db, &self.project, worktree, &git_dir).unwrap();
+    }
+
+    fn git(&self, folder: &Path, arguments: &[&str]) -> String {
+        git_in(&self.home, folder, arguments)
+    }
+
+    fn commit(&self, folder: &Path, path: &str, text: &str) {
+        std::fs::write(folder.join(path), text).unwrap();
+        self.git(folder, &["add", path]);
+        self.git(folder, &["commit", "-q", "-m", path]);
+    }
+
+    fn call(&mut self, caller: i64, call: Call) -> (String, bool) {
+        let access = ModelAccess::default();
+        lead_call(&mut self.fixture, &access, &self.agents, caller, call)
+    }
+
+    fn finish(&mut self, work: i64, version: i64) -> (String, bool) {
+        self.call(
+            LEAD,
+            Call::FinishWork {
+                work,
+                version,
+                outcome: crate::coord::Finish::Complete,
+                evidence: "Merged and checked.".into(),
+            },
+        )
+    }
+
+    fn started(&mut self) -> i64 {
+        let (answer, error) = self.call(
+            LEAD,
+            Call::StartWork {
+                title: "Lead the fix".into(),
+                claims: vec!["fix.txt".into()],
+            },
+        );
+        assert!(!error, "{answer}");
+        answer
+            .strip_prefix("Started work #")
+            .and_then(|rest| rest.split_once(' '))
+            .and_then(|(id, _)| id.parse().ok())
+            .unwrap_or_else(|| panic!("no work id in {answer}"))
+    }
+
+    fn worker_set(&self) -> crate::landing::ChangeSetId {
+        let db = crate::landing::open(&self.fixture.base).unwrap();
+        crate::landing::record_turn_end(
+            &db,
+            &crate::landing::Workspace {
+                project: ProjectId::new(PROJECT).unwrap(),
+                agent: crate::landing::ChangeAgent {
+                    kind: crate::landing::AgentKind::Sub,
+                    id: WORKER.to_string(),
+                    label: format!("Agent {WORKER}"),
+                },
+                repository: self.project.clone(),
+                worktree: self.worker.clone(),
+                git_dir: crate::agent_git::git_dir(&self.worker),
+            },
+            &crate::landing::TurnEnd {
+                outcome: crate::landing::TurnOutcome::Succeeded,
+                turn: "turn-1".into(),
+                prompt_line: "Fix it".into(),
+            },
+        )
+        .unwrap()
+        .expect("the worker's commit is work for review")
+    }
+
+    fn set_state(&self, set: &crate::landing::ChangeSetId) -> (String, Option<String>) {
+        self.fixture
+            .connection
+            .query_row(
+                "SELECT state,landed FROM landing_change_sets WHERE id=?1",
+                [set.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+}
+
+/// A lead cannot report its work Complete while a worker's branch holds a commit its task
+/// branch does not: finish_work names the worker's branch until the lead merges it, then
+/// completes (feat/coord-spawn 4f372a7e).
+#[test]
+fn finish_work_waits_for_an_unmerged_sub_agent() {
+    let mut clones = Clones::new();
+    let work = clones.started();
+    clones.commit(&clones.worker.clone(), "fix.txt", "fixed\n");
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: merge these into your branch first, then finish again: crazyagent/lead--fix.",
+            true
+        )
+    );
+    let (lead, worker, branch) = (
+        clones.lead.clone(),
+        clones.worker.clone(),
+        clones.worker_branch.clone(),
+    );
+    clones.git(&lead, &["fetch", "-q", worker.to_str().unwrap(), &branch]);
+    clones.git(
+        &lead,
+        &["merge", "--no-ff", "-q", "--no-edit", "FETCH_HEAD"],
+    );
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
+/// A lead's `merge` of its finished worker in its own clone runs git with the lead's own
+/// Seatbelt profile, makes a merge commit on the lead's task branch and closes the
+/// worker's change set as Accepted at that commit (feat/coord-spawn 372ee630, 4f372a7e).
+#[cfg(target_os = "macos")]
+#[test]
+fn merge_from_a_lead_merges_its_finished_worker_and_closes_its_change_set() {
+    let mut clones = Clones::new();
+    let state = clones.fixture.base.join("team");
+    let home = super::super::runtime::agent_home(&state, LEAD);
+    let tmp = clones.agents.join(format!("agent-{LEAD}")).join("tmp");
+    let profiles = state.join("profiles");
+    for folder in [&home, &tmp, &profiles] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    crate::sandbox::ProjectSandbox::new(
+        &clones.project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .confine_to_clone(&clones.lead)
+    .unwrap()
+    .install(&profiles.join(format!("agent-{LEAD}.sb")))
+    .unwrap();
+    clones.commit(&clones.worker.clone(), "fix.txt", "fixed\n");
+    let set = clones.worker_set();
+    let merge = || Call::Merge {
+        agent: WORKER.to_string(),
+    };
+    let (answer, error) = clones.call(LEAD, merge());
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!(
+                "Not merged: Sub-agent {WORKER} is still working. Merge it once it calls {}().",
+                tool::FINISH_WORK_TOOL
+            )
+            .as_str(),
+            true
+        )
+    );
+    clones
+        .fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [WORKER])
+        .unwrap();
+    let (answer, error) = clones.call(LEAD, merge());
+    assert!(!error, "{answer}");
+    let lead = clones.lead.clone();
+    let head = clones.git(&lead, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        answer,
+        format!(
+            "Merged Sub-agent {WORKER}'s branch crazyagent/lead--fix into your task branch as {}. Nothing was pushed.",
+            &head[..12]
+        )
+    );
+    assert_eq!(
+        clones.git(&lead, &["symbolic-ref", "--short", "HEAD"]),
+        "crazyagent/lead"
+    );
+    let parents = clones.git(&lead, &["rev-list", "--parents", "-n", "1", "HEAD"]);
+    assert_eq!(parents.split(' ').count(), 3, "a merge commit: {parents}");
+    assert_eq!(clones.git(&lead, &["show", "HEAD:fix.txt"]), "fixed");
+    assert_eq!(clones.set_state(&set), ("accepted".to_owned(), Some(head)));
+    let (answer, error) = clones.call(LEAD, merge());
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Nothing to merge: Sub-agent {WORKER}'s branch crazyagent/lead--fix is already in your task branch.").as_str(),
+            false
+        )
+    );
+}
+
+/// A lead in a linked worktree of a Sandboxed project lands its finished worker's waiting
+/// change set on its own task branch as one commit, as the owner's Accept does, and the
+/// set is Accepted at that commit (feat/coord-spawn 4f372a7e).
+#[test]
+fn lead_merge_lands_a_linked_sub_agent_change_set() {
+    let mut fixture = Fixture::new();
+    let (home, project) = owner_repository(&fixture);
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktrees = project.join(".crazyagent/worktrees");
+    let (lead, worker) = (
+        worktrees.join(format!("agent-{LEAD}")),
+        worktrees.join(format!("agent-{WORKER}")),
+    );
+    let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+    assert_eq!(branch, "crazyagent/lead");
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &branch,
+            lead.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worker.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    team_agent(&fixture, WORKER, "codex", "idle", Some(LEAD));
+    for (agent, worktree) in [(LEAD, &lead), (WORKER, &worker)] {
+        let git_dir = project
+            .join(".git/worktrees")
+            .join(format!("agent-{agent}"));
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    agent,
+                    PROJECT,
+                    project.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        crate::landing::record_worktree_start(&db, &project, worktree, &git_dir).unwrap();
+    }
+    std::fs::write(worker.join("fix.txt"), "fixed\n").unwrap();
+    let set = crate::landing::record_turn_end(
+        &db,
+        &crate::landing::Workspace {
+            project: ProjectId::new(PROJECT).unwrap(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: WORKER.to_string(),
+                label: format!("Agent {WORKER}"),
+            },
+            repository: project.clone(),
+            worktree: worker.clone(),
+            git_dir: project
+                .join(".git/worktrees")
+                .join(format!("agent-{WORKER}")),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Fix it".into(),
+        },
+    )
+    .unwrap()
+    .expect("the worker's file is work for review");
+    let access = ModelAccess::default();
+    let agents = fixture.base.join("team/agents");
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        Call::Merge {
+            agent: WORKER.to_string(),
+        },
+    );
+    assert!(!error, "{answer}");
+    let landed = git_in(&home, &project, &["rev-parse", &branch]);
+    assert_eq!(
+        answer,
+        format!(
+            "Landed on your branch crazyagent/lead as {}.",
+            &landed[..12]
+        )
+    );
+    assert_eq!(
+        git_in(&home, &project, &["show", &format!("{branch}:fix.txt")]),
+        "fixed"
+    );
+    assert_eq!(
+        git_in(&home, &project, &["rev-parse", "main"]),
+        git_in(&home, &project, &["rev-parse", &format!("{landed}^")])
+    );
+    let state: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT state,landed FROM landing_change_sets WHERE id=?1",
+            [set.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("accepted".to_owned(), Some(landed)));
+}

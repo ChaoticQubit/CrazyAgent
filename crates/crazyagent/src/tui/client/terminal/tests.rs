@@ -1,8 +1,12 @@
 use super::*;
 use crate::engine::bootstrap::EngineService;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
 use crate::terminal::{FOLDER, Host};
+use crate::tui::terminal_pane::TerminalPane;
+use crate::tui::theme::Depth;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command as Process, Stdio};
@@ -193,6 +197,17 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
         cols: 100,
         rows: 30,
     });
+    match next(&mut terminals) {
+        Some((resized, TerminalFrame::Attached { cols, rows, .. })) => {
+            assert_eq!(resized, agent(1));
+            assert_eq!(
+                (cols, rows),
+                (100, 30),
+                "a resize starts the view again at the new size"
+            );
+        }
+        other => panic!("expected the view started again, got {other:?}"),
+    }
     terminals.handle(Request::TerminalDetach { agent: agent(1) });
     assert!(!terminals.live());
     assert!(
@@ -271,6 +286,179 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
         other => panic!("expected the dead agent refused, got {other:?}"),
     }
     assert!(!terminals.live());
+
+    drop(terminals);
+    runtime
+        .block_on(async { tokio::time::timeout(WAIT, service.shutdown()).await })
+        .unwrap()
+        .unwrap();
+}
+
+fn tmux_text(tmux: &Path, socket: &Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        Process::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(args)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+fn tmux_rows(tmux: &Path, socket: &Path, target: &str, rows: u16) -> Vec<String> {
+    let text = tmux_text(tmux, socket, &["capture-pane", "-p", "-t", target]);
+    let mut lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim_end().to_owned())
+        .collect();
+    lines.resize(usize::from(rows), String::new());
+    lines
+}
+
+fn pane_rows(pane: &TerminalPane) -> Vec<String> {
+    let (rows, cols) = pane.size();
+    let area = Rect::new(0, 0, cols, rows);
+    let mut buffer = Buffer::empty(area);
+    pane.draw(&mut buffer, area, Depth::NoColor, false);
+    (0..rows)
+        .map(|y| {
+            (0..cols)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn a_sized_attach_starts_at_the_box_size_and_a_resize_redraws_the_screen_as_tmux_reflowed_it() {
+    let root = private_root();
+    let global = root.path().join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root.path()).expect("tmux must be installed on this machine");
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let _launcher = spawn_shell(tmux.clone(), &folder, root.path(), &agent(1));
+    let target = format!("{SESSION}:={}", agent(1));
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = runtime
+        .block_on(EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        ))
+        .unwrap();
+
+    let mut terminals = Terminals::new(root.path().join("e.sock"), Duration::from_secs(5));
+    terminals.handle(Request::TerminalAttach { agent: agent(1) });
+    terminals.handle(Request::TerminalResize {
+        agent: agent(1),
+        cols: 120,
+        rows: 40,
+    });
+    match next(&mut terminals) {
+        Some((attached, TerminalFrame::Attached { cols, rows, .. })) => {
+            assert_eq!(attached, agent(1));
+            assert_eq!(
+                (cols, rows),
+                (120, 40),
+                "the first screen already has the box size"
+            );
+        }
+        other => panic!("expected the sized attach, got {other:?}"),
+    }
+    assert_eq!(
+        tmux_text(
+            &tmux,
+            &socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                &target,
+                "#{window_width}x#{window_height}"
+            ]
+        )
+        .trim(),
+        "120x40"
+    );
+    let mut seen = Vec::new();
+    assert!(output_until(&mut terminals, &mut seen, b"ready$ "));
+    let long = "0123456789".repeat(15);
+    terminals.handle(Request::TerminalInput {
+        agent: agent(1),
+        bytes: format!("echo {long}\r").into_bytes(),
+    });
+    assert!(
+        output_until(
+            &mut terminals,
+            &mut seen,
+            format!("\r\n{long}\r\n").as_bytes()
+        ),
+        "{}",
+        String::from_utf8_lossy(&seen)
+    );
+
+    terminals.handle(Request::TerminalResize {
+        agent: agent(1),
+        cols: 60,
+        rows: 20,
+    });
+    let mut pane = TerminalPane::new(40, 120);
+    match next(&mut terminals) {
+        Some((_, TerminalFrame::Attached { cols, rows, .. })) => {
+            assert_eq!((cols, rows), (60, 20), "a resize starts the view again");
+            pane.resize(rows, cols);
+            pane.show(&[], None);
+        }
+        other => panic!("expected the view started again, got {other:?}"),
+    }
+    let deadline = Instant::now() + WAIT;
+    let mut wanted = tmux_rows(&tmux, &socket, &target, 20);
+    while Instant::now() < deadline && pane_rows(&pane) != wanted {
+        match terminals.poll() {
+            Some((_, TerminalFrame::Output { bytes })) => pane.feed(&bytes),
+            Some(other) => panic!("expected output, got {other:?}"),
+            None => {
+                std::thread::sleep(Duration::from_millis(20));
+                wanted = tmux_rows(&tmux, &socket, &target, 20);
+            }
+        }
+    }
+    let shown = pane_rows(&pane);
+    assert_eq!(shown, wanted, "the TUI copy matches tmux after the resize");
+    assert!(
+        shown.iter().any(|row| *row == long[..60]),
+        "the long line wraps at the new width: {shown:#?}"
+    );
+
+    let refused = runtime.block_on(open(
+        root.path().join("e.sock"),
+        Duration::from_secs(5),
+        agent(1),
+        None,
+        Some((1, 24)),
+    ));
+    assert_eq!(refused.err().as_deref(), Some("terminal_size_bounds"));
 
     drop(terminals);
     runtime

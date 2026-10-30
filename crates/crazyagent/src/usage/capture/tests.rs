@@ -965,6 +965,103 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
     );
 }
 
+/// A session record whose stored progress names the same inode on another device, as a
+/// reboot that renumbered the volume leaves it, keeps its offset and counts only the lines
+/// appended since the last scan, while its stored pin moves to the live device. A record
+/// removed and recreated on that renumbered pin, with a new inode, starts over.
+#[test]
+fn a_record_whose_volume_was_renumbered_keeps_its_place_and_counts_nothing_twice() {
+    use std::os::unix::fs::MetadataExt;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s1.jsonl");
+    let who = attribution(RunKind::Agent, None);
+    let key = record.to_string_lossy().into_owned();
+    let renumber = |db: &Connection| {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut progress: Progress = serde_json::from_str(&text).unwrap();
+        progress.identity.0 ^= 1;
+        db.execute(
+            "UPDATE usage_files SET progress=?2 WHERE path=?1",
+            params![key, serde_json::to_string(&progress).unwrap()],
+        )
+        .unwrap();
+    };
+    let stored_identity = |db: &Connection| -> (u64, u64) {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().identity
+    };
+
+    append(&record, &claude_assistant("r1", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        5
+    );
+
+    renumber(&db);
+    append(&record, &claude_assistant("r2", 3, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap(),
+        Tokens {
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        "only the line appended since the last scan is counted, not the whole record again"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(
+        stored_identity(&db),
+        (live.dev(), live.ino()),
+        "the pin moved to the live device"
+    );
+
+    let kept_offset = {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().offset
+    };
+    renumber(&db);
+    std::fs::remove_file(&record).unwrap();
+    append(&record, &claude_assistant("r3", 9, 4, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r4", 2, 1, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r5", 1, 1, 0, 0, "end_turn"));
+    assert!(
+        std::fs::metadata(&record).unwrap().len() >= kept_offset,
+        "the recreated record is at least as long as the kept offset, so only the \
+         inode check, not the length guard, can start it over"
+    );
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 2)
+            .unwrap()
+            .input,
+        12,
+        "a record recreated with a new inode on the renumbered pin starts over"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(stored_identity(&db), (live.dev(), live.ino()));
+}
+
 /// A home past the entry bound still counts the record that changed last: the walk enters
 /// the most recently changed folder first and reads every entry of it, so the bound leaves
 /// out only folders that changed before. Here that record is the last entry of a folder of

@@ -544,5 +544,6 @@ pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Engine
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
+#[path = "adoption/tests.rs"]
 mod tests;

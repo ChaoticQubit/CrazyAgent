@@ -314,3 +314,136 @@ async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
     assert_eq!(second.next, None);
     fixture.stop().await;
 }
+
+/// Runs git in a test checkout with an isolated home and no system config. Inputs: the
+/// home, the folder and the arguments. Output: standard output.
+fn checkout_git(home: &Path, dir: &Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner_socket() {
+    let fixture = Fixture::start().await;
+    let (home, folder) = (
+        fixture.root.path().join("home"),
+        fixture.root.path().join("project"),
+    );
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    for args in [
+        &["init", "-q", "--template=", "-b", "main"][..],
+        &["config", "user.name", "Repo Owner"],
+        &["config", "user.email", "repo@example.invalid"],
+    ] {
+        checkout_git(&home, &folder, args);
+    }
+    std::fs::write(folder.join("CLAUDE.md"), "SOCKET-RULE\n").unwrap();
+    checkout_git(&home, &folder, &["add", "CLAUDE.md"]);
+    checkout_git(&home, &folder, &["commit", "-q", "-m", "Start"]);
+    let project = crate::protocol::ProjectId::new("import-socket").unwrap();
+    let setup = crate::project_setup::StoredSetup {
+        project_id: project.clone(),
+        name: "Import".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: folder.display().to_string(),
+        created_ms: 1,
+        revision: 1,
+    };
+    rusqlite::Connection::open(fixture.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO project_setups(project, body) VALUES (?1, ?2)",
+            [
+                project.as_str(),
+                serde_json::to_string(&setup).unwrap().as_str(),
+            ],
+        )
+        .unwrap();
+    let client = fixture.client().await;
+    assert!(
+        client
+            .uncommitted_instruction_import(project.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let moved = client
+        .confirm_instruction_import(project.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true, true)]
+    );
+    assert_eq!(
+        client
+            .uncommitted_instruction_import(project.clone())
+            .await
+            .unwrap(),
+        ["CLAUDE.md"]
+    );
+    let made = client
+        .commit_instruction_import(project.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (made.branch.as_str(), made.files.as_slice()),
+        ("main", ["CLAUDE.md".to_owned()].as_slice())
+    );
+    assert_eq!(
+        checkout_git(&home, &folder, &["rev-parse", "main"]).trim(),
+        made.commit
+    );
+    assert_eq!(checkout_git(&home, &folder, &["status", "--porcelain"]), "");
+    assert!(
+        client
+            .uncommitted_instruction_import(project.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        client
+            .commit_instruction_import(project)
+            .await
+            .unwrap_err()
+            .0,
+        "process_commit_none"
+    );
+    fixture.stop().await;
+}

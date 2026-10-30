@@ -270,7 +270,7 @@ test("a card shows its title, role line, branch and newest task, and the full te
   assert.equal(graph.cardTask(node("m", "master"), team.edges), "2 tasks live, 1 waiting for an agent.");
   assert.equal(graph.cardTask(node("m", "master"), [edge(1, "m", "team-1", "running")]), "1 task live.");
   const title = graph.cardText(node("a", "sub", { label: "Ada Lovelace (@onboarding-fix-for-reused-ids)" }), [], name).title;
-  assert.equal(title, "Ada Lovelace (@onboardi...");
+  assert.equal(title, "Ada Lovelace (@onbo...");
   assert.ok(Array.from(title).length <= graph.TITLE_CHARS);
   assert.deepEqual(graph.cardTip(talk.nodes[2], talk, name), [
     "codex-3", "Sub-agent, Codex", "Idle", "2 unread messages from you, delivered.", "1 unread message from codex-2, typed into its terminal.",

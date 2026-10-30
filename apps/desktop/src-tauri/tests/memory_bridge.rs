@@ -64,6 +64,38 @@ fn memory_and_master_cancel_commands_are_registered_in_all_four_places() {
     }
 }
 
+#[test]
+fn the_memory_import_command_is_registered_where_the_web_view_calls_it() {
+    let command = "desktop_import_memory";
+    let bindings = include_str!("../src/lib.rs");
+    assert_eq!(
+        include_str!("../build.rs")
+            .matches(&format!("\"{command}\""))
+            .count(),
+        1
+    );
+    assert!(bindings.contains(&format!("async fn {command}(")));
+    assert_eq!(
+        bindings
+            .lines()
+            .filter(|line| line.trim() == format!("{command},"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        include_str!("../capabilities/main-window.json")
+            .matches("\"allow-desktop-import-memory\"")
+            .count(),
+        1
+    );
+    assert_eq!(
+        include_str!("../../src/api.ts")
+            .matches(&format!("\"{command}\""))
+            .count(),
+        1
+    );
+}
+
 async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);
@@ -376,6 +408,109 @@ async fn desktop_saves_promotes_and_deletes_memory_through_the_real_engine() {
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(20), flow(root.path())).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
+async fn import_flow(root: &Path, folder: &Path) -> Result<(), Box<dyn Error>> {
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let receipt = bridge
+        .setup_project(
+            ProjectSpec {
+                name: "Meal plan".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Plans weekly meals.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Website],
+                research: vec![ResearchKind::MarketResearch],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await?;
+    assert!(
+        matches!(receipt.outcome, ActionOutcome::Applied),
+        "{receipt:?}"
+    );
+    let id = receipt.intent.project_id.clone().unwrap();
+    let path = folder.to_str().unwrap();
+
+    let first = bridge.import_memory(&id, path, 2).await?;
+    assert_eq!((first.imported, first.skipped), (2, 1));
+    assert!(first.stopped.is_none());
+    let again = bridge.import_memory(&id, path, 3).await?;
+    assert_eq!((again.imported, again.skipped), (0, 3));
+    assert!(again.stopped.is_none());
+
+    let listed = bridge.memories(Some(&id), None, None).await?;
+    let mut imported: Vec<(Option<String>, String)> = listed
+        .items
+        .iter()
+        .filter(|memory| memory.origin == "imported")
+        .map(|memory| (memory.source_path.clone(), memory.text.clone()))
+        .collect();
+    imported.sort();
+    assert_eq!(
+        imported,
+        vec![
+            (Some("a.md".into()), "Plan meals on Sunday.".into()),
+            (Some("b.md".into()), "Shop on Monday.".into()),
+        ]
+    );
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|memory| memory.project_id.as_deref() == Some(id.as_str()))
+    );
+    assert_eq!(
+        bridge
+            .import_memory(&id, "relative/memory", 4)
+            .await
+            .unwrap_err()
+            .code,
+        "memory_import_folder_invalid"
+    );
+    assert!(bridge.pending_intent()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn desktop_imports_a_memory_folder_through_the_real_engine() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-mem-imp-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let folder = tempfile::Builder::new()
+        .prefix("ca-mem-folder-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::write(folder.path().join("a.md"), "Plan meals on Sunday.").unwrap();
+    std::fs::write(
+        folder.path().join("b.md"),
+        "---\ntitle: shop\n---\nShop on Monday.\n",
+    )
+    .unwrap();
+    std::fs::write(folder.path().join("long.md"), "l".repeat(5000)).unwrap();
+    std::fs::write(folder.path().join("MEMORY.md"), "- [a](a.md)").unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        import_flow(root.path(), folder.path()),
+    )
+    .await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();

@@ -441,17 +441,22 @@ impl AgentContext {
         &self.plugins
     }
 
-    /// Lists what a project sandbox must let an agent with tools on read beyond its home:
-    /// the executable of every approved command server.
+    /// Lists what a project sandbox must let an agent with tools on read beyond its home, as
+    /// paths whose folders it reads: the executable of every approved command server and,
+    /// for context-mode run from the engine's shared install, that install's `node_modules`.
     pub fn read_paths(&self) -> Vec<PathBuf> {
-        self.plugins
-            .servers
-            .iter()
-            .filter_map(|server| match &server.spec {
-                ServerSpec::Stdio { command, .. } => Some(PathBuf::from(command)),
-                ServerSpec::Http { .. } => None,
-            })
-            .collect()
+        let mut paths = Vec::with_capacity(2 * self.plugins.servers.len());
+        for server in &self.plugins.servers {
+            if let ServerSpec::Stdio { command, .. } = &server.spec {
+                paths.push(PathBuf::from(command));
+            }
+            #[cfg(unix)]
+            paths.extend(
+                crate::context_mode::shared_install(&server.spec)
+                    .map(|install| install.join("node_modules")),
+            );
+        }
+        paths
     }
 
     /// Adds a live master's own instructions to what its harness reads at launch, so they

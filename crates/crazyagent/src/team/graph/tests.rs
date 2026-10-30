@@ -869,7 +869,8 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             unread_edges: vec![(Party::Owner, Party::Agent(9), 1, Receipt::Sent)],
         }),
     };
-    let mates = |graph: &TeamGraph| -> Vec<(String, Option<String>, Option<i64>, Option<String>)> {
+    type MateRow = (String, Option<String>, Option<i64>, Option<String>);
+    let mates = |graph: &TeamGraph| -> Vec<MateRow> {
         graph
             .nodes
             .iter()
@@ -939,6 +940,178 @@ fn an_adopted_teammate_row_replaces_its_pane_and_opens_its_own_terminal() {
             .all(|mate| mate.0 != "teammate-3-12"),
         "a shown finished row still stands for its pane"
     );
+}
+
+/// The agents list orders each lead's workers under it, depth first and in the given order
+/// among siblings (N2): a worker whose lead is not listed starts a tree of its own, and two
+/// agents that name each other as lead are each listed once, at the top.
+#[test]
+fn lead_tree_orders_workers_under_their_leads() {
+    let with = |id, parent| TeamAgent {
+        parent,
+        ..agent(id, AgentRole::Sub, "codex", AgentStatus::Working)
+    };
+    let agents = [
+        with(1, None),
+        with(2, None),
+        with(3, Some(1)),
+        with(4, Some(3)),
+        with(5, Some(2)),
+        with(6, Some(1)),
+        with(7, Some(99)),
+        with(8, Some(9)),
+        with(9, Some(8)),
+    ];
+    let listed: Vec<&TeamAgent> = agents.iter().collect();
+    let tree: Vec<(i64, usize)> = crate::team::lead_tree(&listed)
+        .into_iter()
+        .map(|(agent, depth)| (agent.id, depth))
+        .collect();
+    assert_eq!(
+        tree,
+        vec![
+            (1, 0),
+            (3, 1),
+            (4, 2),
+            (6, 1),
+            (2, 0),
+            (5, 1),
+            (7, 0),
+            (8, 0),
+            (9, 0)
+        ]
+    );
+}
+
+#[cfg(unix)]
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let repo = root.join("repo");
+    let worktrees = root.join("worktrees");
+    for folder in [&repo, &worktrees, &root.join("engine")] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    git(&repo, &["init", "-q", "--template=", "-b", "main"]);
+    git(&repo, &["config", "user.name", "Repo Owner"]);
+    git(&repo, &["config", "user.email", "owner@example.invalid"]);
+    std::fs::write(repo.join("README"), "tidepool\n").unwrap();
+    git(&repo, &["add", "README"]);
+    git(&repo, &["commit", "-q", "-m", "Start"]);
+    let connection = crate::landing::open(&root.join("engine")).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    let status = tree();
+    let linked = |id: i64, task: Option<&str>| {
+        let worktree = worktrees.join(format!("agent-{id}"));
+        if let Some(name) = task {
+            crate::landing::claim_task_branch(&connection, &repo, &worktree, name).unwrap();
+        }
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let git_dir =
+            std::path::PathBuf::from(git(&worktree, &["rev-parse", "--absolute-git-dir"]));
+        crate::landing::name_agent_branch(&connection, &repo, &worktree, &git_dir).unwrap();
+        (id, worktree, git_dir)
+    };
+    let clone = |id: i64, task: Option<&str>| {
+        let worktree = worktrees.join(format!("agent-{id}"));
+        match task {
+            Some(name) => {
+                let branch =
+                    crate::landing::claim_task_branch(&connection, &repo, &worktree, name).unwrap();
+                crate::landing::add_agent_clone_on(&repo, &worktree, None, &branch).unwrap();
+            }
+            None => crate::landing::add_agent_clone(&repo, &worktree).unwrap(),
+        }
+        let git_dir = crate::agent_git::git_dir(&worktree);
+        (id, worktree, git_dir)
+    };
+    let made = [
+        linked(3, Some("charts")),
+        linked(6, None),
+        clone(4, Some("login")),
+        clone(5, None),
+    ];
+    for (agent, worktree, git_dir) in &made {
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    agent,
+                    status.project_id.as_str(),
+                    repo.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    let found = branches(&connection, &status).unwrap();
+    assert_eq!(
+        found,
+        BTreeMap::from([
+            (3, "crazyagent/charts".to_owned()),
+            (4, "crazyagent/login".to_owned()),
+            (5, "agent/agent-5".to_owned()),
+            (6, "crazyagent/agent-6".to_owned()),
+        ]),
+        "a task branch the engine stored wins; else a linked worktree is crazyagent/<folder> and an own clone agent/<folder>"
+    );
+    for (agent, worktree, git_dir) in &made {
+        let checked_out = git(
+            worktree,
+            &[
+                "--git-dir",
+                git_dir.to_str().unwrap(),
+                "--work-tree",
+                worktree.to_str().unwrap(),
+                "symbolic-ref",
+                "--short",
+                "HEAD",
+            ],
+        );
+        assert_eq!(
+            Some(&checked_out),
+            found.get(agent),
+            "agent {agent}: the branch read with no git run is the one git has checked out"
+        );
+    }
 }
 
 #[test]
