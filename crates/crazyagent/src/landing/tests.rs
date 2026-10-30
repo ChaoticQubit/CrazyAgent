@@ -2474,6 +2474,10 @@ fn an_agent_head_naming_another_branch_is_refused_and_its_own_branch_takes_the_t
     assert_eq!(other.trim(), head, "another agent's branch moved");
     assert_eq!(case.view(&id).head, head);
     assert_eq!(case.tip(), tip);
+    assert_eq!(
+        std::fs::read_to_string(&head_file).unwrap(),
+        "ref: refs/heads/crazyagent/agent-2\n"
+    );
     std::fs::remove_file(case.workspace.worktree.join("other.txt")).unwrap();
     case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
     case.edit("lease.txt", "lease\n");
