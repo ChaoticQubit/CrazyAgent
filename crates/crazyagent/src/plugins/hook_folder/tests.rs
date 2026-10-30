@@ -98,3 +98,40 @@ fn a_hook_folder_past_the_file_bound_is_refused_and_leaves_no_copy() {
     super::copy(&big, &copy, &found.hooks).unwrap();
     assert!(copy.join("hooks/hooks.json").is_file());
 }
+
+#[test]
+fn a_stored_hook_one_file_past_the_launch_bound_is_refused_and_the_tally_stays_at_the_bound() {
+    let parent = tempfile::tempdir().unwrap();
+    let stored = parent.path().join("stored");
+    let half = LAUNCH_FILES_MAX / 2;
+    let counts = [half, LAUNCH_FILES_MAX - half + 1];
+    assert!(counts.iter().all(|count| *count < ENTRIES_MAX));
+    assert_eq!(counts.iter().sum::<usize>(), LAUNCH_FILES_MAX + 1);
+    for (name, count) in ["a", "b"].into_iter().zip(counts) {
+        let inner = stored.join(name);
+        fs::create_dir_all(&inner).unwrap();
+        for at in 0..count {
+            fs::write(inner.join(format!("{at}.txt")), "x").unwrap();
+        }
+    }
+    let mut tally = Tally::default();
+    assert_eq!(
+        copy_stored(&stored, &parent.path().join("past"), &mut tally),
+        Err("hooks_too_large")
+    );
+    assert_eq!(tally.files, LAUNCH_FILES_MAX);
+    fs::remove_file(stored.join("b/0.txt")).unwrap();
+    let mut tally = Tally::default();
+    let launch = parent.path().join("launch");
+    copy_stored(&stored, &launch, &mut tally).unwrap();
+    assert_eq!(tally.files, LAUNCH_FILES_MAX);
+    assert!(launch.join("b/1.txt").is_file());
+    let next = parent.path().join("next");
+    fs::create_dir(&next).unwrap();
+    fs::write(next.join("one.txt"), "x").unwrap();
+    assert_eq!(
+        copy_stored(&next, &parent.path().join("next-copy"), &mut tally),
+        Err("hooks_too_large")
+    );
+    assert_eq!(tally.files, LAUNCH_FILES_MAX);
+}
