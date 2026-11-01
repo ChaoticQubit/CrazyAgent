@@ -164,6 +164,21 @@ pub(in crate::tui) enum Ask {
 
 const TEAMMATE_KEYS_MAX: usize = 9;
 
+/// The branch setting the open branch editor writes: the Master's branch (DEC-100) or the
+/// Land on branch (DEC-111 Q1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum BranchSetting {
+    Master,
+    LandOn,
+}
+
+/// The open branch editor: the setting it writes and the branch name being typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct BranchEdit {
+    pub setting: BranchSetting,
+    pub input: TextInput,
+}
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -176,7 +191,7 @@ pub(in crate::tui) struct TeamView {
     pub confirm: Option<i64>,
     pub ask: Option<Ask>,
     pub draft: Option<Draft>,
-    pub branch_edit: Option<TextInput>,
+    pub branch_edit: Option<BranchEdit>,
     pub wake: Option<WakeEdit>,
     pub coord: Option<CoordEdit>,
     pub alerts: bool,
@@ -309,8 +324,8 @@ impl TeamView {
     /// Takes untrusted pasted text; control characters are dropped.
     /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
-        if let Some(input) = &mut self.branch_edit {
-            input.insert_str(text);
+        if let Some(edit) = &mut self.branch_edit {
+            edit.input.insert_str(text);
             return true;
         }
         if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut()) {
@@ -1384,7 +1399,10 @@ impl TeamView {
         };
         let mut input = TextInput::single(MASTER_BRANCH_BYTES_MAX);
         input.set(status.master_branch.as_deref().unwrap_or(""));
-        self.branch_edit = Some(input);
+        self.branch_edit = Some(BranchEdit {
+            setting: BranchSetting::Master,
+            input,
+        });
     }
 
     /// Handles one key while the Master's branch editor is open: Enter saves, Esc closes,
@@ -1397,8 +1415,8 @@ impl TeamView {
             }
             KeyCode::Enter => self.save_master_branch(),
             _ => {
-                if let Some(input) = &mut self.branch_edit {
-                    input.handle(key);
+                if let Some(edit) = &mut self.branch_edit {
+                    edit.input.handle(key);
                 }
                 TeamReply::Handled
             }
@@ -1408,10 +1426,10 @@ impl TeamView {
     /// Sends the Master's branch typed in the editor; an empty name goes back to the
     /// repository default. Output: the change to send, or Handled with a notice while saving.
     fn save_master_branch(&mut self) -> TeamReply {
-        let Some(input) = &self.branch_edit else {
+        let Some(edit) = &self.branch_edit else {
             return TeamReply::Handled;
         };
-        let typed = input.value().trim();
+        let typed = edit.input.value().trim();
         let branch = (!typed.is_empty()).then(|| typed.to_owned());
         if self.changing.is_some() {
             self.notice = Some(Notice::problem(
@@ -1906,8 +1924,8 @@ impl TeamView {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            (None, Some(input), _) => {
-                let (rows, at) = branch_rows(input, content, look);
+            (None, Some(edit), _) => {
+                let (rows, at) = branch_rows(&edit.input, content, look);
                 (rows, Some(at))
             }
             (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),

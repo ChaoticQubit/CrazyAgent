@@ -960,13 +960,69 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
     let shown = flat(&failed);
     assert!(
         shown.contains(
-            "Couldn't list your branches, so these changes land on the checked-out branch."
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
         ),
         "{shown}"
     );
     assert!(
-        shown.contains("They land as one commit on the branch checked out in your project folder"),
+        shown.contains(
+            "They land as one commit on your project's Land on branch, under your own Git name."
+        ),
         "{shown}"
+    );
+}
+
+#[test]
+fn accept_preselects_the_land_on_branch_and_sends_a_plain_accept_for_it() {
+    let land_on = || TargetBranches {
+        branches: vec!["feat/x".into(), "main".into(), "stage".into()],
+        current: Some("feat/x".into()),
+        land_on: Some("stage".into()),
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch stage"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on stage, under your own Git name. That branch isn't checked out"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        }),
+        "the Land on branch is where the engine lands with no branch named"
+    );
+
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch feat/x"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "the checked-out branch is named when it is not the Land on branch"
     );
 }
 
@@ -1001,7 +1057,7 @@ fn opening_accept_drops_an_older_notice_about_the_set() {
     assert!(!failed.contains(&refused), "{failed}");
     assert!(
         failed.contains(
-            "Couldn't list your branches, so these changes land on the checked-out branch."
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
         ),
         "{failed}"
     );
