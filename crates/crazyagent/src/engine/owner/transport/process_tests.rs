@@ -238,14 +238,28 @@ fn a_mismatched_or_oversized_request_is_refused() {
 
 #[test]
 fn saves_at_once_each_read_back_the_settings_they_stored() {
-    use crate::instruction_files::Mode;
+    use crate::instruction_files::{EditDelivery, Mode};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
     let project = with_project(&root, &folder);
     let options: Vec<InstructionSettings> = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
-        .flat_map(|mode| [true, false].map(|transcripts| InstructionSettings { mode, transcripts }))
+        .flat_map(|mode| [true, false].map(|transcripts| (mode, transcripts)))
+        .zip(
+            [
+                EditDelivery::NextMessage,
+                EditDelivery::Restart,
+                EditDelivery::Badge,
+            ]
+            .into_iter()
+            .cycle(),
+        )
+        .map(|((mode, transcripts), edits)| InstructionSettings {
+            mode,
+            transcripts,
+            edits,
+        })
         .collect();
     assert_eq!(options.len(), 6);
     let start = std::sync::Barrier::new(options.len());
