@@ -566,6 +566,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The plugin name must be 1 to 32 letters, digits, ., - or _.",
     ),
     (
+        "hooks_plugin_manifest_missing",
+        "This pack has hooks but no plugin.json.",
+    ),
+    (
         "hooks_already_added",
         "These hooks were already added here.",
     ),
