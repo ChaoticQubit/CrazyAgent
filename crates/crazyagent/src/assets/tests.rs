@@ -1,6 +1,12 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::time::Duration;
+
+/// How many times a detach the system refuses as busy is tried, and the pause between
+/// tries: an eject can race the teardown of the APFS container under load.
+const DETACH_ATTEMPTS: usize = 40;
+const DETACH_PAUSE: Duration = Duration::from_millis(250);
 
 /// A scratch APFS disk image attached without Finder at its own mount point, detached
 /// when dropped, so a test can give its volume another device number as a restart does.
@@ -12,13 +18,14 @@ struct Volume {
 impl Volume {
     fn new(base: &Path, name: &str) -> Self {
         let image = base.join(format!("{name}.dmg"));
-        let created = hdiutil(
+        if let Err(refused) = hdiutil(
             &[
                 "create", "-quiet", "-size", "8m", "-fs", "APFS", "-volname", name,
             ],
             &[&image],
-        );
-        assert!(created, "hdiutil create {name}");
+        ) {
+            panic!("hdiutil create {name}: {refused}");
+        }
         Self {
             image,
             mount: base.join(name),
@@ -27,38 +34,78 @@ impl Volume {
 
     fn attach(&self) {
         std::fs::create_dir_all(&self.mount).unwrap();
-        let attached = hdiutil(
+        if let Err(refused) = hdiutil(
             &["attach", "-quiet", "-nobrowse", "-mountpoint"],
             &[&self.mount, &self.image],
-        );
-        assert!(attached, "hdiutil attach {}", self.image.display());
+        ) {
+            panic!("hdiutil attach {}: {refused}", self.image.display());
+        }
     }
 
     fn detach(&self) {
+        let mut attached = self.disk();
         assert!(
-            hdiutil(&["detach", "-quiet"], &[&self.mount]),
-            "hdiutil detach {}",
-            self.mount.display()
+            attached.is_some(),
+            "hdiutil info lists {} as attached",
+            self.image.display()
         );
+        let mut refused = Vec::new();
+        while let Some(disk) = attached {
+            match hdiutil(&["detach", "-quiet"], &[Path::new(&disk)]) {
+                Ok(_) => return,
+                Err(reason) => refused.push(format!("{disk}: {reason}")),
+            }
+            assert!(
+                refused.len() < DETACH_ATTEMPTS,
+                "hdiutil detach {}: {refused:?}",
+                self.mount.display()
+            );
+            std::thread::sleep(DETACH_PAUSE);
+            attached = self.disk();
+        }
+    }
+
+    /// The whole disk hdiutil attached this volume's image as, found by the image, so a
+    /// detach that unmounted the volume but could not eject the image can still finish.
+    /// Output: the `/dev/diskN` path, or none when the image is not attached.
+    fn disk(&self) -> Option<String> {
+        const DISK: &str = "/dev/disk";
+        let info = hdiutil(&["info", "-plist"], &[]).ok()?;
+        let image = format!("<string>{}</string>", self.image.display());
+        let entities = &info[info.find(&image)? + image.len()..];
+        let number: String = entities[entities.find(DISK)? + DISK.len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        (!number.is_empty()).then(|| format!("{DISK}{number}"))
     }
 }
 
 impl Drop for Volume {
     fn drop(&mut self) {
-        let _ = hdiutil(&["detach", "-quiet", "-force"], &[&self.mount]);
+        if let Some(disk) = self.disk() {
+            let _ = hdiutil(&["detach", "-quiet", "-force"], &[Path::new(&disk)]);
+        }
     }
 }
 
-fn hdiutil(arguments: &[&str], paths: &[&Path]) -> bool {
-    crate::spawn_gate::status(
+/// Runs hdiutil. Input: its arguments, then the paths it acts on. Output: what it printed
+/// when it succeeded, or why it did not start or what it reported when it failed.
+fn hdiutil(arguments: &[&str], paths: &[&Path]) -> Result<String, String> {
+    let output = crate::spawn_gate::output(
         Command::new("/usr/bin/hdiutil")
             .args(arguments)
             .args(paths)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null()),
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
     )
-    .is_ok_and(|status| status.success())
+    .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+    }
 }
 
 fn admitted(db: &Connection, id: &str) -> AdmittedSource {
