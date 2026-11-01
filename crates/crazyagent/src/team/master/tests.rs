@@ -2087,21 +2087,14 @@ fn a_merge_lands_on_the_land_on_branch_when_the_owner_names_one() {
     git_at(&fixture, &repo, &["add", "owner.txt"]);
     git_at(&fixture, &repo, &["commit", "-q", "-m", "Owner work"]);
     let owner_tip = git_at(&fixture, &repo, &["rev-parse", "feat/x"]);
-    let project = ProjectId::new(PROJECT).unwrap();
-    for action in [
-        crate::team::TeamAction::MasterBranch {
-            project_id: project.clone(),
-            branch: Some("main".into()),
-        },
-        crate::team::TeamAction::LandOn {
-            project_id: project.clone(),
-            branch: Some("stage".into()),
-        },
-    ] {
-        let tx = fixture.connection.transaction().unwrap();
-        let outcome = crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap();
-        assert_eq!(outcome, crate::protocol::Outcome::Applied);
-        tx.commit().unwrap();
+    for (table, branch) in [("team_master_branch", "main"), ("team_land_on", "stage")] {
+        fixture
+            .connection
+            .execute(
+                &format!("INSERT INTO {table}(project,branch) VALUES (?1,?2)"),
+                rusqlite::params![PROJECT, branch],
+            )
+            .unwrap();
     }
     let (said, refused) = as_master(
         &mut fixture,
