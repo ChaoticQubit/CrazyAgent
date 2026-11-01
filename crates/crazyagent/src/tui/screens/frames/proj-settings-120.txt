@@ -33,4 +33,4 @@
 
 
 
- Enter Pick a pool   ↑↓ Move   Space On or off here   a Add skill   m Add MCP server   o Open folder             ? Help
+ Enter Pick a pool   ↑↓ Move   Space On or off here   a Add skill   m Add MCP server   h Add hooks   l Tools     ? Help
