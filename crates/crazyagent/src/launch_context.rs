@@ -444,6 +444,20 @@ impl AgentContext {
         &self.plugins
     }
 
+    /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a
+    /// chosen name that is not approved adds nothing. Input: the role's chosen names, or
+    /// none for All approved skills, which keeps every one. Output: the context.
+    pub fn for_role(mut self, chosen: Option<&[String]>) -> Self {
+        if let Some(names) = chosen {
+            let before = self.plugins.skills.len();
+            self.plugins
+                .skills
+                .retain(|skill| names.contains(&skill.name));
+            assert!(self.plugins.skills.len() <= before.min(names.len()));
+        }
+        self
+    }
+
     /// Lists what a project sandbox must let an agent with tools on read beyond its home, as
     /// paths whose folders it reads: the executable of every approved command server and,
     /// for context-mode run from the engine's shared install, that install's `node_modules`.

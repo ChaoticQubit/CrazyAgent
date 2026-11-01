@@ -816,13 +816,25 @@ export type QuestionsTo = "lead" | "me";
 /** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
 export type Overlaps = "warn" | "block" | "off";
 
-/** A project's coordination settings: question routing, claim overlaps, workflow nudges and the
- * tool names the adoption counts include. */
+/** A team role whose skills the owner chooses: the master, a lead or a worker. */
+export type SkillRole = "master" | "lead" | "worker";
+
+/** Which approved skills each team role gets: null is All approved skills, a list is Chosen
+ * skills, and an empty list gives that role no skills. */
+export interface RoleSkills {
+  master: string[] | null;
+  lead: string[] | null;
+  worker: string[] | null;
+}
+
+/** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
+ * tool names the adoption counts include and the skills each team role gets. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
   nudges: boolean;
   counted_tools: string[];
+  role_skills: RoleSkills;
 }
 
 /** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */

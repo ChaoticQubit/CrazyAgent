@@ -547,7 +547,7 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
-        CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, SubagentMode,
+        CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, RoleSkills, SubagentMode,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -622,6 +622,11 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
         overlaps: Overlaps::Block,
         nudges: false,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
+        role_skills: RoleSkills {
+            master: None,
+            lead: Some(Vec::new()),
+            worker: Some(vec!["release-notes".into()]),
+        },
     };
     for receipt in [
         bridge.team_coordination(&id, chosen.clone(), 2).await?,

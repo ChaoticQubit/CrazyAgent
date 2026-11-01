@@ -3,6 +3,7 @@
 use crazyagent::agent_git::Layout;
 use crazyagent::agent_home;
 use crazyagent::client_controller::OwnerController;
+use crazyagent::coord::settings::{CoordSettings, RoleSkills, SkillRole};
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::harnesses::launch::{
@@ -825,6 +826,220 @@ async fn a_codex_agent_with_tools_on_gets_the_skill_index_with_each_description_
         "tools off lists no skills"
     );
     drop(off_files);
+    drop(owner);
+    case.close().await;
+}
+
+/// Sets up a project for the team-role skill tests and adds the given global skills from
+/// real SKILL.md folders. Inputs: the case, the owner and the skill names. Output: the
+/// project.
+async fn crew_with_skills(case: &Case, owner: &mut OwnerController, skills: &[&str]) -> ProjectId {
+    let project = ProjectId::new("crew").unwrap();
+    applied(
+        owner
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Crew".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Runs a team.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap(),
+    );
+    for name in skills {
+        owner
+            .add_skill(Scope::Global, skill_folder(case.root.path(), name))
+            .await
+            .unwrap();
+    }
+    project
+}
+
+/// Saves a project's coordination settings through the owner's team action, the path the
+/// TUI and the desktop use. Inputs: the owner, the project, the settings and the client
+/// generation. Output: the settings the team status then reports, or the refusal code.
+async fn save_coordination(
+    owner: &mut OwnerController,
+    project: &ProjectId,
+    settings: CoordSettings,
+    generation: u64,
+) -> Result<CoordSettings, String> {
+    let response = owner
+        .team_action(
+            crazyagent::team::TeamAction::CoordSettings {
+                project_id: project.clone(),
+                settings,
+            },
+            generation,
+        )
+        .await
+        .map_err(|problem| problem.0)?;
+    applied(response);
+    Ok(coordination(owner, project).await)
+}
+
+async fn coordination(owner: &mut OwnerController, project: &ProjectId) -> CoordSettings {
+    owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .coordination
+        .expect("the team status reports the coordination settings")
+        .settings
+}
+
+/// The skills a Claude Code launch with tools on writes for one team role, from the
+/// project's launch context kept to that role's stored setting. Inputs: the case, the
+/// project, the role and a private agent home. Output: the written skill folder names.
+fn role_launch(case: &Case, project: &ProjectId, role: SkillRole, home: &Path) -> BTreeSet<String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        case.root.path().join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let skills = crazyagent::coord::settings::read(&connection, project)
+        .unwrap()
+        .role_skills;
+    let context = launch_context::for_project(&connection, project, Layout::Linked)
+        .unwrap()
+        .for_role(skills.of(role));
+    let (command, files) =
+        command_with_context(&request(case, "claude-code", home, true), &context).unwrap();
+    let written = argument_after(&command, "--plugin-dir")
+        .map(|plugin| PathBuf::from(plugin).join("skills"))
+        .filter(|skills| skills.is_dir())
+        .map_or_else(BTreeSet::new, |skills| names(&skills));
+    drop(files);
+    written
+}
+
+fn owned(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| (*name).to_owned()).collect()
+}
+
+#[tokio::test]
+async fn with_all_approved_every_role_gets_every_approved_skill() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let project = crew_with_skills(&case, &mut owner, &["meal-tips", "release-notes"]).await;
+    let every = BTreeSet::from_iter(owned(&["meal-tips", "release-notes"]));
+    assert_eq!(
+        coordination(&mut owner, &project).await.role_skills,
+        RoleSkills::default(),
+        "All approved skills is every role's setting until the owner picks"
+    );
+    let agents = private_directory(&case.root.path().join("agents"));
+    for role in SkillRole::ALL {
+        let home = private_directory(&agents.join(format!("{role:?}-default")));
+        assert_eq!(role_launch(&case, &project, role, &home), every, "{role:?}");
+    }
+
+    let worker_chose = RoleSkills {
+        worker: Some(owned(&["meal-tips"])),
+        ..RoleSkills::default()
+    };
+    let kept = save_coordination(
+        &mut owner,
+        &project,
+        CoordSettings {
+            role_skills: worker_chose.clone(),
+            ..CoordSettings::default()
+        },
+        2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept.role_skills, worker_chose);
+    let back = save_coordination(&mut owner, &project, CoordSettings::default(), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        back.role_skills,
+        RoleSkills::default(),
+        "choosing All approved skills again clears the workers' list"
+    );
+    for role in SkillRole::ALL {
+        let home = private_directory(&agents.join(format!("{role:?}-again")));
+        assert_eq!(role_launch(&case, &project, role, &home), every, "{role:?}");
+    }
+    drop(owner);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn with_chosen_skills_each_role_gets_its_own_list() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let project = crew_with_skills(
+        &case,
+        &mut owner,
+        &["meal-tips", "release-notes", "style-guide"],
+    )
+    .await;
+    let chosen = RoleSkills {
+        master: Some(owned(&["meal-tips"])),
+        lead: Some(Vec::new()),
+        worker: Some(owned(&["style-guide", "release-notes", "not-approved"])),
+    };
+    let kept = save_coordination(
+        &mut owner,
+        &project,
+        CoordSettings {
+            role_skills: chosen.clone(),
+            ..CoordSettings::default()
+        },
+        2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(kept.role_skills, chosen);
+    let agents = private_directory(&case.root.path().join("agents"));
+    for (role, given) in [
+        (SkillRole::Master, owned(&["meal-tips"])),
+        (SkillRole::Lead, Vec::new()),
+        (SkillRole::Worker, owned(&["release-notes", "style-guide"])),
+    ] {
+        let home = private_directory(&agents.join(format!("{role:?}")));
+        assert_eq!(
+            role_launch(&case, &project, role, &home),
+            BTreeSet::from_iter(given),
+            "{role:?}: only its chosen names that are approved skills"
+        );
+    }
+    assert_eq!(
+        save_coordination(
+            &mut owner,
+            &project,
+            CoordSettings {
+                role_skills: RoleSkills {
+                    worker: Some(owned(&["Not A Skill"])),
+                    ..RoleSkills::default()
+                },
+                ..CoordSettings::default()
+            },
+            3,
+        )
+        .await
+        .err(),
+        Some("coord_settings_invalid".into()),
+        "a name no skill can have is refused"
+    );
+    assert_eq!(
+        coordination(&mut owner, &project).await.role_skills,
+        chosen,
+        "a refused choice changes nothing"
+    );
     drop(owner);
     case.close().await;
 }

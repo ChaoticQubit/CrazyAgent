@@ -1,5 +1,6 @@
 use super::settings::{
-    self, CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, SubagentMode,
+    self, CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, RoleSkills, SkillRole,
+    SubagentMode,
 };
 use super::store::Change;
 use super::tool_switches::{self, Switch};
@@ -1400,6 +1401,70 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
         Some(HarnessKind::ClaudeCode)
     );
     assert_eq!(HarnessKind::from_harness("gemini"), None);
+}
+
+/// DEC-111 R3: each team role's skill choice validates with the skill name rule, keeps its
+/// order through a save, and a row saved before the choice existed reads as All approved
+/// skills for every role.
+#[test]
+fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
+    let connection = db();
+    let project = project();
+    let worker = |names: Vec<String>| CoordSettings {
+        role_skills: RoleSkills {
+            worker: Some(names),
+            ..RoleSkills::default()
+        },
+        ..CoordSettings::default()
+    };
+    for names in [
+        (0..=settings::ROLE_SKILLS_MAX)
+            .map(|n| format!("skill-{n}"))
+            .collect::<Vec<_>>(),
+        vec!["Upper".into()],
+        vec!["-lead".into()],
+        vec!["tail-".into()],
+        vec!["s".repeat(crate::plugins::skill_folder::NAME_BYTES_MAX + 1)],
+        vec![String::new()],
+        vec!["meal-tips".into(), "meal-tips".into()],
+    ] {
+        let invalid = worker(names);
+        assert_eq!(code(invalid.validate()), "coord_settings_invalid");
+        assert_eq!(
+            code(settings::write(&connection, &project, &invalid)),
+            "coord_settings_invalid"
+        );
+    }
+    let chosen = CoordSettings {
+        role_skills: RoleSkills {
+            master: Some(vec!["meal-tips".into()]),
+            lead: Some(Vec::new()),
+            worker: Some(vec![
+                "style-guide".into(),
+                "s".repeat(crate::plugins::skill_folder::NAME_BYTES_MAX),
+            ]),
+        },
+        ..CoordSettings::default()
+    };
+    settings::write(&connection, &project, &chosen).unwrap();
+    let read = settings::read(&connection, &project).unwrap();
+    assert_eq!(read, chosen);
+    assert_eq!(
+        SkillRole::ALL.map(|role| read.role_skills.of(role).map(<[String]>::len)),
+        [Some(1), Some(0), Some(2)]
+    );
+    connection
+        .execute(
+            "UPDATE coord_settings SET json=?2 WHERE project=?1",
+            params![PROJECT, r#"{"questions_to":"me","overlaps":"warn","nudges":false,"counted_tools":["Skill"]}"#],
+        )
+        .unwrap();
+    let older = settings::read(&connection, &project).unwrap();
+    assert_eq!(older.role_skills, RoleSkills::default());
+    assert_eq!(
+        (older.questions_to, older.counted_tools),
+        (QuestionsTo::Me, vec!["Skill".to_owned()])
+    );
 }
 
 #[test]

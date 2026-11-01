@@ -5045,6 +5045,12 @@ impl TeamRuntime {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
         let context = crate::launch_context::for_project(&self.connection, project, layout)
+            .and_then(|context| {
+                let skills = crate::coord::settings::read(&self.connection, project)
+                    .map_err(|problem| LaunchError(problem.0))?
+                    .role_skills;
+                Ok(context.for_role(skills.of(self.skill_role(project, id, role)?)))
+            })
             .map_err(unread)?;
         let master = role == AgentRole::Master;
         let live = master
@@ -5102,6 +5108,32 @@ impl TeamRuntime {
             _ => context,
         };
         Ok(context)
+    }
+
+    /// Names the team role whose skill setting an agent's launch follows (DEC-111 R3): the
+    /// master; a lead for a sub-agent above the owner's Sub-agent depth setting, which starts
+    /// workers of its own; else a worker. Takes the project, the agent and its role. Returns
+    /// the role, or the plain code of a failed read.
+    fn skill_role(
+        &self,
+        project: &ProjectId,
+        id: i64,
+        role: AgentRole,
+    ) -> Result<crate::coord::settings::SkillRole, LaunchError> {
+        use crate::coord::settings::SkillRole;
+        if role == AgentRole::Master {
+            return Ok(SkillRole::Master);
+        }
+        let unread = |e: EngineError| LaunchError(e.0);
+        let leads = role == AgentRole::Sub
+            && super::agent_depth(&self.connection, id).map_err(unread)?
+                < super::nesting(&self.connection, project)
+                    .map_err(unread)?
+                    .depth;
+        Ok(match leads {
+            true => SkillRole::Lead,
+            false => SkillRole::Worker,
+        })
     }
 
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched

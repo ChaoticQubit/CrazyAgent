@@ -4961,6 +4961,111 @@ fn a_codex_live_master_gets_its_instructions_as_developer_instructions() {
     host.close(&[]).unwrap();
 }
 
+/// Adds global skills to the fixture's plugin store from real SKILL.md folders, as the
+/// owner's Add skill does. Takes the fixture and the names.
+#[cfg(target_os = "macos")]
+fn approve_skills(fixture: &Fixture, names: &[&str]) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    for name in names {
+        let folder = fixture.base.join("picked").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Teaches {name}.\n---\n\nSteps.\n"),
+        )
+        .unwrap();
+        crate::storage::plugins::execute(
+            &mut connection,
+            &fixture.base,
+            crate::storage::plugins::Command::AddSkill {
+                scope: crate::plugins::Scope::Global,
+                source: folder.to_str().unwrap().into(),
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// The skills a team agent's Claude Code launch writes into its plugin folder, from the
+/// runtime's own launch context for that agent with tools on. Takes the runtime, the
+/// fixture, the agent and its role. Returns the skill folder names.
+#[cfg(target_os = "macos")]
+fn written_skills(
+    team: &TeamRuntime,
+    fixture: &Fixture,
+    id: i64,
+    role: AgentRole,
+) -> BTreeSet<String> {
+    let context = team
+        .context(&fixture.setup.project_id, id, role, true, Layout::Linked)
+        .unwrap();
+    let home = fixture.base.join(format!("skills-home-{id}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    let skills = home.join("crazyagent/plugin/skills");
+    let names = match skills.is_dir() {
+        true => std::fs::read_dir(&skills)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect(),
+        false => BTreeSet::new(),
+    };
+    drop(installed);
+    names
+}
+
+/// DEC-111 R3: a worker's launch writes only the approved skills the owner chose for
+/// workers (a chosen name that is not approved adds nothing), while the lead above it and
+/// the master keep every approved skill, since their setting is still All approved skills.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_gets_only_the_skills_chosen_for_workers() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                worker: Some(vec!["not-approved".into(), "release-notes".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let every = BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()]);
+
+    assert_eq!(
+        written_skills(&team, &fixture, worker, AgentRole::Sub),
+        BTreeSet::from(["release-notes".to_owned()]),
+        "a worker, one level below its lead at the default Sub-agent depth of 2, gets the workers' choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, lead, AgentRole::Sub),
+        every,
+        "the lead keeps All approved skills"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, master, AgentRole::Master),
+        every
+    );
+}
+
 #[cfg(target_os = "macos")]
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
