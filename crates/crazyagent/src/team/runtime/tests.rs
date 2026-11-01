@@ -1477,7 +1477,7 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
         "a new agent's start is the Land on tip"
     );
     let main = git(&project, &["rev-parse", "main"]);
-    let (worktree, _, _) = runtime
+    let (folder, plan, _) = runtime
         .prepare(
             &fixture.setup,
             1,
@@ -1489,8 +1489,15 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
             crate::agent_git::Layout::Linked,
         )
         .unwrap();
+    assert_eq!(folder, root);
+    assert_ne!(plan.working_dir, root);
     assert_eq!(
-        git(&worktree, &["rev-parse", "HEAD"]),
+        git(&root, &["rev-parse", "HEAD"]),
+        main,
+        "the owner's checkout stays on main"
+    );
+    assert_eq!(
+        git(&plan.working_dir, &["rev-parse", "HEAD"]),
         stage,
         "main is {main}"
     );
