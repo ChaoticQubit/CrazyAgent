@@ -561,7 +561,7 @@ async fn agent_writes_flow(root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
-    use crazyagent::memory::library::AgentWrites;
+    use crazyagent::memory::library::{AgentWrites, ApprovedMemories, ApprovedMemory};
     use crazyagent::team::tool::{REMEMBER_TOOL, serve_live};
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);
@@ -655,24 +655,29 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     );
 
     let listed = bridge.memories(Some(&id), None, None).await?;
-    let waiting: Vec<_> = listed
-        .items
-        .iter()
-        .filter(|note| note.origin == "requested")
-        .collect();
-    assert_eq!(waiting.len(), 1, "{:?}", listed.items);
-    assert_eq!(waiting[0].text, "Recipes print on one page.");
-    assert_eq!(waiting[0].agent.as_deref(), Some(label.as_str()));
-    let memory = waiting[0].id.clone();
-    let reaches_agents = |approved: &crazyagent::memory::library::ApprovedMemories| {
-        approved.items.iter().any(|item| {
-            item.kind == ApprovedKind::Note
-                && item.scope == ApprovedScope::Project
-                && item.text == "Recipes print on one page."
-        })
+    assert_eq!(listed.items.len(), 1, "{:?}", listed.items);
+    assert_eq!(listed.next, None);
+    assert_eq!(listed.agent_writes, AgentWrites::Ask);
+    let memory = listed.items[0].id.clone();
+    let note = |origin: &str| {
+        serde_json::json!([{
+            "id": memory,
+            "text": "Recipes print on one page.",
+            "scope": "project",
+            "project_id": id,
+            "origin": origin,
+            "from_project_id": null,
+            "source_path": null,
+            "agent": label,
+        }])
     };
-    assert!(
-        !reaches_agents(&bridge.approved_memories(&id).await?),
+    assert_eq!(serde_json::to_value(&listed.items)?, note("requested"));
+    assert_eq!(
+        bridge.approved_memories(&id).await?,
+        ApprovedMemories {
+            items: vec![],
+            complete: true
+        },
         "a waiting memory reaches no agent"
     );
 
@@ -683,15 +688,18 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(approved.intent.kind, "memory_approve");
     let listed = bridge.memories(Some(&id), None, None).await?;
-    let saved = listed
-        .items
-        .iter()
-        .find(|note| note.id == memory)
-        .expect("the approved memory is still listed");
-    assert_eq!(saved.origin, "agent");
-    assert_eq!(saved.agent.as_deref(), Some(label.as_str()));
-    assert!(
-        reaches_agents(&bridge.approved_memories(&id).await?),
+    assert_eq!(serde_json::to_value(&listed.items)?, note("agent"));
+    assert_eq!(listed.next, None);
+    assert_eq!(
+        bridge.approved_memories(&id).await?,
+        ApprovedMemories {
+            items: vec![ApprovedMemory {
+                scope: ApprovedScope::Project,
+                kind: ApprovedKind::Note,
+                text: "Recipes print on one page.".into(),
+            }],
+            complete: true
+        },
         "an approved memory reaches the project's agents"
     );
     let origin: String = connection.query_row(
