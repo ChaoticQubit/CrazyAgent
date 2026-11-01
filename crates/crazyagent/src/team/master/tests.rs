@@ -399,7 +399,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
     let served = mailbox.to_path_buf();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        tool::serve_live(Cursor::new(input), &mut output, &served, &[], None).unwrap();
+        tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
         output
     });
     let access = ModelAccess::default();
@@ -3287,12 +3287,11 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
         let served = mailbox.clone();
         let server = std::thread::spawn(move || {
             let mut output = Vec::new();
-            tool::serve_live(Cursor::new(input), &mut output, &served, &[], None).unwrap();
+            tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
             output
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let agents = fixture.base.join("agents");
-        let runtime = fixture.base.clone();
         while !server.is_finished() {
             assert!(Instant::now() < deadline, "the server never finished");
             super::super::history::serve_agent_calls(
@@ -3301,14 +3300,13 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
                 (sub, &label),
                 &agents,
                 &mailbox,
-                &mut |connection, pane| {
+                &mut |connection, _, _| {
                     super::super::runtime::team_caller(
                         connection,
                         None,
-                        Some(runtime.as_path()),
                         &project,
                         (sub, &label),
-                        pane,
+                        None,
                     )
                 },
                 &mut |_, _, _| None,

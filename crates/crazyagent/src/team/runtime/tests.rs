@@ -7207,14 +7207,6 @@ fn only_an_agent_with_tools_on_gets_the_message_relay() {
     }
 }
 
-struct Removed(PathBuf);
-
-impl Drop for Removed {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 struct NativeLead {
     lead: i64,
     teammate: i64,
@@ -7224,6 +7216,9 @@ struct NativeLead {
 
 fn native_lead(f: &Fixture, host: &Arc<dyn Host>) -> NativeLead {
     let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
     let other = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let teammate = |parent: i64, status: AgentStatus, pane: &str| {
         f.connection
@@ -7255,16 +7250,6 @@ fn native_lead(f: &Fixture, host: &Arc<dyn Host>) -> NativeLead {
     }
 }
 
-fn lead_socket(f: &Fixture, lead: i64) -> Removed {
-    let socket = crate::terminal::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
-    let folder = socket.parent().unwrap().to_path_buf();
-    assert!(!folder.exists(), "{}", folder.display());
-    std::fs::create_dir_all(&folder).unwrap();
-    let removed = Removed(folder);
-    std::fs::write(&socket, b"").unwrap();
-    removed
-}
-
 #[test]
 fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
     let f = Fixture::new(1);
@@ -7276,19 +7261,27 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
         team_caller(
             &f.connection,
             Some(host.as_ref()),
-            Some(&f.base),
             &project,
             (lead, "Lead"),
             pane,
         )
     };
     let as_lead = Some((lead, "Lead".to_owned()));
+    let mode = |name: &str| {
+        f.connection
+            .execute(
+                "UPDATE team_agents SET mode=?2 WHERE id=?1",
+                params![lead, name],
+            )
+            .unwrap();
+    };
 
+    mode("app_spawned");
     for pane in [None, Some("%900"), Some(native.own.as_str()), Some("%x")] {
-        assert_eq!(caller(pane), as_lead, "no socket, {pane:?}");
+        assert_eq!(caller(pane), as_lead, "app-spawned, {pane:?}");
     }
 
-    let _socket = lead_socket(&f, lead);
+    mode("native");
     let named = crate::team::events::label(&f.connection, native.teammate).unwrap();
     assert_eq!(caller(Some("%900")), Some((native.teammate, named)));
     assert_eq!(caller(Some(native.own.as_str())), as_lead);
@@ -7323,7 +7316,6 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
         team_caller(
             &f.connection,
             None,
-            Some(&f.base),
             &project,
             (lead, "Lead"),
             Some(native.own.as_str())
@@ -7340,7 +7332,6 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
     let project = ProjectId::new(PROJECT).unwrap();
     let native = native_lead(&f, &host);
     let lead = native.lead;
-    let _socket = lead_socket(&f, lead);
     let mailbox = f.base.join("lead-mailbox");
     std::fs::create_dir(&mailbox).unwrap();
     let agents_folder = f.base.join("team").join("agents");
@@ -7427,13 +7418,11 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
         ),
     ];
     let mut ids = Vec::new();
+    let mut named = std::collections::BTreeMap::new();
     for (index, (pane, call)) in calls.iter().enumerate() {
         let id = format!("{:032x}", index + 1);
-        let mut value = serde_json::to_value(call).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("pane".into(), serde_json::Value::String((*pane).to_owned()));
+        named.insert(id.clone(), (*pane).to_owned());
+        let value = serde_json::to_value(call).unwrap();
         std::fs::write(
             mailbox.join(format!("{id}.call")),
             serde_json::to_vec(&value).unwrap(),
@@ -7455,7 +7444,6 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
         events: None,
         host: Some(host.as_ref()),
     };
-    let base = f.base.clone();
     let host_ref = host.as_ref();
     let mut served = 0;
     loop {
@@ -7465,14 +7453,13 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
             (lead, "Lead"),
             &agents_folder,
             &mailbox,
-            &mut |connection, pane| {
+            &mut |connection, call, _| {
                 team_caller(
                     connection,
                     Some(host_ref),
-                    Some(&base),
                     &project,
                     (lead, "Lead"),
-                    pane,
+                    named.get(call).map(String::as_str),
                 )
             },
             &mut |connection, caller, call| {
@@ -7566,6 +7553,126 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
         .optional()
         .unwrap();
     assert!(seen.is_some_and(|seen| seen > 1), "{seen:?}");
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+/// A teammate shares its lead's mailbox and can write the lead's pane id into a call file.
+/// The engine stamped no caller for that call, so it names nobody: the lead-only call is
+/// refused and no agent starts (DEC-111 Q18).
+#[test]
+fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
+    let mut f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let mailbox = f.base.join("lead-mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let agents_folder = f.base.join("team").join("agents");
+    let rows = |connection: &Connection| -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before = rows(&f.connection);
+    let folder = tempfile::Builder::new()
+        .prefix("ca-callers-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let mut callers =
+        crate::team::caller::Callers::bind(&folder.path().join(crate::team::caller::CALLER_SOCKET))
+            .unwrap();
+    let mut call = serde_json::to_value(crate::team::tool::Call::Spawn {
+        task: "Write the docs.".into(),
+        harness: None,
+        role: None,
+        mode: None,
+    })
+    .unwrap();
+    call.as_object_mut()
+        .unwrap()
+        .insert("pane".into(), serde_json::Value::String(native.own.clone()));
+    let id = format!("{:032x}", 1);
+    std::fs::write(
+        mailbox.join(format!("{id}.call")),
+        serde_json::to_vec(&call).unwrap(),
+    )
+    .unwrap();
+    let answering = super::super::master::Answering {
+        access: &f.access,
+        stored: &f.setup,
+        landing: &f.base,
+        agents: &agents_folder,
+        events: None,
+        host: Some(host.as_ref()),
+    };
+    let host_ref = host.as_ref();
+    let served = super::super::history::serve_agent_calls(
+        &mut f.connection,
+        &project,
+        (lead, "Lead"),
+        &agents_folder,
+        &mailbox,
+        &mut |connection, call, digest| {
+            let pane = digest.and_then(|digest| callers.take(call, digest));
+            team_caller(
+                connection,
+                Some(host_ref),
+                &project,
+                (lead, "Lead"),
+                pane.as_deref(),
+            )
+        },
+        &mut |connection, caller, call| {
+            super::super::master::answer_sub(connection, &answering, caller, call)
+                .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+        },
+    );
+    assert_eq!(served, 1);
+    let reply: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+            .unwrap();
+    let text = reply["text"].as_str().unwrap();
+    assert!(
+        reply["error"] == true && text.ends_with("(team_caller_unknown)."),
+        "{text}"
+    );
+    assert_eq!(rows(&f.connection), before, "no agent was started");
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+/// A native lead's teammates share its temp folder and can remove the lead's tmux socket
+/// file there. The lead's stored mode, not that file, makes the engine name each caller,
+/// so a call no engine stamp names stays nobody's, and the lead's own named pane is still
+/// the lead.
+#[test]
+fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller() {
+    let f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    let socket = crate::terminal::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
+    assert!(std::fs::symlink_metadata(&socket).is_err());
+    let caller = |pane: Option<&str>| {
+        team_caller(
+            &f.connection,
+            Some(host.as_ref()),
+            &project,
+            (lead, "Lead"),
+            pane,
+        )
+    };
+    for pane in [None, Some("%999")] {
+        assert_eq!(caller(pane), None, "{pane:?}");
+    }
+    assert_eq!(
+        caller(Some(native.own.as_str())),
+        Some((lead, "Lead".to_owned()))
+    );
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
@@ -7685,7 +7792,6 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
         host: None,
     };
     let label = super::super::events::label(&f.connection, worker).unwrap();
-    let base = f.base.clone();
     let mut served = 0;
     loop {
         let taken = super::super::history::serve_agent_calls(
@@ -7694,16 +7800,7 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
             (worker, &label),
             &agents_folder,
             &mailbox,
-            &mut |connection, pane| {
-                team_caller(
-                    connection,
-                    None,
-                    Some(&base),
-                    &project,
-                    (worker, &label),
-                    pane,
-                )
-            },
+            &mut |connection, _, _| team_caller(connection, None, &project, (worker, &label), None),
             &mut |connection, caller, call| {
                 super::super::master::answer_sub(connection, &answering, caller, call)
                     .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))

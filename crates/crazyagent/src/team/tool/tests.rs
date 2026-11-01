@@ -520,7 +520,14 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 
     let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
     assert_eq!(taken.len(), 3, "{taken:?}");
-    assert_eq!(taken[0], (first.clone(), Some(Call::InspectWork), None));
+    assert_eq!(
+        taken[0],
+        (
+            first.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
+        )
+    );
     assert_eq!(taken[1], (second.clone(), None, None));
     assert_eq!(taken[2], ("3".repeat(32), None, None));
     assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
@@ -611,7 +618,11 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
     std::fs::rename(&inner, &mailbox).unwrap();
     assert_eq!(
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
-        vec![(id.clone(), Some(Call::InspectWork), None)]
+        vec![(
+            id.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
+        )]
     );
     assert!(
         !mailbox.join(format!("{stale}{REPLY_SUFFIX}")).exists(),
@@ -638,7 +649,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
             let mailbox = mailbox.clone();
             std::thread::spawn(move || {
                 (0..16)
-                    .map(|_| ask(&mailbox, &Call::InspectWork, None, REPLY_WAIT))
+                    .map(|_| ask(&mailbox, &Call::InspectWork, REPLY_WAIT))
                     .collect::<Vec<_>>()
             })
         })
@@ -670,12 +681,12 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
-    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative"), &[], None).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative"), &[]).is_err());
     let linked = base.join("linked");
     symlink(&base, &linked).unwrap();
-    assert!(serve_live(list.clone(), Vec::new(), &linked, &[], None).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), &linked, &[]).is_err());
     let mut output = Vec::new();
-    serve_live(list, &mut output, &base, &[STOP_TOOL.to_owned()], None).unwrap();
+    serve_live(list, &mut output, &base, &[STOP_TOOL.to_owned()]).unwrap();
     let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
     let names: Vec<&str> = answer["result"]["tools"]
         .as_array()
@@ -711,7 +722,6 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
         ask(
             &served,
             &Call::InspectWork,
-            None,
             std::time::Duration::from_millis(800),
         )
     });
@@ -903,53 +913,14 @@ fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
     );
 }
 
-fn served_pane(pane: Option<&str>) -> Option<String> {
-    let directory = tempfile::tempdir().unwrap();
-    let mailbox = directory.path().canonicalize().unwrap();
-    let served = mailbox.clone();
-    let pane = pane.map(str::to_owned);
-    let server = std::thread::spawn(move || {
-        let mut output = Vec::new();
-        let input = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": INSPECT_WORK_TOOL, "arguments": {}}})]);
-        serve_live(input, &mut output, &served, &[], pane.as_deref()).unwrap();
-        output
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let (id, call, stamped) = loop {
-        if let Some(taken) = take_calls(&mailbox, 1).pop() {
-            break taken;
-        }
-        assert!(std::time::Instant::now() < deadline, "no call was written");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    assert_eq!(call, Some(Call::InspectWork));
-    answer_call(&mailbox, &id, "Taken.", false).unwrap();
-    let output = server.join().unwrap();
-    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
-    assert_eq!(answer["result"]["content"][0]["text"], "Taken.");
-    stamped
-}
-
+/// A call file carries the call alone, and the engine reads back the digest of its exact
+/// bytes; a pane any writer planted beside a call is dropped unread (DEC-111 Q18).
 #[test]
-fn the_live_server_stamps_only_a_host_pane_id_beside_its_call() {
-    assert_eq!(served_pane(Some("%3")), Some("%3".to_owned()));
-    assert_eq!(
-        served_pane(Some("%123456789")),
-        Some("%123456789".to_owned())
-    );
-    for forged in ["", "%", "%x1", "%1234567890", "%1;rm", "3", "%-1"] {
-        assert_eq!(served_pane(Some(forged)), None, "{forged:?}");
-    }
-    assert_eq!(served_pane(None), None);
-}
-
-#[test]
-fn a_call_carries_its_pane_beside_it_and_a_bad_pane_leaves_the_call_unread() {
+fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
     let directory = tempfile::tempdir().unwrap();
     let mailbox = directory.path().canonicalize().unwrap();
     let asked = mailbox.clone();
-    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, Some("%3"), REPLY_WAIT));
+    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, REPLY_WAIT));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let id = loop {
         if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
@@ -958,43 +929,44 @@ fn a_call_carries_its_pane_beside_it_and_a_bad_pane_leaves_the_call_unread() {
         assert!(std::time::Instant::now() < deadline, "no call was written");
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    let written: Value =
-        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}{CALL_SUFFIX}"))).unwrap())
-            .unwrap();
-    assert_eq!(written, json!({"tool": "inspect_work", "pane": "%3"}));
+    let bytes = std::fs::read(mailbox.join(format!("{id}{CALL_SUFFIX}"))).unwrap();
+    let written: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(written, json!({"tool": "inspect_work"}));
     assert_eq!(
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
-        vec![(id.clone(), Some(Call::InspectWork), Some("%3".to_owned()))]
+        vec![(
+            id.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(&bytes))
+        )]
     );
     answer_call(&mailbox, &id, "Taken.", false).unwrap();
     assert_eq!(asker.join().unwrap(), ("Taken.".to_owned(), false));
 
     let planted = [
-        (
-            br#"{"tool":"inspect_work"}"#.as_slice(),
-            Some(Call::InspectWork),
-        ),
-        (br#"{"tool":"inspect_work","pane":3}"#.as_slice(), None),
-        (br#"{"tool":"inspect_work","pane":"%x1"}"#.as_slice(), None),
-        (br#"{"tool":"inspect_work","pane":null}"#.as_slice(), None),
-        (
-            br#"{"tool":"inspect_work","pane":"%1;rm"}"#.as_slice(),
-            None,
-        ),
+        br#"{"tool":"inspect_work"}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":3}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":"%x1"}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":null}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":"%1;rm"}"#.as_slice(),
     ];
-    for (index, (bytes, call)) in planted.into_iter().enumerate() {
+    for (index, bytes) in planted.into_iter().enumerate() {
         let id = format!("{index}").repeat(32);
         std::fs::write(mailbox.join(format!("{id}{CALL_SUFFIX}")), bytes).unwrap();
         assert_eq!(
             take_calls(&mailbox, CALLS_PER_TICK_MAX),
-            vec![(id, call, None)],
+            vec![(id, Some(Call::InspectWork), Some(call_digest(bytes)))],
             "{}",
             String::from_utf8_lossy(bytes)
         );
     }
+    assert_ne!(
+        call_digest(br#"{"tool":"inspect_work"}"#),
+        call_digest(br#"{"tool":"inspect_work","pane":"%7"}"#)
+    );
     assert_eq!(
         read_call(br#"{"tool":"inspect_work","pane":"%7"}"#),
-        Some((Call::InspectWork, Some("%7".to_owned())))
+        Some(Call::InspectWork)
     );
 }
 
@@ -1009,7 +981,7 @@ fn a_switched_off_tool_is_refused_by_its_server_and_never_reaches_the_mailbox() 
         "params": {"name": STOP_TOOL, "arguments": {"agent": "3"}}
     })]);
     let mut output = Vec::new();
-    serve_live(input, &mut output, &mailbox, &[STOP_TOOL.to_owned()], None).unwrap();
+    serve_live(input, &mut output, &mailbox, &[STOP_TOOL.to_owned()]).unwrap();
     let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
     assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
     assert_eq!(
