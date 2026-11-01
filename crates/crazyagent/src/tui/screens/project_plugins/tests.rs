@@ -1003,6 +1003,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 Request::Pools => connection.shell(ShellRequest::Pools).unwrap(),
                 Request::PoolProjects => connection.shell(ShellRequest::PoolProjects).unwrap(),
                 Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
+                Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
                 Request::Settings(job) => {
@@ -1010,6 +1011,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                         SettingsJob::ProjectPlugins { .. } => "project plugins",
                         SettingsJob::Plugin(_) => "plugin change",
                         SettingsJob::SkillDetail { .. } => "skill detail",
+                        SettingsJob::Hooks { .. } => "hooks",
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
@@ -1095,7 +1097,7 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
 
     shell.key(Key::Char(' '));
     let sent = drive(&mut shell, &mut connection).await;
-    assert_eq!(sent, ["plugin change", "project plugins"]);
+    assert_eq!(sent, ["plugin change", "project plugins", "hooks"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Off here"), "{shown}");
     assert!(
