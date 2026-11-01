@@ -93,14 +93,48 @@ impl Mode {
     }
 }
 
-/// One project's agent instruction settings: which instruction texts its agents get and
-/// whether headless Claude runs keep their transcript. A project the owner never changed
-/// gets both texts and keeps transcripts.
+/// How an edit to the owner's instruction texts reaches a project's agents that already
+/// run (DEC-111 QR1): the changed sections at the start of the agent's next task (the
+/// default), a restart at the agent's next idle that resumes its conversation with the new
+/// text, or only an "Instructions changed" badge on its row until it starts again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditDelivery {
+    #[default]
+    NextMessage,
+    Restart,
+    Badge,
+}
+
+impl EditDelivery {
+    /// Returns the stored and wire name of this choice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NextMessage => "next_message",
+            Self::Restart => "restart",
+            Self::Badge => "badge",
+        }
+    }
+
+    /// Reads a stored or wire name back. Input: the name. Output: the choice, or none.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::NextMessage, Self::Restart, Self::Badge]
+            .into_iter()
+            .find(|edits| edits.as_str() == name)
+    }
+}
+
+/// One project's agent instruction settings: which instruction texts its agents get,
+/// whether headless Claude runs keep their transcript and how an instruction edit reaches
+/// agents already running. A project the owner never changed gets both texts, keeps
+/// transcripts and sends an edit in each running agent's next task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub mode: Mode,
     pub transcripts: bool,
+    #[serde(default)]
+    pub edits: EditDelivery,
 }
 
 impl Default for Settings {
@@ -108,6 +142,7 @@ impl Default for Settings {
         Self {
             mode: Mode::Both,
             transcripts: true,
+            edits: EditDelivery::NextMessage,
         }
     }
 }
@@ -196,6 +231,13 @@ pub fn known_name(name: &str) -> bool {
     NAMES.contains(&name)
 }
 
+/// The sections of the owner's instruction text that differ between what an agent started
+/// with and the text now. Inputs: both texts. Output: the changed sections.
+pub fn changed_sections(started: &str, now: &str) -> Vec<String> {
+    let _ = (started, now);
+    Vec::new()
+}
+
 /// Creates the settings and import tables, and turns a settings table from before DEC-106,
 /// whose `files` column held the removed instruction files choice, into the mode column
 /// with every stored choice read as the default mode. Input: a connection to `engine.db`.
@@ -260,7 +302,11 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
         1 => true,
         _ => return Err("instruction_settings_invalid"),
     };
-    Ok(Settings { mode, transcripts })
+    Ok(Settings {
+        mode,
+        transcripts,
+        edits: EditDelivery::NextMessage,
+    })
 }
 
 /// Stores one project's settings whole, creating the table first when it is missing.

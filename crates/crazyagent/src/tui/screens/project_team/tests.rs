@@ -81,6 +81,7 @@ fn agent(
         teammates: Vec::new(),
         pane: None,
         hookless: false,
+        instructions_changed: false,
     }
 }
 

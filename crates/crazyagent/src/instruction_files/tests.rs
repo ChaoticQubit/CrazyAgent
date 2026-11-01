@@ -8,7 +8,8 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
         load(&connection, &project).unwrap(),
         Settings {
             mode: Mode::Both,
-            transcripts: true
+            transcripts: true,
+            edits: EditDelivery::NextMessage,
         },
         "a database that never stored settings gets the defaults"
     );
@@ -16,7 +17,11 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
     assert_eq!(load(&connection, &project).unwrap(), Settings::default());
     for mode in [Mode::ProjectOnly, Mode::AppOnly, Mode::Both] {
         for transcripts in [true, false] {
-            let settings = Settings { mode, transcripts };
+            let settings = Settings {
+                mode,
+                transcripts,
+                edits: EditDelivery::NextMessage,
+            };
             save(&connection, &project, settings).unwrap();
             assert_eq!(load(&connection, &project).unwrap(), settings);
             assert_eq!(Mode::parse(mode.as_str()), Some(mode));
@@ -73,7 +78,8 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
             load(&connection, &ProjectId::new(project).unwrap()).unwrap(),
             Settings {
                 mode: Mode::Both,
-                transcripts
+                transcripts,
+                edits: EditDelivery::NextMessage,
             },
             "{project}"
         );
@@ -82,6 +88,7 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
     let chosen = Settings {
         mode: Mode::AppOnly,
         transcripts: true,
+        edits: EditDelivery::NextMessage,
     };
     save(&connection, &project, chosen).unwrap();
     initialize(&connection).unwrap();
@@ -90,6 +97,154 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
         chosen,
         "a later start keeps a choice made after the change"
     );
+}
+
+#[test]
+fn every_edit_delivery_is_stored_and_a_project_that_never_chose_gets_next_message() {
+    let connection = Connection::open_in_memory().unwrap();
+    let project = ProjectId::new("edits-1").unwrap();
+    assert_eq!(Settings::default().edits, EditDelivery::NextMessage);
+    assert_eq!(
+        load(&connection, &project).unwrap().edits,
+        EditDelivery::NextMessage
+    );
+    for edits in [
+        EditDelivery::NextMessage,
+        EditDelivery::Restart,
+        EditDelivery::Badge,
+    ] {
+        assert_eq!(EditDelivery::parse(edits.as_str()), Some(edits));
+        let settings = Settings {
+            mode: Mode::AppOnly,
+            transcripts: false,
+            edits,
+        };
+        save(&connection, &project, settings).unwrap();
+        assert_eq!(load(&connection, &project).unwrap(), settings);
+    }
+    assert_eq!(EditDelivery::parse("never"), None);
+    connection
+        .execute(
+            "UPDATE agent_instruction_settings SET edits='sometimes' WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        load(&connection, &project).unwrap_err(),
+        "instruction_settings_invalid"
+    );
+    let wire: Settings =
+        serde_json::from_str(r#"{"mode":"both","transcripts":true}"#).unwrap();
+    assert_eq!(wire.edits, EditDelivery::NextMessage, "an older client's save");
+}
+
+#[test]
+fn a_settings_table_from_before_edit_delivery_reads_next_message_and_stores_a_choice() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                transcripts INTEGER NOT NULL
+            );
+            INSERT INTO agent_instruction_settings VALUES ('kept', 'app_only', 0);",
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("kept").unwrap();
+    assert_eq!(
+        load(&connection, &project).unwrap(),
+        Settings {
+            mode: Mode::AppOnly,
+            transcripts: false,
+            edits: EditDelivery::NextMessage,
+        }
+    );
+    let chosen = Settings {
+        edits: EditDelivery::Badge,
+        ..load(&connection, &project).unwrap()
+    };
+    save(&connection, &project, chosen).unwrap();
+    assert_eq!(load(&connection, &project).unwrap(), chosen);
+}
+
+#[test]
+fn changed_sections_returns_only_the_sections_whose_text_changed() {
+    let started = "# Instructions from CrazyAgent\n\n## App instructions\n\nWork in small steps.\n\n## Style\n\nUse tabs.\n\n## Tests\n\nRun them first.\n\n## Old rule\n\nAsk before merging.\n";
+    let now = "# Instructions from CrazyAgent\n\n## App instructions\n\nWork in small steps.\n\n## Style\n\nUse spaces.\n\n## Tests\n\nRun them first.\n\n## Reviews\n\nTwo rounds at most.\n";
+    assert_eq!(
+        changed_sections(started, now),
+        [
+            "## Style\n\nUse spaces.",
+            "## Reviews\n\nTwo rounds at most.",
+            "## Old rule\n\nThis section was removed.",
+        ]
+    );
+    assert!(changed_sections(now, now).is_empty());
+    assert!(changed_sections("", "").is_empty());
+    assert!(
+        changed_sections(now, &now.replace("\n\n", "\n\n\n")).is_empty(),
+        "blank lines around a section are not a change"
+    );
+    assert_eq!(
+        changed_sections("", "## Style\n\nUse tabs.\n"),
+        ["## Style\n\nUse tabs."]
+    );
+    assert_eq!(
+        changed_sections("## Style\n\nUse tabs.\n", ""),
+        ["## Style\n\nThis section was removed."]
+    );
+    assert_eq!(
+        changed_sections(
+            "Read this first.\n\n## Style\n\nUse tabs.\n",
+            "Read this twice.\n\n## Style\n\nUse tabs.\n"
+        ),
+        ["Read this twice."],
+        "the text before the first section is a section too"
+    );
+    assert_eq!(
+        changed_sections("Read this first.\n\n## Style\n\nUse tabs.\n", "## Style\n\nUse tabs.\n"),
+        ["The text before the first section was removed."]
+    );
+    assert_eq!(
+        changed_sections(
+            "## Notes\n\nKeep it short.\n\n## Notes\n\nOne task a day.\n",
+            "## Notes\n\nKeep it short.\n\n## Notes\n\nTwo tasks a day.\n"
+        ),
+        ["## Notes\n\nTwo tasks a day."],
+        "a repeated heading is told apart by its place"
+    );
+    assert!(
+        changed_sections("### Style\n\nUse tabs.\n", "### Style\n\nUse spaces.\n")
+            == ["### Style\n\nUse spaces."],
+        "only a `## ` line starts a section"
+    );
+}
+
+#[test]
+fn changed_sections_never_pass_their_bound_and_say_what_did_not_fit() {
+    let section = |heading: &str, fill: char| {
+        format!(
+            "## {heading}\n\n{}\n",
+            fill.to_string().repeat(SECTION_BYTES_MAX / 2)
+        )
+    };
+    let started = format!("{}{}", section("One", 'a'), section("Two", 'a'));
+    let now = format!("{}{}", section("One", 'b'), section("Two", 'c'));
+    let sections = changed_sections(&started, &now);
+    assert_eq!(sections.len(), 2, "{:?}", sections.iter().map(String::len).collect::<Vec<_>>());
+    assert_eq!(sections[0], section("One", 'b').trim());
+    assert_eq!(
+        sections[1],
+        "More sections changed than one message carries; they apply in full when you next start."
+    );
+    assert!(sections.join("\n\n").len() <= SECTION_BYTES_MAX);
+    let whole = section("One", 'b');
+    let fits = changed_sections(&section("One", 'a'), &whole);
+    assert_eq!(fits, [whole.trim()]);
+    assert!(fits.join("\n\n").len() <= SECTION_BYTES_MAX);
 }
 
 #[cfg(target_os = "macos")]
@@ -310,6 +465,7 @@ mod launch {
                 Settings {
                     mode: Mode::Both,
                     transcripts,
+                    edits: EditDelivery::NextMessage,
                 },
             )
             .unwrap();
@@ -433,6 +589,7 @@ mod launch {
                 Settings {
                     mode,
                     transcripts: true,
+                    edits: EditDelivery::NextMessage,
                 },
             )
             .unwrap();

@@ -3941,6 +3941,215 @@ fn the_owner_restart_of_a_finished_sub_agent_wakes_the_same_agent() {
     host.close(&[]).unwrap();
 }
 
+/// The owner's app instructions a project's agents start with in the edit tests, and the
+/// same text after the owner edited one section of it.
+#[cfg(target_os = "macos")]
+const STARTED_TEXT: &str = "## Style\n\nUse tabs.\n\n## Tests\n\nRun them first.\n";
+#[cfg(target_os = "macos")]
+const EDITED_TEXT: &str = "## Style\n\nUse spaces.\n\n## Tests\n\nRun them first.\n";
+#[cfg(target_os = "macos")]
+const CHANGED_HEADER: &str =
+    "Your instructions changed since you started. The changed sections now read:";
+
+/// Stores the fixture's app instructions as `STARTED_TEXT` and the project's choice of how
+/// an instruction edit reaches running agents, then opens a runtime with the given Claude
+/// Code stand-in and hands it the Claude Code task "Run the compile check.". Takes the
+/// fixture, the host, the stand-in and the choice. Returns the runtime.
+#[cfg(target_os = "macos")]
+fn edit_runtime(
+    fixture: &Fixture,
+    host: &Arc<dyn Host>,
+    script: &str,
+    edits: crate::instruction_files::EditDelivery,
+) -> TeamRuntime {
+    crate::agent_home::save_app(&fixture.base, STARTED_TEXT).unwrap();
+    crate::instruction_files::save(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::instruction_files::Settings {
+            edits,
+            ..crate::instruction_files::Settings::default()
+        },
+    )
+    .unwrap();
+    check_runtime(fixture, host, script, None, None)
+}
+
+/// Hands the fixture's Claude Code sub-agents one more task, as the owner's Delegate does.
+/// Takes the fixture and the prompt.
+#[cfg(target_os = "macos")]
+fn delegate_claude(fixture: &Fixture, prompt: &str) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &claude_access(fixture),
+            &crate::team::TeamAction::Delegate {
+                project_id: fixture.setup.project_id.clone(),
+                harness: Some("claude-code".into()),
+                prompt: prompt.into(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+}
+
+/// Whether the team status shows an agent's instructions changed since it started.
+#[cfg(target_os = "macos")]
+fn badge(fixture: &Fixture, agent: i64) -> bool {
+    fixture
+        .status()
+        .agents
+        .iter()
+        .find(|shown| shown.id == agent)
+        .is_some_and(|shown| shown.instructions_changed)
+}
+
+/// With the default choice, an owner edit to the instructions reaches a sub-agent that
+/// keeps running in its next task, which starts with the changed section only, and only
+/// once: the task after it carries no change block (DEC-111 QR1).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = edit_runtime(
+        &fixture,
+        &host,
+        RESUMING_CLAUDE,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    fixture.until(&mut team, "the first task ends", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    for prompt in ["Write the second page.", "Write the third page."] {
+        delegate_claude(&fixture, prompt);
+        fixture.until(&mut team, prompt, |f| task_of(f, prompt).0 == "done");
+    }
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    let started = launches(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(started.len(), 1, "the agent kept running: {started:?}");
+    assert_eq!(subs(&fixture), vec![agent]);
+    assert_eq!(typed.matches(CHANGED_HEADER).count(), 1, "{typed}");
+    let first = typed.find("Run the compile check.").unwrap();
+    let block = typed.find(CHANGED_HEADER).unwrap();
+    let second = typed.find("Write the second page.").unwrap();
+    let third = typed.find("Write the third page.").unwrap();
+    assert!(first < block && block < second && second < third, "{typed}");
+    let sent = &typed[block..second];
+    assert!(sent.contains("## Style") && sent.contains("Use spaces."), "{sent}");
+    assert!(!sent.contains("## Tests"), "an unchanged section is not sent: {sent}");
+    assert!(!typed.contains("Use tabs."), "{typed}");
+}
+
+/// With Restart chosen, a sub-agent idle when the owner edits the instructions stops and
+/// starts again as a new process that resumes its conversation, with the new text in the
+/// instructions its launch writes, and its next task carries no change block.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let counting = RESUMING_CLAUDE.replacen(
+        "#!/bin/sh\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$CLAUDE_CONFIG_DIR/pids\"\n",
+        1,
+    );
+    assert_ne!(counting, RESUMING_CLAUDE);
+    let mut team = edit_runtime(
+        &fixture,
+        &host,
+        &counting,
+        crate::instruction_files::EditDelivery::Restart,
+    );
+    fixture.until(&mut team, "the first task ends", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+            && subs(f)
+                .first()
+                .is_some_and(|id| agent_conversation(f, *id).is_some())
+    });
+    let agent = subs(&fixture)[0];
+    let pids = |f: &Fixture| -> Vec<String> {
+        std::fs::read_to_string(stand_in_file(f, agent, "pids"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(pids(&fixture).len(), 1);
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    fixture.until(&mut team, "the agent starts again", |f| {
+        pids(f).len() == 2 && f.agent_status(agent).0 == AgentStatus::Idle
+    });
+    let (conversation, _) = agent_conversation(&fixture, agent).unwrap();
+    let started = launches(&fixture, agent);
+    let given =
+        std::fs::read_to_string(stand_in_file(&fixture, agent, "crazyagent/instructions.md"))
+            .unwrap();
+    delegate_claude(&fixture, "Write the second page.");
+    fixture.until(&mut team, "the second task ends", |f| {
+        task_of(f, "Write the second page.").0 == "done"
+    });
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    let seen = pids(&fixture);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_ne!(seen[0], seen[1], "a new process: {seen:?}");
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(subs(&fixture), vec![agent], "the same agent started again");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert!(
+        started[1].contains(&format!("--resume {conversation}")),
+        "{started:?}"
+    );
+    assert!(given.contains("Use spaces.") && !given.contains("Use tabs."), "{given}");
+    assert!(!typed.contains(CHANGED_HEADER), "{typed}");
+    assert!(!badge(&fixture, agent));
+}
+
+/// With Badge chosen, an owner edit sends nothing to a running sub-agent: its next task
+/// carries no change block, it keeps its process, and the team status shows its
+/// instructions changed until it starts again.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_badge_nothing_is_sent_and_the_status_shows_instructions_changed() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = edit_runtime(
+        &fixture,
+        &host,
+        RESUMING_CLAUDE,
+        crate::instruction_files::EditDelivery::Badge,
+    );
+    fixture.until(&mut team, "the first task ends", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    assert!(!badge(&fixture, agent), "no badge before an edit");
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    fixture.until(&mut team, "the badge shows", |f| badge(f, agent));
+    delegate_claude(&fixture, "Write the second page.");
+    fixture.until(&mut team, "the second task ends", |f| {
+        task_of(f, "Write the second page.").0 == "done"
+    });
+    let typed = std::fs::read_to_string(stand_in_file(&fixture, agent, "typed")).unwrap();
+    let started = launches(&fixture, agent);
+    let shown = badge(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(!typed.contains(CHANGED_HEADER), "{typed}");
+    assert!(typed.contains("Write the second page."), "{typed}");
+    assert_eq!(started.len(), 1, "the agent kept running: {started:?}");
+    assert!(shown, "the badge stays while the agent runs");
+}
+
 /// A woken sub-agent continues only a conversation kept on the same harness and account,
 /// with an id its harness resumes by and its record still a plain file, and only where
 /// agents run in terminal panes. A Claude Code agent's kept conversation is the one its

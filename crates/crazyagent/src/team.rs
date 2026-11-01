@@ -2522,6 +2522,8 @@ pub struct TeamAgent {
     pub pane: Option<String>,
     #[serde(default)]
     pub hookless: bool,
+    #[serde(default)]
+    pub instructions_changed: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2762,6 +2764,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         teammates: Vec::new(),
         pane: row.get(17)?,
         hookless: row.get(18)?,
+        instructions_changed: false,
     })
 }
 
