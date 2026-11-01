@@ -1879,6 +1879,96 @@ fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_brea
     );
 }
 
+/// Puts the owner's checkout on `feat/x` at the first commit while `stage` holds 400 more
+/// files and the agent's worktree starts at `stage`, with Land on naming `stage`, as when
+/// the owner's checkout was left on an older branch (DEC-111 Q1). Input: the case. Output:
+/// the first commit and the tip of `stage`.
+fn land_on_stage(case: &Case) -> (String, String) {
+    let start = case.tip();
+    case.owner(&["checkout", "-q", "-b", "stage"]);
+    for at in 0..400 {
+        write(&case.repo.join(format!("stage/file-{at}.txt")), "stage\n");
+    }
+    case.owner(&["add", "stage"]);
+    case.owner(&["commit", "-q", "-m", "Stage work"]);
+    let stage = case.owner(&["rev-parse", "stage"]).trim().to_owned();
+    case.owner(&["checkout", "-q", "-b", "feat/x", &start]);
+    case.agent(&["reset", "-q", "--hard", &stage]);
+    case.start();
+    case.db
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    (start, stage)
+}
+
+/// A change set is measured from the Land on branch the owner chose, not from the owner's
+/// checked-out branch, which lacks the 400 files the agent's work started from: the set
+/// lists the agent's 2 files at its turn end and after a poll, the Accept branch list
+/// names `stage` as where an Accept with no branch named lands, and that Accept lands there
+/// as one commit with the owner's checkout untouched (DEC-111 Q1).
+#[test]
+fn a_change_set_is_measured_from_the_land_on_branch_not_the_owner_s_checkout() {
+    let case = Case::new();
+    let (start, stage) = land_on_stage(&case);
+    case.edit("A", "a\n");
+    case.edit("B", "b\n");
+    case.agent_commit("Add A and B");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 2);
+    observe(&case.db, Some(&case.workspace.project)).unwrap();
+    assert_eq!(case.view(&id).files, 2);
+    let listed = target_branches(&case.db, &id).unwrap();
+    assert_eq!(
+        (listed.current.as_deref(), listed.land_on.as_deref()),
+        (Some("feat/x"), Some("stage"))
+    );
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        (branch.as_str(), case.owner(&["rev-parse", "stage"]).trim()),
+        ("stage", commit.as_str())
+    );
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        stage
+    );
+    assert_eq!(case.owner(&["rev-parse", "feat/x"]).trim(), start);
+    assert_eq!(
+        case.owner(&["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/feat/x"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert!(!case.repo.join("A").exists());
+}
+
+/// Update merges the Land on branch into an agent's work, not the owner's checked-out
+/// branch, and the set is measured from that branch after (DEC-111 Q1).
+#[test]
+fn update_merges_the_land_on_branch_into_the_agent_s_work() {
+    let case = Case::new();
+    land_on_stage(&case);
+    case.edit("A", "a\n");
+    let head = case.agent_commit("Add A");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["checkout", "-q", "stage"]);
+    write(&case.repo.join("later.txt"), "later\n");
+    case.owner(&["add", "later.txt"]);
+    case.owner(&["commit", "-q", "-m", "Later stage work"]);
+    let later = case.owner(&["rev-parse", "HEAD"]).trim().to_owned();
+    case.owner(&["checkout", "-q", "feat/x"]);
+    update(&case.db, &id).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &view.head]).trim(),
+        format!("{head} {later}")
+    );
+    assert_eq!((view.base.as_str(), view.files), (later.as_str(), 1));
+}
+
 /// A worktree with no recorded start opens its set above the head it had, and the set is
 /// measured against the owner's branch (DEC-107 rule 1), so the agent's earlier commit the
 /// owner's branch lacks is counted with the new file.
@@ -3670,7 +3760,7 @@ fn accept_into_an_unchecked_out_branch_moves_only_the_ref() {
         TargetBranches {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
-            land_on: None,
+            land_on: Some("main".into()),
         }
     );
     let before = case.checkout();

@@ -1391,6 +1391,95 @@ fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
     assert!(!fanout.with_extension("moved").exists());
 }
 
+/// A new agent's worktree starts from the tip of the Land on branch the owner named, not
+/// from the Master's branch the owner's checkout is on (DEC-111 Q1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = fixture.base.join("project");
+    let home = fixture.base.join("git-home");
+    std::fs::create_dir(&home).unwrap();
+    let git = |folder: &Path, arguments: &[&str]| {
+        let output = level_git(folder, &home, arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let commit = |path: &str, message: &str| {
+        std::fs::write(project.join(path), "work\n").unwrap();
+        git(&project, &["add", path]);
+        git(
+            &project,
+            &[
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+    };
+    git(&project, &["init", "-q", "--template=", "-b", "main"]);
+    commit("owner.txt", "Start");
+    git(&project, &["checkout", "-q", "-b", "stage"]);
+    commit("stage.txt", "Stage work");
+    let stage = git(&project, &["rev-parse", "HEAD"]);
+    git(&project, &["checkout", "-q", "main"]);
+    assert_ne!(git(&project, &["rev-parse", "main"]), stage);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [PROJECT],
+        )
+        .unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let (worktree, _, _) = runtime
+        .prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
+    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), stage);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {

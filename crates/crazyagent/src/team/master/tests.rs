@@ -2070,6 +2070,81 @@ fn the_master_merges_a_finished_harness_locally_unless_the_owner_asks_first() {
     assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), tip);
 }
 
+/// With Land on naming a branch checked out nowhere, the master's merge lands there as one
+/// commit: the Master's branch and the owner's checked-out branch stay where they were and
+/// the owner's files are untouched (DEC-111 Q1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_merge_lands_on_the_land_on_branch_when_the_owner_names_one() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    git_at(&fixture, &repo, &["branch", "stage", "main"]);
+    let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    let label = super::super::events::label(&fixture.connection, agent).unwrap();
+    git_at(&fixture, &repo, &["checkout", "-q", "-b", "feat/x"]);
+    std::fs::write(repo.join("owner.txt"), "owner work\n").unwrap();
+    git_at(&fixture, &repo, &["add", "owner.txt"]);
+    git_at(&fixture, &repo, &["commit", "-q", "-m", "Owner work"]);
+    let owner_tip = git_at(&fixture, &repo, &["rev-parse", "feat/x"]);
+    let project = ProjectId::new(PROJECT).unwrap();
+    for action in [
+        crate::team::TeamAction::MasterBranch {
+            project_id: project.clone(),
+            branch: Some("main".into()),
+        },
+        crate::team::TeamAction::LandOn {
+            project_id: project.clone(),
+            branch: Some("stage".into()),
+        },
+    ] {
+        let tx = fixture.connection.transaction().unwrap();
+        let outcome = crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap();
+        assert_eq!(outcome, crate::protocol::Outcome::Applied);
+        tx.commit().unwrap();
+    }
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::MERGE_TOOL,
+        json!({"agent": "@docs-writer"}),
+    );
+    let landed = git_at(&fixture, &repo, &["rev-parse", "stage"]);
+    assert_eq!(
+        (said.as_str(), refused),
+        (
+            format!(
+                "Merged {label}'s work from its branch crazyagent/docs into stage as {}. Nothing was pushed; the owner was told.",
+                &landed[..12]
+            )
+            .as_str(),
+            false
+        )
+    );
+    assert_eq!(
+        git_at(&fixture, &repo, &["log", "-1", "--format=%P", "stage"]),
+        start
+    );
+    assert_eq!(
+        git_at(&fixture, &repo, &["show", "stage:README"]),
+        "one\ntwo"
+    );
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "feat/x"]), owner_tip);
+    assert_eq!(
+        git_at(&fixture, &repo, &["symbolic-ref", "HEAD"]),
+        "refs/heads/feat/x"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("README")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(git_at(&fixture, &repo, &["status", "--porcelain"]), "");
+    assert_eq!(
+        set_state(&fixture, &id),
+        crate::landing::ChangeState::Accepted
+    );
+}
+
 /// The master's merge refuses, in plain words and landing nothing, an unknown name, a
 /// harness still working, a worker a lead started, an owner checkout with uncommitted
 /// changes and work that conflicts with the Master's branch (DEC-100 S3).
