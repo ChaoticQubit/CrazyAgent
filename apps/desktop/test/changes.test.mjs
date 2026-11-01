@@ -155,6 +155,20 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
 });
 
+test("Accept lands on the team's Land on branch unless the owner picks another, and says where and whether it is checked out", () => {
+  const listed = { branches: ["feat/x", "main", "stage"], current: "feat/x", land_on: "stage" };
+  const away = "They land as one commit on stage, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.";
+  assert.deepEqual(model.acceptTarget(listed, "stage"), { picked: null, text: away });
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.deepEqual(model.acceptTarget({ branches: ["main"], current: "main", land_on: null }, "main"),
+    { picked: null, text: "They land as one commit on main, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." },
+    "with no Land on branch the engine lands on the checked-out one");
+  assert.deepEqual(model.acceptTarget(null, ""), { picked: null, text: "They land as one commit on your project's Land on branch, under your own Git name. CrazyAgent did not check them." });
+  assert.deepEqual(listed.branches.map((name) => model.branchLabel(listed, name)), ["feat/x (checked out)", "main", "stage (Land on)"]);
+  assert.equal(model.branchLabel({ branches: ["main"], current: "main", land_on: "main" }, "main"), "main (Land on, checked out)");
+});
+
 test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
   assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
   assert.equal(model.commitMessage("Zero\u200bwidth"), null);
