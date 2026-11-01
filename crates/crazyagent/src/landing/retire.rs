@@ -447,7 +447,7 @@ pub(super) fn remove(
     if let Some((branch, head)) = named
         && !drop_branch(repository, &branch, &head)?
     {
-        eprintln!("cleanup_branch_kept branch={branch}");
+        eprintln!("landing_branch_kept branch={branch}");
     }
     Ok(Ok(()))
 }
