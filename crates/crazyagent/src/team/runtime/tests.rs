@@ -1465,6 +1465,18 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
         fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
         1
     );
+    let root = project.canonicalize().unwrap();
+    assert_eq!(
+        crate::landing::land_on(&fixture.connection, &root, &fixture.setup.project_id).unwrap(),
+        Some(("stage".to_owned(), stage.clone())),
+        "the project's work lands on stage"
+    );
+    assert_eq!(
+        runtime.master_tip(&fixture.setup.project_id, &root),
+        Ok(Some(stage.clone())),
+        "a new agent's start is the Land on tip"
+    );
+    let main = git(&project, &["rev-parse", "main"]);
     let (worktree, _, _) = runtime
         .prepare(
             &fixture.setup,
@@ -1477,7 +1489,11 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
             crate::agent_git::Layout::Linked,
         )
         .unwrap();
-    assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), stage);
+    assert_eq!(
+        git(&worktree, &["rev-parse", "HEAD"]),
+        stage,
+        "main is {main}"
+    );
 }
 
 #[cfg(target_os = "macos")]
