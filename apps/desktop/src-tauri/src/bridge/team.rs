@@ -1,8 +1,9 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
+use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{SwitchMode, TeamAction, TeamStatus};
+use crazyagent::team::{BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -171,6 +172,37 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets how deep the project's sub-agents may start workers of their own: 1 lets only
+    /// the master start sub-agents, 2 lets its sub-agents lead workers, 3 lets those workers
+    /// lead too. Takes the project id, the depth and the client generation. Returns the actual
+    /// commit receipt, or the engine's refusal for any other depth.
+    pub async fn team_sub_agent_depth(
+        &mut self,
+        id: &str,
+        depth: u8,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::SubAgentDepth { project_id, depth }, generation)
+            .await
+    }
+
+    /// Sets where a lead's worker lands its change set: `lead` when the lead accepts it onto
+    /// its own branch, `owner` only when the owner accepts it. Takes the project id, the mode
+    /// and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_child_landing(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = ChildLanding::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::ChildLanding { project_id, mode }, generation)
+            .await
+    }
+
     /// Sets where the project's finished agents show: in the agents list and team graph, or
     /// only in their Finished fold-out. Takes the project id, true for Show and the client
     /// generation. Returns the actual commit receipt.
@@ -183,6 +215,134 @@ impl NativeBridge {
         let project_id = project(id)?;
         self.team_action(TeamAction::FinishedAgents { project_id, show }, generation)
             .await
+    }
+
+    /// Sets where the project's new sub-agents commit: `named`, each on its own branch
+    /// `crazyagent/agent-<id>`, or `detached`, the older detached HEAD. Takes the project
+    /// id, the mode and the client generation. Returns the actual commit receipt, or
+    /// `team_action_invalid` for any other mode.
+    pub async fn team_agent_branches(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = BranchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::AgentBranches { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets the branch a project's master works on and merges finished harnesses into
+    /// (DEC-100), or clears the choice back to the repository's default branch. Takes the
+    /// project id, the branch name, None for the default, and the client generation.
+    /// Returns the actual commit receipt; the engine refuses a name git cannot hold.
+    pub async fn team_master_branch(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let branch = branch
+            .map(|branch| branch.trim().to_owned())
+            .filter(|branch| !branch.is_empty());
+        self.team_action(TeamAction::MasterBranch { project_id, branch }, generation)
+            .await
+    }
+
+    /// Turns a project's "Ask me before merging into the master's branch" setting on or
+    /// off: on, the master's merge of a finished harness waits for the owner's Accept.
+    /// Takes the project id, the switch and the client generation. Returns the actual
+    /// commit receipt.
+    pub async fn team_ask_before_merge(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::AskBeforeMerge { project_id, on }, generation)
+            .await
+    }
+
+    /// Sets the most files one new top-level folder, a folder the owner's branch does not
+    /// have, may gain in a project's change set before the engine refuses the set (DEC-107).
+    /// Takes the project id, the limit and the client generation. Returns the actual commit
+    /// receipt.
+    pub async fn team_new_folder_limit(
+        &mut self,
+        id: &str,
+        files: u32,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::NewFolderLimit { project_id, files }, generation)
+            .await
+    }
+
+    /// Saves a project's coordination settings: where sub-agent questions go, what overlapping
+    /// claims do, workflow nudges and the counted tools. Takes the project id, the settings and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_coordination(
+        &mut self,
+        id: &str,
+        settings: CoordSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::CoordSettings {
+                project_id,
+                settings,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets how one harness kind's agents get sub-agents in a project: app-spawned, or native
+    /// teammates where the harness has them. Takes the project id, the harness kind, the mode
+    /// and the client generation. Returns the actual commit receipt.
+    pub async fn team_harness_mode(
+        &mut self,
+        id: &str,
+        harness: HarnessKind,
+        mode: SubagentMode,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::HarnessMode {
+                project_id,
+                harness,
+                mode,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets how messages reach one harness kind's agents in a project: auto, native only or
+    /// typing only. Takes the project id, the harness kind, the delivery and the client
+    /// generation. Returns the actual commit receipt.
+    pub async fn team_harness_delivery(
+        &mut self,
+        id: &str,
+        harness: HarnessKind,
+        delivery: Delivery,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::HarnessDelivery {
+                project_id,
+                harness,
+                delivery,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
@@ -274,7 +434,99 @@ impl NativeBridge {
             .await
     }
 
-    async fn team_action(
+    /// Stops one harness, a sub-agent the master started, with the teammates in its
+    /// terminal; it stays stopped across restarts until the owner wakes it. Takes the project
+    /// id, the team agent id and the client generation. Returns the actual commit receipt; the
+    /// master is a plain rejection, it stops with the whole team.
+    pub async fn team_stop_agent(
+        &mut self,
+        id: &str,
+        agent: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::StopAgent { project_id, agent }, generation)
+            .await
+    }
+
+    /// Stops one teammate a harness split off in its terminal, and tells the harness. Takes
+    /// the project id, the harness agent id, the teammate's pane id and the client generation.
+    /// Returns the actual commit receipt; a teammate that already ended is a plain rejection.
+    pub async fn team_stop_teammate(
+        &mut self,
+        id: &str,
+        agent: i64,
+        pane: String,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::StopTeammate {
+                project_id,
+                agent,
+                pane,
+            },
+            generation,
+        )
+        .await
+    }
+
+    /// Sets Max harnesses per project: how many sub-agents the master's work runs at once,
+    /// None for No limit. Takes the project id, the cap and the client generation. Returns the
+    /// actual commit receipt.
+    pub async fn team_max_harnesses(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MaxHarnesses { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets Max teammates per harness, None for No limit. Takes the project id, the cap and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_max_teammates(
+        &mut self,
+        id: &str,
+        max: Option<u8>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::MaxTeammates { project_id, max }, generation)
+            .await
+    }
+
+    /// Sets the project's Token budget: once its agents use that many tokens from now, the
+    /// engine stops the whole team and notifies the owner. None turns it off. Takes the
+    /// project id, the budget and the client generation. Returns the actual commit receipt.
+    pub async fn team_token_budget(
+        &mut self,
+        id: &str,
+        tokens: Option<u64>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::TokenBudget { project_id, tokens }, generation)
+            .await
+    }
+
+    /// Turns the project's Spread harnesses across accounts on or off: on, a new or woken
+    /// agent prefers a pool account no running agent of the project uses. Takes the project
+    /// id, the switch and the client generation. Returns the actual commit receipt.
+    pub async fn team_spread_accounts(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::SpreadAccounts { project_id, on }, generation)
+            .await
+    }
+
+    pub(super) async fn team_action(
         &mut self,
         action: TeamAction,
         generation: u64,

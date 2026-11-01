@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setOnHarnessSwitch, setTeamTimeLimits, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
-import { Button, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
+import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import { Button, ConfirmDialog, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
+import { CoordinationControls } from "./coordination";
 
 export const TASK_PROMPT_BYTES_MAX = 4000;
 export const LIMIT_CHOICES_SECS = [1800, 3600, 7200, 14_400, 28_800] as const;
@@ -75,6 +76,63 @@ export function switchMode(status: Pick<TeamStatus, "on_harness_switch">): Switc
   return status.on_harness_switch ?? "carry";
 }
 
+/** The Sub-agent depth choices, 2 as the default: how deep leads may start workers. */
+export const DEPTH_OPTIONS: SelectOption[] = [
+  { value: "1", label: "1: only the master starts sub-agents" },
+  { value: "2", label: "2: sub-agents lead their own workers" },
+  { value: "3", label: "3: workers lead workers too" },
+];
+export const DEPTH_DEFAULT = 2;
+
+/** The New folder limit choices, the engine's own list, 1,000 files as the default: the most
+ * files one new top-level folder the owner's branch does not have may gain in a change set. */
+export const NEW_FOLDER_OPTIONS: SelectOption[] = [100, 1000, 10000, 100000].map((files) => ({
+  value: String(files),
+  label: `${files.toLocaleString("en-US")} files`,
+}));
+export const NEW_FOLDER_DEFAULT = 1000;
+
+/** The choices of where a lead's worker lands, When the lead accepts first as the default. */
+export const LANDING_OPTIONS: SelectOption[] = [
+  { value: "lead", label: "When the lead accepts" },
+  { value: "owner", label: "Only when I accept" },
+];
+
+/** The Max harnesses per project and Max teammates per harness choices besides No limit, the
+ * engine's own list. */
+export const CAP_CHOICES = [1, 2, 3, 4, 5, 6, 8, 10, 15] as const;
+
+/** The Token budget choices besides Off, the engine's own list, in tokens. */
+export const BUDGET_CHOICES = [10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000, 500_000_000, 1_000_000_000] as const;
+
+/** Words a token count the way the engine does: millions with one decimal at most, else the
+ * number. Input: the count. Output: the words, such as "12.5M tokens". */
+export function tokenWords(tokens: number): string {
+  if (tokens < 1_000_000) return `${tokens} tokens`;
+  const tenths = Math.floor(tokens / 100_000);
+  return tenths % 10 === 0 ? `${tenths / 10}M tokens` : `${Math.floor(tenths / 10)}.${tenths % 10}M tokens`;
+}
+
+/** The choices for one cap: No limit first, then each of `CAP_CHOICES`. Output: options whose
+ * value is the number, or "off". */
+export function capOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "No limit" }, ...CAP_CHOICES.map((cap) => ({ value: String(cap), label: String(cap) }))];
+}
+
+/** The Token budget choices: Off first, then each of `BUDGET_CHOICES`. Output: options whose
+ * value is the tokens, or "off". */
+export function budgetOptions(): SelectOption[] {
+  return [{ value: NO_LIMIT, label: "Off" }, ...BUDGET_CHOICES.map((tokens) => ({ value: String(tokens), label: tokenWords(tokens) }))];
+}
+
+/** Reads a cap or budget choice. Inputs: the option value and the listed choices. Output: the
+ * number, null for "off", or undefined for a value that is not listed. */
+export function chosen(value: string, listed: readonly number[]): number | null | undefined {
+  if (value === NO_LIMIT) return null;
+  const number = Number(value);
+  return listed.includes(number) ? number : undefined;
+}
+
 /** What a team change's result means for the owner. Inputs: the call result, what it did and
  * the "Not ready yet" subject. Output: the note to show, empty when it applied. */
 export function changeNote(result: Result<IntentReceipt>, missing: string): string {
@@ -101,6 +159,14 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [limits, setLimits] = useState<{ turn: number | null; session: number | null; idle: number | null } | null>(null);
   const [onSwitch, setOnSwitch] = useState<SwitchMode | null>(null);
   const [finished, setFinished] = useState<"hide" | "show" | null>(null);
+  const [depth, setDepth] = useState<number | null>(null);
+  const [lands, setLands] = useState<ChildLanding | null>(null);
+  const [branchMode, setBranchMode] = useState<BranchMode | null>(null);
+  const [stopAsked, setStopAsked] = useState(false);
+  const [spread, setSpread] = useState<"off" | "on" | null>(null);
+  const [masterBranch, setMasterBranchText] = useState<string | null>(null);
+  const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
+  const [newFolder, setNewFolder] = useState<number | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -145,12 +211,113 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseDepth(value: number) {
+    setDepth(value);
+    setBusy(true);
+    const message = changeNote(await setSubAgentDepth(projectId, value), "the Sub-agent depth setting");
+    setBusy(false);
+    setDepth(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseLanding(mode: ChildLanding) {
+    setLands(mode);
+    setBusy(true);
+    const message = changeNote(await setChildLanding(projectId, mode), "the worker landing setting");
+    setBusy(false);
+    setLands(null);
+    setNote(message);
+    reload();
+  }
+
   async function view(choice: "hide" | "show") {
     setFinished(choice);
     setBusy(true);
     const message = changeNote(await showFinishedAgents(projectId, choice === "show"), "choosing where finished agents show");
     setBusy(false);
     setFinished(null);
+    setNote(message);
+    reload();
+  }
+
+  async function branches(choice: BranchMode) {
+    setBranchMode(choice);
+    setBusy(true);
+    const message = changeNote(await setAgentBranches(projectId, choice), "choosing where new agents commit");
+    setBusy(false);
+    setBranchMode(null);
+    setNote(message);
+    reload();
+  }
+
+  async function stopAll(stopped: boolean) {
+    setStopAsked(false);
+    setBusy(true);
+    const message = changeNote(await setTeamStopped(projectId, stopped), stopped ? "stopping the team" : "starting the team again");
+    setBusy(false);
+    setNote(message);
+    reload();
+  }
+
+  async function saveMasterBranch(branch: string | null) {
+    if (busy) return;
+    setBusy(true);
+    const message = changeNote(await setMasterBranch(projectId, branch), "the Master's branch");
+    setBusy(false);
+    setMasterBranchText(null);
+    setNote(message);
+    reload();
+  }
+
+  async function cap(which: "harnesses" | "teammates", value: string) {
+    const max = chosen(value, CAP_CHOICES);
+    if (busy || max === undefined) return;
+    setBusy(true);
+    const message = which === "harnesses"
+      ? changeNote(await setMaxHarnesses(projectId, max), "the Max harnesses setting")
+      : changeNote(await setMaxTeammates(projectId, max), "the Max teammates setting");
+    setBusy(false);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseSpread(choice: "off" | "on") {
+    setSpread(choice);
+    setBusy(true);
+    const message = changeNote(await setSpreadAccounts(projectId, choice === "on"), "the account spread setting");
+    setBusy(false);
+    setSpread(null);
+    setNote(message);
+    reload();
+  }
+
+  async function budget(value: string) {
+    const tokens = chosen(value, BUDGET_CHOICES);
+    if (busy || tokens === undefined) return;
+    setBusy(true);
+    const message = changeNote(await setTokenBudget(projectId, tokens), "the token budget");
+    setBusy(false);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseAskMerge(choice: "off" | "on") {
+    setAskMerge(choice);
+    setBusy(true);
+    const message = changeNote(await setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting");
+    setBusy(false);
+    setAskMerge(null);
+    setNote(message);
+    reload();
+  }
+
+  async function chooseNewFolder(files: number) {
+    setNewFolder(files);
+    setBusy(true);
+    const message = changeNote(await setNewFolderLimit(projectId, files), "the new folder limit");
+    setBusy(false);
+    setNewFolder(null);
     setNote(message);
     reload();
   }
@@ -170,6 +337,20 @@ export function TeamControls({ projectId, status, harness, reload }: {
 
   return <section className="tg-controls" aria-label="Team controls">
     {status.partial && <p className="pj-note" role="status">{PARTIAL_LINE}</p>}
+    <div className="pj-row">
+      {status.paused
+        ? <Button variant="primary" size="small" pending={busy} onClick={() => void stopAll(false)}>Start all again</Button>
+        : <Button variant="danger" size="small" icon="circle-stop" disabled={busy} onClick={() => setStopAsked(true)}>Stop all</Button>}
+      <span className="tg-terminal-note" role="status">{status.paused
+        ? status.budget_reached === true
+          ? "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."
+          : "Every agent of this project is stopped until you start them again."
+        : "Stops the master, every harness and every teammate of this project. They stay stopped across restarts."}</span>
+    </div>
+    <ConfirmDialog open={stopAsked} title="Stop every agent of this project?" confirmLabel="Stop all" cancelLabel="Keep running"
+      pending={busy} onCancel={() => setStopAsked(false)} onConfirm={() => void stopAll(true)}>
+      The master, every harness and every teammate stop now, and stay stopped across app and engine restarts until you start them again. Their work waits for them.
+    </ConfirmDialog>
     <Switch id={`tg-warm-${projectId}`} label={`Keep ${status.min_agents} ${status.min_agents === 1 ? "sub-agent" : "sub-agents"} ready`} checked={checked}
       onChecked={(on) => void toggle(on)} disabledReason={busy ? "Saving the last change." : status.min_agents < 1 ? "The team plan keeps no sub-agents ready." : undefined} />
     <div className="tg-limits" role="group" aria-label="Time limits">
@@ -184,12 +365,58 @@ export function TeamControls({ projectId, status, harness, reload }: {
     </div>
     <Select id={`tg-switch-${projectId}`} label="On master harness switch" value={onSwitch ?? switchMode(status)} options={SWITCH_OPTIONS}
       onValue={(value) => { if (!busy && (value === "carry" || value === "fresh")) void chooseSwitch(value); }} />
+    <Select id={`tg-depth-${projectId}`} label="Sub-agent depth" value={String(depth ?? status.sub_agent_depth ?? DEPTH_DEFAULT)} options={DEPTH_OPTIONS}
+      onValue={(value) => { const chosen = Number(value); if (!busy && [1, 2, 3].includes(chosen)) void chooseDepth(chosen); }}
+      helper="Every agent counts against the team's running agent limit. Each one works in its own worktree and branch." />
+    <Select id={`tg-lands-${projectId}`} label="Sub-agent work lands on its lead's branch" value={lands ?? status.child_landing ?? "lead"} options={LANDING_OPTIONS}
+      onValue={(value) => { if (!busy && (value === "lead" || value === "owner")) void chooseLanding(value); }} />
+    <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder ?? status.new_folder_files_max ?? NEW_FOLDER_DEFAULT)} options={NEW_FOLDER_OPTIONS}
+      onValue={(value) => { const chosen = Number(value); if (!busy && NEW_FOLDER_OPTIONS.some((option) => option.value === value)) void chooseNewFolder(chosen); }}
+      helper="Counts the files a change set adds in one new top-level folder your branch does not have, such as a scratch folder an agent committed. The agent is told the folder to remove and finishes again." />
+    <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={status.max_harnesses == null ? NO_LIMIT : String(status.max_harnesses)} options={capOptions()}
+      onValue={(value) => void cap("harnesses", value)}
+      helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />
+    <Select id={`tg-max-teammates-${projectId}`} label="Max teammates per harness" value={status.max_teammates == null ? NO_LIMIT : String(status.max_teammates)} options={capOptions()}
+      onValue={(value) => void cap("teammates", value)}
+      helper="How many sub-agents each harness runs at once: app-spawned sub-agents and native teammates alike. A new sub-agent waits at the limit; the engine ends the newest native teammates past it and tells the harness." />
+    <div className="pj-row">
+      <span aria-hidden="true">Spread harnesses across accounts</span>
+      <Segmented label="Spread harnesses across accounts" value={spread ?? (status.spread_accounts === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseSpread(choice); }}
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+      <span className="tg-terminal-note">On, a new harness or sub-agent takes a signed-in pool account no running agent of this project uses, when there is one. Off, your account strategy picks. Teammates run on their harness's account.</span>
+    </div>
+    <Select id={`tg-token-budget-${projectId}`} label="Token budget" value={status.token_budget == null ? NO_LIMIT : String(status.token_budget)} options={budgetOptions()}
+      onValue={(value) => void budget(value)}
+      helper={status.token_budget == null
+        ? "Off lets the agents use tokens as their accounts allow. A budget counts every token the Usage page counts, cache reads included, from when you set it or start the team again."
+        : `Used ${tokenWords(status.budget_used ?? 0)} of ${tokenWords(status.token_budget)}. At the budget the engine stops every agent and notifies you.`} />
     <div className="pj-row">
       <span aria-hidden="true">Finished agents</span>
       <Segmented label="Finished agents" value={finished ?? (status.show_finished === true ? "show" : "hide")} onValue={(choice) => { if (!busy) void view(choice); }}
         options={[{ value: "hide", label: "Hide" }, { value: "show", label: "Show" }]} />
-      <span className="tg-terminal-note">Hide moves idle, stopped and failed agents to the Finished list.</span>
+      <span className="tg-terminal-note">Hide moves stopped and failed agents to the Finished list.</span>
     </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Agent branches</span>
+      <Segmented label="Agent branches" value={branchMode ?? status.agent_branches ?? "named"} onValue={(choice) => { if (!busy) void branches(choice); }}
+        options={[{ value: "named", label: "Named branch" }, { value: "detached", label: "Detached" }]} />
+      <span className="tg-terminal-note">Named branch gives each new agent its own branch: a harness's is named after its task, crazyagent/&lt;task&gt;. Detached keeps the older detached HEAD.</span>
+    </div>
+    <form className="pj-row" aria-label="Master's branch" onSubmit={(event) => { event.preventDefault(); void saveMasterBranch((masterBranch ?? status.master_branch ?? "").trim() || null); }}>
+      <label htmlFor={`tg-master-branch-${projectId}`}>Master's branch</label>
+      <input id={`tg-master-branch-${projectId}`} className="pj-input" value={masterBranch ?? status.master_branch ?? ""} placeholder="Repository default"
+        onChange={(event) => setMasterBranchText(event.target.value)} aria-describedby={`tg-master-branch-help-${projectId}`} />
+      <Button type="submit" size="small" disabled={busy || masterBranch === null} pending={busy && masterBranch !== null} pendingLabel="Saving...">Save</Button>
+      <Button type="button" size="small" disabled={busy || !status.master_branch} onClick={() => void saveMasterBranch(null)}>Use default</Button>
+      <span className="tg-terminal-note" id={`tg-master-branch-help-${projectId}`}>The master works on this branch and merges finished harnesses into it, locally; nothing is pushed. Empty uses the repository's default branch.</span>
+    </form>
+    <div className="pj-row">
+      <span aria-hidden="true">Ask me before merging into the master's branch</span>
+      <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
+      <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+    </div>
+    <CoordinationControls projectId={projectId} status={status} reload={reload} />
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>
       <h4>Hand a task to a sub-agent</h4>
       <Select id={`tg-hand-to-${projectId}`} label="Send to" value={target} options={options} onValue={setTarget} />

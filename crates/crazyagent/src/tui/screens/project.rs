@@ -886,7 +886,10 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
-            SetupView::Catalog(_) | SetupView::Team(_) | SetupView::Library(_) => {}
+            SetupView::Catalog(_)
+            | SetupView::Team(_)
+            | SetupView::CoordQuestions(_)
+            | SetupView::Library(_) => {}
         }
         self.assert_consistent();
     }
@@ -1329,6 +1332,7 @@ impl ProjectScreen {
                 ProjectReply::Send(text)
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {

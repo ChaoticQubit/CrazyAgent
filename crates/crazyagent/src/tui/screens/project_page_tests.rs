@@ -4,7 +4,7 @@ use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
 use super::project_page::{Opening, opening};
-use super::{Flow, Place, ProjectTab, open};
+use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
@@ -16,6 +16,7 @@ use crate::master_session::{
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
+use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
@@ -141,6 +142,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::Log { .. } => "log",
                         SetupQuery::ReadPaths { .. } => "read paths",
                         SetupQuery::AgentPolicy { .. } => "agent policy",
+                        SetupQuery::CoordQuestions { .. } => "coord questions",
                     });
                     connection.project_setup(query).unwrap();
                 }
@@ -155,6 +157,16 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 Request::ProjectFiles { project, query } => {
                     sent.push("project files");
                     connection.project_files(project, query).unwrap();
+                }
+                Request::Process(query) => {
+                    sent.push(match query.as_ref() {
+                        ProcessQuery::PendingImport { .. } => "pending import",
+                        ProcessQuery::ConfirmImport { .. } => "confirm import",
+                        ProcessQuery::Uncommitted { .. } => "uncommitted",
+                        ProcessQuery::CommitImport { .. } => "commit import",
+                        _ => "process",
+                    });
+                    connection.process(*query).unwrap();
                 }
                 other => panic!("project pages never send {other:?}"),
             }
@@ -475,11 +487,14 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
         [
             "pools",
             "pool projects",
+            "pending import",
+            "uncommitted",
             "setup",
             "jobs",
             "context",
             "memories"
-        ]
+        ],
+        "a project page also reads its instruction files waiting to import and its uncommitted move"
     );
     let shown = render(&mut shell, 80, 24);
     assert!(
@@ -1192,7 +1207,7 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
 
     shell.key(Key::Char('n'));
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("1 earlier") && shown.contains("No messages yet.")
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
     })
     .await;
     assert!(!shown.contains("RCLI stopped"), "{shown}");
@@ -1200,6 +1215,17 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
     assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+
+    say(&mut shell, &mut connection, "Plan the second slice").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_eq!(second.session_id, fresh.session_id);
+    shell.key(Key::Esc);
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("1 earlier") && shown.contains("Plan the second slice")
+    })
+    .await;
+    assert!(!shown.contains("No messages yet."), "{shown}");
+    assert!(!shown.contains("Plan the first slice"), "{shown}");
 
     shell.key(Key::Char('l'));
     let shown = render(&mut shell, 100, 40);
@@ -1215,16 +1241,122 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     }
     shell.key(Key::Enter);
     let shown = until(&mut shell, &mut connection, |shown| {
-        shown.contains("RCLI stopped") && !shown.contains("Sessions  2")
+        shown.contains("RCLI stopped")
+            && shown.contains("Plan the first slice")
+            && !shown.contains("Sessions  2")
     })
     .await;
     assert!(shown.contains("1 earlier"), "{shown}");
     assert!(!shown.contains("No messages yet."), "{shown}");
-    assert!(shown.contains("Plan the first slice"), "{shown}");
+    assert!(!shown.contains("Plan the second slice"), "{shown}");
     let (resumed, _) = latest_master(&mut engine, &notes).await;
     let resumed = resumed.unwrap();
     assert_eq!(resumed.session_id, first.session_id);
     assert_eq!(resumed.phase, MasterSessionPhase::Configured);
+}
+
+/// A new session on a project whose master runs live turns the live switch on once the
+/// engine has made the new session, so the live master starts on the fresh conversation
+/// even when it was stopped or never started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_on_a_live_master_turns_the_switch_on() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    let before = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_ne!(before.live_master, Some(true), "the switch starts off");
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+
+    shell.key(Key::Char('n'));
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !sent.contains(&"team change") {
+        assert!(
+            Instant::now() < deadline,
+            "the switch never turned on: {sent:?}"
+        );
+        shell.refresh();
+        sent.extend(pump(&mut shell, &mut connection).await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let new = sent.iter().position(|label| *label == "master");
+    let change = sent.iter().position(|label| *label == "team change");
+    assert!(
+        new.is_some() && new < change,
+        "the switch turns on after the new session is asked for: {sent:?}"
+    );
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    let after = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert!(
+        after.live_master.is_some(),
+        "the engine took the switch change for a live-capable master: {:?} {:?}",
+        after.live_master,
+        after.live_problem
+    );
+}
+
+/// A new session asked for while no session is in view turns the live switch on at once,
+/// since there is no earlier session the live master could start on, and the engine takes
+/// the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(100, 40);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Enter);
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    for _ in 0..4 {
+        shell.key(Key::ShiftLeft);
+    }
+    pump(&mut shell, &mut connection).await;
+    let (none, _) = latest_master(&mut engine, &notes).await;
+    assert!(none.is_none(), "the project has no master session yet");
+    let before = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_ne!(before.live_master, Some(true), "the switch starts off");
+
+    shell.key(Key::Esc);
+    shell.key(Key::Char('n'));
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !sent.contains(&"team change") {
+        assert!(
+            Instant::now() < deadline,
+            "the switch never turned on: {sent:?}"
+        );
+        shell.refresh();
+        sent.extend(pump(&mut shell, &mut connection).await);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let after = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert!(
+        after.live_master.is_some(),
+        "the engine took the switch change: {:?} {:?}",
+        after.live_master,
+        after.live_problem
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1802,4 +1934,909 @@ async fn the_changes_tab_reads_the_project_change_sets_from_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Home  /  Notes CLI  /  Changes"), "{shown}");
     assert!(shown.contains("No changes yet."), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut first = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut first,
+    );
+    let mut settings = Shell::with(first, screen);
+    pump(&mut settings, &mut connection).await;
+    settings.key(Key::Enter);
+    settings.key(Key::Enter);
+    pump(&mut settings, &mut connection).await;
+    let shown = render(&mut settings, 120, 24);
+    assert!(shown.contains("Main is assigned."), "{shown}");
+    drop(settings);
+    drop(connection);
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Conversation,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 24);
+    assert!(shown.contains("No messages yet."), "{shown}");
+    let conversation = shell.place();
+    for character in "start the sync".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert_eq!(
+        shell.place(),
+        conversation,
+        "t types while the input is focused"
+    );
+    let shown = render(&mut shell, 120, 24);
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
+    assert!(shown.contains("Ctrl-T Team"), "{shown}");
+
+    shell.key(Key::Ctrl('t'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+    assert_eq!(shell.depth(), 2);
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), conversation);
+    let shown = render(&mut shell, 120, 24);
+    assert!(cell_reads(&shown, "> start the sync"), "{shown}");
+}
+
+fn cell_reads(shown: &str, text: &str) -> bool {
+    shown
+        .lines()
+        .any(|line| line.split('│').any(|cell| cell.trim() == text))
+}
+
+fn team_shell(project: &ProjectId) -> Shell {
+    let mut ctx = ctx(200, 40);
+    let screen = open(
+        &Place::Team {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    Shell::with(ctx, screen)
+}
+
+async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
+    shell.key(Key::Char('s'));
+    let sent = pump(shell, connection).await;
+    assert_eq!(sent, ["team"]);
+    let shown = render(shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+}
+
+fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project, role, harness, tools, status, created_ms, heartbeat_ms)
+             VALUES (?1, 'sub', 'codex', 0, 'stopped', 1, 1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    crate::coord::send(
+        &connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(agent),
+            to: crate::coord::Party::Owner,
+            kind: crate::coord::MessageKind::Question,
+            question: Some((
+                crate::coord::QuestionFor::Me,
+                crate::coord::Severity::Normal,
+            )),
+            work: None,
+            reply_to: None,
+            body: text.into(),
+            idempotency_key: None,
+        },
+        2,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn the_team_screen_opens_its_settings_on_s_and_esc_returns_to_the_tree() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team graph"), "{sent:?}");
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("s Settings"), "{shown}");
+    assert!(!shown.contains("Team settings"), "{shown}");
+
+    team_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Keep warm  Off"), "{shown}");
+    assert!(shown.contains("Spread accounts  Off"), "{shown}");
+
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+    assert!(shown.contains("s Settings"), "{shown}");
+    assert_eq!(
+        shell.place(),
+        Some(Place::Team {
+            id: notes,
+            name: "Notes CLI".into(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_settings_key_on_the_team_screen_sends_a_team_change() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+    assert!(
+        !engine
+            .controller
+            .team_status(notes.clone())
+            .await
+            .unwrap()
+            .keep_warm
+    );
+
+    shell.key(Key::Char('w'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["team change", "team"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Keep warm  On"), "{shown}");
+    assert!(
+        engine
+            .controller
+            .team_status(notes)
+            .await
+            .unwrap()
+            .keep_warm
+    );
+}
+
+#[tokio::test]
+async fn a_paste_on_the_team_settings_goes_into_the_task_draft_and_quit_warns_it_is_lost() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('n'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("New task from you"), "{shown}");
+    shell.key(Key::Paste("Fix the flaky sync test".into()));
+    shell.key(Key::Char('s'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Fix the flaky sync tests"), "{shown}");
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+
+    shell.key(Key::Ctrl('q'));
+    assert!(!shell.quitting());
+    let shown = render(&mut shell, 200, 40);
+    assert!(
+        shown.contains("The task you are writing will be lost."),
+        "{shown}"
+    );
+}
+
+#[tokio::test]
+async fn the_team_settings_reach_the_coordination_editor_and_spread_accounts() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('c'));
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Workflow nudges"), "{shown}");
+    assert!(shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Counted tools"), "{shown}");
+    shell.key(Key::Esc);
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+    assert!(shown.contains("s Settings"), "{shown}");
+
+    team_settings(&mut shell, &mut connection).await;
+    assert!(
+        !engine
+            .controller
+            .team_status(notes.clone())
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+    shell.key(Key::Char('P'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["team change", "team"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Spread accounts  On"), "{shown}");
+    assert!(
+        engine
+            .controller
+            .team_status(notes)
+            .await
+            .unwrap()
+            .spread_accounts
+    );
+}
+
+#[tokio::test]
+async fn the_team_settings_and_questions_do_not_take_each_others_keys() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    seed_question(&engine, &notes, "Which port does the buoy feed use?");
+    let mut connection = engine.connect();
+    let mut shell = team_shell(&notes);
+    pump(&mut shell, &mut connection).await;
+    team_settings(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('q'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Team settings"), "{shown}");
+    assert!(!shown.contains("Which port"), "{shown}");
+
+    shell.key(Key::Esc);
+    shell.key(Key::Char('q'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["coord questions"]);
+    let shown = render(&mut shell, 200, 40);
+    assert!(
+        shown.contains("Which port does the buoy feed use?"),
+        "{shown}"
+    );
+    shell.key(Key::Char('s'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(!shown.contains("Team settings"), "{shown}");
+
+    shell.key(Key::Enter);
+    for character in "use 4000 so?[]".chars() {
+        shell.key(Key::Char(character));
+    }
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 200, 40);
+    assert!(cell_reads(&shown, "use 4000 so?[]"), "{shown}");
+    assert!(!shown.contains("Team settings"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn settings_memory_imports_a_real_folder_into_the_chosen_project() {
+    let mut engine = Engine::start().await;
+    let parent = tempfile::Builder::new()
+        .prefix("ca-tui-import-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let folder = parent.path().join("memory");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::write(folder.join("a.md"), "Plan meals on Sunday.").unwrap();
+    std::fs::write(
+        folder.join("b.md"),
+        "---\ntitle: shop\n---\nShop on Monday.",
+    )
+    .unwrap();
+    std::fs::write(folder.join("long.md"), "l".repeat(5000)).unwrap();
+    std::fs::write(folder.join("MEMORY.md"), "- [a](a.md)").unwrap();
+
+    {
+        let mut connection = engine.connect();
+        let mut ctx = ctx(120, 40);
+        let screen = open(&Place::Settings(SettingsSection::Memory), &mut ctx);
+        let mut shell = Shell::with(ctx, screen);
+        pump(&mut shell, &mut connection).await;
+        shell.key(Key::Char('i'));
+        let shown = render(&mut shell, 120, 40);
+        assert!(shown.contains("Add a project first."), "{shown}");
+        assert!(!shown.contains("Import memory"), "{shown}");
+    }
+
+    let notes = engine.project("notes-cli", "Notes CLI", 2).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 40);
+    ctx.home = Some(parent.path().to_str().unwrap().into());
+    let screen = open(&Place::Settings(SettingsSection::Memory), &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("i Import"), "{shown}");
+
+    shell.key(Key::Char('i'));
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Import memory"), "{shown}");
+    assert!(shown.contains("Notes CLI"), "{shown}");
+    for character in "memory".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Use the full path of the folder"), "{shown}");
+
+    for _ in "memory".chars() {
+        shell.key(Key::Backspace);
+    }
+    for character in "~/memory".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Imported 2, skipped 1."), "{shown}");
+    assert!(!shown.contains("Import memory"), "{shown}");
+    assert!(shown.contains("Shop on Monday."), "{shown}");
+    assert!(shown.contains("Plan meals on Sunday."), "{shown}");
+    assert!(
+        shown.contains("Imported from b.md for Notes CLI only.")
+            || shown.contains("Imported from a.md for Notes CLI only."),
+        "{shown}"
+    );
+
+    let page = engine
+        .controller
+        .memories(
+            crate::memory::library::MemoryScope::Project {
+                project_id: notes.clone(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut files: Vec<String> = page
+        .items
+        .iter()
+        .filter_map(|memory| match &memory.origin {
+            crate::memory::library::MemoryOrigin::Imported { file } => Some(file.clone()),
+            _ => None,
+        })
+        .collect();
+    files.sort();
+    assert_eq!(files, ["a.md", "b.md"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tools_page_switches_real_tools_and_ignores_reads_for_another_scope() {
+    use super::settings_plugins::{ToolsPage, plugin_plain};
+    use crate::coord::tool_switches::Switch;
+    use crate::plugins::{Scope, ServerSpec};
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    for (project, tool, switch) in [
+        (None, "start_work", Switch::Off),
+        (None, "recall", Switch::Hidden),
+        (Some(notes.clone()), "start_work", Switch::On),
+    ] {
+        engine
+            .controller
+            .set_tool_switch(project, None, tool.into(), switch)
+            .await
+            .unwrap();
+    }
+    let folder = engine.root.path().join("servers");
+    std::fs::create_dir(&folder).unwrap();
+    let command = folder.join("mcp_fixture.py");
+    std::fs::write(
+        &command,
+        include_str!("../../../tests/fixtures/mcp_fixture.py"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let server = engine
+        .controller
+        .add_mcp_server(
+            Scope::Global,
+            "fixture".into(),
+            ServerSpec::Stdio {
+                command: command.to_str().unwrap().into(),
+                args: vec![],
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let checked = engine
+        .controller
+        .check_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(checked.tools, ["echo", "anonymous"]);
+
+    let mut connection = engine.connect();
+    let page = ToolsPage::new(vec![(server.id.clone(), "fixture".into())], 0);
+    let mut shell = Shell::with(ctx(120, 30), Box::new(page));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("CrazyAgent tools  1 of 2"), "{shown}");
+    assert!(shown.contains("start_work"), "{shown}");
+    assert!(!shown.contains("recall"), "{shown}");
+    assert!(
+        shown.contains("1 deleted. Press r to restore the defaults and bring it back."),
+        "{shown}"
+    );
+    assert!(!shown.contains("On here"), "{shown}");
+
+    connection
+        .settings(SettingsJob::Tools {
+            project: Some(notes.clone()),
+            server: None,
+        })
+        .unwrap();
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        !shown.contains("On here"),
+        "a read for one project never lands on the every-project page: {shown}"
+    );
+
+    shell.key(Key::Char(' '));
+    shell.key(Key::Tab);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["settings"]);
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("start_work is on for every project."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("CrazyAgent tools  1 of 2"),
+        "Tab while a change runs keeps the server: {shown}"
+    );
+    let stored = engine.controller.tool_switches(None, None).await.unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .find(|view| view.tool == "start_work")
+            .unwrap()
+            .global,
+        Switch::On
+    );
+
+    shell.key(Key::Tab);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("fixture  2 of 2"), "{shown}");
+    assert!(
+        shown.contains("echo") && shown.contains("anonymous"),
+        "{shown}"
+    );
+    shell.key(Key::Char('d'));
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("Only a CrazyAgent tool can be deleted."),
+        "{shown}"
+    );
+
+    engine
+        .controller
+        .remove_mcp_server(server.id.clone())
+        .await
+        .unwrap();
+    shell.key(Key::Char(' '));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent, ["settings", "settings"], "the change, then a reload");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains(plugin_plain("server_not_found")), "{shown}");
+    assert!(shown.contains("Could not refresh the tools."), "{shown}");
+}
+
+async fn owner_ready(connection: &mut Connection) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut ready = false;
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            if let OwnerEvent::Access { ready: true, .. } = event {
+                ready = true;
+            }
+        }
+        if ready && !connection.busy() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the owner link never got ready");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn settings_reply(
+    connection: &mut Connection,
+    job: SettingsJob,
+) -> crate::tui::client::settings::SettingsEvent {
+    connection.settings(job).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        while let Some(event) = connection.poll_owner().unwrap() {
+            if let OwnerEvent::Settings(event) = event {
+                return *event;
+            }
+        }
+        assert!(Instant::now() < deadline, "no settings reply");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_jobs_round_trip_through_the_tui_client_with_their_changed_flags() {
+    use crate::coord::tool_switches::Switch;
+    use crate::tui::client::settings::SettingsEvent;
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    owner_ready(&mut connection).await;
+    let jobs = [
+        (
+            SettingsJob::Tools {
+                project: Some(notes.clone()),
+                server: None,
+            },
+            false,
+            None,
+        ),
+        (
+            SettingsJob::SetTool {
+                project: Some(notes.clone()),
+                server: None,
+                tool: "start_work".into(),
+                switch: Switch::Off,
+            },
+            true,
+            Some(Switch::Off),
+        ),
+        (
+            SettingsJob::RestoreTools {
+                project: Some(notes.clone()),
+                server: None,
+            },
+            true,
+            None,
+        ),
+    ];
+    for (job, flag, here) in jobs {
+        let SettingsEvent::Tools {
+            project,
+            server,
+            changed,
+            result,
+        } = settings_reply(&mut connection, job).await
+        else {
+            panic!("a tools reply expected");
+        };
+        assert_eq!(
+            (project, server, changed),
+            (Some(notes.clone()), None, flag)
+        );
+        let tools = result.unwrap();
+        let start = tools.iter().find(|view| view.tool == "start_work").unwrap();
+        assert_eq!(start.here, here);
+        owner_ready_after(&mut connection).await;
+    }
+    let SettingsEvent::Tools {
+        changed, result, ..
+    } = settings_reply(
+        &mut connection,
+        SettingsJob::SetTool {
+            project: None,
+            server: None,
+            tool: "nope".into(),
+            switch: Switch::Off,
+        },
+    )
+    .await
+    else {
+        panic!("a tools reply expected");
+    };
+    assert!(changed);
+    assert_eq!(result.unwrap_err(), "tool_unknown");
+}
+
+async fn owner_ready_after(connection: &mut Connection) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while connection.busy() {
+        while connection.poll_owner().unwrap().is_some() {}
+        assert!(Instant::now() < deadline, "the owner job never finished");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The top border of the box that lists moved instruction files, as the modal draws its title.
+const MOVED_BOX: &str = "─ Moved to .crazyagent/imported/ ─";
+
+/// The one project folder the engine made under its projects home.
+fn only_folder(engine: &Engine) -> std::path::PathBuf {
+    let folders: Vec<std::path::PathBuf> = std::fs::read_dir(engine.home.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    folders[0].canonicalize().unwrap()
+}
+
+/// Opens the project page on Overview against the real engine and serves its first reads.
+async fn opened_page(
+    project: &ProjectId,
+    connection: &mut Connection,
+) -> (Shell, Vec<&'static str>) {
+    let mut ctx = ctx(100, 40);
+    let screen = open(
+        &Place::Project {
+            id: project.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Overview,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    let sent = pump(&mut shell, connection).await;
+    (shell, sent)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_import_prompt_moves_files_on_confirm_and_asks_again_after_not_now() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let folder = only_folder(&engine);
+    crate::tui::test_home::instruction_repo(&folder, &["CLAUDE.md"], &["AGENTS.md"]);
+    let mut connection = engine.connect();
+
+    let (mut shell, sent) = opened_page(&notes, &mut connection).await;
+    assert!(sent.contains(&"pending import"), "{sent:?}");
+    let shown = render(&mut shell, 100, 40);
+    let flat = shown
+        .lines()
+        .map(|row| row.trim_matches(|c: char| c == '\u{2502}' || c.is_whitespace()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    for want in [
+        "Instruction files found",
+        "- CLAUDE.md (15 bytes, tracked by git)",
+        "- AGENTS.md (15 bytes)",
+        "Git tracks some of them, so after the move git shows them as deleted.",
+        "Enter Copy into instructions.md and move aside",
+        "Esc Not now",
+    ] {
+        assert!(flat.contains(want), "{want} missing in\n{shown}");
+    }
+    assert!(!shown.contains("AGENTS.md (15 bytes, tracked"), "{shown}");
+    shell.key(Key::Esc);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"confirm import"), "{sent:?}");
+    assert!(!render(&mut shell, 100, 40).contains("Instruction files found"));
+    shell.refresh();
+    pump(&mut shell, &mut connection).await;
+    assert!(
+        !render(&mut shell, 100, 40).contains("Instruction files found"),
+        "Not now holds for this opening"
+    );
+    assert!(folder.join("CLAUDE.md").is_file() && folder.join("AGENTS.md").is_file());
+
+    let mut connection = engine.connect();
+    let (mut shell, sent) = opened_page(&notes, &mut connection).await;
+    assert!(sent.contains(&"pending import"), "{sent:?}");
+    assert!(
+        render(&mut shell, 100, 40).contains("Instruction files found"),
+        "the next opening asks again"
+    );
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"confirm import"), "{sent:?}");
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains("Instruction files found"), "{shown}");
+    assert!(
+        shown.contains(MOVED_BOX),
+        "the moved files show in their own box\n{shown}"
+    );
+    assert!(
+        shown.contains("- CLAUDE.md (git shows it as deleted)"),
+        "{shown}"
+    );
+    assert!(shown.contains("- AGENTS.md"), "{shown}");
+    let imported = folder.join(".crazyagent/imported");
+    assert!(imported.join("CLAUDE.md").is_file() && imported.join("AGENTS.md").is_file());
+    assert!(!folder.join("CLAUDE.md").exists() && !folder.join("AGENTS.md").exists());
+    let instructions = std::fs::read_to_string(folder.join(".crazyagent/instructions.md")).unwrap();
+    assert!(
+        instructions.contains("CLAUDE.md rule") && instructions.contains("AGENTS.md rule"),
+        "{instructions}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn untracked_only_move_shows_message_and_no_banner() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let folder = only_folder(&engine);
+    let tip = crate::tui::test_home::instruction_repo(&folder, &[], &["AGENTS.md"]);
+    let mut connection = engine.connect();
+    let (mut shell, _) = opened_page(&notes, &mut connection).await;
+    assert!(render(&mut shell, 100, 40).contains("- AGENTS.md (15 bytes)"));
+    shell.key(Key::Char('y'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"confirm import"), "{sent:?}");
+    assert!(sent.contains(&"uncommitted"), "{sent:?}");
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Moved to .crazyagent/imported/:");
+    assert_eq!(message.rest, "AGENTS.md");
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        !shown.contains(MOVED_BOX),
+        "an untracked-only move says so in the message line, not a box\n{shown}"
+    );
+    assert!(!shown.contains("Commit the move"), "{shown}");
+    assert!(!shown.contains("Git still shows"), "{shown}");
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_only_import_offers_no_confirm() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let folder = only_folder(&engine);
+    let outside = engine.root.path().join("outside.md");
+    std::fs::write(&outside, "kept outside\n").unwrap();
+    std::os::unix::fs::symlink(&outside, folder.join("CLAUDE.md")).unwrap();
+    let mut connection = engine.connect();
+    let (mut shell, _) = opened_page(&notes, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("- CLAUDE.md: stays in place, it links outside the project folder"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("None of them can be moved. Not now asks again the next time you"),
+        "{shown}"
+    );
+    assert!(!shown.contains("Enter Copy into"), "{shown}");
+    assert!(shown.contains("Esc Not now"), "{shown}");
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"confirm import"), "{sent:?}");
+    assert!(
+        std::fs::symlink_metadata(folder.join("CLAUDE.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!folder.join(".crazyagent/imported").exists());
+}
+
+/// Opens the page on a checkout with a tracked CLAUDE.md, confirms the import and leaves
+/// the move uncommitted, so the banner shows. Output: the shell, connection, folder and
+/// the tip before the import.
+async fn left_move(engine: &mut Engine) -> (Shell, Connection, std::path::PathBuf, String) {
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let folder = only_folder(engine);
+    let tip = crate::tui::test_home::instruction_repo(&folder, &["CLAUDE.md"], &[]);
+    let mut connection = engine.connect();
+    let (mut shell, _) = opened_page(&notes, &mut connection).await;
+    shell.key(Key::Enter);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Moved to .crazyagent/imported/"), "{shown}");
+    assert!(shown.contains("Enter Commit the move"), "{shown}");
+    assert!(shown.contains("Esc Leave it"), "{shown}");
+    shell.key(Key::Esc);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"uncommitted"), "{sent:?}");
+    (shell, connection, folder, tip)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn confirm_with_tracked_file_offers_commit_then_banner_after_leave() {
+    let mut engine = Engine::start().await;
+    let (mut shell, mut connection, folder, tip) = left_move(&mut engine).await;
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains("Esc Leave it"), "{shown}");
+    assert!(
+        shown.contains("Git still shows CLAUDE.md as deleted after the instruction import"),
+        "{shown}"
+    );
+    let hints = shown.lines().last().unwrap().to_owned();
+    assert!(
+        hints.trim_start().starts_with("Ctrl-G Commit the move"),
+        "{hints}"
+    );
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip,
+        "Leave it commits nothing"
+    );
+
+    let branch = crate::tui::test_home::git(&folder, &["branch", "--show-current"]);
+    shell.key(Key::Ctrl('g'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"commit import"), "{sent:?}");
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(
+        message.lead,
+        format!("Committed the move on {}:", branch.trim())
+    );
+    assert_eq!(message.rest, "CLAUDE.md. Nothing was pushed.");
+    let git = |args: &[&str]| crate::tui::test_home::git(&folder, args);
+    assert_eq!(git(&["rev-parse", "HEAD~1"]).trim(), tip);
+    assert_eq!(
+        git(&["show", "--name-status", "--format=", "HEAD"]).trim(),
+        "D\tCLAUDE.md"
+    );
+    assert_eq!(
+        git(&["log", "-1", "--format=%an <%ae>"]).trim(),
+        "Owner <owner@example.invalid>"
+    );
+    assert_eq!(git(&["status", "--porcelain", "--", "CLAUDE.md"]), "");
+    assert_eq!(git(&["remote"]), "", "nothing to push to, nothing pushed");
+    let shown = render(&mut shell, 100, 40);
+    assert!(!shown.contains("Git still shows"), "{shown}");
+    assert!(!shown.contains("Ctrl-G Commit the move"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn commit_refusal_keeps_offer() {
+    let mut engine = Engine::start().await;
+    let (mut shell, mut connection, folder, tip) = left_move(&mut engine).await;
+    std::fs::write(folder.join("other.txt"), "staged\n").unwrap();
+    crate::tui::test_home::git(&folder, &["add", "other.txt"]);
+    shell.key(Key::Ctrl('g'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"commit import"), "{sent:?}");
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        super::process::message("process_commit_staged")
+    );
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip,
+        "a refusal commits nothing"
+    );
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["diff", "--cached", "--name-only"]).trim(),
+        "other.txt",
+        "the owner's staged file stays staged and alone"
+    );
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Git still shows CLAUDE.md as deleted"),
+        "the banner stays: {shown}"
+    );
+    assert!(shown.contains("Ctrl-G Commit the move"), "{shown}");
 }

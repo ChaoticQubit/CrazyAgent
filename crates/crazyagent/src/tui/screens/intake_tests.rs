@@ -935,6 +935,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         overview: None,
         folder_overview: None,
         finished: false,
+        imported: Vec::new(),
     };
     let mut draft = draft;
     change(&mut draft);
@@ -1446,4 +1447,162 @@ async fn a_projects_home_the_engine_refuses_says_why_on_the_setup_page() {
     assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
     let message = shell.ctx.message().expect("the refusal is shown");
     assert_eq!(message.lead, "Pick a folder, not a file or a link.");
+}
+
+/// A real checkout with CLAUDE.md tracked and AGENTS.md untracked, imported by the
+/// engine's own import, and the onboarding review of `notes` showing what it moved.
+/// Output: the shell, the project, the folder (kept alive by its guard) and the tip
+/// before the import.
+fn imported_review() -> (
+    Shell,
+    ProjectId,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    String,
+) {
+    let guard = tempfile::tempdir().unwrap();
+    let folder = guard.path().canonicalize().unwrap();
+    let tip = crate::tui::test_home::instruction_repo(&folder, &["CLAUDE.md"], &["AGENTS.md"]);
+    let moved = crate::instruction_files::import(&folder).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true), ("AGENTS.md", false)]
+    );
+    let (mut shell, project) = review_with(|view| view.imported = moved);
+    while shell.ctx.next_request().is_some() {}
+    (shell, project, guard, folder, tip)
+}
+
+fn commit_reply(project: &ProjectId, folder: &Path, home: &Path) -> Arrival {
+    let query = crate::tui::client::process::ProcessQuery::CommitImport {
+        project: project.clone(),
+    };
+    let result = crate::instruction_files::commit(folder, home)
+        .map(crate::tui::client::process::ProcessReply::Committed)
+        .map_err(|problem| problem.0);
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(
+        crate::tui::client::process::ProcessEvent { query, result },
+    ))))
+}
+
+fn commit_sent(shell: &mut Shell, project: &ProjectId) -> bool {
+    let sent: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    matches!(
+        sent.as_slice(),
+        [Request::Process(query)] if matches!(
+            query.as_ref(),
+            crate::tui::client::process::ProcessQuery::CommitImport { project: asked } if asked == project
+        )
+    )
+}
+
+#[test]
+fn imported_files_are_listed_after_folder_import_and_ctrl_g_commits_the_move() {
+    let (mut shell, project, _guard, folder, tip) = imported_review();
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "CrazyAgent copied these instruction files into"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("- AGENTS.md")),
+        "an untracked file is not shown deleted: {rows:#?}"
+    );
+    assert!(
+        shows(
+            &rows,
+            "Merges into this branch are refused until the move is"
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(shows(&rows, "Ctrl-L Leave it"), "{rows:#?}");
+
+    shell.key(Key::Ctrl('g'));
+    assert!(commit_sent(&mut shell, &project));
+    shell.key(Key::Ctrl('g'));
+    assert!(shell.ctx.next_request().is_none(), "one commit at a time");
+    let home = tempfile::tempdir().unwrap();
+    shell.arrive(commit_reply(&project, &folder, home.path()));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Committed the move on main:");
+    assert_eq!(message.rest, "CLAUDE.md. Nothing was pushed.");
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "(git shows it as deleted)"), "{rows:#?}");
+    assert!(!shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("- CLAUDE.md")),
+        "{rows:#?}"
+    );
+    let git = |args: &[&str]| crate::tui::test_home::git(&folder, args);
+    assert_eq!(git(&["rev-parse", "HEAD~1"]).trim(), tip);
+    assert_eq!(
+        git(&["show", "--name-status", "--format=", "HEAD"]).trim(),
+        "D\tCLAUDE.md"
+    );
+    assert!(
+        crate::instruction_files::uncommitted(&folder)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ctrl_l_leaves_the_move_and_hides_the_offer() {
+    let (mut shell, _project, _guard, folder, tip) = imported_review();
+    shell.key(Key::Ctrl('l'));
+    assert!(shell.ctx.next_request().is_none(), "Leave it sends nothing");
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(
+        !shows(&rows, "Merges into this branch are refused"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "the file is still named as git shows it: {rows:#?}"
+    );
+    shell.key(Key::Ctrl('g'));
+    assert!(
+        shell.ctx.next_request().is_none(),
+        "Ctrl-G no longer commits once left"
+    );
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+}
+
+#[test]
+fn a_refused_onboarding_commit_says_why_and_keeps_the_offer() {
+    let (mut shell, project, _guard, folder, tip) = imported_review();
+    std::fs::write(folder.join("other.txt"), "staged\n").unwrap();
+    crate::tui::test_home::git(&folder, &["add", "other.txt"]);
+    shell.key(Key::Ctrl('g'));
+    assert!(commit_sent(&mut shell, &project));
+    let home = tempfile::tempdir().unwrap();
+    shell.arrive(commit_reply(&project, &folder, home.path()));
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        super::process::message("process_commit_staged")
+    );
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
 }

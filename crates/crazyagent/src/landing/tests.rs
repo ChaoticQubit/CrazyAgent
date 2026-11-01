@@ -398,7 +398,14 @@ fn a_bare_repository_layout_an_agent_leaves_is_refused_when_its_turn_is_committe
 /// current branch tip, as the engine adds one for a sibling sub-agent. Input: the case.
 /// Output: the second agent's workspace.
 fn second_agent(case: &Case) -> Workspace {
-    let worktree = case.repo.parent().unwrap().join("agent-2");
+    numbered_agent(case, 2)
+}
+
+/// Adds sub-agent `number` with its own linked detached worktree of the owner repository.
+/// Inputs: the case and the agent number. Output: the agent's workspace.
+fn numbered_agent(case: &Case, number: usize) -> Workspace {
+    let name = format!("agent-{number}");
+    let worktree = case.repo.parent().unwrap().join(&name);
     case.owner(&[
         "worktree",
         "add",
@@ -410,11 +417,11 @@ fn second_agent(case: &Case) -> Workspace {
     Workspace {
         agent: ChangeAgent {
             kind: AgentKind::Sub,
-            id: "agent-2".into(),
-            label: "Agent 2".into(),
+            id: name.clone(),
+            label: format!("Agent {number}"),
         },
         worktree,
-        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        git_dir: case.repo.join(".git/worktrees").join(&name),
         ..case.workspace.clone()
     }
 }
@@ -1814,15 +1821,77 @@ fn the_worktree_start_moves_to_where_accept_or_discard_leaves_the_worktree() {
     }
 }
 
+/// A set that starts where an accepted set's head was is measured from that head only
+/// while the owner's branch still holds the commit the engine landed. Once the owner
+/// resets the branch below it, the earlier work counts again, and once gc prunes the
+/// landed commit, a turn end still records the set and counts it from the joined range,
+/// while the set keeps its stored start.
+#[test]
+fn a_landed_commit_the_owner_reset_away_counts_the_work_again_and_its_prune_breaks_no_turn() {
+    let case = Case::new();
+    case.start();
+    let start = case.tip();
+    case.edit("B", "b\n");
+    let reviewed = case.agent_commit("Add B");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.edit("C", "c\n");
+    let newer = case.agent_commit("Add C");
+    let AcceptOutcome::Landed { commit: squash, .. } = case.accept(&second).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["rev-parse", &format!("{squash}^")]).trim(),
+        start
+    );
+    case.owner(&["reset", "-q", "--hard", &start]);
+    let third = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&third);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (reviewed.as_str(), newer.as_str(), 2)
+    );
+    case.owner(&["reflog", "expire", "--expire=now", "--all"]);
+    case.owner(&["gc", "-q", "--prune=now"]);
+    let objects = case.owner(&[
+        "cat-file",
+        "--batch-all-objects",
+        "--batch-check=%(objectname)",
+    ]);
+    assert!(!objects.lines().any(|id| id == squash));
+    assert!(objects.lines().any(|id| id == reviewed));
+    case.edit("D", "d\n");
+    let latest = case.agent_commit("Add D");
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Add D".into(),
+    };
+    let recorded = record_turn_end(&case.db, &case.workspace, &turn);
+    assert_eq!(
+        recorded.as_ref().ok(),
+        Some(&Some(third.clone())),
+        "{recorded:?}"
+    );
+    let view = case.view(&third);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (reviewed.as_str(), latest.as_str(), 3)
+    );
+}
+
+/// A worktree with no recorded start opens its set above the head it had, and the set is
+/// measured against the owner's branch (DEC-107 rule 1), so the agent's earlier commit the
+/// owner's branch lacks is counted with the new file.
 #[test]
 fn a_worktree_with_no_recorded_start_keeps_opening_above_its_head() {
     let case = Case::new();
     case.edit("A", "a\n");
-    case.agent_commit("Add A");
+    let first = case.agent_commit("Add A");
     assert_eq!(case.turn(TurnOutcome::Succeeded), None);
     case.edit("B", "b\n");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    assert_eq!(case.view(&id).files, 1);
+    let view = case.view(&id);
+    assert_eq!((view.base.as_str(), view.files), (first.as_str(), 2));
 }
 
 #[test]
@@ -2361,7 +2430,7 @@ impl Case {
 }
 
 #[test]
-fn an_agent_head_naming_another_branch_is_refused_and_moves_no_branch() {
+fn an_agent_head_naming_another_branch_is_refused_and_its_own_branch_takes_the_turn() {
     let case = Case::new();
     case.start();
     let tip = case.tip();
@@ -2394,17 +2463,42 @@ fn an_agent_head_naming_another_branch_is_refused_and_moves_no_branch() {
     std::fs::write(&head_file, &detached).unwrap();
     std::fs::remove_file(case.workspace.worktree.join("evil.txt")).unwrap();
     assert_eq!(case.agent_head(), head);
-    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
-    case.edit("lease.txt", "lease\n");
+    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-2"]);
+    case.edit("other.txt", "other\n");
     assert_eq!(
         refused(record_turn_end(&case.db, &case.workspace, &turn)),
         "changes_workspace_invalid",
-        "a sub-agent worktree must stay detached"
+        "a sub-agent worktree never commits on another agent's branch"
+    );
+    let other = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"]);
+    assert_eq!(other.trim(), head, "another agent's branch moved");
+    assert_eq!(case.view(&id).head, head);
+    assert_eq!(case.tip(), tip);
+    assert_eq!(
+        std::fs::read_to_string(&head_file).unwrap(),
+        "ref: refs/heads/crazyagent/agent-2\n"
+    );
+    std::fs::remove_file(case.workspace.worktree.join("other.txt")).unwrap();
+    case.agent(&["checkout", "-q", "-b", "crazyagent/agent-1"]);
+    case.edit("lease.txt", "lease\n");
+    assert_eq!(
+        record_turn_end(&case.db, &case.workspace, &turn).unwrap(),
+        Some(id.clone()),
+        "a sub-agent may commit on its own branch (B1)"
     );
     let named = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"]);
-    assert_eq!(named.trim(), head);
-    assert_eq!(case.view(&id).head, head);
-    assert_eq!(case.tip(), tip, "a lease turn end moved the owner's branch");
+    assert_ne!(named.trim(), head, "its own branch carries the turn");
+    assert_eq!(named.trim(), case.agent_head());
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"])
+            .trim(),
+        head
+    );
+    assert_eq!(
+        case.tip(),
+        tip,
+        "an own-branch turn end moved the owner's branch"
+    );
     assert_eq!(
         std::fs::read_to_string(&head_file).unwrap(),
         "ref: refs/heads/crazyagent/agent-1\n"
@@ -3458,5 +3552,1640 @@ fn engine_git_never_opens_an_agent_s_own_clone() {
         &case.repo,
         &case.workspace.git_dir,
         Some(&case.workspace.worktree),
+    );
+}
+
+fn head_file(git_dir: &Path) -> String {
+    std::fs::read_to_string(git_dir.join("HEAD")).unwrap()
+}
+
+fn named(case: &Case, workspace: &Workspace) -> Result<String, EngineError> {
+    name_agent_branch(
+        &case.db,
+        &case.repo,
+        &workspace.worktree,
+        &workspace.git_dir,
+    )
+}
+
+#[test]
+fn a_named_linked_agent_commits_on_its_own_branch() {
+    let case = Case::new();
+    let tip = case.tip();
+    assert_eq!(head_file(&case.workspace.git_dir), format!("{tip}\n"));
+    assert_eq!(named(&case, &case.workspace).unwrap(), "crazyagent/agent-1");
+    assert_eq!(
+        head_file(&case.workspace.git_dir),
+        "ref: refs/heads/crazyagent/agent-1\n"
+    );
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"])
+            .trim(),
+        tip
+    );
+    assert_eq!(named(&case, &case.workspace).unwrap(), "crazyagent/agent-1");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_ne!(head, tip);
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/heads/crazyagent/agent-1"])
+            .trim(),
+        head
+    );
+    assert_eq!(
+        head_file(&case.workspace.git_dir),
+        "ref: refs/heads/crazyagent/agent-1\n"
+    );
+    assert_eq!(case.tip(), tip, "the owner's branch moved");
+}
+
+#[test]
+fn a_leftover_agent_branch_refuses_the_launch() {
+    let case = Case::new();
+    let tip = case.tip();
+    case.owner(&["branch", "crazyagent/agent-1"]);
+    assert_eq!(
+        refused(named(&case, &case.workspace)),
+        "changes_agent_branch_exists"
+    );
+    assert_eq!(head_file(&case.workspace.git_dir), format!("{tip}\n"));
+}
+
+#[test]
+fn retiring_a_named_worktree_deletes_its_branch_and_keeps_one_the_agent_left() {
+    let case = Case::new();
+    named(&case, &case.workspace).unwrap();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    discard(&case.db, &id, &case.view(&id).head, NOW_MS).unwrap();
+    let late = NOW_MS + 8 * DAY_MS;
+    assert_eq!(
+        retire_worktree(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+            late
+        )
+        .unwrap(),
+        Ok(())
+    );
+    assert!(!case.workspace.worktree.exists());
+    assert_eq!(
+        case.owner(&[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/crazyagent/"
+        ]),
+        ""
+    );
+
+    let left = second_agent(&case);
+    named(&case, &left).unwrap();
+    record_worktree_start(&case.db, &case.repo, &left.worktree, &left.git_dir).unwrap();
+    git_in(&case.home, &left.worktree, &["checkout", "-q", "--detach"]);
+    let kept = case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"]);
+    assert_eq!(
+        retire_worktree(&case.db, &case.repo, &left.worktree, &left.git_dir, late).unwrap(),
+        Ok(())
+    );
+    assert_eq!(
+        case.owner(&["rev-parse", "refs/heads/crazyagent/agent-2"]),
+        kept,
+        "a branch the worktree no longer had checked out is not the engine's to delete"
+    );
+}
+
+#[test]
+fn accept_into_an_unchecked_out_branch_moves_only_the_ref() {
+    let case = Case::new();
+    case.owner(&["branch", "release"]);
+    let tip = case.tip();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_eq!(
+        target_branches(&case.db, &id).unwrap(),
+        TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+        }
+    );
+    let before = case.checkout();
+    assert_eq!(
+        refused(accept_into(
+            &case.db, &case.home, &id, &tip, None, "release"
+        )),
+        "changes_stale"
+    );
+    let AcceptOutcome::Landed { commit, branch } =
+        accept_into(&case.db, &case.home, &id, &head, None, "release").unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(branch, "release");
+    assert_eq!(case.owner(&["rev-parse", "release"]).trim(), commit);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>|%s", &commit])
+            .trim(),
+        format!("{tip}|Repo Owner <owner@example.invalid>|Add the fourth line")
+    );
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(case.tip(), tip);
+    let after = case.checkout();
+    let changed: Vec<&String> = after
+        .iter()
+        .filter(|(path, digest)| before.get(*path) != Some(*digest))
+        .map(|(path, _)| path)
+        .chain(before.keys().filter(|path| !after.contains_key(*path)))
+        .collect();
+    assert!(
+        changed
+            .iter()
+            .any(|path| path.ends_with("refs/heads/release")),
+        "{changed:?}"
+    );
+    assert!(
+        changed.iter().all(|path| {
+            (path.starts_with(".git/refs/") || path.starts_with(".git/logs/refs/"))
+                && !path.ends_with("heads/main")
+        }),
+        "only refs other than the owner's branch moved: {changed:?}"
+    );
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}
+
+#[test]
+fn accept_into_a_lead_agent_branch_updates_its_worktree() {
+    let case = Case::new();
+    let tip = case.tip();
+    let agents = case
+        .repo
+        .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
+        .join("worktrees");
+    std::fs::create_dir_all(&agents).unwrap();
+    let worktree = agents.join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let lead = Workspace {
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-2".into(),
+            label: "Agent 2".into(),
+        },
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+        ..case.workspace.clone()
+    };
+    assert_eq!(named(&case, &lead).unwrap(), "crazyagent/agent-2");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, branch } = accept_into(
+        &case.db,
+        &case.home,
+        &id,
+        &case.view(&id).head,
+        None,
+        "crazyagent/agent-2",
+    )
+    .unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(branch, "crazyagent/agent-2");
+    assert_eq!(
+        std::fs::read_to_string(lead.worktree.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(
+        git_in(&case.home, &lead.worktree, &["rev-parse", "HEAD"]).trim(),
+        commit
+    );
+    assert_eq!(
+        head_file(&lead.git_dir),
+        "ref: refs/heads/crazyagent/agent-2\n"
+    );
+    assert_eq!(
+        git_in(&case.home, &lead.worktree, &["status", "--porcelain"]),
+        ""
+    );
+    assert_eq!(case.tip(), tip);
+
+    case.edit("NOTES", "notes\n");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&lead.worktree.join("README"), "lead edits\n");
+    let lead_tip = git_in(&case.home, &lead.worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        refused(accept_into(
+            &case.db,
+            &case.home,
+            &second,
+            &case.view(&second).head,
+            None,
+            "crazyagent/agent-2",
+        )),
+        "changes_agent_busy"
+    );
+    assert_eq!(
+        git_in(&case.home, &lead.worktree, &["rev-parse", "HEAD"]),
+        lead_tip
+    );
+    assert_eq!(
+        std::fs::read_to_string(lead.worktree.join("README")).unwrap(),
+        "lead edits\n"
+    );
+}
+
+#[test]
+fn accept_into_refuses_invalid_and_externally_checked_out_targets() {
+    let case = Case::new();
+    case.owner(&["branch", "release"]);
+    case.owner(&["symbolic-ref", "refs/heads/alias", "refs/heads/release"]);
+    let outside = case.repo.parent().unwrap().join("plain");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "elsewhere",
+        outside.to_str().unwrap(),
+        "HEAD",
+    ]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let before = case.checkout();
+    let release = case.owner(&["rev-parse", "release"]);
+    let long = "b".repeat(BRANCH_BYTES_MAX + 1);
+    for (target, code) in [
+        ("-x", "changes_target_invalid"),
+        ("a..b", "changes_target_invalid"),
+        ("", "changes_target_invalid"),
+        ("missing", "changes_target_invalid"),
+        ("alias", "changes_target_invalid"),
+        (long.as_str(), "changes_target_invalid"),
+        ("elsewhere", "changes_target_checked_out"),
+    ] {
+        assert_eq!(
+            refused(accept_into(&case.db, &case.home, &id, &head, None, target)),
+            code,
+            "{target:?}"
+        );
+    }
+    assert_eq!(case.checkout(), before);
+    assert_eq!(case.owner(&["rev-parse", "release"]), release);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+impl Case {
+    /// The same owner repository with a harness in its own clone on the task branch the
+    /// engine claimed for it (DEC-100), its start recorded. Input: the task name.
+    /// Output: the case and the branch.
+    fn harness(name: &str) -> (Self, String) {
+        let mut case = Self::new();
+        let worktree = case.repo.parent().unwrap().join("agent-own");
+        let branch = claim_task_branch(&case.db, &case.repo, &worktree, name).unwrap();
+        add_agent_clone_on(&case.repo, &worktree, None, &branch).unwrap();
+        case.workspace.git_dir = crate::agent_git::git_dir(&worktree);
+        case.workspace.worktree = worktree;
+        case.start();
+        (case, branch)
+    }
+}
+
+#[test]
+fn a_harness_clone_works_on_its_task_branch() {
+    let (case, branch) = Case::harness("docs");
+    assert_eq!(branch, "crazyagent/docs");
+    assert_eq!(
+        case.agent(&["symbolic-ref", "HEAD"]).trim(),
+        "refs/heads/crazyagent/docs"
+    );
+    let exclude = std::fs::read_to_string(case.workspace.git_dir.join("info/exclude")).unwrap();
+    assert!(
+        exclude.lines().any(|line| line == "/.worktrees/"),
+        "{exclude}"
+    );
+    assert_eq!(
+        agent_branch(&case.db, &case.workspace.worktree, &case.workspace.git_dir).unwrap(),
+        Some(branch.clone())
+    );
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).files, 1);
+    let AcceptOutcome::Landed {
+        commit,
+        branch: landed,
+    } = case.accept(&id).unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((landed.as_str(), case.tip()), ("main", commit));
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+}
+
+#[test]
+fn claiming_a_taken_task_branch_takes_the_next_suffix() {
+    let case = Case::new();
+    let root = case.repo.parent().unwrap().to_path_buf();
+    let (other, mine) = (root.join("agent-other"), root.join("agent-mine"));
+    let claim =
+        |worktree: &Path, name: &str| claim_task_branch(&case.db, &case.repo, worktree, name);
+    assert_eq!(claim(&other, "x").unwrap(), "crazyagent/x");
+    case.owner(&["branch", "crazyagent/x-2"]);
+    case.owner(&["branch", "crazyagent/x-3/y"]);
+    assert_eq!(claim(&mine, "x").unwrap(), "crazyagent/x-4");
+    assert_eq!(
+        claim(&mine, "x").unwrap(),
+        "crazyagent/x-4",
+        "its own stored row does not count as taken"
+    );
+    case.owner(&["branch", "crazyagent/z"]);
+    for suffix in 2..=64 {
+        case.owner(&["branch", &format!("crazyagent/z-{suffix}")]);
+    }
+    assert_eq!(refused(claim(&mine, "z")), "changes_agent_branch_exists");
+    for invalid in ["Bad", "", "a--b", "-a"] {
+        assert_eq!(
+            refused(claim(&mine, invalid)),
+            "changes_agent_branch_invalid",
+            "{invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn the_masters_branch_resolves_choice_then_origin_head_then_checkout() {
+    let case = Case::new();
+    let tip = case.tip();
+    case.owner(&["branch", "trunk"]);
+    assert_eq!(
+        master_branch(&case.repo, Some("trunk")).unwrap(),
+        Some(("trunk".to_owned(), tip.clone()))
+    );
+    for missing in ["missing", "-x", "a..b", ""] {
+        assert_eq!(
+            refused(master_branch(&case.repo, Some(missing))),
+            "changes_target_invalid",
+            "{missing:?}"
+        );
+    }
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("main".to_owned(), tip.clone()))
+    );
+    case.owner(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/trunk",
+    ]);
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("trunk".to_owned(), tip.clone()))
+    );
+    case.owner(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/gone",
+    ]);
+    assert_eq!(
+        master_branch(&case.repo, None).unwrap(),
+        Some(("main".to_owned(), tip.clone())),
+        "an origin HEAD with no local branch falls back to the checkout"
+    );
+    case.owner(&["symbolic-ref", "-d", "refs/remotes/origin/HEAD"]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    assert_eq!(master_branch(&case.repo, None).unwrap(), None);
+}
+
+impl Case {
+    /// Adds a teammate worktree to a harness clone at `.worktrees/<name>` on
+    /// `<task branch>--<name>` with one committed file, as a native teammate is told to.
+    /// Inputs: the task branch and the teammate's name. Output: the teammate's folder and
+    /// branch.
+    fn teammate(&self, branch: &str, name: &str) -> (PathBuf, String) {
+        let teammate_branch = format!("{branch}--{name}");
+        let folder = format!(".worktrees/{name}");
+        self.agent(&["worktree", "add", "-q", &folder, "-b", &teammate_branch]);
+        let teammate = self.workspace.worktree.join(&folder);
+        write(&teammate.join("NOTES"), "teammate\n");
+        git_in(&self.home, &teammate, &["add", "NOTES"]);
+        git_in(
+            &self.home,
+            &teammate,
+            &[
+                "-c",
+                "user.name=Teammate",
+                "-c",
+                "user.email=teammate@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Teammate notes",
+            ],
+        );
+        (teammate, teammate_branch)
+    }
+
+    fn merge_in_clone(&self, branch: &str) {
+        self.agent(&[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-edit",
+            branch,
+        ]);
+    }
+
+    fn land(&self) {
+        let id = self.turn(TurnOutcome::Succeeded).unwrap();
+        assert!(matches!(
+            self.accept(&id).unwrap(),
+            AcceptOutcome::Landed { .. }
+        ));
+    }
+
+    fn blocker(&self) -> Option<&'static str> {
+        retire_blocker(
+            &self.db,
+            &self.repo,
+            &self.workspace.worktree,
+            &self.workspace.git_dir,
+            NOW_MS,
+        )
+        .unwrap()
+    }
+}
+
+#[test]
+fn teammate_worktrees_never_reach_the_change_set() {
+    let (case, branch) = Case::harness("docs");
+    let (_, teammate_branch) = case.teammate(&branch, "a");
+    case.merge_in_clone(&teammate_branch);
+    write(
+        &case.workspace.worktree.join(".worktrees/stray.txt"),
+        "left by an agent\n",
+    );
+    case.agent(&["add", "-f", ".worktrees/stray.txt"]);
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let tip = |case: &Case| {
+        agent_tip(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+        )
+        .unwrap()
+    };
+    let first = tip(&case);
+    assert_eq!(
+        first,
+        tip(&case),
+        "the same clone tip fetches to the same head"
+    );
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let mut files: Vec<String> = diff(&case.db, &id, 0)
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    files.sort();
+    assert_eq!(files, vec!["NOTES".to_owned(), "README".to_owned()]);
+    assert_eq!(case.view(&id).head, first);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let landed = case.owner(&["ls-tree", "-r", "--name-only", &commit]);
+    assert!(!landed.contains(".worktrees"), "{landed}");
+    assert!(landed.lines().any(|path| path == "NOTES"), "{landed}");
+}
+
+#[test]
+fn cleanup_keeps_a_harness_with_unmerged_or_dirty_teammates() {
+    let (mut case, branch) = Case::harness("docs");
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,mode) VALUES (?1,'sub','claude-code',1,'working',1,1,'native')",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    case.workspace.agent.id = case.db.last_insert_rowid().to_string();
+    let (teammate, teammate_branch) = case.teammate(&branch, "a");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.land();
+    let unlanded = |case: &Case| {
+        unlanded_teammates(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    assert_eq!(case.blocker(), Some("cleanup_refs_unlanded"));
+    assert!(!unlanded(&case).is_empty());
+
+    case.merge_in_clone(&teammate_branch);
+    case.land();
+    write(&teammate.join("SCRATCH"), "not committed\n");
+    assert_eq!(case.blocker(), Some("cleanup_worktree_dirty"));
+
+    std::fs::remove_file(teammate.join("SCRATCH")).unwrap();
+    assert_eq!(case.blocker(), None);
+    assert_eq!(unlanded(&case), Vec::<String>::new());
+    assert_eq!(
+        retire_worktree(
+            &case.db,
+            &case.repo,
+            &case.workspace.worktree,
+            &case.workspace.git_dir,
+            NOW_MS
+        )
+        .unwrap(),
+        Ok(())
+    );
+    assert!(!case.workspace.worktree.exists());
+    let stored: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM landing_agent_branches", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, 0, "the stored task branch goes with the worktree");
+}
+
+/// Commits every given file in a lead's worktree as the lead would. Inputs: the case, the
+/// lead's worktree and the files. Output: none; the commit is on the lead's branch.
+fn lead_commit(case: &Case, lead: &Path, files: &[String]) {
+    for file in files {
+        write(&lead.join(file), "lead work\n");
+    }
+    git_in(&case.home, lead, &["add", "-A"]);
+    git_in(
+        &case.home,
+        lead,
+        &[
+            "-c",
+            "user.name=Lead",
+            "-c",
+            "user.email=lead@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Lead work",
+        ],
+    );
+}
+
+/// Makes team agent 35 a lead of the case's project with `files` lead files committed
+/// ahead of the owner's `main`: in a linked worktree on the branch the engine names for
+/// it, or in its own clone, recorded in the team tables. Inputs: the case, how many files
+/// the lead adds and whether it works in its own clone. Output: the lead's worktree and
+/// its tip as the engine reads it into the owner repository.
+fn lead_35(case: &Case, files: usize, own_clone: bool) -> (PathBuf, String) {
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    let git_dir = if own_clone {
+        add_agent_clone(&case.repo, &lead).unwrap();
+        crate::agent_git::git_dir(&lead)
+    } else {
+        case.owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "crazyagent/agent-35",
+            lead.to_str().unwrap(),
+            "main",
+        ]);
+        case.repo.join(".git/worktrees/agent-35")
+    };
+    let made: Vec<String> = (0..files).map(|at| format!("lead/file-{at}.txt")).collect();
+    lead_commit(case, &lead, &made);
+    crate::team::initialize(&case.db).unwrap();
+    let project = case.workspace.project.as_str();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (35,?1,'sub','claude',0,'idle',1,1,NULL)",
+            [project],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (35,?1,?2,?3,?4)",
+            [
+                project,
+                case.repo.to_str().unwrap(),
+                lead.to_str().unwrap(),
+                git_dir.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+    let tip = flow::tip(&case.db, &case.repo, &lead, &git_dir).unwrap();
+    (lead, tip)
+}
+
+/// Records a worker of lead 35 in the team tables at its workspace, whose agent id is its
+/// team id, moves its worktree to the lead's tip and records its start there, as the
+/// engine cuts a worker from its lead (N1). Inputs: the case, the worker's workspace and
+/// the lead's tip. Output: none; the worker is in place.
+fn put_under_lead(case: &Case, workspace: &Workspace, lead_tip: &str) {
+    let agent: i64 = workspace.agent.id.parse().unwrap();
+    let project = workspace.project.as_str();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (?1,?2,'sub','claude',0,'idle',1,1,35)",
+            rusqlite::params![agent, project],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                agent,
+                project,
+                workspace.repository.to_str().unwrap(),
+                workspace.worktree.to_str().unwrap(),
+                workspace.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    git_in(
+        &case.home,
+        &workspace.worktree,
+        &["checkout", "-q", "--detach", lead_tip],
+    );
+    record_worktree_start(
+        &case.db,
+        &workspace.repository,
+        &workspace.worktree,
+        &workspace.git_dir,
+    )
+    .unwrap();
+}
+
+/// Puts a test change set's agent, as team agent 52, under lead 35 whose linked worktree
+/// is `files` lead files ahead of the owner's `main`. Inputs: the case and how many files
+/// the lead adds. Output: the lead's tip.
+fn worker_of_lead(case: &mut Case, files: usize) -> String {
+    let (_, lead_tip) = lead_35(case, files, false);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(case, &case.workspace, &lead_tip);
+    lead_tip
+}
+
+/// Sets the project's Lands setting as the owner picks it in Team settings. Inputs: the
+/// case and the setting's name. Output: none; the setting is stored.
+fn set_lands(case: &Case, lands: &str) {
+    case.db
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,2,?2)",
+            [case.workspace.project.as_str(), lands],
+        )
+        .unwrap();
+}
+
+/// A change set's files, added lines and removed lines, as its view counts them.
+type Counts = (u32, u32, u32);
+
+/// Reads the counts a change set holds after its turn end and after a poll, and every path
+/// its diff pages show. Inputs: the case and the change set. Output: both counts and the
+/// paths.
+fn measured(case: &Case, id: &ChangeSetId) -> (Counts, Counts, Vec<String>) {
+    let counts = |view: ChangeSetView| -> Counts { (view.files, view.added, view.removed) };
+    let recorded = counts(case.view(id));
+    observe(&case.db, None).unwrap();
+    let view = case.view(id);
+    assert_eq!(view.state, ChangeState::Pending);
+    let mut paths: Vec<String> = all_pages(case, id)
+        .iter()
+        .flat_map(|page| page.files.iter().map(|file| file.path.clone()))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    (recorded, counts(view), paths)
+}
+
+/// A lead's worker lands on its lead's branch, so its change set holds only what would
+/// change there: with the owner's branch far behind the lead, the set counts, judges and
+/// shows the worker's one file, never the lead's work the owner's branch lacks (owner
+/// session 2026-10-29, sets a3edc313 and ef58a29b).
+#[test]
+fn a_lead_worker_s_set_is_measured_against_its_lead_s_branch() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 30);
+    assert_ne!(case.tip(), lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let recorded = case.view(&id);
+    assert_eq!(
+        (recorded.files, recorded.added, recorded.removed),
+        (1, 1, 0),
+        "turn end counted the lead's work"
+    );
+    observe(&case.db, None).unwrap();
+    let observed = case.view(&id);
+    assert_eq!(observed.state, ChangeState::Pending);
+    assert_eq!(
+        (observed.files, observed.added, observed.removed),
+        (1, 1, 0),
+        "the owner view counted the lead's work"
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    let paths: Vec<&str> = page.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["worker.txt"], "the diff showed the lead's work");
+}
+
+/// While the owner's Lands setting is Owner, the owner accepts a lead's worker's set onto
+/// the owner's branch, so it is measured against that branch: the lead's work the owner's
+/// branch lacks is part of it (Q16, current rule).
+#[test]
+fn a_lead_worker_s_set_is_measured_against_the_owner_s_branch_while_lands_is_owner() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 30);
+    set_lands(&case, "owner");
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((31, 31, 0), (31, 31, 0)),
+        "a Lands Owner worker set was measured against its lead's branch"
+    );
+    assert_eq!(paths.len(), 31);
+    assert!(paths.iter().any(|path| path == "worker.txt"));
+    assert!(paths.iter().any(|path| path == "lead/file-0.txt"));
+}
+
+/// A worker of a lead in its own clone is measured against the lead's clone branch, read
+/// through the engine's checked fetch.
+#[test]
+fn a_clone_lead_s_worker_set_is_measured_against_the_lead_s_clone_branch() {
+    let mut case = Case::new();
+    let (_, lead_tip) = lead_35(&case, 30, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    assert_ne!(case.tip(), lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((1, 1, 0), (1, 1, 0)),
+        "the clone lead's work was counted"
+    );
+    assert_eq!(paths, ["worker.txt"]);
+}
+
+/// Update merges a lead's worker's set with its lead's branch, the branch it lands on, and
+/// the merge commit and the resolve prompt name that branch, never the owner's.
+#[test]
+fn update_merges_a_lead_worker_s_set_with_its_lead_s_branch_and_names_it() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 3);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let worker_head = case.view(&id).head;
+    let lead = case.repo.parent().unwrap().join("agent-35");
+    lead_commit(&case, &lead, &["lead/later.txt".to_owned()]);
+    let later = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    update(&case.db, &id).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%s", &view.head])
+            .trim(),
+        format!(
+            "{worker_head} {later}|Merge the lead's branch crazyagent/agent-35 into this agent's work"
+        )
+    );
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Updating, later.as_str())
+    );
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.starts_with(
+            "Your lead's branch crazyagent/agent-35 changed while your work waited for your lead's merge, so CrazyAgent merged it into your worktree.\n"
+        ),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("owner"), "{prompt}");
+}
+
+/// Update merges a clone lead's worker's set with the lead's clone branch as the engine
+/// fetches it now: the merge's second parent is the lead's newest commit, never the tip
+/// the worker started from, and the merge names the lead's clone branch.
+#[test]
+fn update_merges_a_clone_lead_s_newest_tip_into_its_worker_s_set() {
+    let mut case = Case::new();
+    let (lead, lead_tip) = lead_35(&case, 3, true);
+    case.workspace.agent.id = "52".into();
+    put_under_lead(&case, &case.workspace, &lead_tip);
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let worker_head = case.view(&id).head;
+    lead_commit(&case, &lead, &["lead/later.txt".to_owned()]);
+    let later = git_in(&case.home, &lead, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    assert_ne!(later, lead_tip);
+    update(&case.db, &id).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%s", &view.head])
+            .trim(),
+        format!(
+            "{worker_head} {later}|Merge the lead's branch agent/agent-35 into this agent's work"
+        )
+    );
+    assert_eq!(view.base, later);
+}
+
+/// A lead's worker whose lead's worktree is no longer recorded keeps its stored change and
+/// is never measured against the owner's branch, and Update refuses it instead of merging
+/// the owner's branch into a worker that lands on its lead's.
+#[test]
+fn a_lead_worker_whose_lead_s_worktree_is_gone_keeps_its_change_and_update_refuses() {
+    let mut case = Case::new();
+    worker_of_lead(&mut case, 30);
+    case.db
+        .execute("DELETE FROM team_worktrees WHERE agent=35", [])
+        .unwrap();
+    case.edit("worker.txt", "worker work\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let (recorded, observed, paths) = measured(&case, &id);
+    assert_eq!(
+        (recorded, observed),
+        ((1, 1, 0), (1, 1, 0)),
+        "the set was measured against the owner's branch"
+    );
+    assert_eq!(paths, ["worker.txt"]);
+    let before = case.view(&id);
+    assert_eq!(refused(update(&case.db, &id)), "changes_workspace_invalid");
+    assert_eq!(case.view(&id), before);
+}
+
+/// A Changes poll reads one lead's branch once for all of its workers' sets: six worker
+/// sets of one lead cost the git runs two do.
+#[test]
+fn a_poll_reads_a_lead_s_tip_once_for_all_of_its_workers() {
+    let mut case = Case::new();
+    let lead_tip = worker_of_lead(&mut case, 3);
+    case.edit("worker.txt", "worker work\n");
+    let mut ids = vec![case.turn(TurnOutcome::Succeeded).unwrap()];
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    let open = |agent: usize| {
+        let name = format!("agent-{agent}");
+        let worktree = case.repo.parent().unwrap().join(&name);
+        case.owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "main",
+        ]);
+        let workspace = Workspace {
+            agent: ChangeAgent {
+                kind: AgentKind::Sub,
+                id: agent.to_string(),
+                label: format!("Worker {agent}"),
+            },
+            worktree,
+            git_dir: case.repo.join(".git/worktrees").join(&name),
+            ..case.workspace.clone()
+        };
+        put_under_lead(&case, &workspace, &lead_tip);
+        write(&workspace.worktree.join(format!("{name}.txt")), "notes\n");
+        record_turn_end(&case.db, &workspace, &turn)
+            .unwrap()
+            .expect("the worker's work opens a change set")
+    };
+    let runs = || {
+        case.observe();
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        case.observe();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    ids.push(open(60));
+    let two = runs();
+    ids.extend((61..=64).map(open));
+    assert_eq!(
+        runs(),
+        two,
+        "six worker sets of one lead cost more git runs than two"
+    );
+    for id in &ids {
+        let view = case.view(id);
+        assert_eq!(
+            (view.state, view.files, view.added, view.removed),
+            (ChangeState::Pending, 1, 1, 0)
+        );
+    }
+}
+
+impl Case {
+    /// Merges a commit into the agent worktree the way an agent running git by its full
+    /// path can, with a merge commit. Input: the commit. Output: the new HEAD.
+    fn agent_merge(&self, commit: &str) -> String {
+        self.agent(&[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "merge",
+            "-q",
+            "--no-ff",
+            "--no-edit",
+            commit,
+        ]);
+        self.agent_head()
+    }
+
+    /// Makes branch `side` in the owner repository with one commit the owner's branch
+    /// does not hold, leaving the owner on its branch. Output: the side tip.
+    fn side_branch(&self) -> String {
+        self.owner(&["checkout", "-q", "-b", "side"]);
+        self.owner_commit("side.txt", "side\n", "Side work");
+        let side = self.owner(&["rev-parse", "side"]).trim().to_owned();
+        self.owner(&["checkout", "-q", "main"]);
+        side
+    }
+}
+
+fn merge_turn() -> TurnEnd {
+    TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Do the work".into(),
+    }
+}
+
+#[test]
+fn a_change_set_whose_agent_merged_another_branch_is_refused_and_nothing_is_committed() {
+    let case = Case::new();
+    case.start();
+    let side = case.side_branch();
+    case.edit("own.txt", "own\n");
+    case.agent_commit("Own work");
+    let merged = case.agent_merge(&side);
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), side);
+    case.edit("own.txt", "own\nuncommitted\n");
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_outside_merge"
+    );
+    assert_eq!(case.agent_head(), merged);
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+}
+
+#[test]
+fn the_engines_own_update_merge_leaves_the_next_turn_to_add_to_its_change_set() {
+    let case = Case::new();
+    case.start();
+    case.edit("own.txt", "own\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let owner_tip = case.owner_commit("other.txt", "owner\n", "Owner work");
+    update(&case.db, &id).unwrap();
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), owner_tip);
+    case.edit("own.txt", "own\nmore\n");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+#[test]
+fn a_merge_already_in_the_commit_an_agent_started_from_is_not_its_own() {
+    let case = Case::new();
+    let side = case.side_branch();
+    let inherited = case.agent_merge(&side);
+    case.start();
+    case.edit("own.txt", "own\n");
+    assert!(case.turn(TurnOutcome::Succeeded).is_some());
+    assert_eq!(
+        case.agent(&["rev-parse", "HEAD~1"]).trim(),
+        inherited,
+        "the turn commit sits on the inherited merge"
+    );
+}
+
+#[test]
+fn a_lead_may_merge_its_own_workers_tip_and_is_refused_for_any_other_branch() {
+    let mut case = Case::new();
+    case.workspace.agent.id = "1".into();
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute_batch(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,mode)
+             VALUES (1,'project-1','sub','claude',1,'running',1,1,NULL,'app_spawned'),
+                    (2,'project-1','sub','claude',1,'running',1,1,1,'app_spawned');",
+        )
+        .unwrap();
+    let worker = second_agent(&case);
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (2,'project-1',?1,?2,?3)",
+            rusqlite::params![
+                worker.repository.to_str().unwrap(),
+                worker.worktree.to_str().unwrap(),
+                worker.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    case.start();
+    write(&worker.worktree.join("worker.txt"), "worker\n");
+    git_in(&case.home, &worker.worktree, &["add", "-A"]);
+    git_in(
+        &case.home,
+        &worker.worktree,
+        &[
+            "-c",
+            "user.name=Worker",
+            "-c",
+            "user.email=worker@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Worker work",
+        ],
+    );
+    let worker_tip = git_in(&case.home, &worker.worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+    case.agent_merge(&worker_tip);
+    assert_eq!(case.agent(&["rev-parse", "HEAD^2"]).trim(), worker_tip);
+    let id = record_turn_end(&case.db, &case.workspace, &merge_turn())
+        .unwrap()
+        .unwrap();
+    let side = case.side_branch();
+    let merged = case.agent_merge(&side);
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &merge_turn())),
+        "changes_outside_merge"
+    );
+    assert_eq!(case.agent_head(), merged);
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+impl Case {
+    fn observe(&self) {
+        observe(&self.db, Some(&self.workspace.project)).unwrap();
+    }
+
+    /// Checks a change set closed as landed outside the app: accepted, marked outside, its
+    /// pending ref gone, no action left, the quiet agent worktree on the owner's tip and
+    /// no change set opened by the next turn. Inputs: the change set and its head.
+    fn landed_outside(&self, id: &ChangeSetId, head: &str) {
+        let view = self.view(id);
+        assert_eq!(
+            (view.state, view.outside),
+            (ChangeState::Accepted, true),
+            "{view:?}"
+        );
+        assert_eq!(self.owner_refs("refs/crazyagent"), "");
+        assert_eq!(refused(self.accept(id)), "changes_stale");
+        assert_eq!(
+            refused(discard(&self.db, id, head, NOW_MS)),
+            "changes_stale"
+        );
+        assert_eq!(self.agent_head(), self.tip());
+        assert_eq!(self.turn(TurnOutcome::Succeeded), None);
+    }
+
+    /// Checks a change set closed as removed outside the app: discarded, marked outside,
+    /// never restorable, its pending ref gone and no action left. Inputs: the change set
+    /// and its head.
+    fn removed_outside(&self, id: &ChangeSetId, head: &str) {
+        let view = self.view(id);
+        assert_eq!(
+            (view.state, view.outside, view.restorable_until_ms),
+            (ChangeState::Discarded, true, None),
+            "{view:?}"
+        );
+        assert_eq!(self.owner_refs("refs/crazyagent"), "");
+        assert_eq!(
+            refused(restore(&self.db, id, NOW_MS)),
+            "changes_restore_expired"
+        );
+        assert_eq!(
+            refused(discard(&self.db, id, head, NOW_MS)),
+            "changes_stale"
+        );
+    }
+}
+
+#[test]
+fn a_change_set_the_owner_merged_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.outside, view.files, view.added),
+        (ChangeState::Pending, false, 1, 1)
+    );
+    case.owner(&[
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        "Merge the agent work",
+        &head,
+    ]);
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_cherry_picked_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.owner(&["cherry-pick", &head]);
+    assert_eq!(
+        case.owner(&["branch", "--contains", &head]),
+        "",
+        "the pick copied the change, not the commit"
+    );
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_squashed_outside_the_app_closes_as_landed_outside() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    assert_eq!(case.view(&id).files, 2);
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.owner(&["merge", "--squash", "-q", &head]);
+    case.owner(&["commit", "-q", "-m", "Squash the agent work"]);
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_of_it_lands() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.owner_commit("README", "one\ntwo\nthree\nfour\n", "Owner adds the line");
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.outside,
+            view.files,
+            view.added,
+            view.removed
+        ),
+        (ChangeState::Pending, false, 1, 1, 0)
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    let files: Vec<_> = page.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(files, ["src/new.rs"]);
+    assert!(!page.text.contains("+four"), "{}", page.text);
+    assert!(page.text.contains("+fn main() {}"), "{}", page.text);
+    case.owner_commit("src/new.rs", "fn main() {}\n", "Owner adds main");
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_whose_worktree_was_deleted_outside_the_app_closes_as_removed_outside() {
+    for removal in ["git worktree remove", "rm -rf"] {
+        let case = Case::new();
+        case.edit("src/new.rs", "fn main() {}\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        let head = case.view(&id).head;
+        case.observe();
+        assert_eq!(case.view(&id).state, ChangeState::Pending, "{removal}");
+        let worktree = case.workspace.worktree.to_str().unwrap();
+        match removal {
+            "git worktree remove" => {
+                case.owner(&["worktree", "remove", "--force", worktree]);
+            }
+            _ => std::fs::remove_dir_all(worktree).unwrap(),
+        }
+        case.observe();
+        case.removed_outside(&id, &head);
+    }
+}
+
+#[test]
+fn an_own_branch_change_set_whose_branch_was_deleted_outside_the_app_closes_as_removed_outside() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    case.agent(&["checkout", "-q", "--detach"]);
+    case.agent(&["branch", "-q", "-D", "agent/agent-own"]);
+    case.observe();
+    case.removed_outside(&id, &head);
+}
+
+#[test]
+fn a_change_set_whose_commit_is_gone_closes_as_removed_outside() {
+    let case = Case::new();
+    case.edit("src/new.rs", "fn main() {}\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    case.observe();
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+    let object = case
+        .repo
+        .join(".git/objects")
+        .join(&head[..2])
+        .join(&head[2..]);
+    std::fs::remove_file(&object).unwrap();
+    case.observe();
+    case.removed_outside(&id, &head);
+}
+
+#[test]
+fn a_poll_checks_every_open_head_with_one_git_run_for_the_repository() {
+    let case = Case::new();
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Write notes".into(),
+    };
+    case.edit("agent-1.txt", "one\n");
+    let mut ids = vec![case.turn(TurnOutcome::Succeeded).unwrap()];
+    let open = |number: usize| {
+        let agent = numbered_agent(&case, number);
+        write(
+            &agent.worktree.join(format!("agent-{number}.txt")),
+            &format!("{number}\n"),
+        );
+        record_turn_end(&case.db, &agent, &turn)
+            .unwrap()
+            .expect("the agent's work opens a change set")
+    };
+    let runs = || {
+        case.observe();
+        let before = git::GIT_RUNS.with(std::cell::Cell::get);
+        case.observe();
+        git::GIT_RUNS.with(std::cell::Cell::get) - before
+    };
+    ids.push(open(2));
+    let two = runs();
+    assert!(two >= 1, "the poll checks the heads");
+    ids.extend((3..=6).map(open));
+    assert_eq!(runs(), two, "six open sets cost the git runs two do");
+    let heads: Vec<String> = ids.iter().map(|id| case.view(id).head).collect();
+    assert_eq!(
+        heads
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        6
+    );
+    assert!(
+        ids.iter()
+            .all(|id| case.view(id).state == ChangeState::Pending)
+    );
+
+    let gone = &heads[3];
+    std::fs::remove_file(
+        case.repo
+            .join(".git/objects")
+            .join(&gone[..2])
+            .join(&gone[2..]),
+    )
+    .unwrap();
+    case.observe();
+    for (id, head) in ids.iter().zip(&heads) {
+        let view = case.view(id);
+        let expected = if head == gone {
+            (ChangeState::Discarded, true)
+        } else {
+            (ChangeState::Pending, false)
+        };
+        assert_eq!((view.state, view.outside), expected, "{view:?}");
+    }
+}
+
+#[test]
+fn a_change_set_the_owner_has_not_landed_stays_open_with_its_whole_change() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let head = case.view(&id).head;
+    let before = case.view(&id);
+    case.owner_commit("other.txt", "owner work\n", "Owner work");
+    case.observe();
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (
+            view.state,
+            view.outside,
+            view.files,
+            view.added,
+            view.removed
+        ),
+        (
+            ChangeState::Pending,
+            false,
+            before.files,
+            before.added,
+            before.removed
+        )
+    );
+    let page = diff(&case.db, &id, 0).unwrap();
+    assert!(page.text.contains("+four"), "{}", page.text);
+
+    case.owner(&[
+        "merge",
+        "--no-ff",
+        "-q",
+        "-m",
+        "Merge the agent work",
+        &head,
+    ]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    case.observe();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.outside),
+        (ChangeState::Pending, false),
+        "a detached owner HEAD judges nothing"
+    );
+    case.owner(&["checkout", "-q", "main"]);
+    case.observe();
+    case.landed_outside(&id, &head);
+}
+
+#[test]
+fn an_import_commit_that_loses_the_branch_race_leaves_only_the_staged_deletion_and_a_retry_lands() {
+    let case = Case::new();
+    let start = case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    std::fs::remove_file(case.repo.join("CLAUDE.md")).unwrap();
+    let elsewhere = std::cell::RefCell::new(String::new());
+    let lost = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {
+            let moved = case
+                .owner(&[
+                    "commit-tree",
+                    "main^{tree}",
+                    "-p",
+                    "main",
+                    "-m",
+                    "Elsewhere",
+                ])
+                .trim()
+                .to_owned();
+            case.owner(&["update-ref", "refs/heads/main", &moved]);
+            *elsewhere.borrow_mut() = moved;
+        },
+    );
+    assert_eq!(refused(lost), "changes_branch_moved");
+    let elsewhere = elsewhere.into_inner();
+    assert_eq!(case.tip(), elsewhere);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &elsewhere]).trim(),
+        start
+    );
+    assert_eq!(
+        case.owner(&["status", "--porcelain"]),
+        "D  CLAUDE.md\n",
+        "only the deletion is staged; the owner's files are untouched"
+    );
+    let (commit, branch, files) = owner::commit_deletions(
+        &case.repo,
+        &case.home,
+        &["CLAUDE.md"],
+        "Move CLAUDE.md\n",
+        &|| {},
+    )
+    .unwrap();
+    assert_eq!(
+        (branch.as_str(), files),
+        ("main", vec!["CLAUDE.md".to_owned()])
+    );
+    assert_eq!(case.tip(), commit);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>|%s", &commit])
+            .trim(),
+        format!("{elsewhere}|Repo Owner <owner@example.invalid>|Move CLAUDE.md")
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn a_checkout_dirty_only_by_the_instruction_import_refuses_accept_until_the_move_is_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("CLAUDE.md", "RULE\n", "Rules");
+    let moved = crate::instruction_files::import(&case.repo).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.tracked, file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true, true)]
+    );
+    let head = case.view(&id).head;
+    let before = case.tip();
+    assert_eq!(
+        refused(accept_into(&case.db, &case.home, &id, &head, None, "main")),
+        "changes_owner_dirty"
+    );
+    assert_eq!(case.tip(), before, "a refused accept moves no branch");
+    assert_eq!(
+        crate::instruction_files::uncommitted(&case.repo).unwrap(),
+        ["CLAUDE.md"]
+    );
+    let made = crate::instruction_files::commit(&case.repo, &case.home).unwrap();
+    assert_eq!(made.files, ["CLAUDE.md"]);
+    assert_eq!(
+        (made.branch.as_str(), case.tip()),
+        ("main", made.commit.clone())
+    );
+    assert!(
+        crate::instruction_files::uncommitted(&case.repo)
+            .unwrap()
+            .is_empty()
+    );
+    let AcceptOutcome::Landed { commit, branch } =
+        accept_into(&case.db, &case.home, &id, &head, None, "main").unwrap()
+    else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        made.commit
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join(".crazyagent/imported/CLAUDE.md")).unwrap(),
+        "RULE\n"
+    );
+}
+
+/// The paths every diff page of a change set names, in page order. Inputs: the case and
+/// the set. Output: the paths.
+fn shown_paths(case: &Case, id: &ChangeSetId) -> Vec<String> {
+    all_pages(case, id)
+        .iter()
+        .flat_map(|page| page.files.iter().map(|file| file.path.clone()))
+        .collect()
+}
+
+/// A change set whose base is older than the owner's tip, part of it already on the
+/// owner's branch, shows only the rest, measured from the merge base of the owner's tip
+/// and its head; with the owner's checkout detached it falls back to its stored base; and
+/// Accept lands only the rest (DEC-107 rule 1, fix/changes-vs-owner-branch).
+#[test]
+fn a_set_the_owner_holds_part_of_shows_and_lands_only_the_rest() {
+    let case = Case::new();
+    case.start();
+    case.edit("a.txt", "a\n");
+    let first = case.agent_commit("Add a");
+    case.edit("b.txt", "b\n");
+    case.agent_commit("Add b");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(shown_paths(&case, &id), ["a.txt", "b.txt"]);
+    case.owner(&["merge", "-q", "--ff-only", &first]);
+    assert_eq!(shown_paths(&case, &id), ["b.txt"]);
+    case.owner(&["checkout", "-q", "--detach"]);
+    assert_eq!(
+        shown_paths(&case, &id),
+        ["a.txt", "b.txt"],
+        "a detached owner checkout falls back to the stored base"
+    );
+    case.owner(&["checkout", "-q", "main"]);
+    assert_eq!(shown_paths(&case, &id), ["b.txt"]);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P", &commit]).trim(),
+        first
+    );
+    assert_eq!(
+        case.owner(&["diff", "--name-only", &first, &commit]),
+        "b.txt\n"
+    );
+}
+
+/// Writes `count` small files under one folder of the agent's worktree, "" for its root.
+/// Inputs: the case, the folder and the count.
+fn add_files(case: &Case, folder: &str, count: u32) {
+    let at = case.workspace.worktree.join(folder);
+    std::fs::create_dir_all(&at).unwrap();
+    for file in 0..count {
+        std::fs::write(at.join(format!("f{file}.txt")), format!("{file}\n")).unwrap();
+    }
+}
+
+/// Ends one successful turn of the case's agent. Input: the case. Output: what the turn
+/// end gave.
+fn turn_result(case: &Case) -> Result<Option<ChangeSetId>, EngineError> {
+    record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+}
+
+/// A turn whose work adds more files than the limit to one new top-level folder is refused
+/// with the folder, its count and the limit for the agent; at the limit it is kept, and a
+/// folder the owner's branch has or files at the root never count (DEC-107 rule 3,
+/// fix/changes-vs-owner-branch).
+#[test]
+fn a_new_folder_past_the_default_limit_is_refused_with_its_count() {
+    let case = Case::new();
+    add_files(&case, "scratch", 1001);
+    let refused = turn_result(&case).unwrap_err();
+    assert_eq!(refusal_code(&refused), NEW_FOLDER_REFUSED);
+    let told = refusal_for_agent(&refused).unwrap();
+    assert!(
+        told.contains(
+            "folder scratch/ adds 1001 files, more than this project's limit of 1000 files"
+        ),
+        "{told}"
+    );
+
+    let case = Case::new();
+    add_files(&case, "scratch", 1000);
+    assert!(turn_result(&case).unwrap().is_some());
+
+    let case = Case::new();
+    case.owner_commit("src/keep.txt", "kept\n", "Add src");
+    add_files(&case, "src", 1001);
+    assert!(turn_result(&case).unwrap().is_some());
+
+    let case = Case::new();
+    add_files(&case, "", 1001);
+    assert!(turn_result(&case).unwrap().is_some());
+}
+
+/// The owner's New folder limit setting, stored for the project, replaces the default.
+#[test]
+fn a_new_folder_limit_the_owner_set_is_the_one_applied() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,100)",
+            [case.workspace.project.as_str()],
+        )
+        .unwrap();
+    add_files(&case, "scratch", 101);
+    let refused = turn_result(&case).unwrap_err();
+    assert!(
+        refusal_for_agent(&refused)
+            .unwrap()
+            .contains("adds 101 files, more than this project's limit of 100 files"),
+        "{refused:?}"
     );
 }

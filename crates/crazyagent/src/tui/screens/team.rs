@@ -3,17 +3,23 @@ use crate::config::plain_problem;
 use crate::engine::owner::AgentInstructions;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph};
+use crate::team::{
+    AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph,
+};
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
 use crate::tui::keys::Key;
+use crate::tui::screens::new_project_page::{key_event, look};
+use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
-use crate::tui::screens::project_team::account_name;
+use crate::tui::screens::project_team::{TeamReply, TeamView, account_name, team_plain};
+use crate::tui::screens::project_time::local_offset;
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -22,9 +28,11 @@ use crate::tui::theme::Role;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
+use std::collections::BTreeSet;
 
 mod cleanup;
 mod finished;
+mod questions;
 #[cfg(test)]
 mod tests;
 
@@ -42,9 +50,17 @@ const MASTER_WAITING: &str =
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
-const MASTER_STOPPED: &str =
-    "The live master is stopped. Its terminal opens again once you start it.";
+const MASTER_STOPPED: &str = "The live master is stopped.";
+const MASTER_RESTART: &str =
+    "It starts again when you open this view again or press n for a new session.";
 const MASTER_HEAD_ROWS: u16 = 1;
+const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
+const MASTER_PAUSED_START: &str =
+    "S starts every agent of this project again; the master starts with them.";
+const MASTER_TEAM_STOPPED: &str = "Team stopped.";
+/// The master view header's session keys, widest first; the state picks the widest that
+/// fits beside it whole.
+const MASTER_CONTROLS: [&str; 2] = ["n New session  l Sessions", "n New session"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -60,9 +76,12 @@ enum Item {
 
 enum Body {
     Master(usize),
-    Group { node: usize, count: usize },
     Agent(usize),
-    Account(String),
+    Detail {
+        account: Option<String>,
+        branch: Option<String>,
+    },
+    Note(String),
     Heading(&'static str),
     Blank,
     Edge(usize),
@@ -85,6 +104,7 @@ struct LiveSwitch {
 
 struct Attached {
     agent: AgentId,
+    teammate: Option<String>,
     node: String,
     label: String,
     pane: TerminalPane,
@@ -101,12 +121,14 @@ struct Instructions {
     top: usize,
 }
 
-/// A project's live team: a boxed tree of the master, one group per harness
-/// and each agent with its status and account, the tasks the master handed out
-/// under it, and the selected agent's live terminal beside it.
+/// A project's live team: a boxed tree of who leads whom, the master over its
+/// harness leads and each lead over its sub-agents and native teammates, each
+/// with its status, account and branch, the tasks handed out under it, and the
+/// selected agent's live terminal beside it.
 /// Input: TeamGraph reads, terminal frames and keys; while the terminal has
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
+/// s opens the team settings over the whole body, read with `SetupQuery::Team`.
 /// The master view is the same screen showing only the live master's terminal.
 pub struct Team {
     project: ProjectId,
@@ -116,6 +138,7 @@ pub struct Team {
     switch: Option<LiveSwitch>,
     want: Option<bool>,
     refused: Option<String>,
+    paused: bool,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
     offset: usize,
@@ -124,7 +147,9 @@ pub struct Team {
     task: Option<i64>,
     cleanup: cleanup::Cleanup,
     finished: finished::Finished,
+    questions: questions::Questions,
     instructions: Option<Instructions>,
+    settings: Option<TeamView>,
 }
 
 impl Team {
@@ -139,6 +164,7 @@ impl Team {
             switch: None,
             want: None,
             refused: None,
+            paused: false,
             graph: Load::Loading,
             cursor: 0,
             offset: 0,
@@ -147,13 +173,64 @@ impl Team {
             task: None,
             cleanup: cleanup::Cleanup::new(),
             finished: finished::Finished::new(),
+            questions: questions::Questions::new(),
             instructions: None,
+            settings: None,
         }
     }
 
-    /// The master view of one project: a header with the live master switch, then the
+    /// Opens the team settings of this project over the team tree: keep warm, limits,
+    /// wake rules, branches, merging, stops, caps and the token budget.
+    /// Input: the context. Output: none; the first team read is queued.
+    fn open_settings(&mut self, ctx: &mut Ctx) {
+        let mut view = TeamView::new(self.project.clone());
+        view.offset = local_offset(now_ms());
+        self.settings = Some(view);
+        self.pump_settings(ctx);
+    }
+
+    /// Sends the open team settings' next team read once one is due.
+    /// Input: the context. Output: none; a Setup request may be queued.
+    fn pump_settings(&mut self, ctx: &mut Ctx) {
+        if let Some(query) = self
+            .settings
+            .as_mut()
+            .and_then(|view| view.next_query(now_ms()))
+        {
+            ctx.request(Request::Setup(query));
+        }
+    }
+
+    /// Takes a key while the team settings are open: the settings take it first, a change
+    /// goes to the engine as `SetupQuery::TeamChange`, and Esc the settings left alone
+    /// closes them. Inputs: the key and the context. Output: handled.
+    fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(view) = self.settings.as_mut() else {
+            return Flow::Ignored;
+        };
+        let reply = match key {
+            Key::Paste(text) if view.paste(text) => TeamReply::Handled,
+            Key::Paste(_) => TeamReply::Ignored,
+            other => key_event(other).map_or(TeamReply::Ignored, |event| view.key(event)),
+        };
+        match reply {
+            TeamReply::Change(action) => {
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::TeamChange {
+                    action,
+                    generation,
+                }));
+            }
+            TeamReply::Ignored if *key == Key::Esc => self.settings = None,
+            TeamReply::Ignored | TeamReply::Handled => {}
+        }
+        self.pump_settings(ctx);
+        Flow::Handled
+    }
+
+    /// The master view of one project: a header with the live master's state, then the
     /// live master's own terminal filling the body, opened as soon as the team shows it.
-    /// The first open of a project whose switch was never set turns the master on.
+    /// Every open turns the master on; it stops only on the master idle stop or app quit.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
@@ -169,18 +246,18 @@ impl Team {
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
     }
 
-    fn turn_live(&mut self, on: bool, ctx: &mut Ctx) {
+    fn start_live(&mut self, ctx: &mut Ctx) {
         self.asked = true;
-        self.want = Some(on);
+        self.want = Some(true);
         self.refused = None;
-        if !on {
-            self.detach(ctx);
+        if let Some(switch) = self.switch.as_mut() {
+            switch.problem = None;
         }
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: TeamAction::LiveMaster {
                 project_id: self.project.clone(),
-                on,
+                on: true,
             },
             generation,
         }));
@@ -193,7 +270,8 @@ impl Team {
     }
 
     /// Takes a team status read or a live switch change of this master view: a good read
-    /// replaces the switch and turns a never set one on once; a failed read changes nothing;
+    /// replaces the switch, and the first one of this open turns a switch that is not on
+    /// on; a failed read changes nothing;
     /// an accepted change is the switch until the next read, which is read at once.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
@@ -210,6 +288,7 @@ impl Team {
                 let Ok(SetupView::Team(status)) = result else {
                     return;
                 };
+                self.paused = status.paused;
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
@@ -218,10 +297,10 @@ impl Team {
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
                 }
-                let never = switch.on.is_none();
+                let off = switch.on != Some(true);
                 self.switch = Some(switch);
-                if never && !self.asked {
-                    self.turn_live(true, ctx);
+                if off && !self.asked {
+                    self.start_live(ctx);
                 }
             }
             SetupQuery::TeamChange {
@@ -240,18 +319,32 @@ impl Team {
                 }
                 Err(code) => {
                     self.want = None;
-                    if *on {
-                        self.refused = Some(code.clone());
-                    } else {
-                        ctx.say(Message::warning(
-                            "The live master could not be stopped.",
-                            plain_problem(code).unwrap_or(code.as_str()),
-                        ));
-                    }
+                    self.refused = Some(code.clone());
                 }
+            },
+            SetupQuery::TeamChange {
+                action: TeamAction::Resume { project_id },
+                ..
+            } if *project_id == self.project => match result {
+                Ok(_) => self.read_switch(ctx),
+                Err(code) => ctx.say(Message::error(&refusal(code), "")),
             },
             _ => {}
         }
+    }
+
+    /// Starts every agent of a stopped team again from the master view, the same change as
+    /// Start all on the team page; the live master then starts with the team.
+    /// Input: the context. Output: none; the change and a fresh team read are queued.
+    fn start_team(&mut self, ctx: &mut Ctx) {
+        assert!(self.master && self.paused);
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::Resume {
+                project_id: self.project.clone(),
+            },
+            generation,
+        }));
     }
 
     /// Opens the master's terminal once the team lists it, and the new one
@@ -287,13 +380,15 @@ impl Team {
             .is_some_and(|attached| attached.closed.is_none());
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
-            Key::Char('s') => {
-                let on = self.live_on() == Some(false);
-                self.turn_live(on, ctx);
-            }
+            Key::Char('S') if self.paused => self.start_team(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char(code @ ('n' | 'l')) => {
+                ctx.sessions_key = Some((self.project.clone(), *code));
+                self.detach(ctx);
+                return Flow::Back;
+            }
             Key::Esc => {
                 self.detach(ctx);
                 return Flow::Back;
@@ -306,7 +401,7 @@ impl Team {
     fn items(&self, glyphs: &Glyphs) -> Vec<Item> {
         self.graph
             .ready()
-            .map(|graph| tree(graph, glyphs))
+            .map(|graph| tree(graph, glyphs, usize::MAX))
             .unwrap_or_default()
             .into_iter()
             .filter_map(|row| row.item)
@@ -375,22 +470,32 @@ impl Team {
             ));
             return;
         };
+        let teammate = target
+            .pane
+            .clone()
+            .filter(|_| target.kind == NodeKind::Teammate && target.agent.is_none());
+        if teammate
+            .as_deref()
+            .is_some_and(|pane| !crate::terminal::pane_id_valid(pane))
+        {
+            ctx.say(Message::warning(
+                "This teammate's pane can't be opened.",
+                "Press r to read the team again.",
+            ));
+            return;
+        }
         let (id, label) = (target.id.clone(), target.label.clone());
         self.task = None;
         self.instructions = None;
-        if self
-            .attached
-            .as_ref()
-            .is_some_and(|attached| attached.agent == agent && attached.closed.is_none())
-        {
+        if self.attached.as_ref().is_some_and(|attached| {
+            attached.agent == agent && attached.teammate == teammate && attached.closed.is_none()
+        }) {
             self.focus = Focus::Terminal;
             return;
         }
         self.detach(ctx);
         let (rows, cols) = pane_size(ctx, self.master);
-        ctx.request(Request::TerminalAttach {
-            agent: agent.clone(),
-        });
+        ctx.request(attach_request(&agent, teammate.as_deref()));
         ctx.request(Request::TerminalResize {
             agent: agent.clone(),
             cols,
@@ -398,6 +503,7 @@ impl Team {
         });
         self.attached = Some(Attached {
             agent,
+            teammate,
             node: id,
             label,
             pane: TerminalPane::new(rows, cols),
@@ -433,9 +539,10 @@ impl Team {
         };
         attached.closed = None;
         attached.size = (rows, cols);
-        ctx.request(Request::TerminalAttach {
-            agent: attached.agent.clone(),
-        });
+        ctx.request(attach_request(
+            &attached.agent,
+            attached.teammate.as_deref(),
+        ));
         ctx.request(Request::TerminalResize {
             agent: attached.agent.clone(),
             cols,
@@ -465,6 +572,33 @@ impl Team {
             });
         }
         attached.closed = Some(STOPPED.into());
+    }
+
+    /// Opens the terminal of the agent a Questions row names, as Enter on its node does,
+    /// and moves the tree cursor to that node. Inputs: the terminal and the context.
+    /// Output: none; an agent the tree does not show yet gets a plain message.
+    fn open_agent(&mut self, agent: &AgentId, ctx: &mut Ctx) {
+        let node = self.graph.ready().and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .position(|node| node.terminal.as_ref() == Some(agent))
+        });
+        let Some(node) = node else {
+            ctx.say(Message::warning(
+                "That agent is not in the team tree yet.",
+                "Press r to read the team again.",
+            ));
+            return;
+        };
+        if let Some(at) = self
+            .items(ctx.glyphs)
+            .iter()
+            .position(|item| *item == Item::Node(node))
+        {
+            self.cursor = at;
+        }
+        self.open(node, ctx);
     }
 
     fn show_task(&mut self, edge: usize) {
@@ -522,7 +656,15 @@ impl Team {
         };
         open.read = match &event.result {
             Ok(ProcessReply::Agent(view)) => Load::Ready(view.clone()),
-            Ok(ProcessReply::Text(_) | ProcessReply::Saved(_) | ProcessReply::Settings(_)) => {
+            Ok(
+                ProcessReply::Text(_)
+                | ProcessReply::Saved(_)
+                | ProcessReply::Settings(_)
+                | ProcessReply::Adoption(_)
+                | ProcessReply::Files(_)
+                | ProcessReply::Paths(_)
+                | ProcessReply::Committed(_),
+            ) => {
                 return;
             }
             Err(code) if code == NOT_READY => Load::NotReady,
@@ -540,7 +682,6 @@ impl Team {
             return;
         }
         attached.size = (rows, cols);
-        attached.pane.resize(rows, cols);
         if attached.closed.is_none() {
             ctx.request(Request::TerminalResize {
                 agent: attached.agent.clone(),
@@ -615,7 +756,7 @@ impl Team {
                 "Agents show here once the master starts work.",
             );
         }
-        let rows = tree(graph, glyphs);
+        let rows = tree(graph, glyphs, limit.saturating_sub(2));
         let selected = rows
             .iter()
             .enumerate()
@@ -659,7 +800,7 @@ impl Team {
                 "{} {} {}",
                 label(graph, &edge.from),
                 glyphs.right,
-                label(graph, &edge.to)
+                ran_by(graph, edge)
             )),
             styled(
                 format!("{} {word}", glyphs.status(kind)),
@@ -667,9 +808,10 @@ impl Team {
                 theme,
             ),
             styled(
-                match edge.source {
-                    TaskSource::Master => "Handed out by the master.",
-                    TaskSource::Owner => "Handed off by you.",
+                match (&edge.lead, edge.source) {
+                    (Some(lead), _) => format!("Handed out by {}.", label(graph, lead)),
+                    (None, TaskSource::Master) => "Handed out by the master.".to_owned(),
+                    (None, TaskSource::Owner) => "Handed off by you.".to_owned(),
                 },
                 Role::Muted,
                 theme,
@@ -686,29 +828,27 @@ impl Team {
         Some(lines)
     }
 
-    fn switch_control(&self) -> &'static str {
-        if self.live_on() == Some(false) {
-            "Start live master"
-        } else {
-            "Stop live master"
-        }
-    }
-
     /// The master view's header: whether the live master is on, where the live session's
-    /// master harness last switched, and the key that switches it at the right edge.
-    /// Inputs: the width and context. Output: the line.
+    /// master harness last switched, and the session keys at the right edge. The state is
+    /// kept whole: when it does not fit beside both keys, only n New session shows and
+    /// l Sessions stays in the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
         let switched = self
             .switch
             .as_ref()
             .and_then(|switch| switch.switched.as_deref());
-        let state = match (self.live_on() == Some(false), switched) {
-            (true, None) => MASTER_OFF.to_owned(),
-            (true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
-            (false, None) => MASTER_ON.to_owned(),
-            (false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
+        let state = match (self.paused, self.live_on() == Some(false), switched) {
+            (true, _, _) => MASTER_TEAM_STOPPED.to_owned(),
+            (false, true, None) => MASTER_OFF.to_owned(),
+            (false, true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
+            (false, false, None) => MASTER_ON.to_owned(),
+            (false, false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
         };
-        let control = format!("s {}", self.switch_control());
+        let control = MASTER_CONTROLS
+            .into_iter()
+            .find(|control| width(&state) + 2 + width(control) <= limit)
+            .unwrap_or(MASTER_CONTROLS[1])
+            .to_owned();
         let room = limit.saturating_sub(width(&control));
         if room < width(MASTER_OFF) + 2 {
             return styled(
@@ -736,6 +876,24 @@ impl Team {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
         }
+        if let Some((title, lines, cursor)) =
+            self.questions.lines(limit, usize::from(inner.height), ctx)
+        {
+            let typing = cursor.is_some();
+            boxed(frame, area, &title, typing, lines, ctx);
+            return cursor.map(|(row, column)| Position {
+                x: inner.x.saturating_add(
+                    u16::try_from(column)
+                        .unwrap_or(u16::MAX)
+                        .min(inner.width.saturating_sub(1)),
+                ),
+                y: inner.y.saturating_add(
+                    u16::try_from(row)
+                        .unwrap_or(u16::MAX)
+                        .min(inner.height.saturating_sub(1)),
+                ),
+            });
+        }
         if let Some(open) = self.instructions.as_mut() {
             let lines = instruction_lines(&open.read, limit, ctx);
             open.top = open
@@ -751,10 +909,23 @@ impl Team {
             return None;
         }
         let focused = self.focus == Focus::Terminal;
+        if self.master && self.paused && self.attached.is_none() {
+            let mut lines: Vec<Line<'static>> = wrap(MASTER_PAUSED, limit)
+                .into_iter()
+                .map(Line::raw)
+                .collect();
+            lines.extend(
+                wrap(MASTER_PAUSED_START, limit)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            boxed(frame, area, "Master", false, lines, ctx);
+            return None;
+        }
         if let Some(code) = self.refused.as_deref().filter(|_| self.attached.is_none()) {
             let mut lines = vec![Line::raw("The master terminal could not start.")];
             lines.extend(
-                wrap(plain_problem(code).unwrap_or(code), limit)
+                wrap(&refusal(code), limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -771,7 +942,7 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap("Press s to start it.", limit)
+                wrap(MASTER_RESTART, limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Muted, theme)),
             );
@@ -780,7 +951,10 @@ impl Team {
         }
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
-                MASTER_WAITING
+                self.switch
+                    .as_ref()
+                    .and_then(|switch| switch.problem.as_deref())
+                    .unwrap_or(MASTER_WAITING)
             } else {
                 "Enter on an agent opens its live terminal here."
             };
@@ -821,12 +995,6 @@ impl Team {
             return None;
         }
         boxed(frame, area, &attached.label, focused, Vec::new(), ctx);
-        if inner.width > 0
-            && inner.height > 0
-            && attached.pane.size() != (inner.height, inner.width)
-        {
-            attached.pane.resize(inner.height, inner.width);
-        }
         attached
             .pane
             .draw(frame.buffer_mut(), inner, ctx.depth, focused)
@@ -848,6 +1016,9 @@ impl Screen for Team {
         }
         if self.master {
             let mut hints = Vec::new();
+            if self.paused {
+                hints.push(hint("S", "Start all"));
+            }
             if self
                 .attached
                 .as_ref()
@@ -855,16 +1026,27 @@ impl Screen for Team {
             {
                 hints.push(hint("Enter", "Terminal"));
             }
-            hints.push(hint("s", self.switch_control()));
-            hints.push(hint("Esc", "Earlier conversation"));
+            hints.push(hint("n", "New session"));
+            hints.push(hint("l", "Sessions"));
+            hints.push(hint("Esc", "Back"));
             hints.push(hint("r", "Refresh"));
             return hints;
+        }
+        if let Some(view) = &self.settings {
+            return view
+                .help()
+                .into_iter()
+                .map(|(key, label)| hint(key, label))
+                .collect();
         }
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
         if self.finished.open() {
             return self.finished.hints();
+        }
+        if self.questions.open() {
+            return self.questions.hints(ctx);
         }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let mut hints = vec![
@@ -886,16 +1068,28 @@ impl Screen for Team {
                 hints.push(hint("Esc", "Close"));
             }
             None => {
+                let questions = match self.questions.counts() {
+                    Some((asked, waiting)) if asked + waiting > 0 => {
+                        format!("Questions ({})", asked + waiting)
+                    }
+                    _ => "Questions".to_owned(),
+                };
+                hints.push(hint("q", &questions));
                 hints.push(hint("f", "Finished"));
                 hints.push(hint("c", "Clean up"));
                 hints.push(hint("Esc", "Back"));
             }
         }
+        hints.push(hint("s", "Settings"));
         hints
     }
 
     fn raw(&self) -> bool {
         self.focus == Focus::Terminal
+    }
+
+    fn typing(&self) -> bool {
+        self.settings.as_ref().is_some_and(TeamView::typing) || self.questions.typing()
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -904,6 +1098,18 @@ impl Screen for Team {
         }
         if self.master {
             return self.master_key(key, ctx);
+        }
+        if self.settings.is_some() {
+            return self.settings_key(key, ctx);
+        }
+        if !self.cleanup.open()
+            && !self.finished.open()
+            && let Some(took) = self.questions.key(key, &self.project, ctx)
+        {
+            if let questions::Took::Open(agent) = took {
+                self.open_agent(&agent, ctx);
+            }
+            return Flow::Handled;
         }
         if !self.cleanup.open()
             && let Some(flow) = self.finished.key(key, &self.project, ctx)
@@ -953,6 +1159,7 @@ impl Screen for Team {
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
+            Key::Char('s') => self.open_settings(ctx),
             Key::Esc if self.instructions.is_some() => self.instructions = None,
             Key::Esc => {
                 self.detach(ctx);
@@ -966,20 +1173,35 @@ impl Screen for Team {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         self.cleanup.arrive(arrival, &self.project, ctx);
         self.finished.arrive(arrival, &self.project, ctx);
+        self.questions.arrive(arrival, &self.project, ctx);
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
                 self.follow_master(ctx);
+                if !self.master {
+                    questions::Questions::read(&self.project, ctx);
+                }
             }
             Arrival::Terminal { agent, frame } => self.stream(agent, frame),
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
-                OwnerEvent::Setup(event) => self.took_setup(&event.query, &event.result, ctx),
+                OwnerEvent::Setup(event) => {
+                    self.took_setup(&event.query, &event.result, ctx);
+                    if let Some(view) = self.settings.as_mut() {
+                        view.apply(&event.query, event.result.clone());
+                    }
+                }
                 _ => {}
             },
+            Arrival::Disconnected(_) => {
+                if let Some(view) = self.settings.as_mut() {
+                    view.forget_reads();
+                }
+            }
             _ => {}
         }
+        self.pump_settings(ctx);
         self.sync(ctx);
         Flow::Handled
     }
@@ -988,6 +1210,7 @@ impl Screen for Team {
         if self.master {
             self.read_switch(ctx);
         }
+        self.pump_settings(ctx);
         ctx.request(Request::TeamGraph {
             project: self.project.clone(),
         });
@@ -1006,6 +1229,23 @@ impl Screen for Team {
             draw_lines(frame.buffer_mut(), head, &[line]);
             return self.draw_right(frame, body, ctx);
         }
+        if let Some(view) = &self.settings {
+            let area = whole(area);
+            let inner = inside(area);
+            let accounts = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
+            let (rows, _, caret) = view.draw(
+                usize::from(inner.width),
+                usize::from(inner.height),
+                accounts,
+                &look(ctx),
+            );
+            let lines = rows.into_iter().map(Row::line).collect();
+            boxed(frame, area, "Team settings", true, lines, ctx);
+            let (row, column) = caret?;
+            let (row, column) = (u16::try_from(row).ok()?, u16::try_from(column).ok()?);
+            return (row < inner.height && column < inner.width)
+                .then(|| Position::new(inner.x + column, inner.y + row));
+        }
         let (left, right) = split(area);
         let inner = inside(left);
         let lines = self.tree_lines(usize::from(inner.width), usize::from(inner.height), ctx);
@@ -1015,6 +1255,17 @@ impl Screen for Team {
 
     fn busy(&self, _ctx: &Ctx) -> bool {
         matches!(self.graph, Load::Idle | Load::Loading)
+            || self.settings.as_ref().is_some_and(TeamView::busy)
+    }
+
+    fn draft(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|view| view.draft.is_some())
+    }
+
+    fn loss(&self) -> &'static str {
+        "The task you are writing will be lost."
     }
 
     fn place(&self) -> Option<Place> {
@@ -1032,89 +1283,50 @@ impl Screen for Team {
 /// agents whose parent is no group last, then a blank row and the tasks.
 /// Inputs: the graph and glyphs. Output: rows in display order; master,
 /// agent and task rows are selectable.
-fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
-    let branch = |last: bool| {
-        format!(
-            "{}{} ",
-            if last { glyphs.bottom_left } else { glyphs.tee },
-            glyphs.hline
-        )
-    };
-    let stem = |last: bool| {
-        if last {
-            "   ".to_owned()
-        } else {
-            format!("{}  ", glyphs.vline)
-        }
-    };
-    let of = |kind: NodeKind| -> Vec<usize> {
-        graph
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(_, node)| node.kind == kind)
-            .map(|(index, _)| index)
-            .collect()
-    };
-    let groups = of(NodeKind::HarnessGroup);
-    let agents = of(NodeKind::Agent);
-    let under = |agent: usize, group: usize| {
-        graph.nodes[agent].parent.as_deref() == Some(graph.nodes[group].id.as_str())
-    };
-    let orphans: Vec<usize> = agents
-        .iter()
-        .copied()
-        .filter(|agent| !groups.iter().any(|group| under(*agent, *group)))
+/// The rows of the team tree: each master, then the agents it leads depth first, each
+/// with a detail row for its account and branch, then the task rows. An agent whose lead
+/// is not in the graph hangs under the master, or starts the tree when there is none.
+/// Inputs: the graph, glyphs and the width a row's prefix and text get, which wraps the
+/// words of an agent launched without hooks. Output: the rows, at least the blank and
+/// heading rows.
+fn tree(graph: &TeamGraph, glyphs: &Glyphs, width: usize) -> Vec<TreeRow> {
+    let known: BTreeSet<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    let masters: Vec<usize> = (0..graph.nodes.len())
+        .filter(|index| graph.nodes[*index].kind == NodeKind::Master)
         .collect();
-    let branches = groups.len() + orphans.len();
+    let orphans: Vec<usize> = (0..graph.nodes.len())
+        .filter(|index| {
+            let node = &graph.nodes[*index];
+            node.kind.agent()
+                && node
+                    .parent
+                    .as_deref()
+                    .is_none_or(|parent| !known.contains(parent))
+        })
+        .collect();
     let mut out = Vec::new();
-    for master in of(NodeKind::Master) {
-        out.push(TreeRow {
-            item: Some(Item::Node(master)),
-            prefix: String::new(),
-            body: Body::Master(master),
-        });
-        account_row(&mut out, &graph.nodes[master], stem(branches == 0));
-    }
-    for (position, group) in groups.iter().enumerate() {
-        let last = position + 1 == branches;
-        let members: Vec<usize> = agents
-            .iter()
-            .copied()
-            .filter(|agent| under(*agent, *group))
-            .collect();
-        out.push(TreeRow {
-            item: None,
-            prefix: branch(last),
-            body: Body::Group {
-                node: *group,
-                count: graph.nodes[*group]
-                    .agents
-                    .map_or(members.len(), usize::from),
-            },
-        });
-        for (index, member) in members.iter().enumerate() {
-            let member_last = index + 1 == members.len();
-            out.push(TreeRow {
-                item: Some(Item::Node(*member)),
-                prefix: format!("{}{}", stem(last), branch(member_last)),
-                body: Body::Agent(*member),
-            });
-            account_row(
-                &mut out,
-                &graph.nodes[*member],
-                format!("{}{}", stem(last), stem(member_last)),
-            );
+    let mut seen = BTreeSet::new();
+    for (position, master) in masters.iter().enumerate() {
+        let mut kids = children(graph, *master);
+        if position == 0 {
+            kids.extend(&orphans);
         }
-    }
-    for (index, orphan) in orphans.iter().enumerate() {
-        let last = groups.len() + index + 1 == branches;
+        seen.insert(*master);
         out.push(TreeRow {
-            item: Some(Item::Node(*orphan)),
-            prefix: branch(last),
-            body: Body::Agent(*orphan),
+            item: Some(Item::Node(*master)),
+            prefix: String::new(),
+            body: Body::Master(*master),
         });
-        account_row(&mut out, &graph.nodes[*orphan], stem(last));
+        detail_row(
+            &mut out,
+            &graph.nodes[*master],
+            stem(glyphs, kids.is_empty()),
+            width,
+        );
+        lead_rows(graph, glyphs, &kids, "", width, &mut seen, &mut out);
+    }
+    if masters.is_empty() {
+        lead_rows(graph, glyphs, &orphans, "", width, &mut seen, &mut out);
     }
     out.push(TreeRow {
         item: None,
@@ -1135,17 +1347,107 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs) -> Vec<TreeRow> {
         prefix: String::new(),
         body: Body::Edge(edge),
     }));
+    assert!(seen.len() <= graph.nodes.len());
     assert!(out.len() >= 2);
     out
 }
 
-fn account_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String) {
-    if let Some(account) = &node.account {
+fn children(graph: &TeamGraph, lead: usize) -> Vec<usize> {
+    let id = graph.nodes[lead].id.as_str();
+    (0..graph.nodes.len())
+        .filter(|index| {
+            graph.nodes[*index].kind.agent() && graph.nodes[*index].parent.as_deref() == Some(id)
+        })
+        .collect()
+}
+
+fn branch_glyph(glyphs: &Glyphs, last: bool) -> String {
+    format!(
+        "{}{} ",
+        if last { glyphs.bottom_left } else { glyphs.tee },
+        glyphs.hline
+    )
+}
+
+fn stem(glyphs: &Glyphs, last: bool) -> String {
+    if last {
+        "   ".to_owned()
+    } else {
+        format!("{}  ", glyphs.vline)
+    }
+}
+
+/// Adds the rows of agents that share one lead, each followed by its detail row and the
+/// agents it leads in turn. A node already drawn is skipped, so a cycle in the parent
+/// links cannot loop. Inputs: the graph, glyphs, the agents, the indent their branches
+/// hang from, the row width, the drawn nodes and the rows. Output: none; rows are appended.
+fn lead_rows(
+    graph: &TeamGraph,
+    glyphs: &Glyphs,
+    members: &[usize],
+    indent: &str,
+    width: usize,
+    seen: &mut BTreeSet<usize>,
+    out: &mut Vec<TreeRow>,
+) {
+    let members: Vec<usize> = members
+        .iter()
+        .copied()
+        .filter(|member| !seen.contains(member))
+        .collect();
+    for (index, member) in members.iter().enumerate() {
+        if !seen.insert(*member) {
+            continue;
+        }
+        let last = index + 1 == members.len();
+        out.push(TreeRow {
+            item: Some(Item::Node(*member)),
+            prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
+            body: Body::Agent(*member),
+        });
+        let base = format!("{indent}{}", stem(glyphs, last));
+        let kids: Vec<usize> = children(graph, *member)
+            .into_iter()
+            .filter(|kid| !seen.contains(kid))
+            .collect();
+        let detail = if kids.is_empty() {
+            base.clone()
+        } else {
+            format!("{base}{}", stem(glyphs, false))
+        };
+        detail_row(out, &graph.nodes[*member], detail, width);
+        lead_rows(graph, glyphs, &kids, &base, width, seen, out);
+    }
+}
+
+/// Adds the rows under an agent: its account and branch on one row, then, for an agent
+/// whose launch fires no hooks, that its receipts and adoption are unavailable, wrapped to
+/// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
+/// the prefix and the row width. Output: none; rows are appended.
+fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
+    if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
-            prefix,
-            body: Body::Account(account.clone()),
+            prefix: prefix.clone(),
+            body: Body::Detail {
+                account: node.account.clone(),
+                branch: node.branch.clone(),
+            },
         });
+    }
+    if node.hookless {
+        let words = format!(
+            "Receipts and adoption {}",
+            crate::coord::adoption::HOOKLESS_WORDS
+        );
+        let room = width
+            .saturating_sub(crate::tui::text::width(&prefix))
+            .max(1);
+        out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
+            item: None,
+            prefix: prefix.clone(),
+            body: Body::Note(line),
+        }));
     }
 }
 
@@ -1173,21 +1475,33 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                         Span::styled(format!("  {word}"), theme.style(kind.role())),
                     ])
                 }
-                None => Line::raw(node.label.clone()),
+                None => match &node.status_label {
+                    Some(word) => Line::from(vec![
+                        Span::raw(node.label.clone()),
+                        Span::styled(format!("  {word}"), theme.muted),
+                    ]),
+                    None => Line::raw(node.label.clone()),
+                },
             }
         }
-        Body::Group { node, count } => Line::from(vec![
-            Span::styled(graph.nodes[*node].label.clone(), theme.heading),
-            Span::styled(format!(" ({count})"), theme.muted),
-        ]),
-        Body::Account(account) => styled(
-            account_name(
-                Some(account),
-                ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
-            ),
-            Role::Muted,
-            theme,
-        ),
+        Body::Detail { account, branch } => {
+            let account = account.as_ref().map(|account| {
+                account_name(
+                    Some(account),
+                    ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
+                )
+            });
+            styled(
+                account
+                    .into_iter()
+                    .chain(branch.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join("  "),
+                Role::Muted,
+                theme,
+            )
+        }
+        Body::Note(text) => styled(text.clone(), Role::Muted, theme),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
         Body::Blank => Line::default(),
         Body::Edge(edge) => {
@@ -1195,7 +1509,7 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
             let (kind, _) = edge_status(edge.state);
             Line::from(vec![
                 Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                Span::raw(format!(" {}  ", label(graph, &edge.to))),
+                Span::raw(format!(" {}  ", ran_by(graph, edge))),
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
@@ -1212,6 +1526,21 @@ fn dead(code: &str) -> bool {
 /// Says whether a terminal code means the engine connection dropped, so the
 /// terminal opens again once the engine is back.
 /// Input: a Closed or Rejected code. Output: true for connection losses.
+/// The request that opens a terminal view: the agent's own terminal, or one pane of its
+/// window, such as a native teammate's, through `OwnerClient::terminal_attach_pane`.
+/// Takes the terminal name and the pane. Returns the request.
+fn attach_request(agent: &AgentId, teammate: Option<&str>) -> Request {
+    match teammate {
+        Some(pane) => Request::TerminalAttachPane {
+            agent: agent.clone(),
+            pane: pane.to_owned(),
+        },
+        None => Request::TerminalAttach {
+            agent: agent.clone(),
+        },
+    }
+}
+
 fn lost(code: &str) -> bool {
     matches!(
         code,
@@ -1221,6 +1550,13 @@ fn lost(code: &str) -> bool {
             | "owner_socket_replaced"
             | "trusted_owner_connection_failed"
     )
+}
+
+/// One plain sentence for a refused master view team change, the same words the team panel
+/// gives. Input: the engine's code. Output: the config's sentence when it names the code,
+/// else the team panel's sentence, which names an unknown code after a retry sentence.
+fn refusal(code: &str) -> String {
+    plain_problem(code).map_or_else(|| team_plain(code), str::to_owned)
 }
 
 /// The words shown for a closed or refused terminal.
@@ -1268,6 +1604,15 @@ fn label(graph: &TeamGraph, id: &str) -> String {
         .iter()
         .find(|node| node.id == id)
         .map_or_else(|| id.to_owned(), |node| node.label.clone())
+}
+
+/// Names the agent a task went to: the sub-agent or teammate that ran it, drawn or not, so a
+/// stopped agent's task keeps its name, else the node it waits on. Takes the graph and the
+/// edge. Returns the name.
+fn ran_by(graph: &TeamGraph, edge: &GraphEdge) -> String {
+    edge.agent_label
+        .as_deref()
+        .map_or_else(|| label(graph, &edge.to), ToOwned::to_owned)
 }
 
 /// The lines of an agent's Instructions box: what its harness reported loading and
@@ -1399,7 +1744,7 @@ fn file_state(state: crate::instruction_files::State) -> &'static str {
     use crate::instruction_files::State;
     match state {
         State::Given => "given",
-        State::Same => "left out: the same text as a file above",
+        State::Same => "left out: the same text as the instructions or a file above",
         State::TooLarge => "left out: larger than CrazyAgent gives",
         State::Unsafe => "left out: a link or not a plain file",
         State::Invalid => "left out: not plain text",

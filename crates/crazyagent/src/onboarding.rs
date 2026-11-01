@@ -3,6 +3,7 @@ use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -56,8 +57,9 @@ pub struct MappingFacts {
 /// The onboarding of one found or cloned project as clients read it: the graph and mapping
 /// steps, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
 /// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
-/// engine wrote as `overview` or one it did not write as `folder_overview`, and `finished`
-/// once the owner saved the setup, when name and draft are the saved ones.
+/// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
+/// once the owner saved the setup, when name and draft are the saved ones, and the
+/// project's own instruction files the start moved into `.crazyagent/imported/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
@@ -71,6 +73,7 @@ pub struct OnboardingView {
     pub overview: Option<String>,
     pub folder_overview: Option<String>,
     pub finished: bool,
+    pub imported: Vec<crate::instruction_files::ImportFile>,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -358,13 +361,20 @@ fn real_dir(path: &Path) -> bool {
 /// mapping steps, inside the owner transaction. The folder's `.crazyagent/`
 /// is created through the projects home layout, or reused with the draft this
 /// engine saved there; a draft the folder came with is not taken as the engine's,
-/// and the brief is written from the recorded setup. Research stays off.
+/// and the brief is written from the recorded setup. Research stays off. A new
+/// project gets the agent access New Project preselects (Own branch, or Sandboxed
+/// where this computer cannot run it), so its agents work in their own clones.
 /// Starting a folder that is already onboarding returns its project and
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. Takes the transaction, configuration, engine
-/// database path and action. Returns Applied or a plain rejection.
+/// while that folder is still there. A new project's own instruction files
+/// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
+/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// files are kept for the onboarding view; a file or import the engine refuses
+/// stays in place for the owner's later import. Takes the transaction,
+/// configuration, engine database path and action. Returns Applied or a plain
+/// rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -471,6 +481,14 @@ pub(crate) fn execute(
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
+    let access = Some(AgentAccess::NEW_PROJECT)
+        .filter(|level| level.unavailable().is_none())
+        .unwrap_or_default();
+    let policy = AgentPolicy {
+        access,
+        toolchains: Vec::new(),
+    };
+    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?
         .ok_or_else(|| failure("project_setup_missing"))?;
     crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
@@ -491,6 +509,10 @@ pub(crate) fn execute(
         ],
     )
     .map_err(error)?;
+    let moved = crate::instruction_files::import(&repo).unwrap_or_default();
+    if !moved.is_empty() {
+        crate::instruction_files::record_moved(tx, &project_id, &moved)?;
+    }
     Ok(Outcome::Applied)
 }
 
@@ -602,5 +624,6 @@ pub(crate) fn status(
         overview,
         folder_overview,
         finished,
+        imported: crate::instruction_files::moved(tx, project_id, Path::new(&repo))?,
     }))
 }

@@ -2,8 +2,9 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
-use crate::engine::owner::InstructionSettings;
-use crate::instruction_files::Choice;
+use crate::coord::adoption::AgentAdoption;
+use crate::engine::owner::{Adoption, InstructionSettings};
+use crate::instruction_files::Mode;
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -29,6 +30,8 @@ const NAME_REACH: usize = crate::plugins::skill_folder::NAME_BYTES_MAX + 2;
 const EDITOR_ROWS_MIN: usize = 3;
 const EDITOR_CHROME_ROWS: usize = 2;
 const READ_REFUSED: &str = "The instructions weren't read: too many requests are waiting.";
+const ADOPTION_ROWS_MAX: usize = 6;
+const PATH_BYTES_MAX: usize = 4096;
 
 /// Where an instructions text applies: every project, or one project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,7 +180,19 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "process_text_unwritable" => "The instructions couldn't be saved. Check the folder, then try again.".into(),
         "process_project_folder_missing" => "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.".into(),
         "process_project_unknown" => "This project has no setup yet, so it can't hold instructions.".into(),
-        "process_import_missing" => "There is no ~/.claude/CLAUDE.md to import.".into(),
+        "process_import_missing" => "That file doesn't exist. Check the path.".into(),
+        "process_import_unsafe" => "That file isn't a plain file you own, so CrazyAgent won't read it.".into(),
+        "process_import_unreadable" => "That file couldn't be read. Check it, then try again.".into(),
+        "process_import_outside" => "That file links outside the project folder, so it stays where it is.".into(),
+        "process_import_unmovable" => "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.".into(),
+        "process_request_invalid" => "Type the file's full path, starting with / or ~/.".into(),
+        "process_commit_staged" => "Other files are staged in this project's checkout, so nothing was committed. Unstage or commit them, then try again.".into(),
+        "process_commit_none" => "No moved instruction file waits for a commit.".into(),
+        "process_commit_busy" => "Git is busy in this project's checkout (a merge, a rebase or a locked index), so nothing was committed. Finish it, then try again.".into(),
+        "process_commit_detached" => "This project's checkout isn't on a branch, so nothing was committed. Check out a branch, then try again.".into(),
+        "process_commit_moved" => "The branch changed while committing, so nothing was committed. Try again.".into(),
+        "process_commit_identity" => "Git has no user.name or user.email for this project, so nothing was committed. Set them, then try again.".into(),
+        "process_commit_failed" => "Git couldn't commit the move. Check the project's checkout, then try again.".into(),
         "process_folder_missing" => "CrazyAgent's data folder is missing. Restart the engine, then try again.".into(),
         "process_folder_unsafe" => "CrazyAgent's data folder isn't a plain folder, so nothing was saved.".into(),
         "process_unavailable" => "Instructions aren't ready in this engine yet.".into(),
@@ -190,40 +205,39 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "trusted_connection_unavailable" => "Not connected to the engine. Try again once it reconnects.".into(),
         "instruction_settings_invalid" => "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.".into(),
         "instruction_settings_unavailable" => "This project's agent settings couldn't be read. Try again.".into(),
+        "process_adoption_unavailable" => "Workflow adoption couldn't be read. Try again.".into(),
         other => coded("CrazyAgent couldn't finish that.", other),
     }
 }
 
-/// The owner's words for one instruction files option. Input: the option. Output: its name.
-pub(in crate::tui) fn files_label(choice: Choice) -> &'static str {
-    match choice {
-        Choice::Project => "Project files",
-        Choice::ProjectAndUser => "Project and user files",
-        Choice::None => "None",
+/// The owner's words for one instructions option. Input: the option. Output: its name.
+pub(in crate::tui) fn mode_label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::ProjectOnly => "Project only",
+        Mode::AppOnly => "App only",
+        Mode::Both => "Both (app, then project appended)",
     }
 }
 
 /// The option Ctrl-F moves to from one option, in the order the page lists them.
 /// Input: the option. Output: the next one, wrapping to the first.
-fn next_files(choice: Choice) -> Choice {
-    match choice {
-        Choice::Project => Choice::ProjectAndUser,
-        Choice::ProjectAndUser => Choice::None,
-        Choice::None => Choice::Project,
+fn next_mode(mode: Mode) -> Mode {
+    match mode {
+        Mode::ProjectOnly => Mode::AppOnly,
+        Mode::AppOnly => Mode::Both,
+        Mode::Both => Mode::ProjectOnly,
     }
 }
 
-/// What one instruction files option hands the project's agents, in one sentence.
+/// What one instructions option hands the project's agents, in one sentence.
 /// Input: the option. Output: the sentence.
-fn files_note(choice: Choice) -> &'static str {
-    match choice {
-        Choice::Project => {
-            "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets."
+fn mode_note(mode: Mode) -> &'static str {
+    match mode {
+        Mode::ProjectOnly => "Agents get only this project's instructions.md.",
+        Mode::AppOnly => "Agents get only the app instructions from Settings.",
+        Mode::Both => {
+            "Agents get the app instructions, then this project's instructions.md appended."
         }
-        Choice::ProjectAndUser => {
-            "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md."
-        }
-        Choice::None => "Agents get no instruction files, only the instructions on this page.",
     }
 }
 
@@ -234,6 +248,34 @@ pub(in crate::tui) fn size(bytes: usize) -> String {
     } else {
         format!("{:.1} KB", bytes as f64 / 1024.0)
     }
+}
+
+/// One agent's grounding and skill counts as one line of words: graphify, `ctx_*`, then
+/// every skill its project enabled by name with zero included, then the other skills it
+/// called. Inputs: the view's skill names and the agent's row. Output: the words.
+fn skill_words(skills: &[String], agent: &AgentAdoption) -> String {
+    let mut words = vec![
+        format!("graphify {}", agent.graphify),
+        format!("ctx_* {}", agent.context_mode),
+        if skills.is_empty() {
+            "Skills: none enabled".to_owned()
+        } else {
+            "Skills:".to_owned()
+        },
+    ];
+    words.extend(
+        skills
+            .iter()
+            .zip(&agent.skills)
+            .map(|(skill, count)| format!("{skill} {count}")),
+    );
+    words.extend(
+        agent
+            .other_skills
+            .iter()
+            .map(|other| format!("{} {} (not enabled)", other.name, other.count)),
+    );
+    words.join("  ")
 }
 
 /// The character the editor draws for one text character: a tab as a space, and a
@@ -429,11 +471,13 @@ pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
     settings: Option<Result<InstructionSettings, String>>,
+    adoption: Option<Result<Adoption, String>>,
     editor: Editor,
     problem: Option<String>,
     pending: Option<ProcessQuery>,
     preview: Option<(Seed, String)>,
     preview_top: usize,
+    path: Option<String>,
     skills: Vec<Skill>,
 }
 
@@ -445,11 +489,13 @@ impl ProcessPage {
             scope,
             state: State::Loading,
             settings: None,
+            adoption: None,
             editor: Editor::new(""),
             problem: None,
             pending: None,
             preview: None,
             preview_top: 0,
+            path: None,
             skills: Vec::new(),
         }
     }
@@ -472,6 +518,12 @@ impl ProcessPage {
             self.pending = Some(query);
         } else if matches!(query, ProcessQuery::Read { .. }) {
             self.state = State::Failed(READ_REFUSED.into());
+        }
+    }
+
+    fn read_adoption(&mut self, ctx: &mut Ctx) {
+        if let Some(project) = self.project() {
+            self.send(ProcessQuery::Adoption { project }, ctx);
         }
     }
 
@@ -567,10 +619,20 @@ impl ProcessPage {
         match (&event.query, &event.result) {
             (ProcessQuery::Settings { .. }, Ok(ProcessReply::Settings(settings))) => {
                 self.settings = Some(Ok(*settings));
+                self.read_adoption(ctx);
                 return;
             }
             (ProcessQuery::Settings { .. }, Err(code)) => {
                 self.settings = Some(Err(message(code)));
+                self.read_adoption(ctx);
+                return;
+            }
+            (ProcessQuery::Adoption { .. }, Ok(ProcessReply::Adoption(view))) => {
+                self.adoption = Some(Ok((**view).clone()));
+                return;
+            }
+            (ProcessQuery::Adoption { .. }, Err(code)) => {
+                self.adoption = Some(Err(message(code)));
                 return;
             }
             (ProcessQuery::SaveSettings { .. }, Ok(ProcessReply::Settings(settings))) => {
@@ -589,7 +651,15 @@ impl ProcessPage {
         }
         let result = match &event.result {
             Ok(ProcessReply::Text(text)) => Ok(text),
-            Ok(ProcessReply::Saved(_) | ProcessReply::Agent(_) | ProcessReply::Settings(_)) => {
+            Ok(
+                ProcessReply::Saved(_)
+                | ProcessReply::Agent(_)
+                | ProcessReply::Settings(_)
+                | ProcessReply::Adoption(_)
+                | ProcessReply::Files(_)
+                | ProcessReply::Paths(_)
+                | ProcessReply::Committed(_),
+            ) => {
                 return;
             }
             Err(code) => Err(code),
@@ -607,18 +677,60 @@ impl ProcessPage {
             (ProcessQuery::Read { .. }, Err(code)) => self.state = State::Failed(message(code)),
             (ProcessQuery::Save { .. }, Ok(_)) => {}
             (ProcessQuery::Save { .. }, Err(code)) => self.problem = Some(message(code)),
-            (ProcessQuery::ImportGlobal, Ok(text)) => self.open_preview(Seed::Import, text),
+            (ProcessQuery::ReadFile { .. }, Ok(text)) => self.open_preview(Seed::Import, text),
             (ProcessQuery::Default, Ok(text)) => self.open_preview(Seed::Default, text),
-            (ProcessQuery::ImportGlobal | ProcessQuery::Default, Err(code)) => {
+            (ProcessQuery::ReadFile { .. } | ProcessQuery::Default, Err(code)) => {
                 ctx.say(Message::error(&message(code), ""));
             }
             (
                 ProcessQuery::Agent { .. }
                 | ProcessQuery::Settings { .. }
-                | ProcessQuery::SaveSettings { .. },
+                | ProcessQuery::SaveSettings { .. }
+                | ProcessQuery::Adoption { .. }
+                | ProcessQuery::PendingImport { .. }
+                | ProcessQuery::ConfirmImport { .. }
+                | ProcessQuery::Uncommitted { .. }
+                | ProcessQuery::CommitImport { .. },
                 _,
             ) => {}
         }
+    }
+
+    /// Edits the path of the file to import while its field is open: typed characters up to
+    /// `PATH_BYTES_MAX` bytes, Backspace, Enter to read the file as a preview (a leading `~/`
+    /// is the owner's home folder) and Esc to close the field. Inputs: the key and the
+    /// context. Output: handled, so no key reaches the editor meanwhile.
+    fn path_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Some(path) = self.path.as_mut() else {
+            return Flow::Ignored;
+        };
+        match key {
+            Key::Char(character) if path.len() + character.len_utf8() <= PATH_BYTES_MAX => {
+                path.push(*character);
+            }
+            Key::Backspace => {
+                path.pop();
+            }
+            Key::Esc => self.path = None,
+            Key::Enter if !path.trim().is_empty() => {
+                let typed = path.trim().to_owned();
+                self.path = None;
+                let path = match typed.strip_prefix("~/") {
+                    Some(rest) => crate::projects_home::owner_home()
+                        .map(|home| home.join(rest))
+                        .unwrap_or_else(|_| std::path::PathBuf::from(&typed)),
+                    None => std::path::PathBuf::from(&typed),
+                };
+                self.send(ProcessQuery::ReadFile { path }, ctx);
+            }
+            _ => {}
+        }
+        assert!(
+            self.path
+                .as_ref()
+                .is_none_or(|path| path.len() <= PATH_BYTES_MAX)
+        );
+        Flow::Handled
     }
 
     fn open_preview(&mut self, seed: Seed, text: &str) {
@@ -661,7 +773,7 @@ impl ProcessPage {
             Scope::App => "Instructions every master and sub-agent gets, in every project. A project's own instructions come after these.".to_owned(),
             Scope::Project { name, .. } => format!("Instructions every agent in {name} gets, after the app-wide ones. Kept in the project's .crazyagent/instructions.md, which git ignores."),
         };
-        let seeds = "Ctrl-G imports your ~/.claude/CLAUDE.md and Ctrl-D the CrazyAgent default process, each as a preview first.";
+        let seeds = "Ctrl-G imports an instructions file you name, such as a CLAUDE.md, and Ctrl-D the CrazyAgent default process, each as a preview first.";
         let intro = match self.scope {
             Scope::App => format!("{intro} {seeds}"),
             Scope::Project { .. } => intro,
@@ -686,15 +798,45 @@ impl ProcessPage {
         }
         if let Scope::Project { .. } = self.scope {
             self.settings_lines(width, &mut lines, ctx);
+            self.adoption_lines(width, &mut lines, ctx);
         }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
             .max(EDITOR_ROWS_MIN);
+        if let Some(path) = &self.path {
+            lines.push(styled("Import from file", Role::Heading, theme));
+            lines.extend(
+                wrap("Type the file's full path; ~/ is your home folder. Enter reads it as a preview, Esc cancels. Nothing is saved until Ctrl-S.", width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+            let room = width.saturating_sub(3).max(1);
+            let mut used = 0;
+            let mut tail: Vec<char> = path
+                .chars()
+                .rev()
+                .map(shown)
+                .take_while(|character| {
+                    used += char_width(*character);
+                    used <= room
+                })
+                .collect();
+            tail.reverse();
+            let column = 2 + tail.iter().copied().map(char_width).sum::<usize>();
+            assert!(column <= room + 2);
+            let tail: String = tail.into_iter().collect();
+            let at = lines.len();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{} ", ctx.glyphs.vline), theme.accent),
+                Span::raw(tail),
+            ]));
+            return (lines, Some(Position::new(column as u16, at as u16)));
+        }
         if let Some((seed, text)) = &self.preview {
             let (title, note) = match seed {
                 Seed::Import => (
-                    "Your global instructions",
-                    "Read from ~/.claude/CLAUDE.md. Enter puts it in the editor in place of its text; nothing is saved until Ctrl-S.",
+                    "Instructions from your file",
+                    "Read once from the file you named; afterwards the instructions live here. Enter puts it in the editor in place of its text; nothing is saved until Ctrl-S.",
                 ),
                 Seed::Default => (
                     "CrazyAgent default process",
@@ -799,11 +941,7 @@ impl ProcessPage {
         };
         let transcripts = if settings.transcripts { "On" } else { "Off" };
         for (name, option, key) in [
-            (
-                "Agent instruction files",
-                files_label(settings.files),
-                "Ctrl-F",
-            ),
+            ("Agent instructions", mode_label(settings.mode), "Ctrl-F"),
             (
                 "Keep transcripts for headless Claude runs",
                 transcripts,
@@ -821,10 +959,107 @@ impl ProcessPage {
             ));
         }
         lines.extend(
-            wrap(files_note(settings.files), width)
+            wrap(mode_note(settings.mode), width)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme)),
         );
+        lines.push(Line::default());
+    }
+}
+
+impl ProcessPage {
+    /// Adds the project's workflow adoption below its settings: whether nudges are on, then
+    /// the newest agents, at most `ADOPTION_ROWS_MAX`, each with its count per counted tool
+    /// and its flags in red, marked when the agent was reminded. Inputs: the width, the
+    /// lines so far and the context. Output: unit.
+    fn adoption_lines(&self, width: usize, lines: &mut Vec<Line<'static>>, ctx: &Ctx) {
+        let theme = &ctx.theme;
+        let adoption = match &self.adoption {
+            None => return,
+            Some(Err(problem)) => {
+                lines.extend(
+                    wrap(problem, width)
+                        .into_iter()
+                        .map(|text| styled(text, Role::Error, theme)),
+                );
+                lines.push(Line::default());
+                return;
+            }
+            Some(Ok(adoption)) => adoption,
+        };
+        let nudges = if adoption.nudges {
+            "Nudges on: each flag sends that agent one reminder."
+        } else {
+            "Nudges off: flags show here, agents get no reminder."
+        };
+        lines.push(row(
+            width,
+            styled("Workflow adoption", Role::Heading, theme),
+            styled(nudges, Role::Muted, theme),
+            ctx.glyphs,
+        ));
+        if adoption.agents.is_empty() {
+            lines.push(styled("No agents yet.", Role::Muted, theme));
+        }
+        for agent in adoption.agents.iter().take(ADOPTION_ROWS_MAX) {
+            let counts: Vec<String> = adoption
+                .counted
+                .iter()
+                .zip(&agent.counts)
+                .map(|(tool, count)| format!("{tool} {count}"))
+                .collect();
+            let name = format!("#{} {} {}", agent.agent, agent.role, agent.harness);
+            let role = if agent.active {
+                Role::Accent
+            } else {
+                Role::Muted
+            };
+            lines.push(styled(name, role, theme));
+            if agent.hookless {
+                let text = format!(
+                    "Counts and flags {}",
+                    crate::coord::adoption::HOOKLESS_WORDS
+                );
+                lines.extend(
+                    wrap(&text, width.saturating_sub(2).max(1))
+                        .into_iter()
+                        .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+                );
+                continue;
+            }
+            lines.extend(
+                wrap(&counts.join("  "), width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
+            let skills = skill_words(&adoption.skills, agent);
+            lines.extend(
+                wrap(&skills, width.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+            );
+            for flag in &agent.flags {
+                let reminded = if agent.reminded.contains(flag) {
+                    ", reminded"
+                } else {
+                    ""
+                };
+                lines.push(styled(
+                    format!("  {}{reminded}", flag.words()),
+                    Role::Error,
+                    theme,
+                ));
+            }
+        }
+        if adoption.agents.len() > ADOPTION_ROWS_MAX || adoption.hidden > 0 {
+            let more = adoption.agents.len().saturating_sub(ADOPTION_ROWS_MAX)
+                + usize::try_from(adoption.hidden).unwrap_or(usize::MAX);
+            lines.push(styled(
+                format!("and {more} older agents, shown in the desktop app"),
+                Role::Muted,
+                theme,
+            ));
+        }
         lines.push(Line::default());
     }
 }
@@ -838,6 +1073,9 @@ impl Screen for ProcessPage {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.path.is_some() {
+            return vec![hint("Enter", "Read file"), hint("Esc", "Cancel")];
+        }
         if self.preview.is_some() {
             return vec![
                 hint("Enter", "Put in the editor"),
@@ -859,11 +1097,11 @@ impl Screen for ProcessPage {
             hints.push(hint("Ctrl-O", "Open skill"));
         }
         if matches!(self.scope, Scope::Project { .. }) && self.settings.is_some() {
-            hints.push(hint("Ctrl-F", "Instruction files"));
+            hints.push(hint("Ctrl-F", "Instructions"));
             hints.push(hint("Ctrl-T", "Transcripts"));
         }
         if self.scope == Scope::App {
-            hints.push(hint("Ctrl-G", "Import global"));
+            hints.push(hint("Ctrl-G", "Import from file"));
             hints.push(hint("Ctrl-D", "Default process"));
             hints.push(sections_hint(ctx.glyphs));
         }
@@ -876,6 +1114,9 @@ impl Screen for ProcessPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.path.is_some() {
+            return self.path_key(key, ctx);
+        }
         if self.preview.is_some() {
             return self.preview_key(key);
         }
@@ -893,7 +1134,9 @@ impl Screen for ProcessPage {
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('g')) if self.scope == Scope::App => {
-                self.send(ProcessQuery::ImportGlobal, ctx);
+                if self.pending.is_none() {
+                    self.path = Some(String::new());
+                }
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('d')) if self.scope == Scope::App => {
@@ -901,7 +1144,7 @@ impl Screen for ProcessPage {
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('f')) if self.settings.is_some() => {
-                self.change_settings(|settings| settings.files = next_files(settings.files), ctx);
+                self.change_settings(|settings| settings.mode = next_mode(settings.mode), ctx);
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('t')) if self.settings.is_some() => {
@@ -958,6 +1201,8 @@ impl Screen for ProcessPage {
                 project: self.project(),
             };
             self.send(query, ctx);
+        } else if self.settings.is_some() {
+            self.read_adoption(ctx);
         }
     }
 

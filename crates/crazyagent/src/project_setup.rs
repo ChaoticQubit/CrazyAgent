@@ -654,6 +654,9 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    CoordQuestions {
+        project: ProjectId,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -670,6 +673,7 @@ pub enum SetupView {
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    CoordQuestions(Box<crate::team::questions::Inbox>),
     Library(crate::memory::library::LibraryView),
 }
 
@@ -2170,7 +2174,7 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 18] = [
+const REMOVED_WITH_PROJECT: [&str; 26] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2181,13 +2185,21 @@ const REMOVED_WITH_PROJECT: [&str; 18] = [
     "team_master_switch",
     "team_session_switches",
     "team_finished_view",
+    "team_agent_branches",
+    "team_master_branch",
+    "team_merge_ask",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
+    "team_caps",
+    "team_token_budgets",
+    "team_teammates",
+    "team_account_spread",
     "team_agent_conversations",
     "agent_instruction_settings",
+    "instruction_imports",
     "project_setups",
 ];
 
@@ -2281,6 +2293,7 @@ fn remove(
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::scheduling::forget_project(tx, project_id.as_str())?;
+    crate::coord::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

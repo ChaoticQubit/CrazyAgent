@@ -8,10 +8,14 @@ pub mod agents;
 pub mod assets;
 pub mod client_controller;
 pub mod config;
+#[cfg(unix)]
+pub mod context_mode;
 pub mod conversation;
+pub mod coord;
 pub mod coordination;
 pub mod credentials;
 pub mod engine;
+pub mod file_identity;
 pub mod github;
 pub mod harnesses;
 pub mod instruction_files;

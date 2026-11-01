@@ -49,6 +49,21 @@ impl OwnerController {
             .await
     }
 
+    /// Opens a live view of one pane of an agent terminal's window, such as a native
+    /// teammate's `pane` under its lead's `terminal`. Takes the terminal name and pane id.
+    /// Returns the session, or a plain code such as `terminal_pane_unknown`.
+    pub async fn terminal_attach_pane(
+        &mut self,
+        agent: AgentId,
+        pane: String,
+    ) -> Result<TerminalSession, EngineError> {
+        self.client
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .terminal_attach_pane(agent, pane)
+            .await
+    }
+
     /// Sends one owner team action: a message to the master, a task handed straight
     /// to a sub-agent, a cancel or the keep-warm switch.
     /// Takes the action and the client generation.

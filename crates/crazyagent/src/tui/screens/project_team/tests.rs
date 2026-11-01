@@ -1,5 +1,6 @@
 use super::*;
 use crate::client_controller::OwnerController;
+use crate::coord::settings::CoordSettings;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -75,6 +76,11 @@ fn agent(
         finished: false,
         wakeable: false,
         wake_note: None,
+        parent: None,
+        owner_stopped: false,
+        teammates: Vec::new(),
+        pane: None,
+        hookless: false,
     }
 }
 
@@ -96,6 +102,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         created_ms: NOW - 15 * MINUTE,
         started_ms: None,
         finished_ms: None,
+        parent: None,
     }
 }
 
@@ -133,7 +140,20 @@ fn team() -> TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        sub_agent_depth: crate::team::DEPTH_DEFAULT,
+        child_landing: crate::team::ChildLanding::Lead,
+        max_harnesses: None,
+        max_teammates: None,
+        token_budget: None,
+        budget_used: None,
+        budget_reached: false,
+        spread_accounts: false,
         show_finished: false,
+        agent_branches: crate::team::BranchMode::Named,
+        master_branch: None,
+        ask_before_merge: false,
+        new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
+        coordination: None,
         live_switch: None,
         paused: false,
         live_master: None,
@@ -338,7 +358,7 @@ fn every_team_setting_shows_at_80_columns_on_whole_rows_after_the_counts() {
 
 #[test]
 fn a_sub_agent_has_one_name_in_the_team_list_and_the_team_graph() {
-    let graph = crate::team::graph(&team());
+    let graph = crate::team::graph(&team(), &Default::default());
     let working = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
     assert_eq!(working.label, "Sub-agent 2");
     let mut view = loaded();
@@ -359,7 +379,7 @@ fn a_named_sub_agent_shows_its_persona_and_role_in_the_list_panel_and_graph() {
     status.agents[1].persona = Some("Ada".into());
     status.agents[1].handle = Some("charts".into());
     status.agents[1].label = "Ada (@charts)".into();
-    let graph = crate::team::graph(&status);
+    let graph = crate::team::graph(&status, &Default::default());
     let named = graph.nodes.iter().find(|node| node.id == "team-2").unwrap();
     assert_eq!(named.label, "Ada (@charts)");
     let mut view = TeamView::new(project());
@@ -1242,7 +1262,7 @@ fn a_long_notification_list_stays_inside_a_short_window() {
     assert!(text.iter().any(|row| row.contains("Question number 20")));
     let more = text
         .iter()
-        .find(|row| row.contains("older"))
+        .find(|row| row.contains(" older"))
         .unwrap_or_else(|| panic!("{text:?}"));
     let shown = text
         .iter()
@@ -1554,4 +1574,771 @@ fn a_shortened_team_view_says_older_history_is_hidden() {
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(partial))));
     assert!(find(&frame(&view, 160, 24), "Team").contains("older history hidden"));
+}
+
+#[test]
+fn finished_agents_wait_in_finished_and_a_lead_names_the_tasks_it_handed_out() {
+    let read = |status: TeamStatus| {
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        frame(&view, 120, 36)
+    };
+    let mut status = team();
+    status.agents[1].label = "Grace (@lead-b)".into();
+    status.agents[2].finished = true;
+    let mut added = task(13, TaskSource::Master, "Add add(a, b)", TaskStatus::Queued);
+    added.parent = Some(2);
+    let mut merged = task(
+        14,
+        TaskSource::Master,
+        "Merge the calc work",
+        TaskStatus::Queued,
+    );
+    merged.parent = Some(99);
+    status.tasks.push(added);
+    status.tasks.push(merged);
+
+    let hidden = read(status.clone());
+    assert!(
+        hidden.iter().all(|row| !row.contains("Sub-agent 4")),
+        "a finished agent leaves the list under Hide:\n{}",
+        hidden.join("\n")
+    );
+    assert!(find(&hidden, "1 finished agent is in Finished").contains("press Esc, then f."));
+    assert!(find(&hidden, "Add add(a, b)").contains("Grace (@lead-b)"));
+    assert!(find(&hidden, "Merge the calc work").contains("A lead"));
+    assert!(find(&hidden, "    Build the charts component").contains("Master"));
+    assert!(find(&hidden, "Write the readings API").contains("You"));
+
+    status.show_finished = true;
+    let shown = read(status);
+    assert!(find(&shown, "Sub-agent 4").contains("Stopped"));
+    assert!(
+        shown.iter().all(|row| !row.contains("in Finished")),
+        "Show keeps finished agents in the list with no pointer"
+    );
+}
+
+fn shows(view: &TeamView, setting: &str) -> bool {
+    frame(view, 120, 48).iter().any(|row| row.contains(setting))
+}
+
+fn applied(view: &mut TeamView, reply: TeamReply) {
+    let TeamReply::Change(action) = reply else {
+        panic!("no change was sent");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+}
+
+fn reread(view: &mut TeamView, status: TeamStatus, now: i64) {
+    let query = view.next_query(now).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+}
+
+#[test]
+fn agent_branches_flip_between_a_named_branch_and_a_detached_head() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("b", "Agent branches")));
+    assert!(shows(&view, "Agent branches  Named branch"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Detached,
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Char('b'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("New agents now work on a detached HEAD."))
+    );
+    let mut detached = team();
+    detached.agent_branches = crate::team::BranchMode::Detached;
+    reread(&mut view, detached, NOW + 10);
+    assert!(shows(&view, "Agent branches  Detached"));
+    let reply = view.key(press(KeyCode::Char('b')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AgentBranches {
+            project_id: project(),
+            mode: crate::team::BranchMode::Named,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Each new agent now works on its own branch."))
+    );
+}
+
+#[test]
+fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    assert!(!view.typing());
+    let mut view = loaded();
+    assert!(view.help().contains(&("m", "Master's branch")));
+    assert!(shows(&view, "Master's branch  Repository default"));
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert!(view.typing());
+    assert_eq!(view.help(), vec![("Enter", "Save"), ("Esc", "Close")]);
+    assert!(shows(&view, "[ Repository default"));
+    typed(&mut view, "release");
+    assert!(view.paste("/2.0"));
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::MasterBranch {
+            project_id: project(),
+            branch: Some("release/2.0".into()),
+        })
+    );
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+    applied(&mut view, reply);
+    assert!(!view.typing());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The master now works on release/2.0."))
+    );
+    let mut chosen = team();
+    chosen.master_branch = Some("release/2.0".into());
+    reread(&mut view, chosen, NOW + 10);
+    assert!(shows(&view, "Master's branch  release/2.0"));
+
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(
+        view.branch_edit.as_ref().map(TextInput::value),
+        Some("release/2.0")
+    );
+    for _ in "release/2.0".chars() {
+        assert_eq!(view.key(press(KeyCode::Backspace)), TeamReply::Handled);
+    }
+    typed(&mut view, "  ");
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::MasterBranch {
+            project_id: project(),
+            branch: None,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 10,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "team_master_branch_invalid".into(),
+        })),
+    );
+    assert!(view.typing(), "a refused name stays in the editor");
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Type a branch name such as main or release/2.0, or leave it empty for the repository default."
+        ))
+    );
+    let reply = view.key(press(KeyCode::Enter));
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now works on the repository's default branch."
+        ))
+    );
+
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    typed(&mut view, "dev");
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(!view.typing());
+    assert!(view.branch_edit.is_none());
+    assert!(view.help().contains(&("g", "Ask before merge")));
+}
+
+#[test]
+fn g_turns_ask_before_merge_on_and_off() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('g'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(shows(&view, "Ask before merge  Off"));
+    let reply = view.key(press(KeyCode::Char('g')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AskBeforeMerge {
+            project_id: project(),
+            on: true,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now asks you before merging a harness."
+        ))
+    );
+    let mut asking = team();
+    asking.ask_before_merge = true;
+    reread(&mut view, asking, NOW + 10);
+    assert!(shows(&view, "Ask before merge  On"));
+    let reply = view.key(press(KeyCode::Char('g')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::AskBeforeMerge {
+            project_id: project(),
+            on: false,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "The master now merges a finished harness without asking."
+        ))
+    );
+}
+
+async fn coord_send(
+    view: &mut TeamView,
+    controller: &mut OwnerController,
+    reply: TeamReply,
+    generation: u64,
+) -> TeamAction {
+    let TeamReply::Change(action) = reply else {
+        panic!("the key must ask the engine, got {reply:?}");
+    };
+    let response = controller
+        .team_action(action.clone(), generation)
+        .await
+        .unwrap();
+    let result = match response {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            SetupView::Changed(operation.result)
+        }
+        other => panic!("coordination change not applied: {other:?}"),
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action: action.clone(),
+            generation,
+        },
+        Ok(result),
+    );
+    assert!(!view.notice.as_ref().unwrap().error, "{:?}", view.notice);
+    read_team(controller, view, NOW + i64::try_from(generation).unwrap()).await;
+    action
+}
+
+fn coordination_of(view: &TeamView) -> CoordinationView {
+    view.status.as_ref().unwrap().coordination.clone().unwrap()
+}
+
+fn harness_row(view: &TeamView, harness: HarnessKind) -> (SubagentMode, Delivery) {
+    let row = coordination_of(view)
+        .harnesses
+        .into_iter()
+        .find(|row| row.harness == harness)
+        .unwrap();
+    (row.mode, row.delivery)
+}
+
+fn clear_counted(view: &mut TeamView) {
+    let typed = view
+        .coord
+        .as_ref()
+        .and_then(|edit| edit.counted.as_ref())
+        .unwrap()
+        .value()
+        .chars()
+        .count();
+    for _ in 0..typed {
+        assert_eq!(view.key(press(KeyCode::Backspace)), TeamReply::Handled);
+    }
+}
+
+#[tokio::test]
+async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
+    let mut old = loaded();
+    assert_eq!(old.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(
+        old.notice,
+        Some(Notice::plain(
+            "This engine does not report coordination settings yet."
+        ))
+    );
+    assert!(old.coord.is_none());
+
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-coord-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    read_team(&mut controller, &mut view, NOW).await;
+    let (_, help) = view.rows(116, 30, &accounts(), &Look::plain());
+    assert!(help.contains(&("c", "Coordination")), "{help:?}");
+    assert_eq!(coordination_of(&view).settings, CoordSettings::default());
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    assert_eq!(view.coord.as_ref().unwrap().row, 0);
+    assert!(!view.typing());
+
+    let reply = view.key(press(KeyCode::Right));
+    coord_send(&mut view, &mut controller, reply, 2).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::ClaudeCode).0,
+        SubagentMode::Native
+    );
+
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
+    assert!(
+        view.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("has no native teammates"),
+        "{:?}",
+        view.notice
+    );
+    assert!(!view.busy(), "a refused mode sends nothing");
+
+    view.key(press(KeyCode::Down));
+    let reply = view.key(press(KeyCode::Left));
+    coord_send(&mut view, &mut controller, reply, 3).await;
+    assert_eq!(
+        harness_row(&view, HarnessKind::Codex),
+        (SubagentMode::AppSpawned, Delivery::TypingOnly)
+    );
+
+    for _ in 0..4 {
+        view.key(press(KeyCode::Down));
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 7);
+    for (generation, overlaps) in [
+        (4, Overlaps::Block),
+        (5, Overlaps::Off),
+        (6, Overlaps::Warn),
+    ] {
+        let reply = view.key(press(KeyCode::Right));
+        coord_send(&mut view, &mut controller, reply, generation).await;
+        assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
+    }
+
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    assert_eq!(view.coord.as_ref().unwrap().row, 9);
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(view.typing());
+    clear_counted(&mut view);
+    typed(&mut view, "bad name!");
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(team_plain("coord_settings_invalid")))
+    );
+    assert!(view.typing(), "a refused list stays open for editing");
+    clear_counted(&mut view);
+    typed(&mut view, "a, a b*");
+    let reply = view.key(press(KeyCode::Enter));
+    coord_send(&mut view, &mut controller, reply, 7).await;
+    assert!(!view.typing(), "an applied list closes the input");
+    assert_eq!(coordination_of(&view).settings.counted_tools, ["a", "b*"]);
+
+    let reply = view.key(press(KeyCode::Char('r')));
+    coord_send(&mut view, &mut controller, reply, 8).await;
+    assert_eq!(
+        coordination_of(&view).settings.counted_tools,
+        COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec()
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.coord.is_none());
+}
+
+/// Workflow nudges show Off in the coordination editor of a project with no saved settings,
+/// read from a real engine database, and Space on the row turns them On (DEC-109).
+#[test]
+fn workflow_nudges_show_off_by_default_and_space_turns_them_on() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let coordination = crate::team::coordination(&connection, &project()).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut status = team();
+    status.coordination = Some(coordination.clone());
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let nudges = find(&frame(&view, 120, 40), "Workflow nudges").to_owned();
+    assert!(
+        nudges.contains("Off") && !nudges.contains(" On "),
+        "{nudges}"
+    );
+    for _ in 0..8 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    let mut on = coordination.settings;
+    on.nudges = true;
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Change(TeamAction::CoordSettings {
+            project_id: project(),
+            settings: on,
+        })
+    );
+}
+
+/// Sends one settings key's change as the engine answers it: applied, then a fresh team read
+/// with the stored choice. Takes the view, the reply, the stored team and the read time.
+/// Returns the notice the applied change left.
+fn settled(view: &mut TeamView, reply: TeamReply, stored: &TeamStatus, at: i64) -> Option<Notice> {
+    let TeamReply::Change(action) = reply else {
+        panic!("a settings key sends a change: {reply:?}");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    let notice = view.notice.clone();
+    let query = view.next_query(at).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    notice
+}
+
+/// Sub-agent depth steps through every choice (3 after the default 2, then 1, then 2) and
+/// Worker lands flips between both choices (N1, N2): each key sends its change, a second key
+/// waits for the first, the engine's answer says what the choice means and the team rows show
+/// the stored choice.
+#[test]
+fn sub_agent_depth_and_worker_landing_step_through_every_choice() {
+    let mut loading = TeamView::new(project());
+    for code in ['d', 'k'] {
+        assert_eq!(loading.key(press(KeyCode::Char(code))), TeamReply::Handled);
+        assert_eq!(
+            loading.notice,
+            Some(Notice::plain("The team is still loading."))
+        );
+    }
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    assert!(shows(&view, "Sub-agent depth  2"));
+    assert!(shows(&view, "Worker lands  When the lead accepts"));
+    let mut stored = team();
+    let mut at = NOW;
+    for (depth, note) in [
+        (
+            3,
+            "Workers can now lead workers of their own, three levels deep.",
+        ),
+        (1, "Only the master starts sub-agents now."),
+        (
+            2,
+            "The master's sub-agents can now lead workers of their own.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('d')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SubAgentDepth {
+                project_id: project(),
+                depth,
+            })
+        );
+        assert_eq!(
+            view.key(press(KeyCode::Char('d'))),
+            TeamReply::Handled,
+            "a second press waits for the first change"
+        );
+        stored.sub_agent_depth = depth;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(
+            shows(&view, &format!("Sub-agent depth  {depth}")),
+            "{depth}"
+        );
+    }
+    for (mode, note, words) in [
+        (
+            crate::team::ChildLanding::Owner,
+            "A lead's worker now lands only when you accept it.",
+            "Only when I accept",
+        ),
+        (
+            crate::team::ChildLanding::Lead,
+            "A lead's worker now lands on the lead's branch when the lead accepts it.",
+            "When the lead accepts",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('k')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::ChildLanding {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.child_landing = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(note))
+        );
+        assert!(shows(&view, &format!("Worker lands  {words}")), "{words}");
+    }
+}
+
+/// Max harnesses (v), Max teammates (u) and Token budget (T) each step through every choice
+/// and back to No limit or Off, and Spread accounts (P) turns on and off (S4, DEC-104 K8):
+/// each key sends its change, the engine's answer says the new choice and the team rows
+/// show what the engine stored.
+#[test]
+fn caps_budget_and_spread_step_through_every_choice() {
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 36).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    let mut stored = team();
+    let mut at = NOW;
+    for (key, label, done) in [
+        ('v', "Max harnesses", "Max harnesses is now"),
+        ('u', "Max teammates", "Max teammates per harness is now"),
+    ] {
+        assert!(shows(&view, &format!("{label}  No limit")), "{label}");
+        for max in crate::team::CAP_CHOICES
+            .iter()
+            .copied()
+            .map(Some)
+            .chain([None])
+        {
+            let reply = view.key(press(KeyCode::Char(key)));
+            let wanted = if key == 'v' {
+                TeamAction::MaxHarnesses {
+                    project_id: project(),
+                    max,
+                }
+            } else {
+                TeamAction::MaxTeammates {
+                    project_id: project(),
+                    max,
+                }
+            };
+            assert_eq!(reply, TeamReply::Change(wanted), "{label} {max:?}");
+            if key == 'v' {
+                stored.max_harnesses = max;
+            } else {
+                stored.max_teammates = max;
+            }
+            at += 60_000;
+            assert_eq!(
+                settled(&mut view, reply, &stored, at),
+                Some(Notice::plain(format!("{done} {}.", cap_words(max))))
+            );
+            assert!(
+                shows(&view, &format!("{label}  {}", cap_words(max))),
+                "{label} {max:?}"
+            );
+        }
+    }
+
+    assert!(shows(&view, "Token budget  Off"));
+    for tokens in crate::team::BUDGET_CHOICES
+        .iter()
+        .copied()
+        .map(Some)
+        .chain([None])
+    {
+        let reply = view.key(press(KeyCode::Char('T')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::TokenBudget {
+                project_id: project(),
+                tokens,
+            }),
+            "{tokens:?}"
+        );
+        stored.token_budget = tokens;
+        stored.budget_used = tokens.map(|_| 0);
+        at += 60_000;
+        let done = match tokens {
+            Some(tokens) => format!(
+                "The team now stops after {} from now.",
+                crate::team::token_words(tokens)
+            ),
+            None => "The token budget is off.".to_owned(),
+        };
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(
+            shows(
+                &view,
+                &format!("Token budget  {}", budget_words(tokens, Some(0)))
+            ),
+            "{tokens:?}"
+        );
+    }
+
+    assert!(shows(&view, "Spread accounts  Off"));
+    for (on, done, words) in [
+        (
+            true,
+            "New agents now prefer a pool account no running agent of this project uses.",
+            "On",
+        ),
+        (
+            false,
+            "New agents now take the account your account strategy picks.",
+            "Off",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char('P')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::SpreadAccounts {
+                project_id: project(),
+                on,
+            })
+        );
+        stored.spread_accounts = on;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(shows(&view, &format!("Spread accounts  {words}")), "{on}");
+    }
+}
+
+/// F moves New folder limit from the shown choice to the next, through every choice and
+/// back to the first; each choice shows on the team screen and its saved change says what
+/// is now refused (fix/changes-vs-owner-branch DEC-107 rule 3).
+#[test]
+fn f_moves_the_new_folder_limit_through_every_choice() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('F'))), TeamReply::Handled);
+    let choices = crate::team::NEW_FOLDER_FILES_CHOICES;
+    for (at, shown) in choices.iter().enumerate() {
+        let next = choices[(at + 1) % choices.len()];
+        let mut status = team();
+        status.new_folder_files_max = *shown;
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        let rows = frame(&view, 120, 40);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("New folder limit  {shown} files"))),
+            "{}",
+            rows.join("\n")
+        );
+        let reply = view.key(press(KeyCode::Char('F')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::NewFolderLimit {
+                project_id: project(),
+                files: next
+            })
+        );
+        let TeamReply::Change(action) = reply else {
+            unreachable!();
+        };
+        view.apply(
+            &SetupQuery::TeamChange {
+                action,
+                generation: 9,
+            },
+            Ok(SetupView::Changed(OwnerResult::Applied)),
+        );
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain(format!(
+                "A change set adding more than {next} files in one new folder is now refused."
+            )))
+        );
+    }
 }

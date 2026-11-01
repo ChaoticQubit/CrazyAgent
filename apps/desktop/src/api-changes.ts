@@ -22,6 +22,7 @@ export interface ChangeSet {
   conflicts: string[];
   message: string;
   waiting: boolean;
+  outside: boolean;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -76,6 +77,9 @@ const REFUSALS: Record<string, string> = {
   changes_bare_repository: "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.",
   changes_embedded_repository: "These changes add a folder Git would treat as a repository of its own inside the project, such as a submodule. Ask the agent to remove it.",
   changes_agent_branch_invalid: "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard.",
+  changes_agent_branch_exists: "A branch with this agent's name is already in your project. Rename or delete it, then start the agent again.",
+  changes_target_invalid: "That branch isn't a local branch of your project any more. Pick another branch, then accept again.",
+  changes_target_checked_out: "That branch is checked out in another working copy CrazyAgent doesn't manage. Pick another branch, or check it out in your project folder.",
   changes_link_outside: "These changes add a link that points outside the project or into an agent's folder. Ask the agent to remove it.",
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
   changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
@@ -118,11 +122,25 @@ export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeD
   return call<ChangeDiff>("desktop_change_diff", { id, page });
 }
 
-/** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id,
- * the head the owner reviewed and the owner's commit message. Output: the new commit and
+/** The local branches a change set can land on and the checked-out one, the default. */
+export interface TargetBranches {
+  branches: string[];
+  current: string | null;
+}
+
+/** Lands a change set as one commit on a local branch: the checked-out one by default, or
+ * the named target, which moves as a ref while the project folder's files stay as they are
+ * when it isn't checked out. Inputs: the id, the head the owner reviewed, the owner's commit
+ * message and the target branch, null for the checked-out one. Output: the new commit and
  * its branch, or the files that conflict with the branch, in which case nothing changed. */
-export function acceptChange(id: string, expectedHead: string, message: string): Promise<Result<AcceptOutcome>> {
-  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message });
+export function acceptChange(id: string, expectedHead: string, message: string, target: string | null = null): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message, target });
+}
+
+/** Lists the local branches a change set can be accepted onto. Input: the id. Output: the
+ * branches and the checked-out one. */
+export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
+  return call<TargetBranches>("desktop_change_branches", { id });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the

@@ -4,7 +4,7 @@ use crazyagent::protocol::encode_frame;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -72,8 +72,20 @@ impl Service {
     }
 
     fn restart(&mut self) {
+        self.kill();
+        self.serve_again();
+    }
+
+    /// Ends the runner with SIGKILL, the way a crash or reboot does, so its control.sock
+    /// and control.log stay behind. Takes the service; returns once the runner is reaped.
+    fn kill(&mut self) {
         self.process.kill().unwrap();
         self.process.wait().unwrap();
+    }
+
+    /// Starts the runner again on the same state root and waits until it answers status.
+    /// Takes the service whose runner has ended.
+    fn serve_again(&mut self) {
         self.process = crazyagent::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
                 .arg("serve")
@@ -547,6 +559,93 @@ fn changed_endpoint_is_never_deleted_by_graceful_cleanup() {
     assert!(!wait_exit(&mut service.process).success());
     assert_eq!(fs::read(path).unwrap(), b"replacement endpoint canary");
     assert!(service.root.path().join("moved.sock").exists());
+}
+
+/// Reads the runner journal in the runner's own encoding: frames of a 4-byte big-endian
+/// length and one JSON record. Input: the state root. Output: the records in order.
+fn journal(root: &std::path::Path) -> Vec<Value> {
+    let bytes = fs::read(root.join("control.log")).unwrap();
+    let mut records = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        let size = u32::from_be_bytes(bytes[position..position + 4].try_into().unwrap()) as usize;
+        let end = position + 4 + size;
+        records.push(serde_json::from_slice(&bytes[position + 4..end]).unwrap());
+        position = end;
+    }
+    assert_eq!(position, bytes.len());
+    records
+}
+
+/// Crashes the runner and leaves its state as a reboot that renumbers the volume would:
+/// control.sock and control.log stay, and the journal's last Endpoint record names the
+/// device the volume had before, the live st_dev ^ 1, with the same inode. The journal is
+/// rewritten in place in the runner's frame encoding. Input: the service. Output: the
+/// live (device, inode) of the socket the run left.
+fn renumber_after_crash(service: &mut Service) -> (u64, u64) {
+    service.kill();
+    let root = service.root.path();
+    let socket = fs::symlink_metadata(root.join("control.sock")).unwrap();
+    assert!(socket.file_type().is_socket());
+    let live = (socket.dev(), socket.ino());
+    let mut records = journal(root);
+    let last = records
+        .iter_mut()
+        .rev()
+        .find(|record| record["record"] == "endpoint")
+        .unwrap();
+    assert_eq!(
+        *last,
+        json!({"record":"endpoint","device":live.0,"inode":live.1})
+    );
+    last["device"] = json!(live.0 ^ 1);
+    let mut bytes = Vec::new();
+    for record in &records {
+        bytes.extend(encode_frame(record).unwrap());
+    }
+    fs::write(root.join("control.log"), bytes).unwrap();
+    assert_eq!(journal(root), records);
+    live
+}
+
+#[test]
+fn a_runner_restarts_beside_the_socket_its_run_left_before_a_volume_renumber() {
+    let mut service = Service::start();
+    let live = renumber_after_crash(&mut service);
+    let before = journal(service.root.path()).len();
+    service.serve_again();
+    assert_eq!(service.status()["kind"], "status");
+    let socket = fs::symlink_metadata(service.root.path().join("control.sock")).unwrap();
+    assert!(socket.file_type().is_socket());
+    assert_eq!(socket.dev(), live.0);
+    let records = journal(service.root.path());
+    let endpoints: Vec<_> = records[before..]
+        .iter()
+        .filter(|record| record["record"] == "endpoint")
+        .collect();
+    assert_eq!(
+        endpoints,
+        [&json!({"record":"endpoint","device":socket.dev(),"inode":socket.ino()})]
+    );
+}
+
+#[test]
+fn another_socket_left_after_a_volume_renumber_is_refused_and_kept() {
+    let mut service = Service::start();
+    let live = renumber_after_crash(&mut service);
+    let root = service.root.path().canonicalize().unwrap();
+    let path = root.join("control.sock");
+    let staged = root.join("replacement.sock");
+    let replacement = crazyagent::spawn_gate::bind_unix_std(&staged).unwrap();
+    fs::rename(&staged, &path).unwrap();
+    let replaced = fs::symlink_metadata(&path).unwrap();
+    assert!(replaced.file_type().is_socket());
+    assert_ne!(replaced.ino(), live.1);
+    reject_start(&root, "endpoint_identity_changed");
+    let kept = fs::symlink_metadata(&path).unwrap();
+    assert!(kept.file_type().is_socket());
+    assert_eq!((kept.dev(), kept.ino()), (replaced.dev(), replaced.ino()));
+    drop(replacement);
 }
 
 #[test]

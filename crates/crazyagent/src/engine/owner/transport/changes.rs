@@ -1,6 +1,7 @@
 use super::*;
 use crate::landing::{
-    self, AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, LIST_MAX, MESSAGE_BYTES_MAX,
+    self, AcceptOutcome, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeDiff, ChangeSetId, ChangeSetView,
+    LIST_MAX, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::protocol::encode_frame;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ const UPKEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 /// refusals, this protocol's own, the owner connection's it travels on, and the team's
 /// refusals of the resolve work an Update hands a team agent.
 pub const CHANGES_CODES: &[&str] = &[
+    "changes_agent_branch_exists",
     "changes_agent_branch_invalid",
     "changes_agent_busy",
     "changes_agent_has_pending",
@@ -41,6 +43,8 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_request_invalid",
     "changes_restore_expired",
     "changes_stale",
+    "changes_target_checked_out",
+    "changes_target_invalid",
     "changes_too_large",
     "changes_unavailable",
     "changes_workspace_invalid",
@@ -77,6 +81,11 @@ enum Action {
         expected_head: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    Branches {
+        id: ChangeSetId,
     },
     Discard {
         id: ChangeSetId,
@@ -102,6 +111,7 @@ enum Reply {
     List { change_sets: Vec<ChangeSetView> },
     Diff { diff: ChangeDiff },
     Accepted { outcome: AcceptOutcome },
+    Branches { branches: TargetBranches },
     Discarded { restorable_until_ms: u64 },
     Done,
     Rejected { code: String },
@@ -130,6 +140,12 @@ impl Action {
                 message: Some(message),
                 ..
             } if message.len() > 2 * MESSAGE_BYTES_MAX => Err(failure("changes_message_invalid")),
+            Self::Accept {
+                target: Some(target),
+                ..
+            } if target.is_empty() || target.len() > BRANCH_BYTES_MAX => {
+                Err(failure("changes_target_invalid"))
+            }
             _ => Ok(()),
         }
     }
@@ -164,13 +180,39 @@ impl OwnerClient {
         expected_head: String,
         message: Option<String>,
     ) -> Result<AcceptOutcome, EngineError> {
+        self.accept_changes_into(id, expected_head, message, None)
+            .await
+    }
+
+    /// Lands a change set as one squash commit on a chosen local branch, the checked-out
+    /// one when none is named; a branch not checked out moves as a ref and the owner's
+    /// files stay as they are. Inputs: the change set, the reviewed head, the edited
+    /// message and the target branch. Output: the landed commit and branch, or the files
+    /// it conflicts on.
+    pub async fn accept_changes_into(
+        &self,
+        id: ChangeSetId,
+        expected_head: String,
+        message: Option<String>,
+        target: Option<String>,
+    ) -> Result<AcceptOutcome, EngineError> {
         let action = Action::Accept {
             id,
             expected_head,
             message,
+            target,
         };
         match self.changes_exchange(action).await? {
             Reply::Accepted { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the local branches a change set can be accepted onto and the checked-out
+    /// one, the default target. Input: the change set. Output: the branches.
+    pub async fn change_branches(&self, id: ChangeSetId) -> Result<TargetBranches, EngineError> {
+        match self.changes_exchange(Action::Branches { id }).await? {
+            Reply::Branches { branches } if branches.branches.len() <= BRANCHES_MAX => Ok(branches),
             _ => Err(unknown()),
         }
     }
@@ -336,7 +378,10 @@ async fn prepare(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    if !matches!(action, Action::List { .. } | Action::Diff { .. }) {
+    if !matches!(
+        action,
+        Action::List { .. } | Action::Diff { .. } | Action::Branches { .. }
+    ) {
         return Ok(Prepared::Change(root, action));
     }
     tokio::task::spawn_blocking(move || {
@@ -408,7 +453,10 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
     let db = landing::open(root)?;
     Ok(match action {
         Action::List { project } => {
-            let mut change_sets = landing::list(&db, &project)?;
+            if let Err(error) = landing::observe(&db, Some(&project)) {
+                eprintln!("landing_observe_failed cause={}", error.0);
+            }
+            let mut change_sets = landing::owner_list(&db, &project)?;
             change_sets.truncate(LIST_MAX);
             (Reply::List { change_sets }, false)
         }
@@ -422,13 +470,30 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             id,
             expected_head,
             message,
+            target,
         } => {
             let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .ok_or_else(|| failure("changes_owner_identity_missing"))?;
-            let outcome = landing::accept(&db, &home, &id, &expected_head, message.as_deref())?;
+            let outcome = match target.as_deref() {
+                None => landing::accept(&db, &home, &id, &expected_head, message.as_deref())?,
+                Some(target) => landing::accept_into(
+                    &db,
+                    &home,
+                    &id,
+                    &expected_head,
+                    message.as_deref(),
+                    target,
+                )?,
+            };
             (Reply::Accepted { outcome }, false)
         }
+        Action::Branches { id } => (
+            Reply::Branches {
+                branches: landing::target_branches(&db, &id)?,
+            },
+            false,
+        ),
         Action::Discard { id, expected_head } => (
             Reply::Discarded {
                 restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,
@@ -444,9 +509,10 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
-/// it finishes or undoes Accepts and worktree resets an engine stop interrupted and
-/// deletes discarded refs past their restore window, each step run on its own so a failing
-/// one never skips the other. Input: the authority, held weakly so a server dropped
+/// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
+/// open change sets the owner landed or removed outside the app and deletes discarded refs
+/// past their restore window, each step run on its own so a failing one never skips the
+/// others. Input: the authority, held weakly so a server dropped
 /// without its stop path still releases it. Runs until the server aborts it or the
 /// authority is gone.
 pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
@@ -458,6 +524,7 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
             Ok(root) => tokio::task::spawn_blocking(move || match landing::open(&root) {
                 Ok(db) => [
                     landing::reconcile(&db).err(),
+                    landing::observe(&db, None).err(),
                     now_ms().and_then(|now| landing::prune(&db, now)).err(),
                 ]
                 .into_iter()
@@ -641,6 +708,184 @@ mod tests {
             .unwrap();
     }
 
+    /// The owner socket lists the local branches a change set can be accepted onto with the
+    /// checked-out one as the default, and refuses an unknown change set.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn branches_lists_local_branches_and_the_current_one() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-brn-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("global.toml"), "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(
+            root.join("global.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = started(root, &stopped).await;
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&home, &repo, &["add", "README"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=O",
+                "-c",
+                "user.email=o@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Start",
+            ],
+        );
+        git(&home, &repo, &["branch", "release"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(worktree.join("NEW"), "new\n").unwrap();
+        let db = landing::open(root).unwrap();
+        let workspace = landing::Workspace {
+            project: crate::protocol::ProjectId::new("project-1").unwrap(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        drop(db);
+        let (_, controller) = crate::client_controller::OwnerController::attach_configured(
+            crate::engine::Client::new(root.join("e.sock"), Duration::from_secs(10)).unwrap(),
+            crate::engine::owner::OwnerClientKind::Tui,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            controller.change_branches(id).await.unwrap(),
+            TargetBranches {
+                branches: vec!["main".to_owned(), "release".to_owned()],
+                current: Some("main".to_owned()),
+            }
+        );
+        let unknown = ChangeSetId::new("0".repeat(32)).unwrap();
+        assert_eq!(
+            controller.change_branches(unknown).await.unwrap_err().0,
+            "changes_not_found"
+        );
+        drop(controller);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// An owner List after the owner merged an open change set by hand replies with that
+    /// set closed as landed outside the app, so every client shows it without an action.
+    #[cfg(unix)]
+    #[test]
+    fn a_list_after_a_hand_merge_replies_with_the_set_landed_outside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (repo, home, worktree) = (root.join("repo"), root.join("home"), root.join("agent-1"));
+        for folder in [&repo, &home] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let owner = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=O", "-c", "user.email=o@example.invalid"];
+            full.extend_from_slice(args);
+            git(&home, &repo, &full)
+        };
+        owner(&["init", "-q", "--template=", "-b", "main"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        owner(&["add", "README"]);
+        owner(&["commit", "-q", "-m", "Start"]);
+        owner(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ]);
+        std::fs::write(worktree.join("NEW"), "new\n").unwrap();
+        let project = crate::protocol::ProjectId::new("project-1").unwrap();
+        let db = landing::open(&root).unwrap();
+        let workspace = landing::Workspace {
+            project: project.clone(),
+            agent: landing::ChangeAgent {
+                kind: landing::AgentKind::Sub,
+                id: "agent-1".into(),
+                label: "Agent 1".into(),
+            },
+            repository: repo.clone(),
+            worktree,
+            git_dir: repo.join(".git/worktrees/agent-1"),
+        };
+        let turn = landing::TurnEnd {
+            outcome: landing::TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add a file".into(),
+        };
+        let id = landing::record_turn_end(&db, &workspace, &turn)
+            .unwrap()
+            .unwrap();
+        let head = landing::list(&db, &project).unwrap()[0].head.clone();
+        drop(db);
+        let listed = |root: &Path| match run(
+            root,
+            Action::List {
+                project: project.clone(),
+            },
+        )
+        .unwrap()
+        {
+            (Reply::List { change_sets }, false) => change_sets,
+            _ => panic!("expected a list reply"),
+        };
+        let open = listed(&root);
+        assert_eq!(
+            (open.len(), open[0].state, open[0].outside),
+            (1, landing::ChangeState::Pending, false)
+        );
+        owner(&["merge", "--no-ff", "-q", "-m", "Merge by hand", &head]);
+        let closed = listed(&root);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].id, id);
+        assert_eq!(
+            (closed[0].state, closed[0].outside),
+            (landing::ChangeState::Accepted, true)
+        );
+    }
+
     /// Reads the plain codes a source file refuses with, before its tests.
     /// Input: the file text. Output: each `changes_` code once.
     fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
@@ -672,7 +917,20 @@ mod tests {
         .collect();
         let protocol = refusals(include_str!("changes.rs"));
         assert!(engine.len() >= 15 && protocol.len() >= 5);
-        for code in engine.iter().chain(&protocol) {
+        let import = include_str!("../../../instruction_files.rs");
+        let import_only = ["changes_import_none", "changes_import_staged"];
+        for code in import_only {
+            assert!(engine.contains(code), "{code}");
+            assert!(
+                import.contains(&format!("\"{code}\" => \"process_commit_")),
+                "{code} reaches the owner as a process_commit code"
+            );
+        }
+        for code in engine
+            .iter()
+            .chain(&protocol)
+            .filter(|code| !import_only.contains(*code))
+        {
             assert!(
                 CHANGES_CODES.contains(code),
                 "{code} is not in CHANGES_CODES"

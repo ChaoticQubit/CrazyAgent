@@ -67,6 +67,10 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
+/// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
+/// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
+pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
+
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
@@ -74,6 +78,10 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 const HIDDEN_MAX: usize = 4;
+/// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
+const SOCKETS_MAX: usize = 2;
+/// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
+const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
@@ -599,6 +607,7 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
+    sockets: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -650,7 +659,42 @@ impl ProjectSandbox {
             engine_secrets: Vec::new(),
             checkout: None,
             clone: None,
+            sockets: Vec::new(),
         })
+    }
+
+    /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
+    /// file and its `<path>.lock`, and read its folder's metadata, nothing else there: its
+    /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
+    /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
+    /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
+    pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(invalid("unix socket grants need Seatbelt"));
+        }
+        if self.sockets.len() >= SOCKETS_MAX {
+            return Err(invalid("too many unix sockets"));
+        }
+        let text = socket
+            .to_str()
+            .ok_or_else(|| invalid("the unix socket path is not plain"))?;
+        let plain = socket.is_absolute()
+            && text.len() <= SOCKET_PATH_BYTES_MAX
+            && !text.ends_with('/')
+            && !text.contains("//")
+            && text.split('/').all(|part| part != "." && part != "..")
+            && text
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_'));
+        let folder = socket
+            .parent()
+            .filter(|folder| std::fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()));
+        if !plain || folder.is_none() {
+            return Err(invalid("the unix socket path is not plain"));
+        }
+        self.sockets.push(socket.to_path_buf());
+        assert!(self.sockets.len() <= SOCKETS_MAX);
+        Ok(self)
     }
 
     /// Keeps the ports of the owner's configured local model endpoints free of this agent's
@@ -934,6 +978,53 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
+    /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
+    /// access to the tmux program's folder when no system root covers it. No other Unix
+    /// socket becomes reachable, the engine's own tmux server included, and the server, the
+    /// teammate panes it forks and every engine client on it stay inside this profile. Only
+    /// Seatbelt holds it. Input: the socket (`terminal::harness_socket`) and the canonical
+    /// tmux program. Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
+    pub fn allow_tmux_server(mut self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return Err(SandboxError::Unavailable(TMUX_SERVER_NEEDS_SEATBELT.into()));
+        }
+        let scratch = self
+            .scratch
+            .clone()
+            .ok_or_else(|| invalid("a tmux server needs the agent temp folder"))?;
+        if self
+            .sockets
+            .iter()
+            .any(|known| known.parent() == Some(scratch.as_path()))
+        {
+            return Err(invalid("the sandbox already has a tmux server"));
+        }
+        if !clean_absolute(socket)
+            || socket.parent() != Some(scratch.as_path())
+            || socket.as_os_str().len() > SOCKET_PATH_BYTES_MAX
+        {
+            return Err(invalid("the tmux socket must sit in the agent temp folder"));
+        }
+        clear_of_secrets(socket, &self.secret_paths())?;
+        if !clean_absolute(tmux) || !tmux.is_file() || canonical(tmux)? != tmux {
+            return Err(invalid("the tmux program must be a canonical file"));
+        }
+        let folder = tmux
+            .parent()
+            .ok_or_else(|| invalid("the tmux program must sit in a folder"))?;
+        let covered = SYSTEM_READ_ROOTS
+            .iter()
+            .any(|root| folder.starts_with(root))
+            || self.read_roots.iter().any(|root| folder.starts_with(root));
+        if !covered {
+            self = self.allow_read(folder)?;
+        }
+        self = self.allow_unix_socket(socket)?;
+        assert!(self.writes(socket.parent().unwrap_or(socket)));
+        Ok(self)
+    }
+
     /// The project folder this sandbox confines writes to.
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -1014,6 +1105,7 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
+        text.push_str(&app_exec_denies(&self.owner_home));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -1104,6 +1196,14 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
+        for socket in &self.sockets {
+            let path = socket.display();
+            let folder = socket.parent().unwrap_or(socket).display();
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
+            ));
+        }
+        assert_eq!(text.matches("unix-socket").count(), 2 * self.sockets.len());
         let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {
@@ -1143,6 +1243,10 @@ impl ProjectSandbox {
             }
         }
         assert!(text.starts_with("(version 1)\n(deny default)\n"));
+        assert!(
+            text.find("(deny process-exec") > text.find("(allow process-exec)"),
+            "the app bundle exec deny must follow the exec allow, since the last match wins"
+        );
         assert!(!text.contains("(subpath \"/dev\")"));
         assert!(!text[network..].contains("network*") && !text[network..].contains("unix-socket"));
         assert!(
@@ -1235,6 +1339,13 @@ impl ProjectSandbox {
         let pattern = seatbelt_pattern(&self.project_root);
         let checkouts = format!("{pattern}(/\\.crazyagent)?/worktrees/[^/]+");
         let mut exempt = format!("\n    (require-not (regex #\"^{checkouts}/{dot_git}$\"))");
+        if let Some(clone) = &self.clone {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{}/{}/[^/]+/{dot_git}$\"))",
+                seatbelt_pattern(clone),
+                regex_escape(crate::agent_git::TEAMMATES_FOLDER)
+            ));
+        }
         for worktree in &self.worktrees {
             exempt.push_str(&format!(
                 "\n    (require-not (literal \"{}\"))",
@@ -1243,7 +1354,10 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
+        assert!(
+            text.matches("(regex #\"^/").count()
+                == working.len() + other.len() + 1 + usize::from(self.clone.is_some())
+        );
         assert!(text.ends_with(")\n"));
         text
     }
@@ -1330,7 +1444,7 @@ impl ProjectSandbox {
     /// process leads its own group so the whole tree can be stopped.
     #[cfg(unix)]
     pub fn command(&self, profile: &Path, program: &Path) -> Command {
-        let base = self.base_env();
+        let base = self.base_env(false);
         let mut command = agent_command(
             profile,
             program,
@@ -1344,17 +1458,22 @@ impl ProjectSandbox {
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
-    /// C locale and [`toolchains::agent_env`].
-    fn base_env(&self) -> Vec<(&'static str, OsString)> {
+    /// C locale and [`toolchains::agent_env`]. A harness's PATH also starts with the agent's
+    /// own `git` ([`toolchains::with_agent_git`]); an engine command's never does. Takes
+    /// whether the command is a harness. Returns the variables.
+    fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
+        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = if harness {
+            toolchains::with_agent_git(&self.agent_home, path)
+        } else {
+            path
+        };
         let mut env = vec![
             ("HOME", self.agent_home.clone().into_os_string()),
             ("TMPDIR", tmp.clone().into_os_string()),
-            (
-                "PATH",
-                OsString::from(toolchains::agent_path(&homes, AGENT_PATH)),
-            ),
+            ("PATH", OsString::from(path)),
             ("LANG", OsString::from("C")),
             ("LC_ALL", OsString::from("C")),
         ];
@@ -1368,7 +1487,7 @@ impl ProjectSandbox {
     /// agent's own dirs, whatever the harness set.
     pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;
-        let base = self.base_env();
+        let base = self.base_env(true);
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
         assert_eq!(command.get_program(), SANDBOX_EXEC);
@@ -1382,7 +1501,7 @@ impl ProjectSandbox {
     #[cfg(unix)]
     pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;
-        let base = self.base_env();
+        let base = self.base_env(false);
         let mut command = unconfined_command(program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
         assert_ne!(command.get_program(), SANDBOX_EXEC);
@@ -1627,6 +1746,35 @@ fn seatbelt_pattern(path: &Path) -> String {
     let text = path.display().to_string();
     assert!(text.starts_with('/'));
     regex_escape(&text)
+}
+
+/// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
+/// executable in an app bundle's `Contents/MacOS` under `/Applications`,
+/// `/System/Applications` or the owner's `~/Applications`, the Data volume path of each
+/// included, each name in any letter case. A GUI app started inside the agent profile
+/// aborts at launch and macOS shows a crash report for every attempt (Chrome crash
+/// popups, decision C1). Command-line tools a bundle ships under `Contents/Resources` or
+/// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
+/// matching rule wins. Input: the owner's home. Output: the rule text.
+fn app_exec_denies(owner_home: &Path) -> String {
+    let data = format!(
+        "/{}/{}/{}",
+        any_case("System"),
+        any_case("Volumes"),
+        any_case("Data")
+    );
+    let bundle = format!(
+        "/{}/.+{}/{}/{}/",
+        any_case("Applications"),
+        any_case(".app"),
+        any_case("Contents"),
+        any_case("MacOS")
+    );
+    format!(
+        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\"))\n",
+        any_case("System"),
+        seatbelt_pattern(owner_home)
+    )
 }
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its

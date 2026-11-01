@@ -1020,13 +1020,14 @@ pub(super) fn allocate_master_capture(
 }
 
 /// Writes the master's startup instruction into its private turn directory as the 0600
-/// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
-/// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
-/// file's absolute path, `master_instructions_too_large` past the Claude host's limit
+/// file Claude Code reads through `--append-system-prompt-file` and the rcli host through
+/// `--instructions-file`. Input: the owner root, the turn's runtime reference from
+/// `allocate_master_capture` and the text. Output: the file's absolute path,
+/// `master_instructions_too_large` past the Claude host's limit
 /// before any credential reaches the turn, or a plain refusal when the directory or file
 /// is not the engine's.
 #[cfg(unix)]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
     text: &str,
@@ -1066,7 +1067,7 @@ fn write_master_instructions(
 /// Takes the owner root, turn reference and text, all unused.
 /// Returns `master_capture_unavailable`.
 #[cfg(not(unix))]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     _root: &Root,
     _runtime_ref: &RequestId,
     _text: &str,
@@ -1298,137 +1299,6 @@ mod tests {
             "the Process page warns at exactly the room the largest context and the largest instruction files leave"
         );
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
-    }
-
-    /// Runs git in a test checkout with no system or global config. Inputs: the folder and
-    /// the arguments. Output: unit.
-    fn git_in(dir: &Path, args: &[&str]) {
-        let output = crate::spawn_gate::output(
-            std::process::Command::new("/usr/bin/git")
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("HOME", dir)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("LC_ALL", "C")
-                .args([
-                    "-c",
-                    "user.name=Owner",
-                    "-c",
-                    "user.email=owner@example.invalid",
-                    "-c",
-                    "commit.gpgsign=false",
-                ])
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped()),
-        )
-        .unwrap();
-        assert!(output.status.success(), "git {args:?} failed");
-    }
-
-    #[test]
-    fn a_claude_master_past_the_host_limit_gets_its_owner_text_cut_with_a_note_and_every_instruction_file()
-     {
-        use crate::instruction_files::{Choice, FILE_BYTES_MAX, State};
-        let temporary = private_root();
-        let base = std::fs::canonicalize(temporary.path()).unwrap();
-        let (data, folder, home) = (
-            base.join("data"),
-            base.join("repo"),
-            base.join("master-home"),
-        );
-        for made in [&data, &folder, &home] {
-            std::fs::create_dir(made).unwrap();
-            std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        git_in(&folder, &["init", "-q"]);
-        std::fs::write(folder.join("CLAUDE.md"), "c".repeat(FILE_BYTES_MAX + 1)).unwrap();
-        let agents = format!("AGENTS-RULE-91\n{}\n", "a".repeat(30_000));
-        std::fs::write(folder.join("AGENTS.md"), &agents).unwrap();
-        std::fs::write(folder.join(".gitignore"), ".crazyagent/\n").unwrap();
-        git_in(&folder, &["add", "-A"]);
-        git_in(&folder, &["commit", "-q", "-m", "rules"]);
-        std::fs::create_dir(folder.join(".crazyagent")).unwrap();
-        let full = crate::agent_home::TEXT_BYTES_MAX;
-        crate::agent_home::save_app(&data, &format!("APP-START-92{}", "A".repeat(full - 12)))
-            .unwrap();
-        crate::agent_home::save_project(&folder, &"P".repeat(full)).unwrap();
-        let project = crate::agent_home::AgentProject {
-            data,
-            id: crate::protocol::ProjectId::new("cut-instructions").unwrap(),
-            folder: Some(folder),
-            files: Choice::Project,
-            owner_home: None,
-        };
-        let given = crate::agent_home::text(&project).unwrap();
-        let states: Vec<(&str, State)> = given
-            .files
-            .iter()
-            .map(|file| (file.name.as_str(), file.state))
-            .collect();
-        assert_eq!(
-            states,
-            [("CLAUDE.md", State::TooLarge), ("AGENTS.md", State::Given)],
-            "a CLAUDE.md past its limit is left out whole and recorded"
-        );
-        let section = given.text[given.text.len() - given.section_bytes..].to_owned();
-        assert!(section.contains("AGENTS-RULE-91"));
-
-        let instructions = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
-        let host_limit =
-            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
-        assert!(instructions.len() + 1 + given.text.len() > host_limit);
-        let capped = claude_process(&instructions, given.clone());
-        let prompt = master_prompt(&instructions, &capped.text);
-        assert!(prompt.len() <= host_limit, "{} bytes", prompt.len());
-        let root = Root::open(&base).unwrap();
-        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
-        assert!(
-            write_master_instructions(&root, &runtime_ref, &prompt).is_ok(),
-            "the turn's prompt file is written, never refused"
-        );
-        assert!(capped.text.starts_with("# Instructions from CrazyAgent\n"));
-        assert!(capped.text.contains("APP-START-92"));
-        assert!(
-            capped
-                .text
-                .contains("CrazyAgent cut the app and project instructions here")
-        );
-        assert!(
-            capped.text.ends_with(&section),
-            "the instruction files section stays whole"
-        );
-        assert_eq!(capped.section_bytes, section.len());
-        assert_eq!(capped.files, given.files);
-
-        crate::agent_home::prepare(&home, crate::agent_home::Harness::Claude, &project, &capped)
-            .unwrap();
-        let card = crate::agent_home::received(&home, crate::agent_home::Harness::Claude)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            card.text, capped.text,
-            "the agent card shows what the master got"
-        );
-        assert!(card.text.contains("Shorten them on the Process page."));
-        assert_eq!(
-            crate::agent_home::given_files(&project.data, &home).unwrap(),
-            given.files
-        );
-
-        let small = crate::agent_home::Given {
-            text: "# Instructions from CrazyAgent\n\nShort.\n".into(),
-            files: Vec::new(),
-            section_bytes: 0,
-        };
-        assert_eq!(
-            claude_process(&instructions, small.clone()),
-            small,
-            "text that fits is never cut"
-        );
     }
 
     #[test]

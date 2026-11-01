@@ -6,7 +6,7 @@ use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -257,8 +257,11 @@ impl TerminalSession {
             events,
             ready: true,
             turn: false,
+            held: false,
             live: false,
+            own: false,
             facts: VecDeque::new(),
+            background: BTreeSet::new(),
             exited: false,
             stopped: false,
             record: Some(record.clone()),

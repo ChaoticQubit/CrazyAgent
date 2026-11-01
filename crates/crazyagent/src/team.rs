@@ -6,16 +6,22 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod caps;
 pub mod cleanup;
 pub mod direct;
 pub mod events;
 pub mod graph;
+pub mod history;
 pub mod master;
 pub mod names;
+pub mod questions;
 pub mod runtime;
 pub mod tool;
 
-pub use graph::{EdgeState, GraphEdge, GraphNode, NodeKind, TeamGraph, graph};
+pub use graph::{
+    EdgeState, GraphEdge, GraphFacts, GraphNode, MessageEdge, NodeKind, OverlapEdge, TeamGraph,
+    graph,
+};
 
 pub const MESSAGE_BYTES_MAX: usize = 8192;
 pub const TASK_PROMPT_BYTES_MAX: usize = 4000;
@@ -49,6 +55,8 @@ pub const IDLE_CHOICES_SECS: [u32; 3] = [120, 600, 3600];
 /// How long an idle master is kept once its work is done, in seconds: 15 min. It is never
 /// stopped while that work still runs, and no owner setting changes it.
 pub const MASTER_IDLE_STOP_SECS: u32 = 900;
+/// The longest Master's branch name the owner may choose, in bytes.
+pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
 pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
 
@@ -69,6 +77,7 @@ pub struct DirectInput {
 pub enum AgentRole {
     Master,
     Sub,
+    Teammate,
 }
 
 impl AgentRole {
@@ -76,6 +85,7 @@ impl AgentRole {
         match self {
             Self::Master => "master",
             Self::Sub => "sub",
+            Self::Teammate => "teammate",
         }
     }
 
@@ -83,6 +93,7 @@ impl AgentRole {
         match value {
             "master" => Some(Self::Master),
             "sub" => Some(Self::Sub),
+            "teammate" => Some(Self::Teammate),
             _ => None,
         }
     }
@@ -94,6 +105,7 @@ impl AgentRole {
         match self {
             Self::Master => "Master".into(),
             Self::Sub => format!("Sub-agent {id}"),
+            Self::Teammate => format!("Teammate {id}"),
         }
     }
 }
@@ -379,6 +391,117 @@ impl SwitchMode {
     }
 }
 
+/// The owner's Max harnesses per project and Max teammates per harness choices besides No
+/// limit, the default. The largest is the most agents one project runs at once.
+pub const CAP_CHOICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 15];
+const _: () = assert!(CAP_CHOICES[8] as usize == crate::terminal::PANES_PER_PROJECT_MAX);
+
+/// The owner's Token budget choices besides Off, the default: how many tokens a project's
+/// agents may use, every kind the Usage page counts, cache reads included, from when the
+/// owner set it or last started the team again, before the engine stops the whole team.
+pub const BUDGET_CHOICES: [u64; 7] = [
+    10_000_000,
+    25_000_000,
+    50_000_000,
+    100_000_000,
+    250_000_000,
+    500_000_000,
+    1_000_000_000,
+];
+
+/// The most teammates of one harness its status lists: running ones first, then the newest
+/// that ended.
+pub const TEAMMATES_SHOWN_MAX: usize = 16;
+const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
+
+pub use caps::Caps;
+
+/// A project's token budget: the tokens its agents may use, the tokens they used since the
+/// owner set it or last started the team again, and whether reaching it stopped the team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub tokens: u64,
+    pub used: u64,
+    pub reached: bool,
+}
+
+/// The owner's Sub-agent depth choices: 1 lets only the master start sub-agents, 2 lets
+/// the master's sub-agents lead workers of their own, 3 lets those workers lead too.
+pub const DEPTH_CHOICES: [u8; 3] = [1, 2, 3];
+/// The Sub-agent depth a project has until the owner picks another.
+pub const DEPTH_DEFAULT: u8 = 2;
+const _: () = assert!(DEPTH_DEFAULT >= DEPTH_CHOICES[0] && DEPTH_DEFAULT <= DEPTH_CHOICES[2]);
+/// The choices for the most files one new top-level folder, a folder the owner's branch
+/// does not have, may gain in a change set before the engine refuses the set (DEC-107).
+pub const NEW_FOLDER_FILES_CHOICES: [u32; 4] = [100, 1_000, 10_000, 100_000];
+/// The new-folder limit a project has until the owner picks another.
+pub const NEW_FOLDER_FILES_DEFAULT: u32 = 1_000;
+const _: () = assert!(NEW_FOLDER_FILES_DEFAULT == NEW_FOLDER_FILES_CHOICES[1]);
+
+/// The owner's setting for where a lead's worker lands its change set: `Lead` lets the lead
+/// accept it onto the lead's own branch, `Owner` keeps every change set for the owner's own
+/// Accept in Changes. Lead is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildLanding {
+    #[default]
+    Lead,
+    Owner,
+}
+
+impl ChildLanding {
+    /// The stored name of the setting. Output: `lead` or `owner`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lead => "lead",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Lead, Self::Owner]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// The owner's setting for where a new sub-agent commits: `Named` checks out the engine's
+/// branch `crazyagent/agent-<id>` in the agent's worktree, so each agent works on its own
+/// branch; `Detached` keeps the older detached HEAD. Named is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMode {
+    #[default]
+    Named,
+    Detached,
+}
+
+impl BranchMode {
+    /// The stored name of the mode. Output: `named` or `detached`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Detached => "detached",
+        }
+    }
+
+    /// Reads a stored mode name. Input: the name. Output: the mode, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Named, Self::Detached]
+            .into_iter()
+            .find(|mode| mode.name() == name)
+    }
+}
+
+/// A project's nested sub-agent settings: how deep leads may start workers and where a
+/// worker's change set lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nesting {
+    pub depth: u8,
+    pub lands: ChildLanding,
+}
+
 /// The latest master harness switch of the project's live session, for the divider its
 /// conversation shows: the harness's display name, what it was given under the owner's
 /// setting and the note that says so.
@@ -419,6 +542,14 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: SwitchMode,
     },
+    SubAgentDepth {
+        project_id: ProjectId,
+        depth: u8,
+    },
+    ChildLanding {
+        project_id: ProjectId,
+        mode: ChildLanding,
+    },
     LiveMaster {
         project_id: ProjectId,
         on: bool,
@@ -451,10 +582,124 @@ pub enum TeamAction {
         project_id: ProjectId,
         show: bool,
     },
+    AgentBranches {
+        project_id: ProjectId,
+        mode: BranchMode,
+    },
+    MasterBranch {
+        project_id: ProjectId,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    AskBeforeMerge {
+        project_id: ProjectId,
+        on: bool,
+    },
+    NewFolderLimit {
+        project_id: ProjectId,
+        files: u32,
+    },
     WakeAgent {
         project_id: ProjectId,
         agent: i64,
     },
+    StopAgent {
+        project_id: ProjectId,
+        agent: i64,
+    },
+    StopTeammate {
+        project_id: ProjectId,
+        agent: i64,
+        pane: String,
+    },
+    MessageAgent {
+        project_id: ProjectId,
+        agent: i64,
+        text: String,
+    },
+    MaxHarnesses {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    MaxTeammates {
+        project_id: ProjectId,
+        max: Option<u8>,
+    },
+    TokenBudget {
+        project_id: ProjectId,
+        tokens: Option<u64>,
+    },
+    AnswerQuestion {
+        project_id: ProjectId,
+        message: i64,
+        text: String,
+    },
+    SpreadAccounts {
+        project_id: ProjectId,
+        on: bool,
+    },
+    CoordSettings {
+        project_id: ProjectId,
+        settings: crate::coord::settings::CoordSettings,
+    },
+    HarnessMode {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        mode: crate::coord::settings::SubagentMode,
+    },
+    HarnessDelivery {
+        project_id: ProjectId,
+        harness: crate::coord::settings::HarnessKind,
+        delivery: crate::coord::settings::Delivery,
+    },
+}
+
+/// One harness kind's coordination choices as the team settings show them: how its sub-agents
+/// start, how messages reach its agents, and whether it has native teammates at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessCoordination {
+    pub harness: crate::coord::settings::HarnessKind,
+    pub mode: crate::coord::settings::SubagentMode,
+    pub delivery: crate::coord::settings::Delivery,
+    pub native: bool,
+}
+
+/// A project's coordination settings (DEC-104) with every harness kind's mode and delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinationView {
+    pub settings: crate::coord::settings::CoordSettings,
+    pub harnesses: Vec<HarnessCoordination>,
+}
+
+/// Reads a project's coordination settings and each harness kind's sub-agent mode and delivery,
+/// with the plan defaults for anything the owner never set.
+/// Takes a connection and the project. Returns the view, one row per harness kind.
+pub fn coordination(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<CoordinationView, EngineError> {
+    use crate::coord::settings;
+    let mut harnesses = Vec::with_capacity(settings::HarnessKind::ALL.len());
+    for harness in settings::HarnessKind::ALL {
+        harnesses.push(HarnessCoordination {
+            harness,
+            mode: settings::mode(connection, project, harness)?,
+            delivery: settings::delivery(connection, project, harness)?,
+            native: settings::native_supported(harness),
+        });
+    }
+    let view = CoordinationView {
+        settings: settings::read(connection, project)?,
+        harnesses,
+    };
+    assert!(
+        view.harnesses
+            .iter()
+            .all(|row| row.native || row.mode != settings::SubagentMode::Native)
+    );
+    Ok(view)
 }
 
 impl TeamAction {
@@ -529,16 +774,64 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_time_limits_invalid"))
             }
-            Self::WakeAgent { agent, .. } => {
+            Self::WakeAgent { agent, .. } | Self::StopAgent { agent, .. } => {
                 if *agent <= 0 {
                     return Err(failure("team_agent_not_found"));
                 }
                 Ok(())
             }
+            Self::CoordSettings { settings, .. } => settings.validate(),
+            Self::HarnessMode { harness, mode, .. } => (*mode
+                != crate::coord::settings::SubagentMode::Native
+                || crate::coord::settings::native_supported(*harness))
+            .then_some(())
+            .ok_or_else(|| failure("coord_native_unsupported")),
+            Self::StopTeammate { agent, pane, .. } => (*agent > 0
+                && crate::terminal::pane_id_valid(pane))
+            .then_some(())
+            .ok_or_else(|| failure("team_teammate_not_found")),
+            Self::MessageAgent { agent, text, .. } => (*agent > 0
+                && text_valid(text, crate::coord::BODY_BYTES_MAX))
+            .then_some(())
+            .ok_or_else(|| failure("team_agent_message_invalid")),
+            Self::MaxHarnesses { max, .. } | Self::MaxTeammates { max, .. } => max
+                .is_none_or(|max| CAP_CHOICES.contains(&max))
+                .then_some(())
+                .ok_or_else(|| failure("team_cap_invalid")),
+            Self::TokenBudget { tokens, .. } => tokens
+                .is_none_or(|tokens| BUDGET_CHOICES.contains(&tokens))
+                .then_some(())
+                .ok_or_else(|| failure("team_budget_invalid")),
+            Self::SubAgentDepth { depth, .. } => DEPTH_CHOICES
+                .contains(depth)
+                .then_some(())
+                .ok_or_else(|| failure("team_depth_invalid")),
+            Self::NewFolderLimit { files, .. } => NEW_FOLDER_FILES_CHOICES
+                .contains(files)
+                .then_some(())
+                .ok_or_else(|| failure("team_new_folder_limit_invalid")),
+            Self::MasterBranch { branch, .. } => branch
+                .as_deref()
+                .is_none_or(plain_branch_name)
+                .then_some(())
+                .ok_or_else(|| failure("team_master_branch_invalid")),
+            Self::AnswerQuestion { message, text, .. } => {
+                if *message <= 0 {
+                    return Err(failure("coord_question_missing"));
+                }
+                text_valid(text, crate::coord::BODY_BYTES_MAX)
+                    .then_some(())
+                    .ok_or_else(|| failure("team_answer_invalid"))
+            }
             Self::KeepWarm { .. }
+            | Self::SpreadAccounts { .. }
+            | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
+            | Self::AgentBranches { .. }
+            | Self::AskBeforeMerge { .. }
             | Self::LiveMaster { .. }
+            | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
             | Self::Resume { .. } => Ok(()),
         }
@@ -555,7 +848,13 @@ impl TeamAction {
             | Self::KeepWarm { project_id, .. }
             | Self::TimeLimits { project_id, .. }
             | Self::OnHarnessSwitch { project_id, .. }
+            | Self::SubAgentDepth { project_id, .. }
+            | Self::ChildLanding { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
+            | Self::AgentBranches { project_id, .. }
+            | Self::MasterBranch { project_id, .. }
+            | Self::AskBeforeMerge { project_id, .. }
+            | Self::NewFolderLimit { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -566,11 +865,46 @@ impl TeamAction {
                 events::RuleTarget::Project { project_id }
                 | events::RuleTarget::Agent { project_id, .. } => Some(project_id),
             },
-            Self::Rename { project_id, .. } | Self::WakeAgent { project_id, .. } => {
-                Some(project_id)
-            }
+            Self::Rename { project_id, .. }
+            | Self::WakeAgent { project_id, .. }
+            | Self::StopAgent { project_id, .. }
+            | Self::StopTeammate { project_id, .. }
+            | Self::MessageAgent { project_id, .. }
+            | Self::MaxHarnesses { project_id, .. }
+            | Self::MaxTeammates { project_id, .. }
+            | Self::TokenBudget { project_id, .. }
+            | Self::AnswerQuestion { project_id, .. }
+            | Self::SpreadAccounts { project_id, .. }
+            | Self::CoordSettings { project_id, .. }
+            | Self::HarnessMode { project_id, .. }
+            | Self::HarnessDelivery { project_id, .. } => Some(project_id),
         }
     }
+}
+
+/// Tells whether a branch name the owner typed for the Master's branch is one git can hold
+/// as a local branch: printable ASCII without spaces or git's special characters, no `..`,
+/// `@{`, `//` or leading `-`, no part starting with `.` or ending in `.lock`, at most
+/// `MASTER_BRANCH_BYTES_MAX` bytes. Whether that branch exists is checked when it is used.
+/// Input: the name. Output: the answer.
+fn plain_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MASTER_BRANCH_BYTES_MAX
+        && !name.starts_with('-')
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with('.')
+        && !name.contains("..")
+        && !name.contains("@{")
+        && !name.contains("//")
+        && name != "@"
+        && name
+            .split('/')
+            .all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
+        && name.bytes().all(|byte| {
+            byte.is_ascii_graphic()
+                && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
 }
 
 fn failure(code: &str) -> EngineError {
@@ -855,7 +1189,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 heartbeat_ms INTEGER NOT NULL,
                 stopped_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER,
+                pane TEXT,
+                mode TEXT,
+                hookless INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -877,7 +1215,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL,
                 started_ms INTEGER,
                 finished_ms INTEGER,
-                session TEXT
+                session TEXT,
+                parent INTEGER,
+                mode TEXT
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
@@ -908,6 +1248,15 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 session_secs INTEGER,
                 idle_secs INTEGER NOT NULL DEFAULT 600
             );
+            CREATE TABLE IF NOT EXISTS team_nesting (
+                project TEXT PRIMARY KEY,
+                depth INTEGER NOT NULL CHECK(depth BETWEEN 1 AND 3),
+                lands TEXT NOT NULL CHECK(lands IN ('lead','owner'))
+            );
+            CREATE TABLE IF NOT EXISTS team_new_folder_limit (
+                project TEXT PRIMARY KEY,
+                files INTEGER NOT NULL CHECK(files > 0)
+            );
             CREATE TABLE IF NOT EXISTS team_master_switch (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
@@ -915,6 +1264,18 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_finished_view (
                 project TEXT PRIMARY KEY,
                 show INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_branches (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('named','detached'))
+            );
+            CREATE TABLE IF NOT EXISTS team_master_branch (
+                project TEXT PRIMARY KEY,
+                branch TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_merge_ask (
+                project TEXT PRIMARY KEY,
+                ask INTEGER NOT NULL CHECK(ask IN (0,1))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -957,6 +1318,31 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT NOT NULL,
                 stopped_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS team_caps (
+                project TEXT PRIMARY KEY,
+                harnesses INTEGER CHECK(harnesses IS NULL OR harnesses BETWEEN 1 AND 15),
+                teammates INTEGER CHECK(teammates IS NULL OR teammates BETWEEN 1 AND 15)
+            );
+            CREATE TABLE IF NOT EXISTS team_token_budgets (
+                project TEXT PRIMARY KEY,
+                tokens INTEGER NOT NULL CHECK(tokens > 0),
+                since_ms INTEGER NOT NULL,
+                baseline INTEGER NOT NULL CHECK(baseline >= 0),
+                reached_ms INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS team_account_spread (
+                project TEXT PRIMARY KEY,
+                since_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_teammates (
+                agent INTEGER NOT NULL,
+                project TEXT NOT NULL,
+                pane TEXT NOT NULL,
+                seen_ms INTEGER NOT NULL,
+                ended_ms INTEGER,
+                stopped_ms INTEGER,
+                PRIMARY KEY(agent, pane)
+            );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
@@ -977,9 +1363,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS team_owner_prompts_project ON team_owner_prompts(project, id);",
         )
         .map_err(error)?;
+    add_late_columns(connection)?;
     events::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
+    questions::initialize(connection)?;
     direct::erase_typed_input(connection)
 }
 
@@ -1232,8 +1620,10 @@ pub fn admit(
 /// worktree (DEC-095): a sub-agent gets a task pinned to it, so it runs in the same
 /// worktree and lands in the same change set; the team master gets an engine message. A
 /// sub-agent holds at most one queued resolve task, whose prompt the newest update
-/// replaces, so the global task cap never refuses a merge already made. Takes the
-/// transaction, project, agent, prompt and time. Returns Ok, or a plain refusal code.
+/// replaces, so the global task cap never refuses a merge already made. The update is
+/// the owner's, so it clears the owner stop of that sub-agent alone; the agents it leads
+/// stay stopped. Takes the transaction, project, agent, prompt and time. Returns Ok, or a
+/// plain refusal code.
 pub fn admit_resolve(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -1257,7 +1647,7 @@ pub fn admit_resolve(
         return Ok(Err("team_agent_not_found"));
     };
     match AgentRole::parse(&role) {
-        Some(AgentRole::Sub) => {}
+        Some(AgentRole::Sub) => owner_start_alone(tx, project, agent)?,
         Some(AgentRole::Master) => {
             return append_message(
                 tx,
@@ -1269,7 +1659,7 @@ pub fn admit_resolve(
             )
             .map(|sent| sent.map(|_| ()));
         }
-        None => return Ok(Err("team_agent_not_found")),
+        Some(AgentRole::Teammate) | None => return Ok(Err("team_agent_not_found")),
     }
     let queued: Option<i64> = tx
         .query_row(
@@ -1656,6 +2046,24 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::SubAgentDepth { depth, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET depth=excluded.depth",
+                params![project.as_str(), depth, ChildLanding::default().name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::ChildLanding { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET lands=excluded.lands",
+                params![project.as_str(), DEPTH_DEFAULT, mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::FinishedAgents { show, .. } => {
             tx.execute(
                 "INSERT INTO team_finished_view(project,show) VALUES (?1,?2)
@@ -1663,6 +2071,67 @@ pub fn execute(
                 params![project.as_str(), show],
             )
             .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::AgentBranches { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_agent_branches(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MasterBranch { branch, .. } => {
+            match branch {
+                Some(branch) => tx.execute(
+                    "INSERT INTO team_master_branch(project,branch) VALUES (?1,?2)
+                     ON CONFLICT(project) DO UPDATE SET branch=excluded.branch",
+                    params![project.as_str(), branch],
+                ),
+                None => tx.execute(
+                    "DELETE FROM team_master_branch WHERE project=?1",
+                    [project.as_str()],
+                ),
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::AskBeforeMerge { on, .. } => {
+            tx.execute(
+                "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET ask=excluded.ask",
+                params![project.as_str(), on],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::NewFolderLimit { files, .. } => {
+            tx.execute(
+                "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET files=excluded.files",
+                params![project.as_str(), files],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::CoordSettings { settings, .. } => {
+            crate::coord::settings::write(tx, project, settings)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessMode { harness, mode, .. } => {
+            if *mode == crate::coord::settings::SubagentMode::Native
+                && !crate::coord::settings::native_supported(*harness)
+            {
+                return Ok(rejected("coord_native_unsupported"));
+            }
+            crate::coord::settings::set_mode(tx, project, *harness, *mode)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::HarnessDelivery {
+            harness, delivery, ..
+        } => {
+            crate::coord::settings::set_delivery(tx, project, *harness, *delivery)?;
             Ok(Outcome::Applied)
         }
         TeamAction::LiveMaster { on, .. } => {
@@ -1690,6 +2159,118 @@ pub fn execute(
                 [project.as_str()],
             )
             .map_err(error)?;
+            let baseline = usage_from(tx, project, hour_of(now))?;
+            tx.execute(
+                "UPDATE team_token_budgets SET since_ms=?2, baseline=?3, reached_ms=NULL WHERE project=?1",
+                params![project.as_str(), now, baseline],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::StopAgent { agent, .. } => {
+            let role: Option<String> = tx
+                .query_row(
+                    "SELECT role FROM team_agents WHERE id=?1 AND project=?2",
+                    params![agent, project.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            match (role.as_deref(), role.as_deref().and_then(AgentRole::parse)) {
+                (None, _) => return Ok(rejected("team_agent_not_found")),
+                (_, Some(AgentRole::Master)) => return Ok(rejected("team_stop_master")),
+                _ => {}
+            }
+            owner_stop(tx, project, *agent, now)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MessageAgent { agent, text, .. } => {
+            let message = crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Owner,
+                to: crate::coord::Party::Agent(*agent),
+                kind: crate::coord::MessageKind::Prompt,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: text.clone(),
+                idempotency_key: None,
+            };
+            match crate::coord::send(tx, message, now) {
+                Ok(_) => Ok(Outcome::Applied),
+                Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+                Err(problem) => Ok(rejected(&problem.0)),
+            }
+        }
+        TeamAction::StopTeammate { agent, pane, .. } => {
+            let changed = tx
+                .execute(
+                    "UPDATE team_teammates SET stopped_ms=COALESCE(stopped_ms,?4)
+                     WHERE agent=?1 AND project=?2 AND pane=?3 AND ended_ms IS NULL",
+                    params![agent, project.as_str(), pane, now],
+                )
+                .map_err(error)?;
+            Ok(if changed == 0 {
+                rejected("team_teammate_not_found")
+            } else {
+                Outcome::Applied
+            })
+        }
+        TeamAction::SpreadAccounts { on, .. } => {
+            if *on {
+                tx.execute(
+                    "INSERT OR IGNORE INTO team_account_spread(project,since_ms) VALUES (?1,?2)",
+                    params![project.as_str(), now],
+                )
+            } else {
+                tx.execute(
+                    "DELETE FROM team_account_spread WHERE project=?1",
+                    [project.as_str()],
+                )
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MaxHarnesses { max, .. } => {
+            tx.execute(
+                "INSERT INTO team_caps(project,harnesses) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET harnesses=excluded.harnesses",
+                params![project.as_str(), max],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MaxTeammates { max, .. } => {
+            tx.execute(
+                "INSERT INTO team_caps(project,teammates) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET teammates=excluded.teammates",
+                params![project.as_str(), max],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::TokenBudget { tokens, .. } => {
+            match tokens {
+                None => {
+                    tx.execute(
+                        "DELETE FROM team_token_budgets WHERE project=?1",
+                        [project.as_str()],
+                    )
+                    .map_err(error)?;
+                }
+                Some(tokens) => {
+                    let tokens =
+                        i64::try_from(*tokens).map_err(|_| failure("team_budget_invalid"))?;
+                    let baseline = usage_from(tx, project, hour_of(now))?;
+                    tx.execute(
+                        "INSERT INTO team_token_budgets(project,tokens,since_ms,baseline,reached_ms) VALUES (?1,?2,?3,?4,NULL)
+                         ON CONFLICT(project) DO UPDATE SET tokens=excluded.tokens, since_ms=excluded.since_ms,
+                         baseline=excluded.baseline, reached_ms=NULL",
+                        params![project.as_str(), tokens, now, baseline],
+                    )
+                    .map_err(error)?;
+                }
+            }
             Ok(Outcome::Applied)
         }
         TeamAction::HandOff { reply, step, .. } => {
@@ -1729,6 +2310,9 @@ pub fn execute(
             Ok(()) => Outcome::Applied,
             Err(code) => rejected(code),
         }),
+        TeamAction::AnswerQuestion { message, text, .. } => {
+            questions::answer(tx, project, *message, text, now)
+        }
     }
 }
 
@@ -1928,28 +2512,89 @@ pub struct TeamAgent {
     pub wakeable: bool,
     #[serde(default)]
     pub wake_note: Option<String>,
+    #[serde(default)]
+    pub parent: Option<i64>,
+    #[serde(default)]
+    pub owner_stopped: bool,
+    #[serde(default)]
+    pub teammates: Vec<Teammate>,
+    #[serde(default)]
+    pub pane: Option<String>,
+    #[serde(default)]
+    pub hookless: bool,
+}
+
+/// One teammate a harness split off in its own pane of the harness's terminal, such as a
+/// Claude Code agent team member: its pane id, whether its pane closed, whether the owner or
+/// the teammate cap stopped it, and when the engine first saw it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Teammate {
+    pub pane: String,
+    pub ended: bool,
+    pub stopped: bool,
+    pub seen_ms: i64,
 }
 
 impl TeamAgent {
     /// Tells whether this agent belongs in the Finished fold-out rather than the agents
-    /// list and team graph (DEC-102): a stopped or failed sub-agent, or an idle one that ran
-    /// a turn since it last started, holding no task and with no question waiting for the
-    /// master. The master, every starting or working agent and an idle agent still waiting
-    /// for its first turn, such as one just woken or kept ready, stay in view. Takes the
-    /// questions the agent has waiting. Returns true for a finished agent.
+    /// list and team graph (DEC-102, narrowed by the owner after the DEC-104 trial): a
+    /// stopped or failed sub-agent or teammate holding no task and with no question waiting
+    /// for the master. The master and every live agent stay in view, an idle one waiting
+    /// for work or for its own workers too; Idle stop ends an idle agent, which then moves
+    /// here. Takes the questions the agent has waiting. Returns true for a finished agent.
     pub fn finished_with(&self, questions: u16) -> bool {
-        self.role == AgentRole::Sub
+        matches!(self.role, AgentRole::Sub | AgentRole::Teammate)
             && questions == 0
             && self.task.is_none()
             && match self.status {
-                AgentStatus::Idle => self.turns > 0,
                 AgentStatus::Stopped | AgentStatus::Failed => true,
-                AgentStatus::Starting | AgentStatus::Working => false,
+                AgentStatus::Starting | AgentStatus::Idle | AgentStatus::Working => false,
             }
     }
 }
 
-/// One sub-agent task as the clients poll it.
+/// Orders agents as their lead tree (N2): each lead followed by its own workers, depth
+/// first, keeping the given order among siblings; an agent whose lead is not listed starts
+/// a tree of its own. Takes the agents in display order. Returns each agent once with its
+/// depth under the listed leads, 0 for a top agent.
+pub fn lead_tree<'a>(agents: &[&'a TeamAgent]) -> Vec<(&'a TeamAgent, usize)> {
+    let listed: BTreeSet<i64> = agents.iter().map(|agent| agent.id).collect();
+    let mut stack: Vec<(&TeamAgent, usize)> = agents
+        .iter()
+        .rev()
+        .filter(|agent| {
+            agent
+                .parent
+                .is_none_or(|lead| lead == agent.id || !listed.contains(&lead))
+        })
+        .map(|agent| (*agent, 0))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut ordered = Vec::with_capacity(agents.len());
+    while let Some((agent, depth)) = stack.pop() {
+        if !seen.insert(agent.id) {
+            continue;
+        }
+        ordered.push((agent, depth));
+        stack.extend(
+            agents
+                .iter()
+                .rev()
+                .filter(|worker| worker.parent == Some(agent.id) && worker.id != agent.id)
+                .map(|worker| (*worker, depth + 1)),
+        );
+    }
+    for agent in agents {
+        if seen.insert(agent.id) {
+            ordered.push((agent, 0));
+        }
+    }
+    assert_eq!(ordered.len(), listed.len());
+    ordered
+}
+
+/// One sub-agent task as the clients poll it. `parent` is the lead that handed it out, none
+/// for a task of the master or the owner, so clients name the lead it came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamTask {
     pub id: i64,
@@ -1968,6 +2613,8 @@ pub struct TeamTask {
     pub created_ms: i64,
     pub started_ms: Option<i64>,
     pub finished_ms: Option<i64>,
+    #[serde(default)]
+    pub parent: Option<i64>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -2003,6 +2650,11 @@ pub struct PlanStep {
     pub task: Option<i64>,
 }
 
+/// The new-folder limit a team status read without one shows. Output: the default.
+fn new_folder_default() -> u32 {
+    NEW_FOLDER_FILES_DEFAULT
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
@@ -2016,11 +2668,37 @@ pub struct TeamStatus {
     pub idle_stop_secs: Option<u32>,
     #[serde(default)]
     pub on_harness_switch: SwitchMode,
+    #[serde(default = "depth_default")]
+    pub sub_agent_depth: u8,
+    #[serde(default)]
+    pub child_landing: ChildLanding,
     #[serde(default)]
     pub show_finished: bool,
     #[serde(default)]
+    pub agent_branches: BranchMode,
+    #[serde(default)]
+    pub master_branch: Option<String>,
+    #[serde(default)]
+    pub ask_before_merge: bool,
+    #[serde(default = "new_folder_default")]
+    pub new_folder_files_max: u32,
+    #[serde(default)]
+    pub coordination: Option<CoordinationView>,
+    #[serde(default)]
     pub live_switch: Option<SessionSwitch>,
     pub paused: bool,
+    #[serde(default)]
+    pub max_harnesses: Option<u8>,
+    #[serde(default)]
+    pub max_teammates: Option<u8>,
+    #[serde(default)]
+    pub token_budget: Option<u64>,
+    #[serde(default)]
+    pub budget_used: Option<u64>,
+    #[serde(default)]
+    pub budget_reached: bool,
+    #[serde(default)]
+    pub spread_accounts: bool,
     #[serde(default)]
     pub live_master: Option<bool>,
     #[serde(default)]
@@ -2035,6 +2713,10 @@ pub struct TeamStatus {
     pub events: events::EventsView,
     #[serde(default)]
     pub partial: bool,
+}
+
+fn depth_default() -> u8 {
+    DEPTH_DEFAULT
 }
 
 fn invalid_row(column: &str) -> rusqlite::Error {
@@ -2075,15 +2757,20 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         finished: false,
         wakeable: false,
         wake_note: None,
+        parent: row.get(16)?,
+        owner_stopped: false,
+        teammates: Vec::new(),
+        pane: row.get(17)?,
+        hookless: row.get(18)?,
     })
 }
 
-pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id)";
+pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktree,status,task,turns,error,process_group,created_ms,heartbeat_ms,stopped_ms,(SELECT persona FROM team_names WHERE team_names.agent=team_agents.id),(SELECT handle FROM team_names WHERE team_names.agent=team_agents.id),parent,pane,hookless";
 /// The team task columns the clients read, in `task_row` order, selected from `team_tasks`.
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
 /// tab, Team view and TUI say it came from the master.
-pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms";
+pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent";
 
 pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     let source: String = row.get(1)?;
@@ -2106,6 +2793,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         created_ms: row.get(12)?,
         started_ms: row.get(13)?,
         finished_ms: row.get(14)?,
+        parent: row.get(15)?,
     })
 }
 
@@ -2241,8 +2929,244 @@ pub fn on_harness_switch(
     }
 }
 
-/// Tells whether the owner chose to show finished agents (idle, stopped and failed
-/// sub-agents) in the agents list and team graph instead of their Finished fold-out.
+/// The project's nested sub-agent settings: the owner's Sub-agent depth and where a lead's
+/// worker lands, `DEPTH_DEFAULT` and `ChildLanding::Lead` until the owner picks others.
+/// Takes a connection and the project. Returns the settings, or a SQLite failure.
+pub fn nesting(connection: &Connection, project: &ProjectId) -> Result<Nesting, EngineError> {
+    let row: Option<(i64, String)> = connection
+        .query_row(
+            "SELECT depth,lands FROM team_nesting WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((depth, lands)) = row else {
+        return Ok(Nesting {
+            depth: DEPTH_DEFAULT,
+            lands: ChildLanding::default(),
+        });
+    };
+    let depth = u8::try_from(depth)
+        .ok()
+        .filter(|depth| DEPTH_CHOICES.contains(depth))
+        .ok_or_else(|| error("team_depth_invalid"))?;
+    let lands = ChildLanding::named(&lands).ok_or_else(|| error("team_landing_invalid"))?;
+    Ok(Nesting { depth, lands })
+}
+
+/// How deep a sub-agent sits under the master: 1 for one the master started, one more for
+/// each lead above it, counted up the recorded parents at most `DEPTH_WALK_MAX` steps.
+/// Takes a connection and the agent. Returns its depth, or a SQLite failure.
+pub fn agent_depth(connection: &Connection, agent: i64) -> Result<u8, EngineError> {
+    let depth: Option<i64> = connection
+        .query_row(
+            "WITH RECURSIVE chain(id,parent,n) AS (
+                 SELECT id,parent,1 FROM team_agents WHERE id=?1
+                 UNION ALL
+                 SELECT a.id,a.parent,chain.n+1 FROM team_agents a JOIN chain ON a.id=chain.parent
+                 WHERE chain.n<?2)
+             SELECT MAX(n) FROM chain",
+            params![agent, DEPTH_WALK_MAX],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let depth = depth.ok_or_else(|| failure("team_agent_not_found"))?;
+    assert!((1..=DEPTH_WALK_MAX).contains(&depth));
+    Ok(u8::try_from(depth).expect("the walk is bounded"))
+}
+
+/// The most parent links `agent_depth` follows, past the deepest setting so a deeper chain
+/// still reads as past every limit.
+const DEPTH_WALK_MAX: i64 = 8;
+const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
+
+/// Gives team tables made before later columns those columns, older rows taking the
+/// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
+/// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
+/// for a lead's task) and `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// DEC-104 bare-hooks). Runs on every open and adds each column once. Takes the engine
+/// connection. Returns any SQLite failure.
+fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
+    for (table, column, definition) in [
+        ("team_agents", "pane", "TEXT"),
+        ("team_agents", "mode", "TEXT"),
+        ("team_tasks", "mode", "TEXT"),
+        ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                [table, column],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                ))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
+/// The sub-agent mode an agent leads in (DEC-104), fixed at its first start: its row's
+/// mode, else the project's setting for its harness kind when the master started it on a
+/// kind with native teammates, else app-spawned, then stored so a later setting change
+/// never moves it. Takes the connection, project and agent. Returns the mode, or a SQLite
+/// failure or `team_lead_mode_invalid` for a stored name this build does not know.
+pub(crate) fn lead_mode(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<crate::coord::settings::SubagentMode, EngineError> {
+    use crate::coord::settings::{HarnessKind, SubagentMode, mode, native_supported};
+    assert!(agent > 0);
+    let read = |connection: &Connection| -> Result<(String, String, Option<i64>, Option<String>), EngineError> {
+        connection
+            .query_row(
+                "SELECT role,harness,parent,mode FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(error)
+    };
+    let (role, harness, parent, stored) = read(connection)?;
+    let stored = match stored {
+        Some(stored) => stored,
+        None => {
+            let chosen =
+                match HarnessKind::from_harness(&harness).filter(|kind| native_supported(*kind)) {
+                    Some(kind) if role == AgentRole::Sub.name() && parent.is_none() => {
+                        mode(connection, project, kind)?
+                    }
+                    _ => SubagentMode::AppSpawned,
+                };
+            connection
+                .execute(
+                    "UPDATE team_agents SET mode=?2 WHERE id=?1 AND mode IS NULL",
+                    params![agent, chosen.as_str()],
+                )
+                .map_err(error)?;
+            read(connection)?.3.expect("the mode was just stored")
+        }
+    };
+    SubagentMode::parse(&stored).ok_or_else(|| failure("team_lead_mode_invalid"))
+}
+
+/// Adds the parent agent column to the team task and agent tables (N1, migration 8), so
+/// each task and agent records the lead that started it, NULL for the master's own. A
+/// table the engine has not opened yet gets the column from `initialize`. Takes the
+/// upgrade transaction. Returns any SQLite failure.
+pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    for table in ["team_tasks", "team_agents"] {
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            continue;
+        }
+        let present: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name='parent')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN parent INTEGER"))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Where the project's new sub-agents commit: on their own named branch, the default, or
+/// on a detached HEAD, the owner's other choice. Takes a connection and the project.
+/// Returns the mode.
+pub fn agent_branches(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BranchMode, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_agent_branches WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(BranchMode::default()),
+        Some(name) => BranchMode::named(name).ok_or_else(|| error("team_branch_mode_invalid")),
+    }
+}
+
+/// The branch the owner chose for the master to work on and merge harnesses into
+/// (DEC-100), None for the repository's default branch. Takes a connection and the
+/// project. Returns the choice.
+pub fn master_branch_choice(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    let branch: Option<String> = connection
+        .query_row(
+            "SELECT branch FROM team_master_branch WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match branch {
+        Some(branch) if !plain_branch_name(&branch) => Err(error("team_master_branch_invalid")),
+        branch => Ok(branch),
+    }
+}
+
+/// Tells whether the owner asked to approve each merge of a finished harness into the
+/// Master's branch, so the master's merge leaves it as a pending Accept instead; off by
+/// default. Takes a connection and the project. Returns the setting.
+pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    let ask: Option<bool> = connection
+        .query_row(
+            "SELECT ask FROM team_merge_ask WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(ask.unwrap_or(false))
+}
+
+/// The most files one new top-level folder, a folder the owner's branch does not have,
+/// may gain in one of the project's change sets before the engine refuses the set
+/// (DEC-107); `NEW_FOLDER_FILES_DEFAULT` until the owner picks another. Takes a connection
+/// and the project. Returns the limit.
+pub fn new_folder_files_max(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<u32, EngineError> {
+    let files: Option<u32> = connection
+        .query_row(
+            "SELECT files FROM team_new_folder_limit WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(files.unwrap_or(NEW_FOLDER_FILES_DEFAULT))
+}
+
+/// Tells whether the owner chose to show finished agents (stopped and failed sub-agents)
+/// in the agents list and team graph instead of their Finished fold-out.
 /// Takes a connection and the project.
 /// Returns false, the Hide default, until the owner picks Show.
 pub fn show_finished(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
@@ -2326,6 +3250,225 @@ pub fn paused(connection: &Connection, project: &ProjectId) -> Result<bool, Engi
         .map_err(error)
 }
 
+/// The owner's Max teammates per harness for the project, for a lead's instructions and the
+/// engine's own check. Takes a connection and the project. Returns the cap, None for No
+/// limit, or a SQLite failure.
+pub fn teammate_cap(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<u8>, EngineError> {
+    caps::read(connection, project).map(|caps| caps.teammates)
+}
+
+/// Tells whether the owner turned on Spread harnesses across accounts for the project, so a
+/// new or woken agent prefers a pool account no running agent of the project uses. Takes a
+/// connection and the project. Returns the switch, Off when unset, or a SQLite failure.
+pub fn spread_accounts(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_account_spread WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records the owner's stop of a sub-agent and of every agent it leads, down its whole
+/// lead tree, so each stays stopped across restarts until the owner wakes it or its lead.
+/// Takes a connection, the project, the agent and the time. Returns any SQLite failure.
+pub(crate) fn owner_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    now: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?4
+             )
+             INSERT OR IGNORE INTO team_owner_stops(agent,project,stopped_ms)
+             SELECT id, ?2, ?3 FROM led",
+            params![agent, project.as_str(), now, DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a
+/// woken harness brings its stopped sub-agents back with it: their held tasks wake them.
+/// Only the owner's own Wake or restart of that agent clears the tree (AW-1); any other
+/// start uses [`owner_start_alone`]. Takes a connection, the project and the agent.
+/// Returns any SQLite failure.
+pub(crate) fn owner_start(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "WITH RECURSIVE led(id, depth) AS (
+                 SELECT ?1, 0
+                 UNION
+                 SELECT a.id, led.depth + 1 FROM team_agents a JOIN led ON a.parent = led.id
+                 WHERE a.project = ?2 AND a.id <> led.id AND led.depth < ?3
+             )
+             DELETE FROM team_owner_stops WHERE agent IN (SELECT id FROM led)",
+            params![agent, project.as_str(), DEPTH_WALK_MAX],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Clears the owner's stop of one agent that starts again for anything but the owner's
+/// Wake or restart of it, such as the owner's change-set Update or a pinned task. The
+/// stops of the agents it leads stay, so each of them waits for the owner (AW-1). Takes a
+/// connection, the project and the agent. Returns any SQLite failure.
+pub(crate) fn owner_start_alone(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<(), EngineError> {
+    assert!(agent > 0, "owner_start_alone_needs_a_stored_agent");
+    connection
+        .execute(
+            "DELETE FROM team_owner_stops WHERE agent=?1 AND project=?2",
+            params![agent, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The start of the usage hour that holds a time, as usage rows record it. Takes ms since
+/// the epoch. Returns the hour's start in the same unit.
+fn hour_of(ms: i64) -> i64 {
+    ms - ms.rem_euclid(events::HOUR_MS)
+}
+
+/// Adds up every token the project's agents used in usage hours from `hour_ms` on, each kind
+/// the Usage page counts. Takes a connection, the project and the hour start. Returns the
+/// total, 0 before any usage was recorded, or a SQLite failure.
+fn usage_from(
+    connection: &Connection,
+    project: &ProjectId,
+    hour_ms: i64,
+) -> Result<i64, EngineError> {
+    let counted: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='usage_tokens')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !counted {
+        return Ok(0);
+    }
+    let total: f64 = connection
+        .query_row(
+            "SELECT TOTAL(input)+TOTAL(output)+TOTAL(cache_read)+TOTAL(cache_write) FROM usage_tokens
+             WHERE project=?1 AND hour_ms>=?2",
+            params![project.as_str(), hour_ms],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(total.clamp(0.0, i64::MAX as f64) as i64)
+}
+
+/// Reads the project's token budget and what its agents used against it: the tokens of the
+/// usage hours since the budget's start, less what that first hour held at its start, so
+/// the hour's earlier use never counts. Takes a connection and the project. Returns the
+/// budget, None while it is Off, or a SQLite failure.
+pub fn budget(connection: &Connection, project: &ProjectId) -> Result<Option<Budget>, EngineError> {
+    let row: Option<(i64, i64, i64, Option<i64>)> = connection
+        .query_row(
+            "SELECT tokens,since_ms,baseline,reached_ms FROM team_token_budgets WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((tokens, since, baseline, reached)) = row else {
+        return Ok(None);
+    };
+    let tokens = u64::try_from(tokens)
+        .ok()
+        .filter(|tokens| *tokens > 0)
+        .ok_or_else(|| error("team_budget_invalid"))?;
+    let used = usage_from(connection, project, hour_of(since))?
+        .saturating_sub(baseline)
+        .max(0);
+    Ok(Some(Budget {
+        tokens,
+        used: u64::try_from(used).expect("used is never below zero"),
+        reached: reached.is_some(),
+    }))
+}
+
+/// Stops the project's whole team once its agents used the owner's token budget: the team
+/// pauses as the owner's Stop all does, the budget records when, and the owner gets an app
+/// notification. A budget that already stopped the team waits for the owner to start it
+/// again. Takes a connection, the project and the time. Returns true when it stopped the
+/// team now, or a SQLite failure.
+pub(crate) fn budget_stop(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<bool, EngineError> {
+    let Some(budget) = budget(connection, project)? else {
+        return Ok(false);
+    };
+    if budget.reached || budget.used < budget.tokens {
+        return Ok(false);
+    }
+    let tx = events::immediate(connection)?;
+    let changed = tx
+        .execute(
+            "UPDATE team_token_budgets SET reached_ms=?2 WHERE project=?1 AND reached_ms IS NULL",
+            params![project.as_str(), now],
+        )
+        .map_err(error)?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO team_paused_projects(project,since_ms) VALUES (?1,?2)
+         ON CONFLICT(project) DO NOTHING",
+        params![project.as_str(), now],
+    )
+    .map_err(error)?;
+    let text = format!(
+        "The team stopped: its agents used {} of the {} token budget. Raise the budget or start the team again to continue.",
+        token_words(budget.used),
+        token_words(budget.tokens)
+    );
+    events::notify(
+        &tx,
+        project,
+        events::NotificationKind::BudgetStopped,
+        &text,
+        now,
+    )?;
+    tx.commit().map_err(error)?;
+    Ok(true)
+}
+
+/// Words a token count for the owner: millions with one decimal at most, else the number.
+/// Takes the count. Returns the words, such as `12.5M tokens`.
+pub fn token_words(tokens: u64) -> String {
+    if tokens < 1_000_000 {
+        return format!("{tokens} tokens");
+    }
+    let tenths = tokens / 100_000;
+    if tenths.is_multiple_of(10) {
+        format!("{}M tokens", tenths / 10)
+    } else {
+        format!("{}.{}M tokens", tenths / 10, tenths % 10)
+    }
+}
+
 /// Pauses a pool account that hit a rate or usage limit for as long as a team agent's
 /// account pauses, in the pause every master, team and research turn honours. Takes a
 /// connection and the account's connection. Returns when the pause ends, in ms since the
@@ -2374,16 +3517,17 @@ pub fn owner_status(
 }
 
 /// The project's team graph as the owner reads it, built from a status `fit_status` fitted
-/// until the graph fits one owner reply. Takes a connection and the stored setup. Returns
-/// the graph, or `team_status_bounds` when even an empty view does not fit.
+/// until the graph fits one owner reply, with the branches and coordination state
+/// `graph::facts` reads now. Takes a connection and the stored setup. Returns the graph, or
+/// `team_status_bounds` when even an empty view does not fit.
 pub fn owner_graph(
     connection: &Connection,
     stored: &StoredSetup,
 ) -> Result<TeamGraph, EngineError> {
-    let status = fit_status(status(connection, stored)?, |status| {
-        encoded_len(&graph(status))
-    })?;
-    Ok(graph(&status))
+    let status = status(connection, stored)?;
+    let facts = graph::facts(connection, &status, now_ms())?;
+    let status = fit_status(status, |status| encoded_len(&graph(status, &facts)))?;
+    Ok(graph(&status, &facts))
 }
 
 /// Fits a status to one owner reply. First every free-form text is cut to one shared cap,
@@ -2647,8 +3791,25 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             refusal.map(wake_note)
         };
     }
+    let stopped: BTreeSet<i64> = {
+        let mut statement = connection
+            .prepare("SELECT agent FROM team_owner_stops WHERE project=?1")
+            .map_err(error)?;
+        statement
+            .query_map([project.as_str()], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    for agent in &mut agents {
+        agent.owner_stopped = stopped.contains(&agent.id);
+        agent.teammates = teammates(connection, project, agent.id)?;
+    }
     let (live_master, live_problem) = master::switch(connection, project)?;
     let limits = time_limits(connection, project)?;
+    let nested = nesting(connection, project)?;
+    let limited = caps::read(connection, project)?;
+    let spend = budget(connection, project)?;
     Ok(TeamStatus {
         project_id: project.clone(),
         keep_warm: keep_warm(connection, project)?,
@@ -2656,9 +3817,22 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         session_limit_secs: limits.session,
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
+        sub_agent_depth: nested.depth,
+        child_landing: nested.lands,
         show_finished: show_finished(connection, project)?,
+        agent_branches: agent_branches(connection, project)?,
+        master_branch: master_branch_choice(connection, project)?,
+        ask_before_merge: ask_before_merge(connection, project)?,
+        new_folder_files_max: new_folder_files_max(connection, project)?,
+        coordination: Some(coordination(connection, project)?),
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
+        max_harnesses: limited.harnesses,
+        max_teammates: limited.teammates,
+        token_budget: spend.map(|spend| spend.tokens),
+        budget_used: spend.map(|spend| spend.used),
+        budget_reached: spend.is_some_and(|spend| spend.reached),
+        spread_accounts: spread_accounts(connection, project)?,
         live_master,
         live_problem,
         min_agents: plan.min_agents,
@@ -2671,6 +3845,39 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         events,
         partial: false,
     })
+}
+
+/// Lists one harness's teammates as the status shows them: running ones first, then the
+/// newest that ended, at most `TEAMMATES_SHOWN_MAX`. Takes a connection, the project and the
+/// harness agent. Returns the teammates, or a SQLite failure.
+fn teammates(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<Vec<Teammate>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT pane,ended_ms IS NOT NULL,stopped_ms IS NOT NULL,seen_ms FROM team_teammates
+             WHERE agent=?1 AND project=?2 ORDER BY ended_ms IS NOT NULL, COALESCE(ended_ms,seen_ms) DESC LIMIT ?3",
+        )
+        .map_err(error)?;
+    let listed = statement
+        .query_map(
+            params![agent, project.as_str(), TEAMMATES_SHOWN_MAX as i64],
+            |row| {
+                Ok(Teammate {
+                    pane: row.get(0)?,
+                    ended: row.get(1)?,
+                    stopped: row.get(2)?,
+                    seen_ms: row.get(3)?,
+                })
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(listed.len() <= TEAMMATES_SHOWN_MAX);
+    Ok(listed)
 }
 
 #[cfg(all(test, unix))]

@@ -21,6 +21,8 @@ const RUN_SCAN_MS: i64 = 24 * HOUR_MS;
 const FINISHED_RUNS_PER_SCAN: i64 = 64;
 const LINE_TOKENS_MAX: u64 = 1_000_000_000;
 const ROW_TOKENS_MAX: i64 = 1_000_000_000_000_000;
+const TOOLS_PER_READ_MAX: usize = 4096;
+const ARGUMENTS_BYTES_MAX: usize = 64 * 1024;
 
 pub(super) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS usage_tokens (
     hour_ms INTEGER NOT NULL,
@@ -290,6 +292,37 @@ fn codex_line(
     (growth, reported.then_some(observation))
 }
 
+/// Names the tool call one Codex rollout line records, the way adoption counts it: a
+/// function or custom tool call by its name and parsed arguments, a local shell call by its
+/// command, and a skill it read by `skill:` and the skill's name too. Arguments longer than
+/// `ARGUMENTS_BYTES_MAX` count the call by its name alone. Input: the parsed line. Output:
+/// the counted names, at most two, none for any other line.
+fn codex_tools(value: &Value) -> Vec<String> {
+    let payload = &value["payload"];
+    if value["type"] != "response_item" {
+        return Vec::new();
+    }
+    let (name, input) = match payload["type"].as_str() {
+        Some("function_call") => (
+            payload["name"].as_str().unwrap_or_default(),
+            payload["arguments"]
+                .as_str()
+                .filter(|arguments| arguments.len() <= ARGUMENTS_BYTES_MAX)
+                .and_then(|arguments| serde_json::from_str(arguments).ok())
+                .unwrap_or(Value::Null),
+        ),
+        Some("custom_tool_call") => (payload["name"].as_str().unwrap_or_default(), Value::Null),
+        Some("local_shell_call") => ("local_shell_call", payload["action"].clone()),
+        _ => return Vec::new(),
+    };
+    let names: Vec<String> = crate::coord::adoption::tool_key(name, &input)
+        .into_iter()
+        .chain(crate::coord::adoption::skill_key(name, &input))
+        .collect();
+    assert!(names.len() <= 2);
+    names
+}
+
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
 /// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
@@ -400,7 +433,8 @@ fn session_name(path: &Path) -> String {
 }
 
 /// Reads what one record gained since its stored progress, at most `READ_BYTES_MAX`.
-/// A replaced or shortened record starts over. A line longer than the read is skipped.
+/// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
+/// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the growth and the last limits.
 fn read_record(
     path: &Path,
@@ -414,17 +448,50 @@ fn read_record(
     read_opened(opened, format, progress, now_ms)
 }
 
-/// Reads what an open record gained since its stored progress, up to the length it had
-/// when it was opened and at most `READ_BYTES_MAX`, so lines a harness appends meanwhile
-/// wait for the next scan. Inputs: the open record with its identity and length, its
-/// progress and the time. Output: the growth and the last limits.
+/// Reads one record as `read_record` does and also collects the Codex tool calls its new
+/// lines record. Inputs: the record, its progress, the time and the collected tools.
+/// Output: the growth and the last limits.
+fn read_record_with(
+    path: &Path,
+    format: Format,
+    progress: &mut Progress,
+    now_ms: i64,
+    tools: &mut Vec<String>,
+) -> (Tokens, Option<Observation>) {
+    let Some(opened) = open_record(path) else {
+        return (Tokens::default(), None);
+    };
+    read_opened_with(opened, format, progress, now_ms, Some(tools))
+}
+
 fn read_opened(
-    (mut file, identity, length): (File, (u64, u64), u64),
+    opened: (File, (u64, u64), u64),
     format: Format,
     progress: &mut Progress,
     now_ms: i64,
 ) -> (Tokens, Option<Observation>) {
-    if progress.identity != identity || length < progress.offset {
+    read_opened_with(opened, format, progress, now_ms, None)
+}
+
+/// Reads what an open record gained since its stored progress, up to the length it had
+/// when it was opened and at most `READ_BYTES_MAX`, so lines a harness appends meanwhile
+/// wait for the next scan. The record is the one the progress pinned while its inode is
+/// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
+/// device, so a reboot never counts a whole record again. Inputs: the open record with its
+/// identity and length, its progress, the time and where to collect the Codex tool calls
+/// read, at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the growth and the last limits.
+fn read_opened_with(
+    (mut file, identity, length): (File, (u64, u64), u64),
+    format: Format,
+    progress: &mut Progress,
+    now_ms: i64,
+    mut tools: Option<&mut Vec<String>>,
+) -> (Tokens, Option<Observation>) {
+    if crate::file_identity::same_files(&[progress.identity], &[identity])
+        && length >= progress.offset
+    {
+        progress.identity = identity;
+    } else {
         *progress = Progress {
             identity,
             ..Progress::default()
@@ -464,10 +531,18 @@ fn read_opened(
                 let (gained, observed) = codex_line(&value, progress, now_ms);
                 growth = growth.plus(gained);
                 limits = observed.or(limits);
+                if let Some(tools) = tools.as_deref_mut() {
+                    for tool in codex_tools(&value) {
+                        if tools.len() < TOOLS_PER_READ_MAX {
+                            tools.push(tool);
+                        }
+                    }
+                }
             }
         }
     }
     assert!(progress.offset <= length);
+    assert!(tools.is_none_or(|tools| tools.len() <= TOOLS_PER_READ_MAX));
     (growth, limits)
 }
 
@@ -501,16 +576,56 @@ pub fn scan_home(
     attribution: &Attribution,
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
+    scan(db, home, format, attribution, None, now_ms)
+}
+
+/// Counts a team agent's home as `scan_home` does and, for a Codex home, also counts each
+/// tool call the new lines record against the agent for the coordination layer, in the
+/// same write as the tokens, so each call counts once. Claude Code agents count theirs
+/// through their hooks. Inputs: the store, the home, its format, the attribution, the
+/// agent and the time. Output: the tokens added, or a plain code.
+pub fn scan_agent_home(
+    db: &Connection,
+    home: &Path,
+    format: Format,
+    attribution: &Attribution,
+    agent: i64,
+    now_ms: i64,
+) -> Result<Tokens, EngineError> {
+    scan(db, home, format, attribution, Some(agent), now_ms)
+}
+
+fn scan(
+    db: &Connection,
+    home: &Path,
+    format: Format,
+    attribution: &Attribution,
+    agent: Option<i64>,
+    now_ms: i64,
+) -> Result<Tokens, EngineError> {
     checked_attribution(attribution)?;
+    let counting = agent.filter(|_| format == Format::Codex);
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
     let mut changed = Vec::new();
     for path in records(home, format) {
         let key = path.to_string_lossy().into_owned();
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
-        let (growth, observed) = read_record(&path, format, &mut progress, now_ms);
+        let mut tools = Vec::new();
+        let (growth, observed) = match counting {
+            Some(_) => read_record_with(&path, format, &mut progress, now_ms, &mut tools),
+            None => read_record(&path, format, &mut progress, now_ms),
+        };
         if progress != before {
-            changed.push((key, session_name(&path), before, progress, growth, observed));
+            changed.push((
+                key,
+                session_name(&path),
+                before,
+                progress,
+                growth,
+                observed,
+                tools,
+            ));
         }
     }
     if changed.is_empty() {
@@ -519,9 +634,14 @@ pub fn scan_home(
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
     let mut added = Tokens::default();
     let mut limits = None;
-    for (key, session, before, progress, growth, observed) in changed {
+    for (key, session, before, progress, growth, observed, tools) in changed {
         if stored_progress(&tx, &key)? != before {
             continue;
+        }
+        if let Some(agent) = counting {
+            for tool in &tools {
+                crate::coord::record_tool(&tx, agent, tool, now_ms)?;
+            }
         }
         tx.execute(
             "INSERT INTO usage_files (path,progress) VALUES (?1,?2)

@@ -1,5 +1,6 @@
 mod routes;
 
+use crazyagent::coord::{MessageKind, NewMessage, Party, QuestionFor, Severity};
 use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
 use crazyagent_desktop::bridge::{BridgeError, BridgeQueue, NativeBridge};
@@ -18,6 +19,7 @@ const HEAD_BYTES_MAX: usize = 16 * 1024;
 const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const RECORD_MODE: &str = "record-turn-end";
+const ASK_MODE: &str = "ask-owner";
 const RECORD_ARGS_MAX: usize = 10;
 
 /// The one bridge every route shares, as the app's `NativeState` does.
@@ -200,13 +202,79 @@ fn record_turn_end(args: &[OsString]) -> Result<String, String> {
     Ok(recorded.map_or_else(|| "none".to_owned(), String::from))
 }
 
+/// Puts one question from a team agent to the owner the way the agent's `update_work` call
+/// does, through the engine's own `coord::send` on its database, so the end-to-end test
+/// answers a question the engine really holds. Inputs: engine root, project, asking agent
+/// id, severity (high, normal or low) and the question of at most `coord::BODY_BYTES_MAX`
+/// bytes. Output: the question's message id.
+fn ask_owner(args: &[OsString]) -> Result<String, String> {
+    let [root, project, agent, severity, question] = args else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {ASK_MODE} <engine root> <project> <agent> <severity> <question>"
+        ));
+    };
+    let text = |value: &OsString| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "arguments must be UTF-8".to_owned())
+    };
+    let agent: i64 = text(agent)?
+        .parse()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "invalid agent id".to_owned())?;
+    let severity = Severity::parse(&text(severity)?)
+        .ok_or_else(|| "severity is high, normal or low".to_owned())?;
+    let body = text(question)?;
+    if body.trim().is_empty() || body.len() > crazyagent::coord::BODY_BYTES_MAX {
+        return Err(format!(
+            "the question is 1 to {} bytes",
+            crazyagent::coord::BODY_BYTES_MAX
+        ));
+    }
+    let message = NewMessage {
+        project: ProjectId::new(text(project)?).map_err(|_| "invalid project id".to_owned())?,
+        from: Party::Agent(agent),
+        to: Party::Owner,
+        kind: MessageKind::Question,
+        question: Some((QuestionFor::Me, severity)),
+        work: None,
+        reply_to: None,
+        body,
+        idempotency_key: None,
+    };
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "the clock is before 1970".to_owned())?;
+    let now =
+        i64::try_from(since.as_millis()).map_err(|_| "the clock is out of range".to_owned())?;
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    let id = crazyagent::coord::send(&db, message, now).map_err(|error| error.0)?;
+    assert!(id > 0);
+    Ok(id.to_string())
+}
+
 /// Serves the app's `desktop_*` commands to the end-to-end test on 127.0.0.1 for as long as
-/// stdin stays open, or with `record-turn-end` first, records one ended agent turn. Input:
-/// the engine socket path. Output: prints `ready <port> <token>` once listening, or the
-/// recorded change set; exits non-zero when it cannot.
+/// stdin stays open; with `record-turn-end` first, records one ended agent turn, and with
+/// `ask-owner` first, puts one agent's question to the owner. Input: the engine socket path.
+/// Output: prints `ready <port> <token>` once listening, or the recorded change set or the
+/// question's id; exits non-zero when it cannot.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
+    if all.first().is_some_and(|mode| mode == ASK_MODE) {
+        return match ask_owner(&all[1..]) {
+            Ok(id) => {
+                println!("{id}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{ASK_MODE}: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
     if all.first().is_some_and(|mode| mode == RECORD_MODE) {
         return match record_turn_end(&all[1..]) {
             Ok(recorded) => {

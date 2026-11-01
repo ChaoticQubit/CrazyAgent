@@ -1,6 +1,6 @@
 import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
@@ -209,10 +209,27 @@ const copy: Record<string, string> = {
   team_plan_step_handed: "That step was handed off already.",
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
+  team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
+  coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
+  coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
+  coord_project_unknown: "This project was not found.",
   team_agent_unknown: "That agent is not running anymore.",
   team_agent_running: "That agent is already running.",
   team_agent_no_worktree: "That agent's worktree was cleaned up, so it can't be woken. Hand its work to a new agent.",
   team_agents_unavailable: "Team agents can't run on this system in this version.",
+  team_stop_master: "The master stops with Stop all.",
+  team_teammate_not_found: "That teammate has already ended.",
+  team_agent_message_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_agent_unknown: "That agent is not on this project's team any more.",
+  coord_text_invalid: "Write a message of up to 4000 bytes, with no hidden characters.",
+  coord_message_self: "An agent cannot be sent its own message.",
+  coord_recipient_invalid: "That message has no agent to go to.",
+  team_cap_invalid: "Pick a listed limit, or No limit.",
+  team_budget_invalid: "Pick a listed token budget, or Off.",
+  team_answer_invalid: "Write an answer of at most 4000 bytes.",
+  coord_question_missing: "That question is no longer there.",
+  coord_question_closed: "That question was already answered or has ended.",
+  coord_questions_bounds: "The questions are too long to show. Answer them in the agents' terminals.",
   team_state_unavailable: "The engine cannot read the team safely right now.",
   team_state_not_canonical: "The engine cannot read the team safely right now.",
   team_state_not_private: "The engine cannot read the team safely right now.",
@@ -240,6 +257,8 @@ const copy: Record<string, string> = {
   master_turn_running: "The master is still answering. Stop that reply to switch sessions.",
   master_session_live: "That session is already the live one.",
   master_session_closed: "That session ended with its project and can't be resumed.",
+  master_session_unused: "This session has no messages yet, so it already is a new session.",
+  master_session_files_kept: "Its transcript couldn't be removed from the master's home, so nothing was deleted.",
   master_turn_capacity: "This conversation is full. End it from the conversation menu, then send again.",
   master_turn_not_current: "That reply already finished.",
   master_input_too_large: "This conversation is too long for the master. End it from the conversation menu, then send again.",
@@ -403,6 +422,28 @@ export function renameTeamAgent(id: string, agent: number, handle: string, gener
  * Output: the engine receipt. */
 export function wakeTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_wake_agent", { id, agent, generation });
+}
+
+/** Stops one harness with the teammates in its terminal; it stays stopped until the owner wakes
+ * it. Inputs: the project id, the team agent id and a generation. Output: the engine receipt. */
+export function stopTeamAgent(id: string, agent: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_agent", { id, agent, generation });
+}
+
+/** The most bytes one owner message to an agent may hold, as the coordination layer allows. */
+export const AGENT_MESSAGE_BYTES_MAX = 4000;
+
+/** Sends the owner's message to one team agent through the coordination layer, which delivers
+ * it to the agent's mailbox with a receipt. Inputs: the project id, the team agent id, the text
+ * and a generation. Output: the engine receipt. */
+export function sendAgentMessage(id: string, agent: number, text: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_send", { id, agent, text, generation });
+}
+
+/** Stops one teammate a harness split off, and tells the harness. Inputs: the project id, the
+ * harness agent id, the teammate's pane id and a generation. Output: the engine receipt. */
+export function stopTeammate(id: string, agent: number, pane: string, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_stop_teammate", { id, agent, pane, generation });
 }
 
 export const RESEARCH_LOG_LINES_MAX = 200;
@@ -621,6 +662,13 @@ export function startNewSession(ticket: string, cancelRunning: boolean, generati
  * owner confirmed stopping a running reply, and a draft generation. Output: the receipt. */
 export function resumeSession(ticket: string, session: string, cancelRunning: boolean, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => resumeMasterSession(ticket, session, cancelRunning, generation));
+}
+
+/** Deletes a session that is not live: the engine removes its stored turns and its
+ * transcript in the master's private home. Inputs: the master ticket, the session id and a
+ * draft generation. Output: the receipt. */
+export function deleteSession(ticket: string, session: string, generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => deleteMasterSession(ticket, session, generation));
 }
 
 /** Asks the engine to stop the master's reply in progress.

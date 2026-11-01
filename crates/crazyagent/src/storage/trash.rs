@@ -7,15 +7,36 @@ pub(crate) const ACCOUNT_KEY: &str = "account_key";
 pub(crate) const MCP_SECRET: &str = "mcp_secret";
 pub(crate) const MCP_CHECKS: &str = "mcp_checks";
 pub(crate) const SKILL_FOLDER: &str = "skill_folder";
+pub(crate) const HOOK_FOLDER: &str = "hook_folder";
 const SWEEP_MAX: i64 = 10_000;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS file_trash (
-    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+macro_rules! trash_columns {
+    () => {
+        "(
+    kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder','hook_folder')),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
     PRIMARY KEY(kind, name)
-) WITHOUT ROWID;";
+) WITHOUT ROWID"
+    };
+}
 
-/// Creates the table of secret files a committed removal left to delete.
+const SCHEMA: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS file_trash ",
+    trash_columns!(),
+    ";"
+);
+/// Rebuilds a trash table from before hook folders with the current check, keeping every
+/// note, for the upgrade step that lets it hold hook folders.
+pub(super) const WIDEN: &str = concat!(
+    "CREATE TABLE file_trash_next ",
+    trash_columns!(),
+    ";
+INSERT INTO file_trash_next(kind,name) SELECT kind,name FROM file_trash;
+DROP TABLE file_trash;
+ALTER TABLE file_trash_next RENAME TO file_trash;"
+);
+
+/// Creates the table of files a committed removal left to delete.
 /// Input: the engine connection. Output: any SQLite failure.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
@@ -74,6 +95,7 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
 fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, EngineError> {
     let quoted = format!("\"{name}\"");
     let scoped = format!("project:{name}");
+    let stored = format!("/{name}\"");
     let (query, value) = match kind {
         ACCOUNT_KEY => (
             "SELECT EXISTS(SELECT 1 FROM accounts WHERE instr(CAST(body AS TEXT), ?1) > 0)",
@@ -91,6 +113,10 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
             "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE kind='skill' AND scope=?1)",
             scoped.as_str(),
         ),
+        HOOK_FOLDER => (
+            "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE kind='hook' AND instr(body, ?1) > 0)",
+            stored.as_str(),
+        ),
         _ => return Err(error("file_trash_kind_unknown")),
     };
     connection
@@ -104,6 +130,7 @@ fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
         MCP_SECRET => super::plugins::remove_secret(root, name),
         MCP_CHECKS => super::plugins::remove_check_folder(root, name),
         SKILL_FOLDER => super::plugins::remove_skill_project_folder(root, name),
+        HOOK_FOLDER => super::plugins::remove_hook_folder(root, name),
         _ => Err(error("file_trash_kind_unknown")),
     }
 }

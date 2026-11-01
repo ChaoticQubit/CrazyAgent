@@ -1,10 +1,11 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, PendingIntent, SwitchMode } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, SavedMemoryPage, SkillDetail, SkillView, TeamGraph, TerminalMessage, ImportList, ImportedSkill } from "./engine-client";
+import type { ActionReceipt, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
-export type { SavedMemory, SavedMemoryPage } from "./engine-client";
-export type { McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
+export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
 
 export type Failure = { kind: "not_ready" } | { kind: "error"; code: string; message: string; cause?: string };
@@ -101,6 +102,8 @@ const COPY: Record<string, string> = {
   memory_note_invalid: "Remove hidden, direction-changing or control characters from the memory.",
   memory_duplicate: "This memory is already saved.",
   memory_full: "Memory is full. Delete an old memory first.",
+  memory_import_folder_invalid: "Choose a folder that exists. A link to a folder can't be imported.",
+  memory_import_invalid: "A file in this folder can't be imported.",
   memory_missing: "That memory no longer exists.",
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
@@ -303,6 +306,8 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_add: "adding a memory",
   memory_promote: "promoting a memory",
   memory_delete: "deleting a memory",
+  memory_approve: "approving a memory",
+  memory_agent_writes: "saving agent memory writes",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -728,6 +733,23 @@ export function setSkillEnabled(id: string, enabled: boolean): Promise<Result<Sk
   return call<SkillView>("desktop_set_skill_enabled", { id, enabled });
 }
 
+/** Reads hooks for global settings (no project) or one project's settings, where global
+ * hooks carry the project's own switch. Output: hooks in engine order. */
+export function listHooks(projectId?: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_plugin_hooks", { projectId: projectId ?? null });
+}
+
+/** Adds the command hooks a plugin folder defines, each turned on; nothing in the folder runs.
+ * Inputs: where they apply and the folder's full path. Output: the added hooks. */
+export function addHooks(scope: PluginScope, folder: string): Promise<Result<HookView[]>> {
+  return call<HookView[]>("desktop_add_hooks", { scope, folder });
+}
+
+/** Turns a hook on or off where it was added. Inputs: hook id and the switch. */
+export function setHookEnabled(id: string, enabled: boolean): Promise<Result<HookView>> {
+  return call<HookView>("desktop_set_hook_enabled", { id, enabled });
+}
+
 /** Removes a skill and the engine's copy of its folder; the owner's folder stays. */
 export function removeSkill(id: string): Promise<Result<void>> {
   return call<void>("desktop_remove_skill", { id });
@@ -804,6 +826,26 @@ export function switchPlugin(projectId: string, id: string, on: boolean): Promis
   return call<void>("desktop_switch_plugin", { projectId, id, on });
 }
 
+/** Reads tool switches: the CrazyAgent built-in tools (no server id) or one MCP server's
+ * checked tools, for global settings (no project) or one project. Output: each tool with its
+ * every-project switch and the project's own switch. */
+export function toolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_tool_switches", { projectId: projectId ?? null, serverId });
+}
+
+/** Sets one tool's switch for every project (no project) or for one project; hidden deletes a
+ * built-in tool until Restore defaults. Inputs: project, server id (null for built-in), the tool
+ * and the switch. Output: the server's tools after the change. */
+export function setToolSwitch(projectId: string | undefined, serverId: string | null, tool: string, value: ToolSwitch): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_set_tool_switch", { projectId: projectId ?? null, serverId, tool, value });
+}
+
+/** Clears every tool switch of one server in that scope, bringing deleted built-in tools back.
+ * Inputs: project (none for every project) and server id (null for built-in). Output: the tools. */
+export function restoreToolSwitches(projectId: string | undefined, serverId: string | null): Promise<Result<ToolView[]>> {
+  return call<ToolView[]>("desktop_restore_tool_switches", { projectId: projectId ?? null, serverId });
+}
+
 /** Lists launched agents, newest first. Input: a project id, or none for every project.
  * Output: each agent's plain status and the controls usable now. */
 export function agents(projectId?: string): Promise<Result<AgentView[]>> {
@@ -838,9 +880,10 @@ export function releaseAccount(accountId: string): Promise<Result<AccountUse>> {
   return call<AccountUse>("desktop_release_account", { accountId, generation: nextGeneration() });
 }
 
-/** What the native folder chooser is for: a skill folder, an existing project folder to add, or
- * the folder that holds the owner's projects. Each shows its own fixed prompt. */
-export type FolderPurpose = "skill" | "project" | "projects_home";
+/** What the native folder chooser is for: a skill folder, an existing project folder to add,
+ * the folder that holds the owner's projects, a folder of memory files to import, or a plugin
+ * folder whose hooks are added. Each shows its own fixed prompt. */
+export type FolderPurpose = "skill" | "project" | "projects_home" | "memory" | "plugin";
 
 /** Opens the native folder chooser for one purpose. Input: what the folder is for. Output: the
  * chosen folder's full path, or null when the owner closed the chooser. */
@@ -871,9 +914,40 @@ export function addMemory(project: string | null, text: string): Promise<Result<
   return change("desktop_add_memory", { project, text, generation: nextGeneration() });
 }
 
+/** How an import of a memory folder ended: memories saved and markdown files not saved. */
+export interface MemoryImportCounts {
+  imported: number;
+  skipped: number;
+}
+
+/** Imports the markdown memory files of a folder the owner chose into one project's memory,
+ * one memory per file. Inputs: the project id and the folder's full path. Output: the counts,
+ * or the plain error of a change that was refused or is still unconfirmed. */
+export async function importMemory(project: string, folder: string): Promise<Result<MemoryImportCounts>> {
+  const result = await call<MemoryImportCounts & { stopped: IntentReceipt | null }>("desktop_import_memory", { project, folder, generation: nextGeneration() });
+  if (result.kind !== "ok") return result;
+  if (result.value.stopped) {
+    const stopped = receiptResult(result.value.stopped);
+    if (stopped.kind !== "ok") return stopped;
+  }
+  return { kind: "ok", value: { imported: result.value.imported, skipped: result.value.skipped } };
+}
+
 /** Deletes one saved memory for good. Input: memory id. Output: ok once deleted. */
 export function deleteMemory(id: string): Promise<Result<void>> {
   return change("desktop_delete_memory", { id, generation: nextGeneration() });
+}
+
+/** Approves one memory an agent asked to save, so agents get it from their next launch.
+ * Input: memory id. Output: ok once approved. */
+export function approveMemory(id: string): Promise<Result<void>> {
+  return change("desktop_approve_memory", { id, generation: nextGeneration() });
+}
+
+/** Saves the owner's Agent memory writes setting: agents save directly, or ask first.
+ * Input: the choice. Output: ok once saved. */
+export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
 }
 
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its
@@ -981,11 +1055,26 @@ export function loadTeamGraph(id: string): Promise<Result<TeamGraph>> {
   return call<TeamGraph>("desktop_team_graph", { id });
 }
 
+/** Reads one project's Questions inbox: the open questions agents put to the owner, most
+ * urgent first, and the agents waiting on the owner in their own terminal.
+ * Input: the project id. Output: the inbox, not ready, or a plain error. */
+export function loadQuestions(id: string): Promise<Result<QuestionsInbox>> {
+  return call<QuestionsInbox>("desktop_coord_questions", { id });
+}
+
+/** Answers one open question an agent put to the owner; it reaches the asker as the owner's
+ * reply. Inputs: the project id, the question's message id and the answer. Output: the engine
+ * receipt. */
+export function answerQuestion(id: string, message: number, text: string): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_coord_answer", { id, message, text, generation: nextGeneration() });
+}
+
 /** Opens a live view of one agent's terminal on a channel: the attach frame, the screen,
- * then live output. Inputs: the terminal name and the channel. Output: the view's serial
- * once attached, which its detach names. */
-export function attachTerminal(agent: string, output: Channel<TerminalMessage>): Promise<Result<number>> {
-  return call<number>("desktop_terminal_attach", { agent, output });
+ * then live output. With a pane, the view is that one pane of the terminal's window, such as
+ * a native teammate's. Inputs: the terminal name, the channel and the pane id, if any.
+ * Output: the view's serial once attached, which its detach names. */
+export function attachTerminal(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<Result<number>> {
+  return call<number>("desktop_terminal_attach", { agent, pane, output });
 }
 
 /** Types one chunk of bytes into an attached agent terminal. Inputs: the terminal name and
@@ -1033,11 +1122,107 @@ export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result
   return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
 }
 
+/** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id
+ * and the depth. Output: the engine receipt, not ready, or a plain error. */
+export function setSubAgentDepth(id: string, depth: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_sub_agent_depth", { id, depth, generation: nextGeneration() });
+}
+
+/** Sets where a lead's worker lands its change set: when the lead accepts it, or only when the
+ * owner does. Inputs: the project id and the mode. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setChildLanding(id: string, mode: ChildLanding): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_child_landing", { id, mode, generation: nextGeneration() });
+}
+
 /** Sets where the team's finished agents show: in the agents list and graph (Show) or only in
  * the Finished fold-out (Hide). Inputs: the project id and true for Show. Output: the engine
  * receipt, not ready, or a plain error. */
 export function showFinishedAgents(id: string, show: boolean): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_finished_agents", { id, show, generation: nextGeneration() });
+}
+
+/** Sets where the project's new sub-agents commit: each on its own branch crazyagent/agent-<id>
+ * (named) or on a detached HEAD (detached). Inputs: the project id and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setAgentBranches(id: string, mode: BranchMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_agent_branches", { id, mode, generation: nextGeneration() });
+}
+
+/** Stops every agent of the project, the master, each harness and each teammate, until the
+ * owner starts the team again, or starts it again. Inputs: the project id and true to stop.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setTeamStopped(id: string, stopped: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_pause", { id, paused: stopped, generation: nextGeneration() });
+}
+
+/** Sets Max harnesses per project: how many harnesses run at once, null for No limit. Inputs:
+ * the project id and the cap. Output: the engine receipt, not ready, or a plain error. */
+export function setMaxHarnesses(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_harnesses", { id, max, generation: nextGeneration() });
+}
+
+/** Sets Max teammates per harness, null for No limit. Inputs: the project id and the cap.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setMaxTeammates(id: string, max: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_max_teammates", { id, max, generation: nextGeneration() });
+}
+
+/** Sets the project's Token budget, null for Off: once its agents use that many tokens from now,
+ * the engine stops the whole team. Inputs: the project id and the tokens. Output: the engine
+ * receipt, not ready, or a plain error. */
+export function setTokenBudget(id: string, tokens: number | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_token_budget", { id, tokens, generation: nextGeneration() });
+}
+
+/** Turns the project's Spread harnesses across accounts on or off: on, a new or woken agent
+ * prefers a pool account no running agent of the project uses, else the account strategy
+ * picks. Inputs: the project id and the switch. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setSpreadAccounts(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_spread_accounts", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the branch the project's master works on and merges finished harnesses into, or
+ * clears it back to the repository's default branch. Inputs: the project id and the branch,
+ * null for the default. Output: the engine receipt, not ready, or a plain error. */
+export function setMasterBranch(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_master_branch", { id, branch, generation: nextGeneration() });
+}
+
+/** Turns the project's "Ask me before merging into the master's branch" setting on or off;
+ * on, the master's merge of a finished harness waits for the owner's Accept in Changes.
+ * Inputs: the project id and the switch. Output: the engine receipt, not ready, or a plain
+ * error. */
+export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
+}
+
+/** Sets the most files one new top-level folder, a folder the owner's branch does not have,
+ * may gain in a project's change set before the engine refuses the set. Inputs: the project id
+ * and the limit. Output: the engine receipt, not ready, or a plain error. */
+export function setNewFolderLimit(id: string, files: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_new_folder_limit", { id, files, generation: nextGeneration() });
+}
+
+/** Saves a project's coordination settings: where sub-agent questions go, what overlapping
+ * claims do, workflow nudges and the counted tools. Inputs: the project id and the settings.
+ * Output: the engine receipt, not ready, or a plain error. */
+export function setCoordSettings(id: string, settings: CoordSettings): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_coordination", { id, settings, generation: nextGeneration() });
+}
+
+/** Sets how one harness kind's sub-agents start in a project: app-spawned, or native teammates
+ * where that kind has them. Inputs: the project id, the harness kind and the mode. Output: the
+ * engine receipt, not ready, or a plain error. */
+export function setHarnessMode(id: string, harness: CoordHarness, mode: SubagentMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_mode", { id, harness, mode, generation: nextGeneration() });
+}
+
+/** Sets how messages reach one harness kind's agents in a project. Inputs: the project id, the
+ * harness kind and the delivery. Output: the engine receipt, not ready, or a plain error. */
+export function setHarnessDelivery(id: string, harness: CoordHarness, delivery: Delivery): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_harness_delivery", { id, harness, delivery, generation: nextGeneration() });
 }
 
 /** Turns the project's live master on or off; on, the engine keeps the master's own app running
