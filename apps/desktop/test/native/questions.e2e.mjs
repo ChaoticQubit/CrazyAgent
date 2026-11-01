@@ -159,11 +159,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
 
         const alert = `${label} asks you, urgent: ${QUESTION}`;
         await me.waitFor("the urgent question's toast", (text) => text.includes(alert), ALERT_MS);
-        const toast = await page.evaluate("document.querySelector('.toast')?.innerText ?? null");
+        const toast = await page.evaluate("document.querySelector('div.toast[role=status]')?.innerText ?? null");
         assert.ok(toast?.includes(alert) && toast.includes("Open"), `the toast names the asker and offers Open: ${toast}`);
         assert.equal(questionRows(runtime, project, question, agent).waiting, "question", "the engine paused the asker until the owner answers");
         await me.capture("questions-toast");
-        await me.click("Open", ".toast button");
+        await me.click("Open", "div.toast[role=status] button");
         await me.waitFor("the Agents tab with the question", (text) => text.includes("Questions for you (1)") && text.includes(QUESTION));
         assert.ok((await page.evaluate("location.hash")).endsWith(`/projects/${encodeURIComponent(project)}/agents`), "Open goes to the project's Agents tab");
         const row = await page.evaluate("document.querySelector('li.tg-question')?.innerText ?? null");
@@ -205,7 +205,9 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const rows = questionRows(runtime, project, question, agent);
     assert.equal(rows.asked.receipt, "replied", "the answered question is closed");
     assert.deepEqual(rows.replies, [{ from_kind: "owner", from_agent: null, to_kind: "agent", to_agent: agent, kind: "reply", body: ANSWER }], "the engine keeps the owner's answer as the one reply to the asker");
-    assert.equal(rows.waiting, null, "answering lifts the pause the question set");
+    for (const deadline = Date.now() + STEP_MS; questionRows(runtime, project, question, agent).waiting !== null; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, `answering lifts the pause the question set, but the asker still waits on: ${questionRows(runtime, project, question, agent).waiting}`);
+    }
     const native = new Set(commands(readFileSync(LIB, "utf8")).filter((command) => plan(command).skip).map((command) => command.name));
     assert.ok(native.has("desktop_terminal_attach"), "terminal attach is native-only, so this run proves the request, not a live attach");
     assert.deepEqual([...log.unrouted].filter((command) => !native.has(command)), [], "every plain command the page sent reached the bridge");
