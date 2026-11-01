@@ -279,7 +279,10 @@ impl TeamView {
                         if matches!(action, TeamAction::Delegate { .. }) {
                             self.draft = None;
                         }
-                        if matches!(action, TeamAction::MasterBranch { .. }) {
+                        if matches!(
+                            action,
+                            TeamAction::MasterBranch { .. } | TeamAction::LandOn { .. }
+                        ) {
                             self.branch_edit = None;
                         }
                         if matches!(action, TeamAction::CoordSettings { .. })
@@ -308,7 +311,7 @@ impl TeamView {
         self.changing.is_some()
     }
 
-    /// Says whether the owner is writing a new task or the Master's branch, so the host
+    /// Says whether the owner is writing a new task or a branch setting, so the host
     /// sends pastes here, keeps its own letter keys off and shows the cursor.
     /// Takes the view. Returns true while the task composer or the branch editor is open.
     pub fn typing(&self) -> bool {
@@ -320,7 +323,7 @@ impl TeamView {
                 .is_some_and(|edit| edit.counted.is_some())
     }
 
-    /// Adds pasted text to the task or the Master's branch being written.
+    /// Adds pasted text to the task or the branch setting being written.
     /// Takes untrusted pasted text; control characters are dropped.
     /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
@@ -531,7 +534,11 @@ impl TeamView {
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
-                self.open_branch_edit();
+                self.open_branch_edit(BranchSetting::Master);
+                TeamReply::Handled
+            }
+            KeyCode::Char('L') => {
+                self.open_branch_edit(BranchSetting::LandOn);
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
@@ -1390,30 +1397,35 @@ impl TeamView {
         })
     }
 
-    /// Opens the Master's branch editor filled with the current choice, empty for the
-    /// repository default. Output: none; a notice while the team is loading.
-    fn open_branch_edit(&mut self) {
+    /// Opens the editor of one branch setting filled with the current choice, empty for
+    /// its default: the repository's default branch for the Master's branch, the Master's
+    /// branch for Land on. Takes the setting. Output: none; a notice while the team is
+    /// loading.
+    fn open_branch_edit(&mut self, setting: BranchSetting) {
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return;
         };
         let mut input = TextInput::single(MASTER_BRANCH_BYTES_MAX);
-        input.set(status.master_branch.as_deref().unwrap_or(""));
-        self.branch_edit = Some(BranchEdit {
-            setting: BranchSetting::Master,
-            input,
-        });
+        input.set(
+            match setting {
+                BranchSetting::Master => status.master_branch.as_deref(),
+                BranchSetting::LandOn => status.land_on.as_deref(),
+            }
+            .unwrap_or(""),
+        );
+        self.branch_edit = Some(BranchEdit { setting, input });
     }
 
-    /// Handles one key while the Master's branch editor is open: Enter saves, Esc closes,
-    /// other keys edit. Takes the key. Output: the change to send, or Handled.
+    /// Handles one key while a branch editor is open: Enter saves, Esc closes, other keys
+    /// edit. Takes the key. Output: the change to send, or Handled.
     fn branch_key(&mut self, key: KeyEvent) -> TeamReply {
         match key.code {
             KeyCode::Esc => {
                 self.branch_edit = None;
                 TeamReply::Handled
             }
-            KeyCode::Enter => self.save_master_branch(),
+            KeyCode::Enter => self.save_branch(),
             _ => {
                 if let Some(edit) = &mut self.branch_edit {
                     edit.input.handle(key);
@@ -1423,9 +1435,10 @@ impl TeamView {
         }
     }
 
-    /// Sends the Master's branch typed in the editor; an empty name goes back to the
-    /// repository default. Output: the change to send, or Handled with a notice while saving.
-    fn save_master_branch(&mut self) -> TeamReply {
+    /// Sends the branch typed in the open editor to its setting; an empty name goes back to
+    /// the setting's default. Output: the change to send, or Handled with a notice while
+    /// saving.
+    fn save_branch(&mut self) -> TeamReply {
         let Some(edit) = &self.branch_edit else {
             return TeamReply::Handled;
         };
@@ -1437,13 +1450,19 @@ impl TeamView {
             ));
             return TeamReply::Handled;
         }
-        self.changing = Some(match &branch {
-            Some(name) => format!("The master now works on {name}."),
-            None => "The master now works on the repository's default branch.".to_owned(),
+        let setting = edit.setting;
+        self.changing = Some(match (setting, &branch) {
+            (BranchSetting::Master, Some(name)) => format!("The master now works on {name}."),
+            (BranchSetting::Master, None) => {
+                "The master now works on the repository's default branch.".to_owned()
+            }
+            (BranchSetting::LandOn, Some(name)) => format!("Work now lands on {name}."),
+            (BranchSetting::LandOn, None) => "Work now lands on the master's branch.".to_owned(),
         });
-        TeamReply::Change(TeamAction::MasterBranch {
-            project_id: self.project.clone(),
-            branch,
+        let project_id = self.project.clone();
+        TeamReply::Change(match setting {
+            BranchSetting::Master => TeamAction::MasterBranch { project_id, branch },
+            BranchSetting::LandOn => TeamAction::LandOn { project_id, branch },
         })
     }
 
@@ -1925,7 +1944,7 @@ impl TeamView {
                 (rows, Some(at))
             }
             (None, Some(edit), _) => {
-                let (rows, at) = branch_rows(&edit.input, content, look);
+                let (rows, at) = branch_rows(edit, content, look);
                 (rows, Some(at))
             }
             (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
@@ -2067,7 +2086,7 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Ask before merge, New folder limit), each whole. A
+    /// budget, Master's branch, Land on, Ask before merge, New folder limit), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2169,6 +2188,13 @@ impl TeamView {
                     .master_branch
                     .clone()
                     .unwrap_or_else(|| "Repository default".to_owned()),
+            ),
+            setting(
+                "Land on",
+                status
+                    .land_on
+                    .clone()
+                    .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
                 "Ask before merge",
@@ -2498,6 +2524,7 @@ impl TeamView {
                 },
             ),
             ("m", "Master's branch"),
+            ("L", "Land on"),
             ("g", "Ask before merge"),
             ("F", "New folder limit"),
             ("c", "Coordination"),
@@ -2670,6 +2697,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_master_branch_invalid" => {
             "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
         }
+        "team_land_on_invalid" => {
+            "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.".into()
+        }
         other => plain_problem(other),
     }
 }
@@ -2727,20 +2757,28 @@ fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, 
     (rows, cursor)
 }
 
-/// Draws the Master's branch editor. Takes the input, the content width and the look.
-/// Returns the rows and the cursor as a row and a column inside those rows.
-fn branch_rows(input: &TextInput, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
-    let mut rows = vec![
-        Row::of("Master's branch", look.heading),
-        Row::of(
+/// Draws the editor of one branch setting: the Master's branch or Land on. Takes the
+/// editor, the content width and the look. Returns the rows and the cursor as a row and a
+/// column inside those rows.
+fn branch_rows(edit: &BranchEdit, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    let (heading, help, empty) = match edit.setting {
+        BranchSetting::Master => (
+            "Master's branch",
             "The master works there and merges finished harnesses into it. Leave it empty for the repository default.",
-            look.muted,
+            "Repository default",
         ),
-    ];
+        BranchSetting::LandOn => (
+            "Land on",
+            "The master's merges and your Accept land there, and each change set counts only what it lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Leave it empty for the master's branch.",
+            "The master's branch",
+        ),
+    };
+    let input = &edit.input;
+    let mut rows = vec![Row::of(heading, look.heading), Row::of(help, look.muted)];
     let inner = content.saturating_sub(4).max(2);
     let (lines, (line, column)) = input.wrap(inner - 1);
     let text = if input.value().is_empty() {
-        Row::of("Repository default", look.muted)
+        Row::of(empty, look.muted)
     } else {
         Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
     };

@@ -277,10 +277,8 @@ impl ProjectChanges {
             }
             (ChangesQuery::Branches { id }, Ok(ChangesView::Branches(listed))) => {
                 if self.target.as_ref().is_some_and(|(asked, _)| asked == id) {
-                    self.branch = listed
-                        .current
-                        .as_ref()
-                        .and_then(|current| listed.branches.iter().position(|name| name == current))
+                    self.branch = landing_default(listed)
+                        .and_then(|default| listed.branches.iter().position(|name| name == default))
                         .unwrap_or(0);
                     self.branches = Some((id.clone(), listed.clone()));
                 }
@@ -288,7 +286,7 @@ impl ProjectChanges {
             (ChangesQuery::Branches { .. }, Err(code)) => {
                 self.say(
                     Notice::problem(format!(
-                        "Couldn't list your branches, so these changes land on the checked-out branch. {}",
+                        "Couldn't list your branches, so these changes land on your project's Land on branch. {}",
                         refusal(code)
                     )),
                     about,
@@ -587,12 +585,13 @@ impl ProjectChanges {
         assert!(self.branch < count);
     }
 
-    /// The branch the owner picked for Accept, when it is not the checked-out one, which
-    /// is the engine's default. Output: the branch, or None for the default.
+    /// The branch the owner picked for Accept, when it is not the one the engine lands on
+    /// with no branch named, as [`landing_default`] says. Output: the branch, or None for
+    /// the default.
     fn chosen_branch(&self) -> Option<String> {
         let (_, listed) = self.branches.as_ref()?;
         let name = listed.branches.get(self.branch)?;
-        (listed.current.as_ref() != Some(name)).then(|| name.clone())
+        (landing_default(listed) != Some(name)).then(|| name.clone())
     }
 
     /// The branch Accept lands on, once the list arrived, and whether it is checked out.
@@ -829,7 +828,10 @@ impl ProjectChanges {
         let mut rows = vec![Row::of(question, look.warning)];
         rows.extend(size.map(|size| Row::of(size, look.fg)));
         let landing = match self.landing_branch() {
-            None => "They land as one commit on the branch checked out in your project folder, under your own Git name.".to_owned(),
+            None => {
+                "They land as one commit on your project's Land on branch, under your own Git name."
+                    .to_owned()
+            }
             Some((name, true)) => format!(
                 "They land as one commit on {name}, the branch checked out in your project folder, under your own Git name."
             ),
@@ -1010,6 +1012,13 @@ fn agent_name(set: &ChangeSetView) -> String {
         AgentKind::Master => "Master".to_owned(),
         AgentKind::Sub => set.agent.label.clone(),
     }
+}
+
+/// The branch an Accept with no branch named lands on (DEC-111 Q1): the team's Land on
+/// branch, else the checked-out one. Input: the listed branches. Output: the name, None
+/// when neither is known.
+fn landing_default(listed: &TargetBranches) -> Option<&String> {
+    listed.land_on.as_ref().or(listed.current.as_ref())
 }
 
 /// The change set a Changes request is about. Input: the request. Output: its id, or None
