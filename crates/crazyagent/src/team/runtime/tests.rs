@@ -9130,15 +9130,16 @@ fn max_harnesses(fixture: &Fixture, max: Option<u8>) {
 }
 
 /// Max harnesses per project holds the master's wake of a finished harness (S4): with the
-/// project at its one allowed harness, the task pinned to the finished harness waits and the
-/// harness stays stopped; once the choice rises, the same harness wakes in its own worktree
-/// and does the task, and no other harness starts.
+/// project at its one allowed harness, an idle second one, the task pinned to the finished
+/// harness waits and the harness stays stopped; once the choice rises, the same harness
+/// wakes in its own worktree and does the task, and no other harness starts.
 #[cfg(target_os = "macos")]
 #[test]
 fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
     let fixture = Fixture::new(2);
     let host = fixture.host();
-    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
     idle_stop(&fixture, WAKE_IDLE);
     owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
     fixture.until(&mut team, "the first harness finishes and stops", |f| {
@@ -9149,13 +9150,28 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
     });
     let woken = subs(&fixture)[0];
     let worktree = agent_worktree(&fixture, woken);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::TimeLimits {
+            project_id: project.clone(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None,
+        }],
+    );
     max_harnesses(&fixture, Some(1));
-    let held = "Hold the page for a long time.";
-    owner(&fixture, &[hand_off(&fixture, held)]);
-    fixture.until(&mut team, "a second harness works and fills the cap", |f| {
-        task_of(f, held).0 == "running" && subs(f).len() == 2
-    });
-    let busy = subs(&fixture)[1];
+    owner(&fixture, &[hand_off(&fixture, "Write page 2.")]);
+    fixture.until(
+        &mut team,
+        "a second harness does its task and fills the cap idle",
+        |f| {
+            task_of(f, "Write page 2.").0 == "done"
+                && subs(f)
+                    .get(1)
+                    .is_some_and(|second| f.agent_status(*second).0 == AgentStatus::Idle)
+        },
+    );
+    let second = subs(&fixture)[1];
     fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
     let mailbox = fixture.base.join("mailbox");
     std::fs::create_dir(&mailbox).unwrap();
@@ -9191,7 +9207,7 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
     );
     assert_eq!(state(&fixture).0, "queued");
     assert_eq!(pinned_to(&fixture, task), Some(woken));
-    assert_eq!(subs(&fixture), vec![woken, busy]);
+    assert_eq!(subs(&fixture), vec![woken, second]);
 
     max_harnesses(&fixture, Some(2));
     fixture.until(
@@ -9201,10 +9217,10 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
     );
     assert_eq!(state(&fixture).1, Some(woken));
     assert_eq!(agent_worktree(&fixture, woken), worktree);
-    assert_eq!(task_of(&fixture, held).0, "running");
+    assert!(fixture.agent_status(second).0.live());
     assert_eq!(
         subs(&fixture),
-        vec![woken, busy],
+        vec![woken, second],
         "no other harness started"
     );
     team.shutdown().unwrap();
@@ -9220,7 +9236,7 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
 fn max_harnesses_refuses_the_owners_wake_at_the_cap_and_starts_it_once_raised() {
     let fixture = Fixture::new(2);
     let host = fixture.host();
-    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
     let project = fixture.setup.project_id.clone();
     let first = idle_sub_agent(&fixture, &mut team);
     let worktree = agent_worktree(&fixture, first);
