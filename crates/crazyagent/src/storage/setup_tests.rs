@@ -801,6 +801,12 @@ fn hook_plugin(parent: &Path, name: &str) -> PathBuf {
     for script in ["start.sh", "prompt.sh"] {
         std::fs::write(folder.join("hooks").join(script), "exit 0\n").unwrap();
     }
+    std::fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{name}"}}"#),
+    )
+    .unwrap();
     folder
 }
 
@@ -1016,6 +1022,31 @@ fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks(
     let hookless = work.path().join("hookless");
     std::fs::create_dir(&hookless).unwrap();
     seed(&mut connection, root, "caveman", &hookless).unwrap();
+    assert!(hook_views(&mut connection, root, None).is_empty());
+}
+
+#[test]
+fn importing_a_hooks_pack_without_plugin_json_shows_the_plain_reason() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let work = tempfile::tempdir().unwrap();
+    install(
+        &mut connection,
+        root,
+        "caveman",
+        "https://example.invalid/caveman@1",
+        vec![skill(work.path(), "caveman")],
+        None,
+    )
+    .unwrap();
+    let plugin = hook_plugin(work.path(), "caveman-hooks");
+    std::fs::remove_dir_all(plugin.join(".claude-plugin")).unwrap();
+    let refused = seed(&mut connection, root, "caveman", &plugin).map_err(|problem| problem.0);
+    assert_eq!(refused, Err("hooks_plugin_manifest_missing".to_owned()));
+    assert_eq!(
+        crate::plugins::plain_problem("hooks_plugin_manifest_missing"),
+        Some("This pack has hooks but no plugin.json.")
+    );
     assert!(hook_views(&mut connection, root, None).is_empty());
 }
 

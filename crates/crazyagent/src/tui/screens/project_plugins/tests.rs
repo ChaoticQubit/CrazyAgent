@@ -1340,9 +1340,10 @@ fn hook_row(shown: &str) -> &str {
         .unwrap_or_else(|| panic!("no hook row:\n{shown}"))
 }
 
-/// A real engine's hooks through the TUI: h in Settings, Plugins adds a plugin folder's
-/// hooks for every project, Space turns the hook off and on again there, and a project's
-/// Settings tab switches that every-project hook off for the project only.
+/// A real engine's hooks through the TUI: h in Settings, Plugins refuses a folder without
+/// plugin.json with its plain reason, then adds the folder's hooks for every project once it
+/// has one, Space turns the hook off and on again there, and a project's Settings tab
+/// switches that every-project hook off for the project only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_through_the_engine() {
     let engine = engine().await;
@@ -1376,6 +1377,24 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     for character in plugin.display().to_string().chars() {
         shell.key(Key::Char(character));
     }
+    shell.key(Key::Enter);
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown.contains("This pack has hooks but no plugin.json."),
+        "{shown}"
+    );
+    assert!(
+        global().await.unwrap().is_empty(),
+        "a folder without plugin.json adds no hooks"
+    );
+    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"guard"}"#,
+    )
+    .unwrap();
     shell.key(Key::Enter);
     let sent = drive_settings(&mut shell, &mut connection).await;
     assert!(sent.contains(&"plugin change"), "{sent:?}");

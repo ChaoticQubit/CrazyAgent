@@ -12,17 +12,22 @@ import { INTERNALS, STEP_MS, closedPort, owner, required, serveApp, start as lau
 const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const COMMAND = 'sh "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh"';
 
-/** Writes a Claude Code plugin folder with one command hook in hooks/hooks.json, the shape
- * a pack plugin ships. Input: the folder. Output: none. */
-function plugin(folder) {
+/** Writes a Claude Code plugin folder with one command hook in hooks/hooks.json and, when
+ * named, the .claude-plugin/plugin.json a pack plugin ships. Inputs: the folder and the
+ * plugin name, or null for a folder without plugin.json. Output: none. */
+function plugin(folder, name) {
   mkdirSync(join(folder, "hooks"), { recursive: true, mode: 0o700 });
+  if (name !== null) {
+    mkdirSync(join(folder, ".claude-plugin"), { recursive: true, mode: 0o700 });
+    writeFileSync(join(folder, ".claude-plugin", "plugin.json"), JSON.stringify({ name }));
+  }
   writeFileSync(join(folder, "hooks", "guard.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   writeFileSync(join(folder, "hooks", "hooks.json"), JSON.stringify({
     hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: COMMAND }] }] },
   }));
 }
 
-test("Settings, Plugins, Hooks lists the engine's hooks, adds a plugin folder's hooks and turns one off and on", { timeout: 300000 }, async () => {
+test("Settings, Plugins, Hooks lists the engine's hooks, refuses a folder without plugin.json, adds a plugin folder's hooks and turns one off and on", { timeout: 300000 }, async () => {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -33,8 +38,10 @@ test("Settings, Plugins, Hooks lists the engine's hooks, adds a plugin folder's 
   const home = join(root, "home");
   const projects = join(root, "projects");
   const guard = join(root, "plugins", "guard");
+  const bare = join(root, "plugins", "bare");
   for (const folder of [runtime, evidence, home, join(home, ".codex"), projects]) mkdirSync(folder, { recursive: true, mode: 0o700 });
-  plugin(guard);
+  plugin(guard, "guard");
+  plugin(bare, null);
   const provider = await closedPort();
   writeFileSync(join(runtime, "global.toml"), `version = 1
 timeout_ms = 2000
@@ -68,7 +75,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
     assert.ok(existsSync(join(dist, "index.html")), "the frontend built");
-    site = await serveApp(dist, bridge, [guard], log);
+    site = await serveApp(dist, bridge, [bare, guard], log);
 
     await withPage(async (page) => {
       const me = owner(page, evidence);
@@ -85,9 +92,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("hooks-empty");
 
         await me.click("Add hooks from a plugin");
+        const refused = await me.waitFor("the refusal of a folder without plugin.json", (text) => text.includes("This pack has hooks but no plugin.json.") || text.includes("Added 1 hook.") || text.includes("Something went wrong"), STEP_MS);
+        assert.ok(refused.includes("This pack has hooks but no plugin.json.") && !refused.includes("Added 1 hook."),
+          `a folder without plugin.json is refused with its plain reason:\n${refused.slice(0, 2000)}`);
+        assert.deepEqual(await hooks(), [], "the refused folder added no hooks");
+        await me.capture("hooks-refused");
+
+        await me.click("Add hooks from a plugin");
         const listed = await me.waitFor("the added hook in the list", (text) => text.includes("Added 1 hook.") && text.includes("PreToolUse, matching Bash"), STEP_MS);
         assert.ok(listed.includes("guard") && listed.includes(COMMAND), `the row names the plugin and its command:\n${listed.slice(0, 2000)}`);
-        assert.equal(log.picked, 1, "Add hooks asked the owner for one plugin folder");
+        assert.equal(log.picked, 2, "each Add hooks asked the owner for one plugin folder");
         const added = await hooks();
         assert.equal(added.length, 1, JSON.stringify(added));
         assert.deepEqual([added[0].plugin, added[0].event, added[0].matcher, added[0].command, added[0].enabled, added[0].scope],

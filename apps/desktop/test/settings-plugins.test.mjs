@@ -29,6 +29,9 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("skill_missing_skill_md"), "This folder has no SKILL.md file.");
   assert.equal(api.plainError("server_changed"), "This server changed. Review it again before approving.");
   assert.equal(api.plainError("plugin_switch_global_only"), "Only items from global settings can be switched here.");
+  assert.equal(api.plainError("hooks_none_found"), "This folder has no Claude Code hooks.");
+  assert.equal(api.plainError("hooks_plugin_manifest_missing"), "This pack has hooks but no plugin.json.");
+  assert.equal(api.plainError("hook_plugin_name_invalid"), "The plugin name must be 1 to 32 letters, digits, ., - or _.");
   assert.equal(api.classifyFailure({ code: "server_secret_invalid" }).message, "Enter the secret on one line, up to 8192 characters.");
   assert.equal(api.plainError("picker_failed"), "Couldn't open the folder chooser. Type the full path instead.");
   assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again. (unknown)");
