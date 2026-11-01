@@ -750,7 +750,17 @@ fn process_adoption_round_trip() {
     }
 
     {
-        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
         let on = crate::coord::settings::CoordSettings {
             nudges: true,
             ..Default::default()
