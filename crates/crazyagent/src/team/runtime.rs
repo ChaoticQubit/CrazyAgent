@@ -4517,9 +4517,10 @@ impl TeamRuntime {
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
-    /// and, in its own clone, where its agent team's teammates work, each in
-    /// `.worktrees/<name>` on `<task branch>--<name>`, merged into the task branch before it
-    /// reports done. Takes the project and the agent. Returns the line, empty for an agent
+    /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
+    /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
+    /// the task branch before it reports done; an app-spawned lead delegates only through
+    /// the spawn tool. Takes the project and the agent. Returns the line, empty for an agent
     /// with no task branch of its own.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
@@ -4551,6 +4552,14 @@ impl TeamRuntime {
             return format!(
                 "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
                 finish = super::tool::FINISH_WORK_TOOL
+            );
+        }
+        if !matches!(
+            super::lead_mode(&self.connection, project, agent),
+            Ok(crate::coord::settings::SubagentMode::Native)
+        ) {
+            return format!(
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
             );
         }
         format!(
