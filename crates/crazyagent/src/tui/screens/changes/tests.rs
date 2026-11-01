@@ -386,6 +386,7 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
         Ok(ChangesView::Branches(crate::landing::TargetBranches {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
+            land_on: None,
         })),
     );
     assert_eq!(asked, ChangesQuery::Branches { id: id('1') });
@@ -894,6 +895,7 @@ fn accept_lists_the_branches_and_tab_picks_another_target() {
     let listed_branches = TargetBranches {
         branches: vec!["main".into(), "release".into(), "next".into()],
         current: Some("main".into()),
+        land_on: None,
     };
     let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
     assert_eq!(query, ChangesQuery::Branches { id: id('1') });
@@ -939,6 +941,7 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
         Ok(ChangesView::Branches(TargetBranches {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
+            land_on: None,
         })),
     );
     assert!(view.key(key(KeyCode::Enter), NOW));

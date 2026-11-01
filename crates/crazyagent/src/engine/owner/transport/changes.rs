@@ -794,6 +794,7 @@ mod tests {
             TargetBranches {
                 branches: vec!["main".to_owned(), "release".to_owned()],
                 current: Some("main".to_owned()),
+                land_on: None,
             }
         );
         let unknown = ChangeSetId::new("0".repeat(32)).unwrap();

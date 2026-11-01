@@ -374,7 +374,11 @@ pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranch
     let current = current_branch(&owner)?
         .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned));
     assert!(branches.len() <= BRANCHES_MAX);
-    Ok(TargetBranches { branches, current })
+    Ok(TargetBranches {
+        branches,
+        current,
+        land_on: None,
+    })
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
