@@ -1409,6 +1409,54 @@ mod tests {
     }
 
     #[test]
+    fn the_live_master_keeps_the_model_only_network_under_every_project_choice() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let native = ModelEndpoint::Native {};
+        for choice in AgentNetwork::ALL {
+            let (runtime_ref, _capture_ref, capture) = allocate_master_capture(&root).unwrap();
+            let policy = AgentPolicy {
+                network: choice,
+                ..AgentPolicy::default()
+            };
+            let sandbox = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &native,
+                &policy,
+            )
+            .unwrap();
+            let profile = sandbox.sandbox().profile();
+            assert!(
+                profile.contains("(allow network-outbound (remote ip \"*:443\"))"),
+                "{choice:?}\n{profile}"
+            );
+            assert!(
+                !profile.contains("(remote ip \"*:*\")"),
+                "{choice:?}\n{profile}"
+            );
+            drop((capture, sandbox));
+            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
+        }
+    }
+
+    #[test]
     fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();

@@ -4742,16 +4742,16 @@ impl TeamRuntime {
             })?;
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
-        let network = if tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![remote])
-        };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        let network = if tools {
+            policy.network.sandbox(Some(remote))
+        } else {
+            SandboxNetwork::Only(vec![remote])
+        };
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;

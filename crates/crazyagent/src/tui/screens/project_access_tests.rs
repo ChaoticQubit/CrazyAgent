@@ -1,7 +1,9 @@
 use super::project_access::{AccessEdit, LOWERING_STOPS_AGENTS, summary};
 #[cfg(target_os = "macos")]
 use super::project_access::{AccessKey, FULL_ACCESS_WARNING};
-use crate::sandbox::policy::{AgentAccess, LevelView, PolicyView, ToolchainView};
+use crate::sandbox::policy::{
+    AgentAccess, AgentNetwork, LevelView, NetworkView, PolicyView, ToolchainView,
+};
 use crate::sandbox::toolchains::Toolchain;
 #[cfg(target_os = "macos")]
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -14,12 +16,20 @@ fn key(code: KeyCode) -> KeyEvent {
 fn view() -> PolicyView {
     PolicyView {
         access: AgentAccess::Sandboxed,
+        network: AgentNetwork::default(),
         levels: AgentAccess::ALL
             .into_iter()
             .map(|access| LevelView {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+            })
+            .collect(),
+        networks: AgentNetwork::ALL
+            .into_iter()
+            .map(|network| NetworkView {
+                network,
+                label: network.label().to_owned(),
             })
             .collect(),
         toolchains: vec![

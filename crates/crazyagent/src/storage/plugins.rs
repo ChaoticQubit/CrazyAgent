@@ -174,7 +174,11 @@ pub(crate) enum ResultValue {
     Skills(Vec<SkillView>, Option<u16>),
     Servers(Vec<ServerView>, Option<u16>),
     Secret(Box<ServerView>, Option<String>),
-    Check(Box<ServerSpec>, Vec<EffectiveSecret>),
+    Check(
+        Box<ServerSpec>,
+        Vec<EffectiveSecret>,
+        crate::sandbox::SandboxNetwork,
+    ),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
     HooksAdded(Vec<HookView>, PathBuf),
@@ -1615,7 +1619,15 @@ pub(super) fn run(
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Check(Box::new(record.spec), record.secrets)
+            let network = match &record.scope {
+                Scope::Project { project_id } => {
+                    crate::sandbox::policy::load(tx, project_id.as_str())
+                        .map(|policy| policy.network.sandbox(None))
+                        .unwrap_or(crate::sandbox::SandboxNetwork::Open)
+                }
+                Scope::Global => crate::sandbox::SandboxNetwork::Open,
+            };
+            ResultValue::Check(Box::new(record.spec), record.secrets, network)
         }
         Command::RecordCheck {
             id,
