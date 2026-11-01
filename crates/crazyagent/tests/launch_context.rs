@@ -737,6 +737,99 @@ async fn every_launch_gets_exactly_the_approved_plugins_project_context_and_memo
 }
 
 #[tokio::test]
+async fn a_codex_agent_with_tools_on_gets_the_skill_index_with_each_description_and_path() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let root = case.root.path().to_path_buf();
+    let project = ProjectId::new("notes").unwrap();
+    applied(
+        owner
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Notes".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Keeps release notes.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap(),
+    );
+    owner
+        .add_skill(Scope::Global, skill_folder(&root, "release-notes"))
+        .await
+        .unwrap();
+    let switched = owner
+        .add_skill(Scope::Global, skill_folder(&root, "switched-off"))
+        .await
+        .unwrap();
+    owner
+        .switch_plugin(project.clone(), switched.id.clone(), false)
+        .await
+        .unwrap();
+    let context = case.context(&project, Layout::Linked).unwrap();
+    let agents = private_directory(&root.join("agents"));
+
+    let home = private_directory(&agents.join("codex-index"));
+    let (_, files) = command_with_context(&request(&case, "codex", &home, true), &context).unwrap();
+    let config: toml::Table = fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let skill = home.join("skills/crazyagent/release-notes/SKILL.md");
+    assert!(skill.is_file(), "the index names the copy Codex reads");
+    assert!(developer.starts_with(context.instructions()));
+    assert!(developer.contains("\n## Skills\n"), "{developer}");
+    assert!(developer.contains("Check this list first"), "{developer}");
+    assert!(
+        developer.contains(&format!(
+            "- release-notes: Teaches release-notes. ({})\n",
+            skill.display()
+        )),
+        "{developer}"
+    );
+    assert!(
+        developer.contains("read its SKILL.md at the path shown"),
+        "{developer}"
+    );
+    assert!(
+        !developer.contains("Skill tool"),
+        "Codex has no Skill tool: {developer}"
+    );
+    assert!(!developer.contains("switched-off"));
+    drop(files);
+
+    let off = private_directory(&agents.join("codex-off"));
+    let (_, off_files) =
+        command_with_context(&request(&case, "codex", &off, false), &context).unwrap();
+    let off_config: toml::Table = fs::read_to_string(off.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        off_config["developer_instructions"].as_str(),
+        Some(context.instructions()),
+        "tools off lists no skills"
+    );
+    drop(off_files);
+    drop(owner);
+    case.close().await;
+}
+
+#[tokio::test]
 async fn every_master_and_agent_launch_states_how_work_lands() {
     let case = Case::new().await;
     let mut owner = case.owner().await;
