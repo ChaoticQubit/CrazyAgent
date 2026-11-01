@@ -1893,8 +1893,8 @@ impl TeamView {
     }
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
-    /// While the footer asks a question, the settings summary folds toward its first row
-    /// when the window is too short to keep the question beside the lists and the panel.
+    /// When the window is too short for the lists, the panel and any footer question, the
+    /// settings summary folds toward its first row so they stay visible.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -1956,13 +1956,9 @@ impl TeamView {
         let footer = self.footer(look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
-        let folded = if footer.is_empty() {
-            0
-        } else {
-            (fixed + 2)
-                .saturating_sub(room)
-                .min(summary_rows.saturating_sub(1))
-        };
+        let folded = (fixed + 2)
+            .saturating_sub(room)
+            .min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
@@ -2774,7 +2770,12 @@ fn branch_rows(edit: &BranchEdit, content: usize, look: &Look) -> (Vec<Row>, (us
         ),
     };
     let input = &edit.input;
-    let mut rows = vec![Row::of(heading, look.heading), Row::of(help, look.muted)];
+    let mut rows = vec![Row::of(heading, look.heading)];
+    rows.extend(
+        wrap_words(help, content)
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+    );
     let inner = content.saturating_sub(4).max(2);
     let (lines, (line, column)) = input.wrap(inner - 1);
     let text = if input.value().is_empty() {
