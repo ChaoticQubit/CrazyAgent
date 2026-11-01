@@ -398,6 +398,26 @@ pub fn master_branch(
     }
 }
 
+/// The branch a project's work lands on, with its tip (DEC-111 Q1): the master's merges,
+/// an Accept with no branch named, the measuring of change sets and the start of new
+/// agents. The owner's Land on choice, else the Master's branch as [`master_branch`]
+/// resolves it. Inputs: the engine database, the owner checkout root and the project.
+/// Output: the branch and tip, None when nothing was chosen and no Master's branch
+/// exists, or `changes_target_invalid` for a chosen branch that is no local branch.
+pub fn land_on(
+    db: &Connection,
+    repository: &Path,
+    project: &ProjectId,
+) -> Result<Option<(String, String)>, EngineError> {
+    #[cfg(unix)]
+    return owner::land_on_branch(db, repository, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, project);
+        Err(unavailable())
+    }
+}
+
 /// The commit a lead's worktree holds now, which its new worker's worktree is cut from
 /// (N1). Inputs: the store, the owner's checkout root, the lead's worktree and its git
 /// metadata folder. Output: the commit id.

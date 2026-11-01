@@ -4400,19 +4400,25 @@ impl TeamRuntime {
         }
     }
 
-    /// The commit a new master or harness worktree starts from (DEC-100): the tip of the
-    /// project's Master's branch, so the master works there and each harness's task branch
-    /// is cut from the branch it merges into. Takes the project and its canonical folder.
-    /// Returns the tip, None to start from the owner's HEAD when the project has no such
-    /// branch and none was chosen, or the plain reason a chosen Master's branch is missing.
+    /// The commit a new master or harness worktree starts from (DEC-100, DEC-111 Q1): the
+    /// tip of the project's Land on branch, the Master's branch unless the owner named
+    /// another, so each new agent starts where the team's merged work lands. Takes the
+    /// project and its canonical folder. Returns the tip, None to start from the owner's
+    /// HEAD when the project has no such branch and none was chosen, or the plain reason a
+    /// chosen branch is missing.
     fn master_tip(&self, project: &ProjectId, root: &Path) -> Result<Option<String>, String> {
+        let land_on = super::land_on(&self.connection, project)
+            .map_err(|e| with_code("the Land on setting could not be read", Some(&e.0)))?;
         let choice = super::master_branch_choice(&self.connection, project)
             .map_err(|e| with_code("the Master's branch setting could not be read", Some(&e.0)))?;
-        match crate::landing::master_branch(root, choice.as_deref()) {
+        match crate::landing::land_on(&self.connection, root, project) {
             Ok(found) => Ok(found.map(|(_, tip)| tip)),
-            Err(_) if choice.is_none() => Ok(None),
+            Err(_) if land_on.is_none() && choice.is_none() => Ok(None),
             Err(problem) => Err(with_code(
-                "the Master's branch is not a local branch of the project",
+                match land_on {
+                    Some(_) => "the Land on branch is not a local branch of the project",
+                    None => "the Master's branch is not a local branch of the project",
+                },
                 Some(&problem.0),
             )),
         }
