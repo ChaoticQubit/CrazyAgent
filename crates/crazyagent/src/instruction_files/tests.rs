@@ -133,9 +133,12 @@ fn every_edit_delivery_is_stored_and_a_project_that_never_chose_gets_next_messag
         load(&connection, &project).unwrap_err(),
         "instruction_settings_invalid"
     );
-    let wire: Settings =
-        serde_json::from_str(r#"{"mode":"both","transcripts":true}"#).unwrap();
-    assert_eq!(wire.edits, EditDelivery::NextMessage, "an older client's save");
+    let wire: Settings = serde_json::from_str(r#"{"mode":"both","transcripts":true}"#).unwrap();
+    assert_eq!(
+        wire.edits,
+        EditDelivery::NextMessage,
+        "an older client's save"
+    );
 }
 
 #[test]
@@ -205,7 +208,10 @@ fn changed_sections_returns_only_the_sections_whose_text_changed() {
         "the text before the first section is a section too"
     );
     assert_eq!(
-        changed_sections("Read this first.\n\n## Style\n\nUse tabs.\n", "## Style\n\nUse tabs.\n"),
+        changed_sections(
+            "Read this first.\n\n## Style\n\nUse tabs.\n",
+            "## Style\n\nUse tabs.\n"
+        ),
         ["The text before the first section was removed."]
     );
     assert_eq!(
@@ -234,7 +240,12 @@ fn changed_sections_never_pass_their_bound_and_say_what_did_not_fit() {
     let started = format!("{}{}", section("One", 'a'), section("Two", 'a'));
     let now = format!("{}{}", section("One", 'b'), section("Two", 'c'));
     let sections = changed_sections(&started, &now);
-    assert_eq!(sections.len(), 2, "{:?}", sections.iter().map(String::len).collect::<Vec<_>>());
+    assert_eq!(
+        sections.len(),
+        2,
+        "{:?}",
+        sections.iter().map(String::len).collect::<Vec<_>>()
+    );
     assert_eq!(sections[0], section("One", 'b').trim());
     assert_eq!(
         sections[1],

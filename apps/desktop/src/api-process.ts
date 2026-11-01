@@ -215,15 +215,27 @@ export interface LoadedFile {
 /** Which of the owner's two instruction texts a project's agents get (DEC-106). */
 export type InstructionMode = "project_only" | "app_only" | "both";
 
-/** One project's agent settings: which instructions its agents get and whether headless
- * Claude runs keep their transcript. */
+/** How an edit to the instructions reaches agents that already run (DEC-111 QR1). */
+export type EditDelivery = "next_message" | "restart" | "badge";
+
+/** One project's agent settings: which instructions its agents get, whether headless
+ * Claude runs keep their transcript and how an instruction edit reaches running agents. */
 export interface InstructionSettings {
   mode: InstructionMode;
   transcripts: boolean;
+  edits?: EditDelivery;
 }
 
 /** The settings of a project the owner never changed. */
-export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true };
+export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
+
+/** Every way an instruction edit can reach running agents, in the order the page lists
+ * them, with what each does. */
+export const EDIT_DELIVERIES: readonly { value: EditDelivery; label: string; note: string }[] = [
+  { value: "next_message", label: "Next task", note: "A running agent's next task starts with the sections you changed, sent once." },
+  { value: "restart", label: "Restart when idle", note: "A running agent restarts when it is next idle and resumes its conversation with the new text." },
+  { value: "badge", label: "Badge only", note: "Nothing is sent. A running agent shows Instructions changed until it starts again." },
+];
 
 /** Every instructions option in the order the page lists them, with what it hands agents. */
 export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string; note: string }[] = [

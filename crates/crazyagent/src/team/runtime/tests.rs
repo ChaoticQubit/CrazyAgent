@@ -4044,8 +4044,14 @@ fn with_next_message_an_edit_reaches_a_running_agent_once_in_its_next_task() {
     let third = typed.find("Write the third page.").unwrap();
     assert!(first < block && block < second && second < third, "{typed}");
     let sent = &typed[block..second];
-    assert!(sent.contains("## Style") && sent.contains("Use spaces."), "{sent}");
-    assert!(!sent.contains("## Tests"), "an unchanged section is not sent: {sent}");
+    assert!(
+        sent.contains("## Style") && sent.contains("Use spaces."),
+        "{sent}"
+    );
+    assert!(
+        !sent.contains("## Tests"),
+        "an unchanged section is not sent: {sent}"
+    );
     assert!(!typed.contains("Use tabs."), "{typed}");
 }
 
@@ -4109,7 +4115,10 @@ fn with_restart_the_agent_restarts_at_its_next_idle_with_the_new_text() {
         started[1].contains(&format!("--resume {conversation}")),
         "{started:?}"
     );
-    assert!(given.contains("Use spaces.") && !given.contains("Use tabs."), "{given}");
+    assert!(
+        given.contains("Use spaces.") && !given.contains("Use tabs."),
+        "{given}"
+    );
     assert!(!typed.contains(CHANGED_HEADER), "{typed}");
     assert!(!badge(&fixture, agent));
 }

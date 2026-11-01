@@ -25,6 +25,7 @@ pub const OVERLAP_REASON_BYTES_MAX: usize = 160;
 /// project's terminals, so the agents of the latest work stay beside their tasks.
 pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
 const TEAMMATE_PREFIX: &str = "teammate-";
+const INSTRUCTIONS_CHANGED: &str = "Instructions changed";
 
 /// What one node of the who-leads-whom tree stands for (DEC-104 Q16): the master, a harness
 /// lead the master started, a sub-agent a lead started, or a native teammate a lead's
@@ -173,6 +174,16 @@ fn edge_state(status: TaskStatus) -> EdgeState {
 
 /// Tells whether an agent row is a team member the graph places under a lead: a sub-agent or
 /// a native teammate the engine adopted as its own row. Takes the agent. Returns the answer.
+/// The status words an agent's node shows: its status, and after it "Instructions changed"
+/// while the owner's Badge choice flags that its instructions changed since it started.
+/// Input: the agent. Output: the words.
+fn status_words(agent: &TeamAgent) -> String {
+    match agent.instructions_changed {
+        true => format!("{} - {INSTRUCTIONS_CHANGED}", agent.status_label),
+        false => agent.status_label.clone(),
+    }
+}
+
 fn team_member(agent: &TeamAgent) -> bool {
     matches!(agent.role, AgentRole::Sub | AgentRole::Teammate)
 }
@@ -304,7 +315,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             .map(|harness| harness.harness.clone())
             .unwrap_or_default(),
         status: master.map(|agent| agent.status),
-        status_label: master.map(|agent| agent.status_label.clone()),
+        status_label: master.map(status_words),
         account: master.and_then(|agent| agent.account.clone()),
         branch: status.master_branch.clone(),
         terminal: master
@@ -358,7 +369,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             label: agent.label.clone(),
             harness: agent.harness.clone(),
             status: Some(agent.status),
-            status_label: Some(agent.status_label.clone()),
+            status_label: Some(status_words(agent)),
             account: agent.account.clone(),
             branch: facts.branches.get(&agent.id).cloned(),
             terminal: agent.status.live().then(|| terminal.clone()),

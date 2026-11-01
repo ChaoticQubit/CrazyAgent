@@ -62,6 +62,9 @@ const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
+/// How often a project's running agents are checked for an owner instruction edit under
+/// the Restart and Badge choices (DEC-111 QR1).
+const INSTRUCTION_CHECK_EVERY: Duration = Duration::from_secs(2);
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
 const SESSION_EVENTS_MAX: usize = 200_000;
 const HISTORY_MESSAGES_MAX: i64 = 12;
@@ -451,6 +454,8 @@ pub struct TeamRuntime {
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     reproving: Option<Arc<AtomicBool>>,
+    instructions_next: BTreeMap<ProjectId, Instant>,
+    instruction_restarts: BTreeMap<i64, ProjectId>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -600,6 +605,8 @@ impl TeamRuntime {
             deliveries: crate::coord::delivery::Deliveries::default(),
             adoption_failed: None,
             reproving: None,
+            instructions_next: BTreeMap::new(),
+            instruction_restarts: BTreeMap::new(),
         })
     }
 
@@ -1902,6 +1909,7 @@ impl TeamRuntime {
         self.check_adoption(project);
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
+        self.instruction_edits(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -3441,6 +3449,159 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// The owner's instruction edit a sub-agent's next task starts with under the project's
+    /// default Next task choice (DEC-111 QR1): the sections changed since its launch or its
+    /// last change block. A read that fails sends the task without one. Takes the project,
+    /// the agent and its home. Returns the edit, or none.
+    fn next_message_edit(
+        &self,
+        project: &ProjectId,
+        agent: i64,
+        home: &Path,
+    ) -> Option<crate::instruction_files::Edit> {
+        let harness = launch_harness(&self.workers[&agent].harness)?;
+        crate::instruction_files::edit_for(&self.connection, project, home, harness)
+            .ok()
+            .flatten()
+            .filter(|edit| edit.delivery == crate::instruction_files::EditDelivery::NextMessage)
+    }
+
+    /// Applies the project's Restart or Badge choice for owner instruction edits (DEC-111
+    /// QR1), checking its running agents at most once each `INSTRUCTION_CHECK_EVERY`: under
+    /// Restart an idle sub-agent whose instructions changed stops, and starts again once its
+    /// process ended; under Badge each running agent whose instructions changed is flagged
+    /// for the team status, and the flags clear under any other choice. Takes the setup, the
+    /// access and the paused accounts. Returns any SQLite failure.
+    fn instruction_edits(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        self.restart_after_edits(stored, access, paused)?;
+        let now = Instant::now();
+        if self
+            .instructions_next
+            .get(project)
+            .is_some_and(|next| now < *next)
+        {
+            return Ok(());
+        }
+        self.instructions_next
+            .insert(project.clone(), now + INSTRUCTION_CHECK_EVERY);
+        let delivery = crate::instruction_files::load(&self.connection, project)
+            .map(|settings| settings.edits)
+            .unwrap_or_default();
+        let mut flagged = BTreeSet::new();
+        let ids: Vec<i64> = match delivery {
+            crate::instruction_files::EditDelivery::NextMessage => Vec::new(),
+            _ => self
+                .workers
+                .iter()
+                .filter(|(_, worker)| &worker.project == project && !worker.stopping)
+                .map(|(id, _)| *id)
+                .collect(),
+        };
+        for id in ids {
+            let Some(harness) = launch_harness(&self.workers[&id].harness) else {
+                continue;
+            };
+            let home = agent_home(&self.state, id);
+            let Ok(Some(edit)) =
+                crate::instruction_files::edit_for(&self.connection, project, &home, harness)
+            else {
+                continue;
+            };
+            if edit.delivery == crate::instruction_files::EditDelivery::Badge {
+                flagged.insert(id);
+                continue;
+            }
+            let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            if worker.role != AgentRole::Sub
+                || worker.live
+                || worker.busy.is_some()
+                || worker.own_turn.is_some()
+                || waits
+            {
+                continue;
+            }
+            worker.restarting = true;
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+            self.instruction_restarts.insert(id, project.clone());
+        }
+        assert!(flagged.len() <= self.workers.len());
+        crate::instruction_files::set_badges(&self.connection, project, &flagged).map_err(error)
+    }
+
+    /// Starts again each sub-agent of the project that stopped for an instruction edit, once
+    /// its process ended: in its own worktree and conversation through [`TeamRuntime::wake`],
+    /// with an event saying why, or a team note when it cannot; while the pool's sign-ins are
+    /// still being checked it waits for a later tick. Takes the setup, the access and the
+    /// paused accounts. Returns any SQLite failure.
+    fn restart_after_edits(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let ended: Vec<i64> = self
+            .instruction_restarts
+            .iter()
+            .filter(|(id, owner)| *owner == project && !self.workers.contains_key(id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ended {
+            self.instruction_restarts.remove(&id);
+            let row: Option<(String, bool)> = self
+                .connection
+                .query_row(
+                    "SELECT harness, tools FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+                    params![id, project.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(error)?;
+            let Some((harness, tools)) = row else {
+                continue;
+            };
+            let started = match self.account_for(access, project, &harness, paused) {
+                Ok(Some(account)) => self
+                    .wake(stored, id, &harness, tools, &account, None)?
+                    .map(|_| ()),
+                Ok(None) => {
+                    self.instruction_restarts.insert(id, project.clone());
+                    continue;
+                }
+                Err(reason) => Err(reason),
+            };
+            match started {
+                Ok(()) => {
+                    super::events::record(
+                        &self.connection,
+                        project,
+                        id,
+                        None,
+                        super::events::EventKind::Progress,
+                        INSTRUCTIONS_RESTARTED,
+                        now_ms(),
+                    )?;
+                }
+                Err(reason) => self.note(
+                    project,
+                    &format!(
+                        "An agent stopped to load your changed instructions but could not start again: {}.",
+                        bound_text(&reason, 300)
+                    ),
+                )?,
+            }
+        }
+        Ok(())
+    }
+
     fn dispatch(
         &mut self,
         stored: &StoredSetup,
@@ -3655,6 +3816,14 @@ impl TeamRuntime {
             prompt.push_str(&self.branch_line(project, agent));
             let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
             prompt.push_str(&waiting);
+            let home = agent_home(&self.state, agent);
+            let edit = self.next_message_edit(project, agent, &home);
+            if let Some(edit) = &edit {
+                prompt.insert_str(
+                    0,
+                    &crate::instruction_files::changed_message(&edit.sections),
+                );
+            }
             let bound = turn_bound(
                 super::time_limits(&self.connection, &stored.project_id)?,
                 self.workers[&agent].ran(),
@@ -3670,6 +3839,9 @@ impl TeamRuntime {
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
             worker.briefed |= worker.kept_session;
+            if let Some(edit) = &edit {
+                let _ = crate::instruction_files::delivered(edit, &home);
+            }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
@@ -7096,6 +7268,7 @@ const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
+const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.

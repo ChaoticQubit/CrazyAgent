@@ -503,7 +503,11 @@ fn an_agent_whose_instructions_changed_says_so_in_its_status_until_it_starts_aga
     assert_eq!(label("team-7"), "Working - Instructions changed");
     assert_eq!(label("team-8"), "Waiting for work - Instructions changed");
     assert_eq!(label("team-3"), AgentStatus::Working.label());
-    assert!(label("master").ends_with(" - Instructions changed"), "{}", label("master"));
+    assert!(
+        label("master").ends_with(" - Instructions changed"),
+        "{}",
+        label("master")
+    );
 }
 
 #[test]
