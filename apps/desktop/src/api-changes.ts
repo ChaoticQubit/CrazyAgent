@@ -122,23 +122,25 @@ export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeD
   return call<ChangeDiff>("desktop_change_diff", { id, page });
 }
 
-/** The local branches a change set can land on and the checked-out one, the default. */
+/** The local branches a change set can land on, the checked-out one and the team's Land on
+ * branch, where an Accept with no branch picked lands. */
 export interface TargetBranches {
   branches: string[];
   current: string | null;
+  land_on?: string | null;
 }
 
-/** Lands a change set as one commit on a local branch: the checked-out one by default, or
+/** Lands a change set as one commit on a local branch: the team's Land on branch by default, or
  * the named target, which moves as a ref while the project folder's files stay as they are
  * when it isn't checked out. Inputs: the id, the head the owner reviewed, the owner's commit
- * message and the target branch, null for the checked-out one. Output: the new commit and
+ * message and the target branch, null for the Land on branch. Output: the new commit and
  * its branch, or the files that conflict with the branch, in which case nothing changed. */
 export function acceptChange(id: string, expectedHead: string, message: string, target: string | null = null): Promise<Result<AcceptOutcome>> {
   return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message, target });
 }
 
 /** Lists the local branches a change set can be accepted onto. Input: the id. Output: the
- * branches and the checked-out one. */
+ * branches, the checked-out one and the Land on branch. */
 export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
   return call<TargetBranches>("desktop_change_branches", { id });
 }

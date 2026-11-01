@@ -857,6 +857,7 @@ export interface TeamStatus {
   show_finished?: boolean;
   agent_branches?: BranchMode;
   master_branch?: string | null;
+  land_on?: string | null;
   ask_before_merge?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;

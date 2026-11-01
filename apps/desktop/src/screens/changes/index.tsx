@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import "./changes.css";
 
@@ -26,11 +26,11 @@ export function ChangesNotReady() {
 }
 
 /** The Accept dialog: says where the changes land, lets the owner pick the local branch
- * they land on, the checked-out one first, and shows the proposed commit message for the
+ * they land on, the team's Land on branch first, and shows the proposed commit message for the
  * owner to edit first, hidden characters as escapes with a warning; Accept stays off while
  * the message is empty, too long or holds hidden characters.
  * Inputs: the change set, whether the accept runs, and the handlers; Accept gets the
- * message and the picked branch, null for the checked-out one. Output: the dialog. */
+ * message and the picked branch, null for the Land on branch. Output: the dialog. */
 export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   set: ChangeSet;
   pending: boolean;
@@ -49,20 +49,18 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
     void loadTargetBranches(set.id).then((result) => {
       if (!current || result.kind !== "ok") return;
       setBranches(result.value);
-      setTarget(result.value.current ?? result.value.branches[0] ?? "");
+      setTarget(result.value.land_on ?? result.value.current ?? result.value.branches[0] ?? "");
     });
     return () => { current = false; };
   }, [set.id]);
-  const picked = branches !== null && target !== "" && target !== branches.current ? target : null;
+  const { picked, text: lands } = acceptTarget(branches, target);
   return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
       <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message, picked); }}>Accept</Button></>}>
-    {picked === null
-      ? <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
-      : <p>They land as one commit on {picked}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.</p>}
+    <p>{lands}</p>
     {branches !== null && branches.branches.length > 0 &&
       <Select id={branchId} label="Branch" value={target} onValue={setTarget}
-        options={branches.branches.map((name) => ({ value: name, label: name === branches.current ? `${name} (checked out)` : name }))} />}
+        options={branches.branches.map((name) => ({ value: name, label: branchLabel(branches, name) }))} />}
     {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
       error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />

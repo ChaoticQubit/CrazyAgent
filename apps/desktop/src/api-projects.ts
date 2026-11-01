@@ -210,6 +210,7 @@ const copy: Record<string, string> = {
   team_handle_invalid: "Use lower-case letters, digits and single hyphens, up to 32 characters, such as onboarding-fix.",
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
   team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
+  team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
   coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
   coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
   coord_project_unknown: "This project was not found.",
