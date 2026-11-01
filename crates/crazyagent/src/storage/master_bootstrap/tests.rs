@@ -604,6 +604,16 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
 #[test]
 fn a_conversation_started_with_new_session_passes_the_bootstrap_scope_check() {
     let mut case = Case::new();
+    crate::master_sessions::mark_owner_turn(
+        &case.db,
+        &case.session.project_id,
+        case.session.session_id.as_str(),
+    )
+    .unwrap();
+    assert!(
+        crate::master_sessions::has_owner_turn(&case.db, &case.session.session_id).unwrap(),
+        "the session the owner used holds an owner turn"
+    );
     let action = MasterOwnerAction::NewSession {
         project_id: case.session.project_id.clone(),
         expected_config_id: case.session.config_id.clone(),
