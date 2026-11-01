@@ -7179,6 +7179,105 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
     }
 }
 
+/// Starts a Claude Code lead the master started while the project's Claude Code sub-agent
+/// mode is `mode`, in its own clone of the committed project on the task branch the engine
+/// claimed for it, as a lead's launch does. Takes the fixture and the mode. Returns the
+/// lead and its task branch.
+#[cfg(target_os = "macos")]
+fn lead_in_its_own_clone(
+    fixture: &Fixture,
+    mode: crate::coord::settings::SubagentMode,
+) -> (i64, String) {
+    use crate::coord::settings::{HarnessKind, set_mode};
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+    committed_project(fixture);
+    let repository = fixture.base.join("project");
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    assert_eq!(
+        super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
+        mode
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{lead}"));
+    let branch =
+        crate::landing::claim_task_branch(&db, &repository, &worktree, "write-the-page").unwrap();
+    crate::landing::add_agent_clone_on(&repository, &worktree, None, &branch).unwrap();
+    let git_dir = crate::agent_git::git_dir(&worktree);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                lead,
+                PROJECT,
+                repository.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    (lead, branch)
+}
+
+/// DEC-111 Q10: an app-spawned lead's task prompt names its task branch only. It says
+/// nothing of Claude Code native teammates, `git worktree add` or the teammates folder,
+/// so the lead delegates only through the spawn tool.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_spawned_lead_s_task_prompt_has_no_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::AppSpawned);
+    let mut team = fixture.runtime();
+    let line = team.branch_line(&fixture.setup.project_id, lead);
+    assert!(
+        !line.contains("git worktree add") && !line.contains(crate::agent_git::TEAMMATES_FOLDER),
+        "{line}"
+    );
+    assert_eq!(
+        line,
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a native lead's task prompt keeps the native-teammates paragraph: each
+/// teammate works in its own worktree under the teammates folder, on `<task branch>--<name>`,
+/// merged into the task branch before the lead reports done.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let mut team = fixture.runtime();
+    let line = team.branch_line(&fixture.setup.project_id, lead);
+    assert!(
+        line.starts_with(&format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. "
+        )),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!(
+            "git worktree add {}/<name> -b {branch}--<name>",
+            crate::agent_git::TEAMMATES_FOLDER
+        )),
+        "{line}"
+    );
+    assert!(
+        line.ends_with(&format!(
+            "Merge each finished teammate branch into {branch} before you report done; nothing under {} lands by itself.",
+            crate::agent_git::TEAMMATES_FOLDER
+        )),
+        "{line}"
+    );
+    team.shutdown().unwrap();
+}
+
 #[test]
 fn only_an_agent_with_tools_on_gets_the_message_relay() {
     let fixture = Fixture::new(1);
