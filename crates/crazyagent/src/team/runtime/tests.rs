@@ -9179,8 +9179,25 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
         .unwrap()
         .unwrap()
         .persona;
-    let (reply, refused) = wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.");
-    assert!(!refused && reply.contains("Waking "), "{reply}");
+    let woke = wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.");
+    let sent: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT max(id) FROM coord_messages WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let label = super::super::events::label(&fixture.connection, woken).unwrap();
+    assert_eq!(
+        woke,
+        (
+            format!(
+                "Sent #{sent}. Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+            ),
+            false
+        )
+    );
     let task: i64 = fixture
         .connection
         .query_row(
