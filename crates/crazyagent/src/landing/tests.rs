@@ -1895,6 +1895,7 @@ fn land_on_stage(case: &Case) -> (String, String) {
     case.owner(&["checkout", "-q", "-b", "feat/x", &start]);
     case.agent(&["reset", "-q", "--hard", &stage]);
     case.start();
+    crate::team::initialize(&case.db).unwrap();
     case.db
         .execute(
             "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
