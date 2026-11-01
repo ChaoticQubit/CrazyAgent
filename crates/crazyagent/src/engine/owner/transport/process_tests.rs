@@ -688,7 +688,11 @@ fn process_adoption_round_trip() {
     }
 
     let view = adoption(&root, &project).unwrap();
-    assert!(view.nudges, "nudges are on by default");
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "nudges are off by default (DEC-109)"
+    );
     assert_eq!(
         view.counted,
         crate::coord::settings::COUNTED_TOOLS_DEFAULT

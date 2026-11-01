@@ -1,4 +1,4 @@
-use super::settings::{COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_MAX};
+use super::settings::{COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_MAX, Nudges};
 use super::store::{AgentRow, agent, state};
 use super::{AgentId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
 use crate::engine::EngineError;
@@ -16,6 +16,10 @@ pub const NUDGES_PER_TICK_MAX: usize = 16;
 /// How long an agent works with no graphify and no context-mode call before it is
 /// flagged (Q18), in ms.
 pub const UNGROUNDED_MS: i64 = 10 * 60_000;
+/// What the FirstEdit nudges tell an agent whose first file edit came before any
+/// code-graph query (DEC-111 R4): the hook's answer where hooks run, the engine's note for
+/// an agent without them.
+pub const FIRST_EDIT_REMINDER: &str = "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.";
 /// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
 /// What the clients show in place of receipts and adoption counts for an agent whose
@@ -64,7 +68,7 @@ const _: () = assert!(NUDGES_PER_TICK_MAX <= AGENTS_CHECKED_MAX);
 
 /// A workflow habit an agent missed (Q18), shown red on the Process page and the graph:
 /// editing files with no declared work, or working ten minutes with no code-graph query
-/// and no context-mode call. Each earns that agent one reminder while nudges are on.
+/// and no context-mode call. Each earns that agent one reminder under the TenMinutes nudges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Flag {
     #[serde(rename = "edits_without_start_work")]
@@ -146,13 +150,13 @@ pub struct SkillCount {
     pub count: u32,
 }
 
-/// A project's adoption view: whether nudges are on, the counted-tools entries that name
+/// A project's adoption view: its nudges option, the counted-tools entries that name
 /// the count columns, the skills its agents receive (sorted by name), its newest agents, at
 /// most `AGENTS_SHOWN_MAX`, and how many older agents the view's byte limit left out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adoption {
-    pub nudges: bool,
+    pub nudges: Nudges,
     pub counted: Vec<String>,
     #[serde(default)]
     pub skills: Vec<String>,
@@ -487,13 +491,16 @@ pub fn view(
 }
 
 /// Sends each running agent of a project one Engine note per flag it raised and was never
-/// reminded of, at most `NUDGES_PER_TICK_MAX` a call, only while the project's nudges are
-/// on. The note's idempotency key is the flag and the agent, so a reminder is sent once
-/// whatever the retries. Takes the database, the project and the time in ms. Returns Ok
-/// or the first refusal.
+/// reminded of, at most `NUDGES_PER_TICK_MAX` a call, under the project's TenMinutes
+/// nudges; under FirstEdit it sends `first_edits` instead, and under Off nothing. The
+/// note's idempotency key is the flag and the agent, so a reminder is sent once whatever
+/// the retries. Takes the database, the project and the time in ms. Returns Ok or the
+/// first refusal.
 pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), EngineError> {
-    if !super::settings::read(db, project)?.nudges {
-        return Ok(());
+    match super::settings::read(db, project)?.nudges {
+        Nudges::Off => return Ok(()),
+        Nudges::FirstEdit => return first_edits(db, project, now),
+        Nudges::TenMinutes => {}
     }
     let ids: Vec<AgentId> = {
         let mut statement = db
@@ -539,6 +546,73 @@ pub fn tick(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Engine
             )?;
             sent += 1;
         }
+    }
+    assert!(sent <= NUDGES_PER_TICK_MAX);
+    Ok(())
+}
+
+/// The FirstEdit fallback for running agents without the hook path, a launch that fires no
+/// hooks or a harness other than Claude Code: each one whose counted calls hold a file edit
+/// and no code-graph query gets one Engine note with `FIRST_EDIT_REMINDER`, keyed by the
+/// agent so it is sent once, at most `NUDGES_PER_TICK_MAX` a call. Takes the database, the
+/// project and the time in ms. Returns Ok or the first refusal.
+fn first_edits(db: &Connection, project: &ProjectId, now: i64) -> Result<(), EngineError> {
+    let ids: Vec<AgentId> = {
+        let mut statement = db
+            .prepare(
+                "SELECT id FROM team_agents WHERE project=?1 AND tools=1
+                 AND status NOT IN ('stopped','failed')
+                 AND (hookless=1 OR harness NOT IN ('claude-code','claude'))
+                 ORDER BY id DESC LIMIT ?2",
+            )
+            .map_err(state)?;
+        let limit = i64::try_from(AGENTS_CHECKED_MAX).map_err(state)?;
+        let rows = statement
+            .query_map(params![project.as_str(), limit], |found| found.get(0))
+            .map_err(state)?;
+        rows.collect::<Result<_, _>>().map_err(state)?
+    };
+    let mut sent = 0;
+    for id in ids {
+        let used = used(db, id)?;
+        let called = |tool: &dyn Fn(&str) -> bool| {
+            used.iter()
+                .any(|(name, count)| *count > 0 && tool(super::presence::short(name)))
+        };
+        if !called(&|name| EDIT_TOOLS.contains(&name)) || called(&|name| name == GRAPH_TOOL) {
+            continue;
+        }
+        let key = format!("{NUDGE_KEY}first_edit-{id}");
+        let earlier: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE project=?1
+                 AND from_kind='engine' AND to_kind='agent' AND to_agent=?2 AND idem_key=?3)",
+                params![project.as_str(), id, key],
+                |found| found.get(0),
+            )
+            .map_err(state)?;
+        if earlier {
+            continue;
+        }
+        if sent == NUDGES_PER_TICK_MAX {
+            break;
+        }
+        super::send(
+            db,
+            NewMessage {
+                project: project.clone(),
+                from: Party::Engine,
+                to: Party::Agent(id),
+                kind: MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: FIRST_EDIT_REMINDER.to_owned(),
+                idempotency_key: Some(key),
+            },
+            now,
+        )?;
+        sent += 1;
     }
     assert!(sent <= NUDGES_PER_TICK_MAX);
     Ok(())

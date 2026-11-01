@@ -815,13 +815,16 @@ export type Delivery = "auto" | "native_only" | "typing_only";
 export type QuestionsTo = "lead" | "me";
 /** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
 export type Overlaps = "warn" | "block" | "off";
+/** When workflow nudges remind an agent: never, with the engine's note per flag after ten
+ * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
+export type Nudges = "off" | "ten_minutes" | "first_edit";
 
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges and the
  * tool names the adoption counts include. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
-  nudges: boolean;
+  nudges: Nudges;
   counted_tools: string[];
 }
 

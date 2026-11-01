@@ -8820,7 +8820,11 @@ fn a_runtime_with_default_settings_sends_no_workflow_reminder() {
         now_ms(),
     )
     .unwrap();
-    assert!(!view.nudges, "workflow nudges are off by default");
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "workflow nudges are off by default"
+    );
     assert!(team.shutdown().unwrap().is_empty());
 }
 
@@ -8833,7 +8837,7 @@ fn workflow_nudges_the_owner_turned_on_send_one_reminder_per_flag() {
         &fixture.connection,
         &fixture.setup.project_id,
         &crate::coord::settings::CoordSettings {
-            nudges: true,
+            nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
         },
     )

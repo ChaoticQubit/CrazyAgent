@@ -1,7 +1,9 @@
 #![cfg(unix)]
 
-use crazyagent::coord::settings::{CoordSettings, Overlaps};
+use crazyagent::coord::adoption::Flag;
+use crazyagent::coord::settings::{CoordSettings, Nudges, Overlaps};
 use crazyagent::protocol::ProjectId;
+use crazyagent::usage::capture::{Attribution, Format, RunKind};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -470,6 +472,210 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
         .filter(|name| name.ends_with(".ask") || name.ends_with(".answer"))
         .collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// What one nudges option does through the real chain: the engine's relay writes the
+/// project's settings for the real hook binary, the lead's session edits a file twice with
+/// its tool call logged between, the relay takes that log into the engine, and the
+/// adoption tick runs. Inputs: the team and the option. Output: the hook's answers to the
+/// two edits and the engine notes the lead's agent got.
+fn nudged(team: &Team, nudges: Nudges) -> ([String; 2], Vec<String>) {
+    let (db, project) = engine(team, nudges);
+    let lead = tools_agent(&db, "claude-code");
+    let home = team.root.join("agent").join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let serve = || {
+        crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
+            .unwrap()
+    };
+    serve();
+    let file = team.root.join("src").join("a.rs");
+    let first = team.hook("edit", None, edit(LEAD_SESSION, &file));
+    team.hook("post-tool", None, edit(LEAD_SESSION, &file));
+    let second = team.hook("edit", None, edit(LEAD_SESSION, &file));
+    serve();
+    crazyagent::coord::adoption::tick(&db, &project, now_ms()).unwrap();
+    ([first, second], engine_notes(&db, lead))
+}
+
+/// Opens the team's real engine database with the project `alpha`, the team, setup,
+/// coordination and usage tables, and the chosen nudges stored. Inputs: the team and the
+/// option. Output: the connection and the project.
+fn engine(team: &Team, nudges: Nudges) -> (Connection, ProjectId) {
+    let db = Connection::open(team.root.join("engine.db")).unwrap();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
+        .unwrap();
+    crazyagent::team::initialize(&db).unwrap();
+    crazyagent::project_setup::initialize(&db).unwrap();
+    crazyagent::coord::ensure(&db).unwrap();
+    crazyagent::usage::initialize(&db).unwrap();
+    let project = ProjectId::new("alpha").unwrap();
+    crazyagent::coord::settings::write(
+        &db,
+        &project,
+        &CoordSettings {
+            nudges,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+    (db, project)
+}
+
+/// Adds one working tools-on sub-agent of a harness to project `alpha`. Inputs: the
+/// database and the harness id. Output: the agent's id.
+fn tools_agent(db: &Connection, harness: &str) -> i64 {
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES ('alpha','sub_agent',?1,1,'working',0,0)",
+        [harness],
+    )
+    .unwrap();
+    db.last_insert_rowid()
+}
+
+/// The engine notes one agent got, oldest first. Inputs: the database and the agent.
+/// Output: the note bodies.
+fn engine_notes(db: &Connection, agent: i64) -> Vec<String> {
+    let mut statement = db
+        .prepare(
+            "SELECT body FROM coord_messages WHERE from_kind='engine' AND to_kind='agent'
+             AND to_agent=?1 ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap()
+}
+
+#[test]
+fn with_nudges_off_no_reminder_is_sent() {
+    let team = Team::new();
+    let (edits, notes) = nudged(&team, Nudges::Off);
+    assert_eq!(edits, ["", ""], "no hook reminder on an edit");
+    assert!(notes.is_empty(), "no engine reminder: {notes:?}");
+}
+
+#[test]
+fn with_ten_minutes_the_adoption_reminder_is_sent() {
+    let team = Team::new();
+    let (edits, notes) = nudged(&team, Nudges::TenMinutes);
+    assert_eq!(
+        edits,
+        ["", ""],
+        "the 10-minute option never reminds on an edit"
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|note| note == Flag::EditsWithoutWork.reminder()),
+        "the logged edit without start_work earns the engine's reminder: {notes:?}"
+    );
+}
+
+#[test]
+fn with_first_edit_the_hook_returns_the_reminder_once() {
+    let team = Team::new();
+    let (edits, notes) = nudged(&team, Nudges::FirstEdit);
+    let answer: Value = serde_json::from_str(edits[0].trim()).unwrap();
+    assert_eq!(
+        answer,
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.",
+        }}),
+        "a reminder with no permission decision, so the edit stays allowed"
+    );
+    assert_eq!(edits[1], "", "once per session");
+    assert!(notes.is_empty(), "no 10-minute reminder: {notes:?}");
+
+    let own = team.root.join(".worktrees").join("greet").join("a.rs");
+    team.hook(
+        "post-tool",
+        Some(MATE_PANE),
+        tool(
+            MATE_SESSION,
+            None,
+            "Bash",
+            json!({"command": "graphify query \"parser\""}),
+        ),
+    );
+    assert_eq!(
+        team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own)),
+        "",
+        "a session that queried the graph first gets no reminder"
+    );
+}
+
+/// Under FirstEdit an agent without hooks gets the same reminder from the engine (DEC-111
+/// R4): a Codex agent's real rollout file records a patch before any graphify call, the
+/// engine's usage scan of its home counts the calls, and the adoption tick sends one note,
+/// however often both run. A Codex agent whose rollout ran graphify first gets none.
+#[test]
+fn with_first_edit_a_codex_agent_without_hooks_gets_the_engine_reminder_once() {
+    let team = Team::new();
+    let (db, project) = engine(&team, Nudges::FirstEdit);
+    let patch = json!({"type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch",
+    }});
+    let graphify = json!({"type": "response_item", "payload": {
+        "type": "function_call", "name": "exec_command",
+        "arguments": json!({"cmd": "graphify query \"parser\""}).to_string(),
+    }});
+    let codex = |lines: &[&Value]| {
+        let agent = tools_agent(&db, "codex");
+        let home = team
+            .root
+            .join("agents")
+            .join(format!("agent-{agent}"))
+            .join("home");
+        let record = home.join("sessions/2026/11/01/rollout-2026-11-01T14-00-00-t.jsonl");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&record, text).unwrap();
+        (agent, home)
+    };
+    let edited = codex(&[&patch]);
+    let grounded = codex(&[&graphify, &patch]);
+    let scan = || {
+        for (agent, home) in [&edited, &grounded] {
+            let who = Attribution {
+                kind: RunKind::Agent,
+                project: Some(project.clone()),
+                pool: None,
+                account: None,
+                agent: format!("team-{agent}"),
+                harness: "codex".to_owned(),
+            };
+            crazyagent::usage::capture::scan_agent_home(
+                &db,
+                home,
+                Format::Codex,
+                &who,
+                *agent,
+                now_ms(),
+            )
+            .unwrap();
+        }
+        crazyagent::coord::adoption::tick(&db, &project, now_ms()).unwrap();
+    };
+
+    scan();
+    scan();
+    assert_eq!(
+        engine_notes(&db, edited.0),
+        [
+            "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
+        ],
+        "one engine reminder, the hook's own words"
+    );
+    assert_eq!(
+        engine_notes(&db, grounded.0),
+        Vec::<String>::new(),
+        "a Codex agent that queried the graph first"
+    );
 }
 
 #[test]

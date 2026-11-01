@@ -4342,7 +4342,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,
         overlaps: Overlaps::Block,
-        nudges: false,
+        nudges: crate::coord::settings::Nudges::FirstEdit,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
     };
     for action in [
