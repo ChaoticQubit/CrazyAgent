@@ -250,11 +250,14 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
     );
 }
 
-/// K2b: Codex runs its own app through the bridge script, which gets the executable and an
-/// empty resume id before the headless settings; the settings are the same for the app
-/// server the script starts first and for the app.
+/// A tools-off Codex agent runs its own app with `--no-daemon` and the headless settings,
+/// never through the bridge: Codex 0.164's shared app server keeps unified exec on, so a
+/// session that turns it off refuses that server and the app exits. It also turns off
+/// `request_user_input`, the one tool those settings leave on. With tools on, Codex
+/// runs its app through the bridge script (K2b), which gets the executable and an empty
+/// resume id before the settings, the same for the app server it starts first and the app.
 #[test]
-fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
+fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
     let case = Case::new();
     let mut request = case.request("codex", case.subscription(), false);
     request.model = Some("gpt-5.5".into());
@@ -263,12 +266,8 @@ fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
         SANDBOX_EXEC,
         "-f",
         case.profile().to_str().unwrap(),
-        "/bin/sh",
-        "-c",
-        CODEX_BRIDGE_SCRIPT,
-        "codex-bridge",
         request.executable.to_str().unwrap(),
-        "",
+        "--no-daemon",
     ]);
     for setting in [
         "cli_auth_credentials_store=\"file\"",
@@ -287,6 +286,7 @@ fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
         "features.goals=false",
         "web_search=\"disabled\"",
         "mcp_servers={}",
+        "tools.experimental_request_user_input.enabled=false",
         "check_for_update_on_startup=false",
     ] {
         argv.extend(strings(&["-c", setting]));
@@ -318,8 +318,36 @@ fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
         }
     );
 
+    assert!(
+        !built
+            .argv
+            .iter()
+            .any(|argument| argument == CODEX_BRIDGE_SCRIPT)
+    );
+
     let on = case.request("codex", case.subscription(), true);
     let built = command(&on, None, &run(None)).unwrap();
+    assert_eq!(
+        built.argv[..9],
+        strings(&[
+            SANDBOX_EXEC,
+            "-f",
+            case.profile().to_str().unwrap(),
+            "/bin/sh",
+            "-c",
+            CODEX_BRIDGE_SCRIPT,
+            "codex-bridge",
+            on.executable.to_str().unwrap(),
+            "",
+        ])
+    );
+    assert!(!built.argv.iter().any(|argument| argument == "--no-daemon"));
+    assert!(
+        !built
+            .argv
+            .iter()
+            .any(|argument| argument == "tools.experimental_request_user_input.enabled=false")
+    );
     for setting in [
         "sandbox_mode=\"danger-full-access\"",
         "approval_policy=\"never\"",
@@ -337,8 +365,9 @@ fn codex_runs_its_own_app_through_the_bridge_with_the_headless_settings() {
 }
 
 /// A resumed Codex or Claude Code app continues the conversation it recorded under the
-/// stored id, Codex through the bridge's resume id in place of the empty one, which the
-/// bridge runs as the `resume` subcommand after its settings, and Claude Code through
+/// stored id: Codex with tools on through the bridge's resume id in place of the empty one,
+/// which the bridge runs as the `resume` subcommand after its settings, Codex with tools
+/// off through that `resume` subcommand after its own settings, and Claude Code through
 /// `--resume` in place of a new `--session-id`, with the same transcript source.
 #[test]
 fn a_resumed_harness_continues_the_conversation_it_recorded() {
@@ -347,7 +376,16 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
         resume: true,
         ..run(None)
     };
-    let codex = case.request("codex", case.subscription(), false);
+    let off = case.request("codex", case.subscription(), false);
+    let fresh = command(&off, None, &run(None)).unwrap();
+    let again = command(&off, None, &resumed).unwrap();
+    let mut argv = fresh.argv.clone();
+    argv.extend(strings(&["resume", SESSION]));
+    assert_eq!(again.argv, argv);
+    assert_eq!(again.transcript, fresh.transcript);
+    assert_eq!(again.env, fresh.env);
+
+    let codex = case.request("codex", case.subscription(), true);
     let fresh = command(&codex, None, &run(None)).unwrap();
     let again = command(&codex, None, &resumed).unwrap();
     let resume = fresh
@@ -366,10 +404,12 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
         session_id: "not-a-uuid",
         ..resumed
     };
-    assert_eq!(
-        command(&codex, None, &unknown).unwrap_err().0,
-        "launch_session_id_invalid"
-    );
+    for request in [&codex, &off] {
+        assert_eq!(
+            command(request, None, &unknown).unwrap_err().0,
+            "launch_session_id_invalid"
+        );
+    }
 
     let claude = case.request("claude-code", case.subscription(), false);
     let fresh = command(&claude, None, &run(None)).unwrap();

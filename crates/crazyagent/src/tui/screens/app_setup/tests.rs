@@ -48,6 +48,7 @@ fn entry(id: &str, kind: PackKind, group: PackGroup, on: bool, state: PackState)
         license: "MIT".into(),
         on_by_default: on,
         state,
+        hooks_refused: None,
     }
 }
 
@@ -406,6 +407,32 @@ fn a_failed_install_shows_the_sentence_the_engine_sent() {
     find(
         &render(&mut shell, 120, 36),
         "caveman: The source could not be downloaded.",
+    );
+}
+
+#[test]
+fn an_installed_entry_whose_hooks_were_refused_says_why_without_being_picked() {
+    let mut status = installed_status();
+    status.pack[1].hooks_refused = Some(
+        crate::plugins::plain_problem("hooks_plugin_manifest_missing")
+            .unwrap()
+            .to_owned(),
+    );
+    let mut shell = settings(120, 36);
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 120, 36);
+    assert!(find(&rows, "[x] superpowers").contains("Installed"));
+    find(
+        &rows,
+        "superpowers hooks were not added: This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.contains("hooks were not added"))
+            .count(),
+        1,
+        "{}",
+        rows.join("\n")
     );
 }
 

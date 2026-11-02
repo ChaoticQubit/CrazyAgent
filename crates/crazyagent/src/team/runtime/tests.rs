@@ -331,6 +331,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
             PROJECT,
             &crate::sandbox::policy::AgentPolicy {
                 access,
+                network: crate::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
             },
         )
@@ -5044,6 +5045,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -5194,6 +5196,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -5246,6 +5249,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -7180,6 +7184,218 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
     }
 }
 
+/// Starts a Claude Code lead the master started while the project's Claude Code sub-agent
+/// mode is `mode`, in its own clone of the committed project on the task branch the engine
+/// claimed for it, as a lead's launch does. Takes the fixture and the mode. Returns the
+/// lead and its task branch.
+#[cfg(target_os = "macos")]
+fn lead_in_its_own_clone(
+    fixture: &Fixture,
+    mode: crate::coord::settings::SubagentMode,
+) -> (i64, String) {
+    use crate::coord::settings::{HarnessKind, set_mode};
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+    committed_project(fixture);
+    let repository = fixture.base.join("project");
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    assert_eq!(
+        super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
+        mode
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{lead}"));
+    let branch =
+        crate::landing::claim_task_branch(&db, &repository, &worktree, "write-the-page").unwrap();
+    crate::landing::add_agent_clone_on(&repository, &worktree, None, &branch).unwrap();
+    let git_dir = crate::agent_git::git_dir(&worktree);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                lead,
+                PROJECT,
+                repository.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    (lead, branch)
+}
+
+/// DEC-111 Q10: an app-spawned lead's task prompt names its task branch only. It says
+/// nothing of Claude Code native teammates, `git worktree add` or the teammates folder,
+/// so the lead delegates only through the spawn tool.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_spawned_lead_s_task_prompt_has_no_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::AppSpawned);
+    let mut team = fixture.runtime();
+    let line = team.branch_line(&fixture.setup.project_id, lead);
+    assert!(
+        !line.contains("git worktree add") && !line.contains(crate::agent_git::TEAMMATES_FOLDER),
+        "{line}"
+    );
+    assert_eq!(
+        line,
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a native lead's task prompt keeps the native-teammates paragraph: each
+/// teammate works in its own worktree under the teammates folder, on `<task branch>--<name>`,
+/// merged into the task branch before the lead reports done.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, lead),
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            folder = crate::agent_git::TEAMMATES_FOLDER
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a worker its lead started reads its own branch and that its lead merges
+/// it, never a lead's task-branch line, whatever the project's sub-agent mode says.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_s_task_prompt_names_its_branch_and_its_lead_s_merge_not_a_lead_line() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let repository = fixture.base.join("project");
+    let lead_worktree = fixture.base.join(format!("agent-{lead}"));
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{worker}"));
+    let own = crate::landing::claim_sub_agent_branch(
+        &db,
+        &repository,
+        &worktree,
+        &branch,
+        Some(&lead_worktree),
+        "notes",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(own, format!("{branch}--notes"));
+    crate::landing::add_agent_clone_on(&repository, &worktree, None, &own).unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                worker,
+                PROJECT,
+                repository.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                crate::agent_git::git_dir(&worktree).to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, worker),
+        format!(
+            "\nYour branch is {own}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {}().",
+            super::super::tool::FINISH_WORK_TOOL
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a lead in a linked worktree of the owner repository reads that the engine
+/// commits its edits on its branch, for either sub-agent mode, never the line of a lead
+/// in its own clone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_s_task_prompt_says_the_engine_commits_its_edits_in_either_mode() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let home = committed_project(&fixture);
+    let repository = fixture.base.join("project");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let mut leads = Vec::new();
+    for (mode, name) in [
+        (SubagentMode::AppSpawned, "write-the-page"),
+        (SubagentMode::Native, "write-the-notes"),
+    ] {
+        set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+        let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+        assert_eq!(
+            super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
+            mode
+        );
+        let worktree = fixture.base.join(format!("linked-{lead}"));
+        let added = level_git(
+            &repository,
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+        let git_dir = level_git(&worktree, &home, &["rev-parse", "--absolute-git-dir"]);
+        assert!(git_dir.status.success(), "{git_dir:?}");
+        let git_dir = PathBuf::from(String::from_utf8(git_dir.stdout).unwrap().trim());
+        assert_ne!(git_dir, crate::agent_git::git_dir(&worktree));
+        let branch = crate::landing::claim_task_branch(&db, &repository, &worktree, name).unwrap();
+        assert_eq!(
+            crate::landing::name_agent_branch(&db, &repository, &worktree, &git_dir).unwrap(),
+            branch
+        );
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    lead,
+                    PROJECT,
+                    repository.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        leads.push((lead, branch));
+    }
+    let mut team = fixture.runtime();
+    for (lead, branch) in leads {
+        assert_eq!(
+            team.branch_line(&fixture.setup.project_id, lead),
+            format!("\nYour branch is {branch}; the engine commits your edits there.")
+        );
+    }
+    team.shutdown().unwrap();
+}
+
 #[test]
 fn only_an_agent_with_tools_on_gets_the_message_relay() {
     let fixture = Fixture::new(1);
@@ -9020,6 +9236,36 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
     assert!(request.unconfined && request.sandbox_profile.is_none());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_agent_profile_follows_the_project_network_choice() {
+    use crate::sandbox::policy::AgentNetwork;
+    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let make = |name: &str| {
+        let folder = base.join(name);
+        std::fs::create_dir(&folder).unwrap();
+        folder
+    };
+    let (root, home, tmp) = (make("project"), make("home"), make("tmp"));
+    let model = SandboxRemote::AnyHost(8443);
+    let profile = |choice: AgentNetwork| {
+        ProjectSandbox::new(&root, &home, &tmp, choice.sandbox(Some(model)))
+            .unwrap()
+            .profile()
+    };
+    let open = profile(AgentNetwork::Open);
+    assert!(open.contains("(remote ip \"*:*\")"), "{open}");
+    let https = profile(AgentNetwork::Https);
+    assert!(https.contains("(remote ip \"*:443\")"), "{https}");
+    assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
+    let none = profile(AgentNetwork::None);
+    assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
+    assert!(!none.contains("(remote ip \"*:443\")"), "{none}");
+    assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+}
+
 #[test]
 fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
@@ -9142,7 +9388,11 @@ fn a_runtime_with_default_settings_sends_no_workflow_reminder() {
         now_ms(),
     )
     .unwrap();
-    assert!(!view.nudges, "workflow nudges are off by default");
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "workflow nudges are off by default"
+    );
     assert!(team.shutdown().unwrap().is_empty());
 }
 
@@ -9155,7 +9405,7 @@ fn workflow_nudges_the_owner_turned_on_send_one_reminder_per_flag() {
         &fixture.connection,
         &fixture.setup.project_id,
         &crate::coord::settings::CoordSettings {
-            nudges: true,
+            nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
         },
     )
@@ -9406,6 +9656,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                 PROJECT,
                 &crate::sandbox::policy::AgentPolicy {
                     access,
+                    network: crate::sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                 },
             )
@@ -9996,6 +10247,57 @@ fn stop_all_persists_across_engine_restart_and_resume_wakes_the_same_agent_in_it
     team.shutdown().unwrap();
 }
 
+/// A woken agent shows no process group until its new process is ready: Stop all ends the
+/// busy harness's process group, and from Start all on the agent's row never pairs a live
+/// status with that ended group. Once ready it shows the new, running group.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_woken_agent_never_shows_the_process_group_its_stop_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = busy_harness(&fixture, &mut team);
+    let shown = |f: &Fixture| {
+        let agent = f
+            .status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == lead)
+            .unwrap();
+        (agent.status, agent.process_group)
+    };
+    let ended = shown(&fixture).1.unwrap();
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Pause {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "Stop all ends the busy harness", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "queued"
+    });
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Resume {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "the woken harness is ready", |f| {
+        let (status, group) = shown(f);
+        assert!(
+            !(status.live() && group == Some(ended)),
+            "a {status:?} agent shows the process group {ended} its stop ended"
+        );
+        status.live() && group.is_some()
+    });
+    let started = shown(&fixture).1.unwrap();
+    assert_ne!(started, ended);
+    let pid = rustix::process::Pid::from_raw(i32::try_from(started).unwrap()).unwrap();
+    assert!(rustix::process::test_kill_process_group(pid).is_ok());
+    team.shutdown().unwrap();
+}
+
 /// The tasks of a project in one state, oldest first. Takes the fixture and the state.
 #[cfg(target_os = "macos")]
 fn tasks_in(fixture: &Fixture, status: &str) -> Vec<String> {
@@ -10061,6 +10363,263 @@ fn max_harnesses_each_choice_holds_the_next_harness_until_the_cap_rises() {
         assert_eq!(subs(&fixture).len(), usize::from(cap), "{cap}");
     }
     team.shutdown().unwrap();
+}
+
+/// The note the engine leaves when the owner's wake or restart of a harness finds the
+/// project at its Max harnesses per project.
+#[cfg(target_os = "macos")]
+const HARNESSES_FULL: &str = "The project already runs as many harnesses as your Max harnesses setting allows, so no other was started. Stop one or raise the setting.";
+
+/// Sets the project's Max harnesses per project, as the owner's control does. Takes the
+/// fixture and the choice, None for No limit.
+#[cfg(target_os = "macos")]
+fn max_harnesses(fixture: &Fixture, max: Option<u8>) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::MaxHarnesses {
+            project_id: fixture.setup.project_id.clone(),
+            max,
+        }],
+    );
+}
+
+/// Max harnesses per project holds the master's wake of a finished harness (S4): with the
+/// project at its one allowed harness, an idle second one, the task pinned to the finished
+/// harness waits and the harness stays stopped; once the choice rises, the same harness
+/// wakes in its own worktree and does the task, and no other harness starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    idle_stop(&fixture, WAKE_IDLE);
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the first harness finishes and stops", |f| {
+        task_of(f, "Write page.md").0 == "done"
+            && subs(f)
+                .first()
+                .is_some_and(|id| f.agent_status(*id).0 == AgentStatus::Stopped)
+    });
+    let woken = subs(&fixture)[0];
+    let worktree = agent_worktree(&fixture, woken);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::TimeLimits {
+            project_id: project.clone(),
+            turn_secs: None,
+            session_secs: None,
+            idle_secs: None,
+        }],
+    );
+    max_harnesses(&fixture, Some(1));
+    owner(&fixture, &[hand_off(&fixture, "Write page 2.")]);
+    fixture.until(
+        &mut team,
+        "a second harness does its task and fills the cap idle",
+        |f| {
+            task_of(f, "Write page 2.").0 == "done"
+                && subs(f)
+                    .get(1)
+                    .is_some_and(|second| f.agent_status(*second).0 == AgentStatus::Idle)
+        },
+    );
+    let second = subs(&fixture)[1];
+    fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let persona = names::name(&fixture.connection, woken)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let woke = wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.");
+    let sent: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT max(id) FROM coord_messages WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let label = super::super::events::label(&fixture.connection, woken).unwrap();
+    assert_eq!(
+        woke,
+        (
+            format!(
+                "Sent #{sent}. Waking {label}: it starts again in its own worktree and gets your text as its next task. The engine tells you when it ends."
+            ),
+            false
+        )
+    );
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_task_pins WHERE agent=?1",
+            [woken],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let state = |f: &Fixture| -> (String, Option<i64>) {
+        f.connection
+            .query_row(
+                "SELECT status,agent FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    };
+
+    idle_ticks(&mut team);
+    assert_eq!(
+        fixture.agent_status(woken).0,
+        AgentStatus::Stopped,
+        "at the cap the woken harness waits"
+    );
+    assert_eq!(state(&fixture).0, "queued");
+    assert_eq!(pinned_to(&fixture, task), Some(woken));
+    assert_eq!(subs(&fixture), vec![woken, second]);
+
+    max_harnesses(&fixture, Some(2));
+    fixture.until(
+        &mut team,
+        "under the raised cap the same harness wakes and does the task",
+        |f| state(f).0 == "done",
+    );
+    assert_eq!(state(&fixture).1, Some(woken));
+    assert_eq!(agent_worktree(&fixture, woken), worktree);
+    assert!(fixture.agent_status(second).0.live());
+    assert_eq!(
+        subs(&fixture),
+        vec![woken, second],
+        "no other harness started"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Max harnesses per project holds the owner's wake of a stopped harness (S4): with the
+/// project at its one allowed harness, the wake leaves the harness stopped with one note
+/// naming the setting; once the choice rises, the next wake starts the same harness in its
+/// own worktree and no other harness starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_harnesses_refuses_the_owners_wake_at_the_cap_and_starts_it_once_raised() {
+    let fixture = Fixture::new(2);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    let first = idle_sub_agent(&fixture, &mut team);
+    let worktree = agent_worktree(&fixture, first);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent: first,
+        }],
+    );
+    fixture.until(&mut team, "the owner's stop ends the first harness", |f| {
+        f.agent_status(first).0 == AgentStatus::Stopped
+    });
+    max_harnesses(&fixture, Some(1));
+    owner(&fixture, &[hand_off(&fixture, "Write page 2.")]);
+    fixture.until(
+        &mut team,
+        "a second harness does the task and fills the cap",
+        |f| task_of(f, "Write page 2.").0 == "done" && subs(f).len() == 2,
+    );
+    let second = subs(&fixture)[1];
+    let wake = || crate::team::TeamAction::WakeAgent {
+        project_id: project.clone(),
+        agent: first,
+    };
+
+    owner(&fixture, &[wake()]);
+    fixture.until(&mut team, "the wake at the cap leaves the cap note", |f| {
+        f.note(HARNESSES_FULL)
+    });
+    idle_ticks(&mut team);
+    assert_eq!(
+        fixture.agent_status(first).0,
+        AgentStatus::Stopped,
+        "at the cap the harness stays stopped"
+    );
+    assert_eq!(noted(&fixture, HARNESSES_FULL), 1);
+    assert_eq!(subs(&fixture), vec![first, second]);
+
+    max_harnesses(&fixture, Some(2));
+    owner(&fixture, &[wake()]);
+    fixture.until(
+        &mut team,
+        "under the raised cap the wake starts the same harness",
+        |f| f.agent_status(first).0.live(),
+    );
+    idle_ticks(&mut team);
+    assert!(fixture.agent_status(first).0.live());
+    assert!(fixture.agent_status(second).0.live());
+    assert_eq!(noted(&fixture, HARNESSES_FULL), 1, "no second cap note");
+    assert_eq!(agent_worktree(&fixture, first), worktree);
+    assert_eq!(
+        subs(&fixture),
+        vec![first, second],
+        "no other harness started"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Max harnesses per project holds Keep warm too (S4): with a warm floor of four harnesses,
+/// Keep warm starts only as many as each choice allows and no more on later ticks, stays on,
+/// and with No limit fills the floor.
+#[cfg(target_os = "macos")]
+#[test]
+fn max_harnesses_holds_keep_warm_at_each_choice_and_no_limit_fills_the_floor() {
+    let mut fixture = Fixture::new(4);
+    fixture.setup.team.min_agents = 5;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let floor = usize::from(fixture.setup.team.min_agents - 1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[
+            crate::team::TeamAction::TimeLimits {
+                project_id: project.clone(),
+                turn_secs: None,
+                session_secs: None,
+                idle_secs: None,
+            },
+            crate::team::TeamAction::KeepWarm {
+                project_id: project.clone(),
+                on: true,
+            },
+        ],
+    );
+    for (max, warm) in [(Some(2), 2), (Some(3), 3), (None, floor)] {
+        max_harnesses(&fixture, max);
+        fixture.until(&mut team, "Keep warm starts harnesses up to the cap", |f| {
+            subs(f).len() >= warm
+        });
+        idle_ticks(&mut team);
+        assert_eq!(
+            subs(&fixture).len(),
+            warm,
+            "{max:?}: the cap holds the warm harnesses"
+        );
+        assert!(
+            crate::team::keep_warm(&fixture.connection, &project).unwrap(),
+            "{max:?}: Keep warm stays on"
+        );
+    }
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
 }
 
 /// Spread harnesses across accounts (DEC-104 K8) with two signed-in pool accounts, the

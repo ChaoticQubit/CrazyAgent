@@ -2188,6 +2188,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
             project.clone(),
             AgentPolicy {
                 access: AgentAccess::Sandboxed,
+                network: crazyagent::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
             },
             bench.generation,

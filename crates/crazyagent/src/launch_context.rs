@@ -29,7 +29,7 @@ pub const INDEX_BYTES_MAX: usize = 3 * 1024;
 pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 34 * 1024;
-pub const SKILLS_INDEX_BYTES_MAX: usize = 2 * 1024;
+pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
     INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
@@ -69,6 +69,9 @@ const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
 pub(crate) const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
+const SKILL_LINE_DESCRIPTION_BYTES_MAX: usize = 160;
+const SKILL_TOOL_USE: &str = "Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.";
+const SKILL_FILE_USE: &str = "To use one, read its SKILL.md at the path shown and follow it.";
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
@@ -706,15 +709,22 @@ impl AgentContext {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
             remove_copies(home);
+            let mut developer = self.instructions.clone();
             if skills {
                 directory(&home.join("skills"), false)?;
                 self.copy_skills(&copies)?;
+                developer.push_str(&skills_index(&copies, &self.plugins.skills, false));
             }
+            assert!(
+                developer.len()
+                    <= MASTER_INSTRUCTIONS_BYTES_MAX
+                        + 1
+                        + LIVE_INSTRUCTIONS_BYTES_MAX
+                        + SKILLS_INDEX_BYTES_MAX
+                        + SECTION_SLACK
+            );
             remove(&config);
-            write_secret(
-                &config,
-                codex_config(&self.instructions, servers, &self.off_tools)?,
-            )?;
+            write_secret(&config, codex_config(&developer, servers, &self.off_tools)?)?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
@@ -737,7 +747,11 @@ impl AgentContext {
                 )?;
                 if skills {
                     self.copy_skills(&plugin.join("skills"))?;
-                    text.push_str(&skills_index(&plugin.join("skills"), &self.plugins.skills));
+                    text.push_str(&skills_index(
+                        &plugin.join("skills"),
+                        &self.plugins.skills,
+                        true,
+                    ));
                 }
                 installed.hooks = write_hooks(&plugin, hooks)?;
                 installed
@@ -1016,18 +1030,50 @@ fn skill_description(path: &Path) -> String {
     crate::plugins::skill_folder::stored_description(path).unwrap_or_default()
 }
 
-/// Names the skills the owner approved for one launch and the one path pattern their
-/// files follow, so the agent reads a skill's `SKILL.md` only when it uses that skill.
-/// Inputs: the folder the skills were copied into and the skills. Output: at most
-/// `SKILLS_INDEX_BYTES_MAX` plus slack bytes of markdown.
-fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
+/// Cuts a skill description to at most `bytes` bytes for one index line, at the last whole
+/// word with "..." when it is longer. Inputs: the description and the bound, above 3.
+/// Output: the description or its cut.
+fn short_description(text: &str, bytes: usize) -> String {
+    assert!(bytes > "...".len());
+    if text.len() <= bytes {
+        return text.to_owned();
+    }
+    let head = clip(text, bytes - "...".len());
+    let whole = text[head.len()..].starts_with(char::is_whitespace);
+    let cut = match head.rfind(char::is_whitespace) {
+        Some(end) if !whole => &head[..end],
+        _ => head,
+    };
+    let short = format!("{}...", cut.trim_end());
+    assert!(short.len() <= bytes);
+    short
+}
+
+/// Lists the skills the owner approved for one launch, each with its one-line description
+/// and the path of its `SKILL.md` copy, and says to check the list first and how to use a
+/// skill: through Claude Code's Skill tool, or for Codex by reading the file. Inputs: the
+/// folder the skills were copied into, the skills and whether the harness has a Skill tool.
+/// Output: at most `SKILLS_INDEX_BYTES_MAX` plus slack bytes of markdown.
+fn skills_index(folder: &Path, skills: &[EffectiveSkill], skill_tool: bool) -> String {
+    let using = match skill_tool {
+        true => SKILL_TOOL_USE,
+        false => SKILL_FILE_USE,
+    };
     let mut index = format!(
-        "\n## Skills\n\nThe owner approved these skills for this project. Before you use one, read `{}`, with the skill's name in place of NAME.\n\n",
-        folder.join("NAME").join("SKILL.md").display()
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. {using}\n\n"
     );
     let mut left = 0;
     for skill in skills {
-        let line = format!("- {}\n", clip(&skill.name, NAME_BYTES_MAX));
+        let name = clip(&skill.name, NAME_BYTES_MAX);
+        let path = folder.join(name).join("SKILL.md");
+        let description = short_description(
+            skill_description(&skill.folder.join("SKILL.md")).trim(),
+            SKILL_LINE_DESCRIPTION_BYTES_MAX,
+        );
+        let line = match description.is_empty() {
+            true => format!("- {name} ({})\n", path.display()),
+            false => format!("- {name}: {description} ({})\n", path.display()),
+        };
         if left > 0 || index.len() + line.len() > SKILLS_INDEX_BYTES_MAX {
             left += 1;
             continue;

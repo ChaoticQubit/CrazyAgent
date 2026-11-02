@@ -97,14 +97,61 @@ pub enum Overlaps {
     Off,
 }
 
+/// When the workflow nudges remind an agent (DEC-111 Q4, R4): never, with the engine's
+/// note for each flag an agent raised after ten minutes of work, or once on its first file
+/// edit before any code-graph query, by its hook where hooks run and by an engine note for
+/// an agent without them. A stored `true` from before reads as TenMinutes and `false` as Off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nudges {
+    #[default]
+    Off,
+    TenMinutes,
+    FirstEdit,
+}
+
+named!(Nudges { Off => "off", TenMinutes => "ten_minutes", FirstEdit => "first_edit" });
+
+impl Nudges {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 3] = [Self::Off, Self::TenMinutes, Self::FirstEdit];
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::TenMinutes => "Every 10 minutes",
+            Self::FirstEdit => "First edit without a graph query",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Nudges {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Flag(bool),
+            Name(String),
+        }
+        match Stored::deserialize(deserializer)? {
+            Stored::Flag(true) => Ok(Self::TenMinutes),
+            Stored::Flag(false) => Ok(Self::Off),
+            Stored::Name(name) => {
+                Self::parse(&name).ok_or_else(|| serde::de::Error::custom("unknown nudges option"))
+            }
+        }
+    }
+}
+
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges off and `COUNTED_TOOLS_DEFAULT`.
+/// are Lead, Warn, nudges Off and `COUNTED_TOOLS_DEFAULT`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
     pub questions_to: QuestionsTo,
     pub overlaps: Overlaps,
-    pub nudges: bool,
+    pub nudges: Nudges,
     pub counted_tools: Vec<String>,
 }
 
@@ -113,7 +160,7 @@ impl Default for CoordSettings {
         Self {
             questions_to: QuestionsTo::Lead,
             overlaps: Overlaps::Warn,
-            nudges: false,
+            nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
         }
     }
