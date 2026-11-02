@@ -9674,6 +9674,57 @@ fn stop_all_persists_across_engine_restart_and_resume_wakes_the_same_agent_in_it
     team.shutdown().unwrap();
 }
 
+/// A woken agent shows no process group until its new process is ready: Stop all ends the
+/// busy harness's process group, and from Start all on the agent's row never pairs a live
+/// status with that ended group. Once ready it shows the new, running group.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_woken_agent_never_shows_the_process_group_its_stop_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let lead = busy_harness(&fixture, &mut team);
+    let shown = |f: &Fixture| {
+        let agent = f
+            .status()
+            .agents
+            .into_iter()
+            .find(|agent| agent.id == lead)
+            .unwrap();
+        (agent.status, agent.process_group)
+    };
+    let ended = shown(&fixture).1.unwrap();
+    let project = fixture.setup.project_id.clone();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Pause {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "Stop all ends the busy harness", |f| {
+        f.agent_status(lead).0 == AgentStatus::Stopped && task_of(f, HELD_TASK).0 == "queued"
+    });
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::Resume {
+            project_id: project.clone(),
+        }],
+    );
+    fixture.until(&mut team, "the woken harness is ready", |f| {
+        let (status, group) = shown(f);
+        assert!(
+            !(status.live() && group == Some(ended)),
+            "a {status:?} agent shows the process group {ended} its stop ended"
+        );
+        status.live() && group.is_some()
+    });
+    let started = shown(&fixture).1.unwrap();
+    assert_ne!(started, ended);
+    let pid = rustix::process::Pid::from_raw(i32::try_from(started).unwrap()).unwrap();
+    assert!(rustix::process::test_kill_process_group(pid).is_ok());
+    team.shutdown().unwrap();
+}
+
 /// The tasks of a project in one state, oldest first. Takes the fixture and the state.
 #[cfg(target_os = "macos")]
 fn tasks_in(fixture: &Fixture, status: &str) -> Vec<String> {
