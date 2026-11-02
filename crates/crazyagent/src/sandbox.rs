@@ -1071,6 +1071,31 @@ impl ProjectSandbox {
         self.tmux_server(socket, tmux, true)
     }
 
+    /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104,
+    /// rv-audit S1 F1). The lead runs its own tmux server at `own`, uses the engine's caller
+    /// socket at `callers` and only reaches its teammates' server at `mates`. The teammates
+    /// serve `mates`, use `callers` as the lead does and are shut out of `own`. Inputs: the
+    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
+    /// sandboxes, `Invalid`, or `Unavailable` off macOS.
+    pub fn native_team(
+        self,
+        own: &Path,
+        mates: &Path,
+        callers: &Path,
+        tmux: &Path,
+    ) -> Result<(Self, Self), SandboxError> {
+        let teammates = self
+            .clone()
+            .serve_tmux_server(mates, tmux)?
+            .allow_unix_socket(callers)?
+            .shut_unix_socket(own)?;
+        let lead = self
+            .allow_tmux_server(own, tmux)?
+            .allow_unix_socket(callers)?
+            .reach_unix_socket(mates)?;
+        Ok((lead, teammates))
+    }
+
     /// Grants one tmux server in the agent temp folder, served and reached or served only.
     /// Takes the socket, the canonical tmux program and whether the socket is served only.
     /// Returns the widened sandbox, `Invalid`, or `Unavailable` off macOS.

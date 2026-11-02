@@ -5051,19 +5051,11 @@ impl TeamRuntime {
                 Some(callers.as_path()),
                 "the lead's servers find the caller socket its sandbox reaches"
             );
-            teammates = Some(
-                sandbox
-                    .clone()
-                    .serve_tmux_server(&mates_socket, &tmux)
-                    .and_then(|mates| mates.allow_unix_socket(&callers))
-                    .and_then(|mates| mates.shut_unix_socket(&socket))
-                    .map_err(sandboxed)?,
-            );
-            sandbox = sandbox
-                .allow_tmux_server(&socket, &tmux)
-                .and_then(|lead| lead.allow_unix_socket(&callers))
-                .and_then(|lead| lead.reach_unix_socket(&mates_socket))
+            let (lead, mates) = sandbox
+                .native_team(&socket, &mates_socket, &callers, &tmux)
                 .map_err(sandboxed)?;
+            sandbox = lead;
+            teammates = Some(mates);
             native_tmux = Some(tmux);
         }
         expose_graph(&root, &working_dir);
