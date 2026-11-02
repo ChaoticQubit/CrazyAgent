@@ -500,7 +500,7 @@ impl BranchMode {
 /// the background still runs (DEC-111 Q13): `Wait` keeps the task open until the command
 /// ends, bounded by the task time limit; `Grace` waits at most `secs` seconds, then stops
 /// it; `Stop` ends the task with its turn and stops it, and the agent's task prompt says
-/// so. Wait is the default.
+/// so wherever the engine stops it. Wait is the default.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BackgroundAtEnd {

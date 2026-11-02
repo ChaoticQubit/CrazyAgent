@@ -3964,9 +3964,6 @@ impl TeamRuntime {
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
             let background = super::background_at_end(&self.connection, &stored.project_id)?;
-            if background == super::BackgroundAtEnd::Stop {
-                prompt.push_str(&format!("\n{BACKGROUND_STOPS_LINE}"));
-            }
             let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
             prompt.push_str(&waiting);
             let home = agent_home(&self.state, agent);
@@ -7378,6 +7375,7 @@ fn serve(
             }
         };
         assert!(grant.is_none());
+        let prompt = told(prompt, rules, session.reports_background());
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
         let reusable = matches!(
             end,
@@ -7498,6 +7496,7 @@ fn per_turn(
             group: session.process_group(),
             pane: None,
         });
+        let prompt = told(prompt, rules, true);
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
         if let Some(recorded) = session
             .conversation()
@@ -7987,6 +7986,20 @@ fn run_code(error: &RunError) -> &str {
         RunError::Busy => "account_busy",
         RunError::Uncertain(code) => code,
         RunError::Setup(code) => code,
+    }
+}
+
+/// The prompt one turn is typed with: the task's own, and under Stop the line telling the
+/// agent its background commands stop when its turn ends, only where the engine stops them:
+/// a session that ends with the turn, or a pane app whose record reports them. A kept
+/// session reporting none, such as a Codex app's, keeps them running, so its agent is not
+/// told so (rv-audit S3 F2). Takes the prompt, the turn's rules and whether the engine stops
+/// them. Returns the prompt.
+fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
+    if rules.background == super::BackgroundAtEnd::Stop && stops {
+        format!("{prompt}\n{BACKGROUND_STOPS_LINE}")
+    } else {
+        prompt
     }
 }
 

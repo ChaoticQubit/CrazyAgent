@@ -679,6 +679,16 @@ impl AgentSession {
         }
     }
 
+    /// Says whether the engine sees the commands the agent starts in the background, so a
+    /// turn can be held for them or stopped with them: a pane app whose record reports
+    /// them; a headless session reports none. Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.reader.reports_background(),
+        }
+    }
+
     /// Sends one prompt. Output: Ok, or a plain refusal code such as `launch_busy`.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
         match self {
