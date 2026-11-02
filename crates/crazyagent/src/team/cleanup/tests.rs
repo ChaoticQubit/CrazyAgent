@@ -372,6 +372,37 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
     assert!(case.listed().is_empty());
 }
 
+/// The owner's list of finished agents to remove names one whose name a running sub-agent
+/// shares by its number only (DEC-111 Q19), since that name reaches the running one; an
+/// unshared name shows as the engine names the agent everywhere else.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_offered_by_number_only() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    case.agent(3, "sub", "working");
+    for (id, persona, handle) in [
+        (1, "Ada", None),
+        (2, "Bo", Some("docs")),
+        (3, "ada", Some("charts")),
+    ] {
+        case.db
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![id, case.project.as_str(), persona, handle],
+            )
+            .unwrap();
+    }
+    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|agent| (agent.id, agent.label.as_str()))
+            .collect::<Vec<_>>(),
+        [(2, "Bo (@docs)"), (1, "Sub-agent 1")]
+    );
+}
+
 #[test]
 fn unlanded_or_live_work_keeps_the_agent_and_says_why() {
     let case = Case::new();

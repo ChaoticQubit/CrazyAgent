@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
-import type { CoordHarness, CoordinationView, CoordSettings, Delivery, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
+import type { CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -17,7 +17,7 @@ export const COORD_HARNESSES: CoordHarness[] = ["claude-code", "codex", "rcli"];
 export const COORD_DEFAULTS: CoordSettings = {
   questions_to: "lead",
   overlaps: "warn",
-  nudges: false,
+  nudges: "off",
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
   role_skills: { master: null, lead: null, worker: null },
 };
@@ -166,9 +166,9 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
     </div>
     <div className="pj-row">
       <span aria-hidden="true">Workflow nudges</span>
-      <Segmented label="Workflow nudges" value={view.settings.nudges ? "on" : "off"} onValue={(value) => void save({ nudges: value === "on" }, "workflow nudges")}
-        options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
-      <span className="tg-terminal-note">On sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools.</span>
+      <Segmented label="Workflow nudges" value={view.settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
+        options={[{ value: "off", label: "Off" }, { value: "ten_minutes", label: "Every 10 minutes" }, { value: "first_edit", label: "First edit" }]} />
+      <span className="tg-terminal-note">Every 10 minutes sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools. First edit reminds an agent once when it edits a file before any graphify query; the edit still runs.</span>
     </div>
     <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>
       <label htmlFor={`tg-counted-${projectId}`}>Counted tools</label>

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
-import { HOOKLESS_WORDS, type ImportFile } from "../engine-client";
+import { HOOKLESS_WORDS, type ImportFile, type Nudges } from "../engine-client";
 import {
   DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
   importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
@@ -218,9 +218,15 @@ export function AgentSkillsDialog({ projectId, agent, label, onClose }: { projec
   </Dialog>;
 }
 
+const NUDGES_NOTES: Record<Nudges, string> = {
+  off: "Nudges are off: flags show here, and agents get no reminder.",
+  ten_minutes: "Nudges run every 10 minutes: each red flag sends that agent one reminder.",
+  first_edit: "Nudges run on the first edit: an edit before any graph query gets one reminder, and flags send none.",
+};
+
 /** A project's workflow adoption as a pure view: one row per recent agent with its count for
  * each counted tool, its graphify, ctx_* and per-skill counts, and its flags in red, marked
- * once the agent was reminded, and whether nudges are on. Stopped agents are dimmed; an
+ * once the agent was reminded, and the nudges option. Stopped agents are dimmed; an
  * agent whose launch fires no hooks says its counts and flags are unavailable. Inputs: the
  * read and the refresh action. */
 export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoption>; onRefresh: () => void }) {
@@ -231,9 +237,7 @@ export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoptio
   const skills = adoption.value.skills ?? [];
   const hidden = adoption.value.hidden ?? 0;
   return <Panel title="Workflow adoption" padded={false} actions={<Button icon="refresh-cw" onClick={onRefresh}>Refresh</Button>}>
-    <p className="secondary adoption-note">{nudges
-      ? "Nudges are on: each red flag sends that agent one reminder."
-      : "Nudges are off: flags show here, and agents get no reminder."} Nudges and the counted tools are coordination settings.</p>
+    <p className="secondary adoption-note">{NUDGES_NOTES[nudges]} Nudges and the counted tools are coordination settings.</p>
     {agents.length === 0
       ? <EmptyState compact icon="users" title="No agents yet">Counts appear once this project's agents use tools.</EmptyState>
       : <div className="pj-table-wrap"><table className="pj-table adoption-table">

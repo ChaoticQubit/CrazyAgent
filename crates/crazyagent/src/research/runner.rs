@@ -66,9 +66,6 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
-/// The Codex 0.164 setting that removes `request_user_input`, the one tool a
-/// tools-off research agent is still offered after the shared tools-off settings.
-const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -1560,7 +1557,7 @@ fn codex_arguments(
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
         }
-        command.args(["-c", CODEX_NO_USER_INPUT]);
+        command.args(["-c", crate::harnesses::launch::CODEX_NO_USER_INPUT]);
     }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {

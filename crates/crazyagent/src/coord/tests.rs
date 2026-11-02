@@ -1,6 +1,6 @@
 use super::settings::{
-    self, CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, RoleSkills, SkillRole,
-    SubagentMode,
+    self, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
+    SkillRole, SubagentMode,
 };
 use super::store::Change;
 use super::tool_switches::{self, Switch};
@@ -1296,7 +1296,7 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
     let defaults = CoordSettings::default();
     assert_eq!(
         (defaults.questions_to, defaults.overlaps, defaults.nudges),
-        (QuestionsTo::Lead, Overlaps::Warn, false)
+        (QuestionsTo::Lead, Overlaps::Warn, Nudges::Off)
     );
     for counted in [
         (0..=settings::COUNTED_TOOLS_MAX)
@@ -1465,6 +1465,58 @@ fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
         (older.questions_to, older.counted_tools),
         (QuestionsTo::Me, vec!["Skill".to_owned()])
     );
+}
+
+/// Settings saved before the nudge options (DEC-111 R4) held `nudges` as a bool: a stored
+/// `true` reads as TenMinutes and `false` as Off, each option is stored by its own name and
+/// reads back, and a name this build does not know is refused.
+#[test]
+fn an_old_true_nudge_setting_reads_as_ten_minutes() {
+    let connection = db();
+    let project = project();
+    settings::write(&connection, &project, &CoordSettings::default()).unwrap();
+    let stored = |json: &str| {
+        connection
+            .execute(
+                "UPDATE coord_settings SET json=?2 WHERE project=?1",
+                params![PROJECT, json],
+            )
+            .unwrap();
+        settings::read(&connection, &project)
+    };
+    let old = |nudges: &str| {
+        format!(
+            r#"{{"questions_to":"lead","overlaps":"warn","nudges":{nudges},"counted_tools":["graphify"]}}"#
+        )
+    };
+    assert_eq!(
+        stored(&old("true")).map(|read| read.nudges),
+        Ok(Nudges::TenMinutes)
+    );
+    assert_eq!(
+        stored(&old("false")).map(|read| read.nudges),
+        Ok(Nudges::Off)
+    );
+    for nudges in Nudges::ALL {
+        let chosen = CoordSettings {
+            nudges,
+            ..CoordSettings::default()
+        };
+        settings::write(&connection, &project, &chosen).unwrap();
+        let json: String = connection
+            .query_row(
+                "SELECT json FROM coord_settings WHERE project=?1",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            json.contains(&format!(r#""nudges":"{}""#, nudges.as_str())),
+            "{json}"
+        );
+        assert_eq!(settings::read(&connection, &project).unwrap(), chosen);
+    }
+    assert_eq!(code(stored(&old(r#""hourly""#))), "coord_settings_invalid");
 }
 
 #[test]

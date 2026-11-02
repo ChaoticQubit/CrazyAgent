@@ -696,7 +696,11 @@ fn process_adoption_round_trip() {
     }
 
     let view = adoption(&root, &project).unwrap();
-    assert!(!view.nudges, "nudges are off by default (DEC-111 Q4)");
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "nudges are off by default (DEC-111 Q4)"
+    );
     assert_eq!(
         view.counted,
         crate::coord::settings::COUNTED_TOOLS_DEFAULT
@@ -762,13 +766,14 @@ fn process_adoption_round_trip() {
         ));
         tx.commit().unwrap();
         let on = crate::coord::settings::CoordSettings {
-            nudges: true,
+            nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
         };
         crate::coord::settings::write(&connection, &project, &on).unwrap();
     }
-    assert!(
+    assert_eq!(
         adoption(&root, &project).unwrap().nudges,
+        crate::coord::settings::Nudges::TenMinutes,
         "the view shows nudges the owner turned on"
     );
 

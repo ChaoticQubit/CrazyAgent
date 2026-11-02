@@ -77,10 +77,11 @@ pub fn valid_plugin_name(name: &str) -> bool {
 /// Reads the command hooks a Claude Code plugin folder defines, running nothing: the
 /// `hooks/hooks.json` file and the `hooks` entry of `.claude-plugin/plugin.json`, an object
 /// or the relative path of a hooks file inside the folder, or a list of those. The plugin's
-/// name comes from `plugin.json`, else the folder's own name, and is checked only once hooks
-/// were found, so a folder with none reports `hooks_none_found` whatever it is called.
+/// name comes only from `plugin.json`, never the folder's own name, and is checked only once
+/// hooks were found, so a folder with none reports `hooks_none_found` whatever it holds.
 /// Input: the absolute plugin folder. Output: what was found, or `hooks_none_found`,
-/// `hooks_invalid`, `hooks_too_many`, `hook_plugin_name_invalid` or `skill_folder_not_found`.
+/// `hooks_invalid`, `hooks_too_many`, `hooks_plugin_manifest_missing`,
+/// `hook_plugin_name_invalid` or `skill_folder_not_found`.
 pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if !folder.is_absolute()
         || folder.as_os_str().len() > super::skill_folder::SOURCE_BYTES_MAX
@@ -140,12 +141,13 @@ pub fn read(folder: &Path) -> Result<Found, &'static str> {
     if found.hooks.is_empty() {
         return Err("hooks_none_found");
     }
+    let manifest = manifest.ok_or("hooks_plugin_manifest_missing")?;
     found.plugin = manifest
-        .as_ref()
-        .and_then(|manifest| manifest.get("name")?.as_str().map(str::to_owned))
-        .or_else(|| folder.file_name()?.to_str().map(str::to_owned))
+        .get("name")
+        .and_then(serde_json::Value::as_str)
         .filter(|name| valid_plugin_name(name))
-        .ok_or("hook_plugin_name_invalid")?;
+        .ok_or("hook_plugin_name_invalid")?
+        .to_owned();
     assert!(found.hooks.len() <= super::HOOKS_PER_PLUGIN_MAX);
     Ok(found)
 }

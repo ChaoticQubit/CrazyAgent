@@ -1,8 +1,8 @@
 use super::launch::{
     AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
-    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
-    harness_id, key_file_text, validate,
+    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
+    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_configuration, failure, harness_id, key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -20,8 +20,8 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
-/// Runs a Codex agent as an app-server and a TUI attached to it with `--remote`, so the
-/// engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
+/// Runs a tools-on Codex agent as an app-server and a TUI attached to it with `--remote`, so
+/// the engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
 /// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
 /// TUI runs alone as before. Arguments: the Codex program, the conversation to resume or
 /// an empty word, then the `-c` settings both take. The app-server ends with the TUI.
@@ -38,6 +38,11 @@ c=$?
 kill "$a" 2>/dev/null
 exit "$c"
 "#;
+/// Runs a tools-off Codex agent's TUI on its own app server instead of the shared one: the
+/// shared app server keeps unified exec on, and Codex 0.164 refuses it to a session whose
+/// tools-off settings turn unified exec off, so that agent would exit at its first line.
+/// The engine then reaches the agent by typing instead of the K2b bridge.
+const CODEX_NO_DAEMON: &str = "--no-daemon";
 const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--tools",
     "default",
@@ -275,24 +280,28 @@ pub fn command(
     let transcript = match harness_id(request) {
         "codex" => {
             let resume = if run.resume {
-                session_id_checked(run.session_id)?.to_owned()
+                Some(session_id_checked(run.session_id)?.to_owned())
             } else {
-                String::new()
+                None
             };
-            argv.extend([
-                "/bin/sh".to_owned(),
-                "-c".to_owned(),
-                CODEX_BRIDGE_SCRIPT.to_owned(),
-                "codex-bridge".to_owned(),
-                executable,
-                resume,
-            ]);
-            argv.extend(codex(
-                request,
-                installed.is_some(),
-                &cwd,
-                key_file.as_deref(),
-            )?);
+            let settings = codex(request, installed.is_some(), &cwd, key_file.as_deref())?;
+            if request.tools {
+                argv.extend([
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    CODEX_BRIDGE_SCRIPT.to_owned(),
+                    "codex-bridge".to_owned(),
+                    executable,
+                    resume.unwrap_or_default(),
+                ]);
+                argv.extend(settings);
+            } else {
+                argv.extend([executable, CODEX_NO_DAEMON.to_owned()]);
+                argv.extend(settings);
+                if let Some(resume) = resume {
+                    argv.extend(["resume".to_owned(), resume]);
+                }
+            }
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
                 ("TMPDIR".to_owned(), home),
@@ -397,6 +406,7 @@ fn codex(
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)
         .into_iter()
+        .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain([
             "check_for_update_on_startup=false".to_owned(),
             format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
