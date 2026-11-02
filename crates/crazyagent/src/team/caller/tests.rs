@@ -40,7 +40,7 @@ fn id(n: u8) -> String {
 fn a_call_is_named_once_by_the_listed_pane_of_its_process_or_a_parent() {
     let folder = folder();
     let socket = folder.path().join(CALLER_SOCKET);
-    let mut callers = Callers::bind(&socket).unwrap();
+    let mut callers = Callers::bind(&socket, None).unwrap();
     let parent = std::os::unix::process::parent_id();
     let lists = std::cell::Cell::new(0);
     let mut panes = || {
@@ -97,7 +97,7 @@ fn a_call_is_named_once_by_the_listed_pane_of_its_process_or_a_parent() {
 fn a_malformed_or_unfinished_line_names_nothing() {
     let folder = folder();
     let socket = folder.path().join(CALLER_SOCKET);
-    let mut callers = Callers::bind(&socket).unwrap();
+    let mut callers = Callers::bind(&socket, None).unwrap();
     let own = std::process::id();
     let mut panes = || vec![("%7".to_owned(), own)];
     let digest = [5_u8; DIGEST_BYTES];
@@ -174,7 +174,7 @@ fn a_team_server_sends_its_call_only_once_the_engine_named_it() {
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    let mut callers = Callers::bind(&socket).unwrap();
+    let mut callers = Callers::bind(&socket, None).unwrap();
     let own = std::process::id();
     for (call, listed, named) in [(2, own, true), (3, u32::MAX, false)] {
         let served = std::thread::scope(|scope| {
@@ -197,5 +197,91 @@ fn a_team_server_sends_its_call_only_once_the_engine_named_it() {
     assert!(
         !name_call(&mailbox, &id(4), &digest),
         "a caller socket nobody serves names nothing"
+    );
+}
+
+/// One pane that names many calls and never sends them keeps only its own newest stamps,
+/// so another pane's call is still named (DEC-111 S1R1-3).
+#[test]
+fn one_pane_filling_the_stamps_never_stops_another_pane_s_call() {
+    let folder = folder();
+    let socket = folder.path().join(CALLER_SOCKET);
+    let mut callers = Callers::bind(&socket, None).unwrap();
+    let own = std::process::id();
+    let digest = [1_u8; DIGEST_BYTES];
+    for round in 0..4_u8 {
+        let mut streams: Vec<UnixStream> = (0..16_u8)
+            .map(|n| sent(&socket, &line(&id(round * 16 + n + 1), &digest)))
+            .collect();
+        assert_eq!(callers.serve(&mut || vec![("%1".to_owned(), own)]), 16);
+        for stream in &mut streams {
+            assert_eq!(reply(stream), NAMED);
+        }
+    }
+    let mut other = sent(&socket, &line(&id(65), &digest));
+    assert_eq!(
+        callers.serve(&mut || vec![("%2".to_owned(), own)]),
+        1,
+        "another pane's call is named"
+    );
+    assert_eq!(reply(&mut other), NAMED);
+    assert_eq!(callers.take(&id(65), &digest), Some("%2".to_owned()));
+    assert_eq!(
+        callers.take(&id(64), &digest),
+        Some("%1".to_owned()),
+        "the full pane keeps its newest"
+    );
+    assert_eq!(
+        callers.take(&id(1), &digest),
+        None,
+        "the full pane lost its oldest"
+    );
+}
+
+/// One pane holding connections open with no full line keeps only a few waiting places,
+/// so another pane's call is still named (DEC-111 S1R1-3).
+#[test]
+fn one_pane_holding_unfinished_lines_never_stops_another_pane_s_call() {
+    let folder = folder();
+    let socket = folder.path().join(CALLER_SOCKET);
+    let mut callers = Callers::bind(&socket, None).unwrap();
+    let own = std::process::id();
+    let digest = [2_u8; DIGEST_BYTES];
+    let held: Vec<UnixStream> = (0..PENDING_MAX)
+        .map(|n| sent(&socket, &line(&id(n as u8 + 1), &digest)[..10]))
+        .collect();
+    assert_eq!(callers.serve(&mut || vec![("%1".to_owned(), own)]), 0);
+    let mut other = sent(&socket, &line(&id(99), &digest));
+    assert_eq!(
+        callers.serve(&mut || vec![("%2".to_owned(), own)]),
+        1,
+        "another pane's call is named"
+    );
+    assert_eq!(reply(&mut other), NAMED);
+    assert_eq!(callers.take(&id(99), &digest), Some("%2".to_owned()));
+    drop(held);
+}
+
+/// The engine removes its socket when dropped only from the folder it bound in: a folder
+/// swapped for a link to another folder keeps whatever that folder holds (DEC-111 S1R1-1).
+#[test]
+fn dropping_the_socket_never_removes_through_a_swapped_folder() {
+    let root = folder();
+    let bound = root.path().join("bound");
+    std::fs::create_dir(&bound).unwrap();
+    std::fs::set_permissions(&bound, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let callers = Callers::bind(&bound.join(CALLER_SOCKET), None).unwrap();
+    let elsewhere = root.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let planted = elsewhere.join(CALLER_SOCKET);
+    std::fs::write(&planted, b"owner data").unwrap();
+    std::fs::rename(&bound, root.path().join("moved")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &bound).unwrap();
+
+    drop(callers);
+    assert_eq!(
+        std::fs::read(&planted).ok().as_deref(),
+        Some(&b"owner data"[..]),
+        "the file behind the link survives"
     );
 }

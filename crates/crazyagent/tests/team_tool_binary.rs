@@ -274,8 +274,13 @@ fn served_in_a_teammate_pane(
     std::fs::create_dir_all(&mailbox).unwrap();
     let socket = socket_for_mailbox(&mailbox).unwrap();
     std::fs::create_dir(socket.parent().unwrap()).unwrap();
+    std::fs::set_permissions(
+        socket.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     let _placed = Placed(socket.clone());
-    let mut callers = Callers::bind(&socket).unwrap();
+    let mut callers = Callers::bind(&socket, None).unwrap();
     let requests = root.join("requests.jsonl");
     std::fs::write(
         &requests,
@@ -635,8 +640,13 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         .unwrap();
     let socket = crazyagent::team::caller::socket_for_mailbox(&mailbox).unwrap();
     std::fs::create_dir(socket.parent().unwrap()).unwrap();
+    std::fs::set_permissions(
+        socket.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     let _placed = Placed(socket.clone());
-    callers = Some(Callers::bind(&socket).unwrap());
+    callers = Some(Callers::bind(&socket, None).unwrap());
     let answers = run(
         &mut connection,
         &mut callers,

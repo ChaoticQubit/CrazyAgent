@@ -612,8 +612,19 @@ fn own_folder(path: &Path) -> bool {
 
 #[cfg(unix)]
 fn private_folder(path: &Path) -> bool {
-    own_folder(path)
-        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.mode() & 0o077 == 0)
+    private_folder_pin(path).is_some()
+}
+
+/// The (device, inode) of a folder that is this user's own private folder, read in one
+/// look that never follows a link. Input: the path. Output: the pin, or None for a link, a
+/// file, another user's folder or one open to others.
+#[cfg(unix)]
+pub fn private_folder_pin(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.is_dir()
+        && metadata.uid() == nix::unistd::getuid().as_raw()
+        && metadata.mode() & 0o077 == 0)
+        .then(|| (metadata.dev(), metadata.ino()))
 }
 
 /// The short temp folder of one agent run that ends inside a single call, removed with

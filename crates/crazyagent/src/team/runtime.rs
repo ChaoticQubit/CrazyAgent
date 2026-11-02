@@ -157,7 +157,8 @@ struct Grant {
 /// conversation a live master continues instead of starting one; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with; `hookless`
-/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks).
+/// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
+/// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -176,6 +177,8 @@ struct Plan {
     native: bool,
     tmux: Option<PathBuf>,
     hookless: bool,
+    #[cfg(unix)]
+    scratch_pin: Option<(u64, u64)>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -3093,13 +3096,22 @@ impl TeamRuntime {
             let workers = &self.workers;
             self.callers.retain(|id, _| workers.contains_key(id));
             for id in &subs {
-                if !self.callers.contains_key(id)
-                    && self.stored_mode(*id).as_deref()
-                        == Some(crate::coord::settings::SubagentMode::Native.as_str())
-                {
-                    let bound = self.bind_callers(*id);
-                    self.callers.insert(*id, bound.ok());
+                let pinned = match self.callers.get(id) {
+                    Some(Some(callers)) if callers.intact() => continue,
+                    Some(Some(callers)) => Some(callers.folder()),
+                    Some(None) => continue,
+                    None if self.stored_mode(*id).as_deref()
+                        == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
+                    {
+                        None
+                    }
+                    None => continue,
+                };
+                let bound = self.bind_callers(*id, pinned);
+                if pinned.is_some() && bound.is_ok() {
+                    eprintln!("team_caller_socket_rebound");
                 }
+                self.callers.insert(*id, bound.ok());
             }
         }
         let host = self.terminal.as_deref();
@@ -4196,7 +4208,7 @@ impl TeamRuntime {
         let prepared = prepared.and_then(|(root, plan, mode)| {
             if plan.native {
                 self.callers.remove(&id);
-                let bound = self.bind_callers(id).map_err(|e| {
+                let bound = self.bind_callers(id, plan.scratch_pin).map_err(|e| {
                     with_code(
                         "the lead's caller socket could not be made",
                         Some(io_code(&e)),
@@ -4506,7 +4518,11 @@ impl TeamRuntime {
     /// find it from their mailbox (DEC-111 Q18); a failure is logged and leaves the lead's
     /// calls unnamed, so they are refused. Takes the lead. Returns the socket or the failure.
     #[cfg(unix)]
-    fn bind_callers(&self, id: i64) -> std::io::Result<super::caller::Callers> {
+    fn bind_callers(
+        &self,
+        id: i64,
+        pinned: Option<(u64, u64)>,
+    ) -> std::io::Result<super::caller::Callers> {
         let socket =
             toolchains::tmp_path(&agent_home(&self.state, id)).join(super::caller::CALLER_SOCKET);
         assert_eq!(
@@ -4514,7 +4530,7 @@ impl TeamRuntime {
             Some(socket.as_path()),
             "the lead's servers find the socket the engine binds"
         );
-        super::caller::Callers::bind(&socket).inspect_err(|error| {
+        super::caller::Callers::bind(&socket, pinned).inspect_err(|error| {
             eprintln!("team_caller_socket_not_bound kind={:?}", error.kind());
         })
     }
@@ -4822,6 +4838,8 @@ impl TeamRuntime {
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
+        #[cfg(unix)]
+        let scratch_pin = toolchains::private_folder_pin(&scratch);
         let leads = role == AgentRole::Sub
             && super::agent_depth(&self.connection, id).is_ok_and(|depth| {
                 super::nesting(&self.connection, &stored.project_id)
@@ -5049,6 +5067,8 @@ impl TeamRuntime {
             native,
             tmux: native_tmux,
             hookless,
+            #[cfg(unix)]
+            scratch_pin,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {

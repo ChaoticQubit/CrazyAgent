@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,9 +14,15 @@ pub const CALLER_WAIT: Duration = Duration::from_secs(10);
 /// The most new connections one lead's socket accepts a tick.
 pub const CALLERS_PER_TICK_MAX: usize = 16;
 const PENDING_MAX: usize = 16;
+/// The most connections from one pane, or from processes in no pane, that wait for their
+/// line at once (DEC-111 S1R1-3).
+const PENDING_PER_PANE_MAX: usize = 4;
 const PENDING_WAIT: Duration = Duration::from_secs(5);
 const ANCESTORS_MAX: usize = 32;
 const STAMPS_MAX: usize = 64;
+/// The most names one pane holds unclaimed; its oldest makes room for a new one
+/// (DEC-111 S1R1-3).
+const STAMPS_PER_PANE_MAX: usize = 8;
 const STAMP_TTL: Duration = Duration::from_secs(60);
 const ID_BYTES: usize = 32;
 const DIGEST_BYTES: usize = 32;
@@ -23,6 +30,8 @@ const LINE_BYTES: usize = ID_BYTES + 1 + 2 * DIGEST_BYTES + 1;
 const PROCESSES_BYTES_MAX: usize = 1 << 20;
 const NAMED: &[u8; 3] = b"ok\n";
 const UNNAMED: &[u8; 3] = b"no\n";
+
+const _: () = assert!(PENDING_PER_PANE_MAX < PENDING_MAX && STAMPS_PER_PANE_MAX < STAMPS_MAX);
 
 /// The caller socket of the agent whose team mailbox is `mailbox`, found from the engine's
 /// folder layout (`agent-<id>/tmp/<MAILBOX_FOLDER>` beside `agent-<id>/home`), so a team
@@ -101,9 +110,13 @@ fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
 /// server lists, never by anything the call or the caller's environment says. A name
 /// holds the call id and the digest of the call's bytes, so a teammate that shares the
 /// mailbox can neither reuse another caller's name nor swap the named call's contents.
+/// The folder and the socket node are pinned by (device, inode) when bound, so the engine
+/// can tell either replaced and never acts through a folder an agent swapped.
 pub struct Callers {
     listener: UnixListener,
     path: PathBuf,
+    folder: (u64, u64),
+    node: (u64, u64),
     pending: Vec<Pending>,
     stamps: Vec<Stamp>,
 }
@@ -155,10 +168,23 @@ impl Pending {
 }
 
 impl Callers {
-    /// Binds a lead's caller socket at `path`, first removing whatever an earlier run left
-    /// there, and keeps it non-blocking so a tick never waits on it. Takes the path in the
-    /// lead's short temp folder. Returns the socket, or the I/O failure.
-    pub fn bind(path: &Path) -> std::io::Result<Self> {
+    /// Binds a lead's caller socket at `path`. The folder must still be this user's own
+    /// private folder, not a link, and the very folder the engine pinned when it made it,
+    /// if it did (DEC-111 S1R1-1); then whatever an earlier run left at `path` is removed.
+    /// The socket is kept non-blocking so a tick never waits on it. Takes the path in the
+    /// lead's short temp folder and the folder's pin, if known. Returns the socket, or the
+    /// I/O failure, `PermissionDenied` for a changed folder.
+    pub fn bind(path: &Path, pinned: Option<(u64, u64)>) -> std::io::Result<Self> {
+        let folder = path
+            .parent()
+            .and_then(crate::sandbox::toolchains::private_folder_pin)
+            .filter(|folder| pinned.is_none_or(|pinned| pinned == *folder))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the caller socket folder changed",
+                )
+            })?;
         if let Err(error) = std::fs::remove_file(path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -166,21 +192,40 @@ impl Callers {
         }
         let listener = crate::spawn_gate::bind_unix_std(path)?;
         listener.set_nonblocking(true)?;
+        let node = socket_pin(path).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone")
+        })?;
         Ok(Self {
             listener,
             path: path.to_path_buf(),
+            folder,
+            node,
             pending: Vec::new(),
             stamps: Vec::new(),
         })
     }
 
+    /// Tells whether the socket node at the path is still the one bound, in one look: false
+    /// once anyone unlinked or replaced it (DEC-111 S1R1-2). Takes the socket. Returns the
+    /// answer.
+    pub fn intact(&self) -> bool {
+        socket_pin(&self.path) == Some(self.node)
+    }
+
+    /// The (device, inode) pin of the folder the socket was bound in, for binding again in
+    /// the same folder. Takes the socket. Returns the pin.
+    pub fn folder(&self) -> (u64, u64) {
+        self.folder
+    }
+
     /// Accepts the connections waiting on the socket, at most `CALLERS_PER_TICK_MAX`, finds
     /// on accepting each the pane whose process is the connecting process or one of its
     /// first `ANCESTORS_MAX` parents, then reads each one's call id and digest and names the
-    /// call by that pane, answering yes or no. A connection with no full line within
-    /// `PENDING_WAIT` is dropped. Takes the lead's panes as (pane id, pid), listed with the
-    /// process table at most once a tick, only when a connection arrives. Returns how many
-    /// it named.
+    /// call by that pane, answering yes or no. A connection whose line has not fully arrived
+    /// waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and is dropped with no
+    /// full line within `PENDING_WAIT`. Takes the lead's panes as (pane id, pid), listed
+    /// with the process table at most once a tick, only when a connection arrives. Returns
+    /// how many it named.
     pub fn serve(&mut self, panes: &mut dyn FnMut() -> Vec<(String, u32)>) -> usize {
         let now = Instant::now();
         self.stamps
@@ -189,6 +234,7 @@ impl Callers {
             .retain(|pending| now.duration_since(pending.since) < PENDING_WAIT);
         let mut listed: Option<Vec<(String, u32)>> = None;
         let mut parents: Option<HashMap<u32, u32>> = None;
+        let mut named = 0;
         for _ in 0..CALLERS_PER_TICK_MAX {
             if self.pending.len() >= PENDING_MAX {
                 break;
@@ -207,36 +253,35 @@ impl Callers {
                 listed.get_or_insert_with(&mut *panes),
                 parents.get_or_insert_with(|| process_parents().unwrap_or_default()),
             );
-            self.pending.push(Pending {
+            let mut pending = Pending {
                 stream,
                 pane,
                 line: Vec::new(),
                 since: now,
-            });
+            };
+            match pending.receive() {
+                Received::Partial => {
+                    let waiting = self
+                        .pending
+                        .iter()
+                        .filter(|held| held.pane == pending.pane)
+                        .count();
+                    if waiting < PENDING_PER_PANE_MAX {
+                        self.pending.push(pending);
+                    }
+                }
+                Received::Broken => {}
+                Received::Line(call, digest) => {
+                    named += usize::from(self.answer(pending, call, digest, now));
+                }
+            }
         }
-        let mut named = 0;
         for mut pending in std::mem::take(&mut self.pending) {
             match pending.receive() {
                 Received::Partial => self.pending.push(pending),
                 Received::Broken => {}
                 Received::Line(call, digest) => {
-                    let fresh = self.stamps.len() < STAMPS_MAX
-                        && !self.stamps.iter().any(|stamp| stamp.call == call);
-                    let pane = if fresh { pending.pane.take() } else { None };
-                    let reply = match pane {
-                        Some(pane) => {
-                            self.stamps.push(Stamp {
-                                call,
-                                digest,
-                                pane,
-                                at: now,
-                            });
-                            named += 1;
-                            NAMED
-                        }
-                        None => UNNAMED,
-                    };
-                    let _ = pending.stream.write_all(reply);
+                    named += usize::from(self.answer(pending, call, digest, now));
                 }
             }
         }
@@ -244,20 +289,95 @@ impl Callers {
         named
     }
 
+    /// Names one call by its connection's pane, unless that call id was named already or
+    /// the connection reached no pane, and answers yes or no on the connection. Takes the
+    /// socket, the connection, the call id, the digest and the time. Returns whether it
+    /// named the call.
+    fn answer(
+        &mut self,
+        mut pending: Pending,
+        call: String,
+        digest: [u8; DIGEST_BYTES],
+        now: Instant,
+    ) -> bool {
+        let fresh = !self.stamps.iter().any(|stamp| stamp.call == call);
+        let pane = if fresh { pending.pane.take() } else { None };
+        let named = pane.is_some();
+        if let Some(pane) = pane {
+            self.make_room(&pane);
+            self.stamps.push(Stamp {
+                call,
+                digest,
+                pane,
+                at: now,
+            });
+        }
+        let _ = pending
+            .stream
+            .write_all(if named { NAMED } else { UNNAMED });
+        named
+    }
+
+    /// Frees a place for one more name of `pane`: its own oldest when it holds
+    /// `STAMPS_PER_PANE_MAX`, otherwise, when all `STAMPS_MAX` are held, the oldest of the
+    /// pane holding the most, so no pane takes another's place (DEC-111 S1R1-3). Takes the
+    /// socket and the pane.
+    fn make_room(&mut self, pane: &str) {
+        let full = {
+            let mut held: HashMap<&str, usize> = HashMap::new();
+            for stamp in &self.stamps {
+                *held.entry(stamp.pane.as_str()).or_default() += 1;
+            }
+            if held
+                .get(pane)
+                .is_some_and(|count| *count >= STAMPS_PER_PANE_MAX)
+            {
+                Some(pane.to_owned())
+            } else if self.stamps.len() >= STAMPS_MAX {
+                held.into_iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(fullest, _)| fullest.to_owned())
+            } else {
+                None
+            }
+        };
+        if let Some(at) =
+            full.and_then(|full| self.stamps.iter().position(|stamp| stamp.pane == full))
+        {
+            self.stamps.remove(at);
+        }
+        assert!(self.stamps.len() < STAMPS_MAX);
+    }
+
     /// Takes the name of one call, once: the pane the engine named it by, only when the
     /// call file's bytes have the digest the caller sent. Takes the call id and the digest
     /// of the file the engine read. Returns the pane id, or none.
     pub fn take(&mut self, call: &str, digest: &[u8; DIGEST_BYTES]) -> Option<String> {
         let at = self.stamps.iter().position(|stamp| stamp.call == call)?;
-        let stamp = self.stamps.swap_remove(at);
+        let stamp = self.stamps.remove(at);
         (stamp.digest == *digest).then_some(stamp.pane)
     }
 }
 
 impl Drop for Callers {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let folder = self
+            .path
+            .parent()
+            .and_then(crate::sandbox::toolchains::private_folder_pin);
+        if folder != Some(self.folder) {
+            eprintln!("team_caller_folder_changed");
+        } else if self.intact() {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
+}
+
+fn socket_pin(path: &Path) -> Option<(u64, u64)> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|metadata| metadata.file_type().is_socket())
+        .map(|metadata| (metadata.dev(), metadata.ino()))
 }
 
 #[cfg(target_os = "macos")]

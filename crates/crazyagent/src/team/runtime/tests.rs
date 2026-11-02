@@ -5360,6 +5360,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         native: false,
         tmux: None,
         hookless: false,
+        scratch_pin: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -7579,9 +7580,12 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
         .prefix("ca-callers-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
-    let mut callers =
-        crate::team::caller::Callers::bind(&folder.path().join(crate::team::caller::CALLER_SOCKET))
-            .unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut callers = crate::team::caller::Callers::bind(
+        &folder.path().join(crate::team::caller::CALLER_SOCKET),
+        None,
+    )
+    .unwrap();
     let mut call = serde_json::to_value(crate::team::tool::Call::Spawn {
         task: "Write the docs.".into(),
         harness: None,
@@ -7674,6 +7678,225 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
         Some((lead, "Lead".to_owned()))
     );
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+/// A teammate that rewrites a call file in the shared mailbox after the engine named it
+/// cannot keep the name: the bytes the engine reads no longer have the named digest, so
+/// the lead-only call is refused and no agent starts, while an unchanged named call is
+/// served as the lead's (DEC-111 Q18).
+#[test]
+fn a_named_call_whose_file_changed_after_naming_is_refused() {
+    use std::io::{Read, Write};
+    let mut f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let mailbox = f.base.join("lead-mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let agents_folder = f.base.join("team").join("agents");
+    let rows = |connection: &Connection| -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM team_agents", [], |row| row.get(0))
+            .unwrap()
+    };
+    let before = rows(&f.connection);
+    let folder = tempfile::Builder::new()
+        .prefix("ca-callers-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = folder.path().join(crate::team::caller::CALLER_SOCKET);
+    let mut callers = crate::team::caller::Callers::bind(&socket, None).unwrap();
+    let inspect = serde_json::to_vec(&crate::team::tool::Call::InspectWork).unwrap();
+    let spawn = serde_json::to_vec(&crate::team::tool::Call::Spawn {
+        task: "Write the docs.".into(),
+        harness: None,
+        role: None,
+        mode: None,
+    })
+    .unwrap();
+    let swapped = format!("{:032x}", 1);
+    let kept = format!("{:032x}", 2);
+    let mut streams = Vec::new();
+    for id in [&swapped, &kept] {
+        let mut line = format!("{id} ");
+        for byte in crate::team::tool::call_digest(&inspect) {
+            line.push_str(&format!("{byte:02x}"));
+        }
+        line.push('\n');
+        let mut stream = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+        stream.write_all(line.as_bytes()).unwrap();
+        streams.push(stream);
+    }
+    let own = std::process::id();
+    assert_eq!(callers.serve(&mut || vec![(native.own.clone(), own)]), 2);
+    for stream in &mut streams {
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+        assert_eq!(reply, b"ok\n");
+    }
+    std::fs::write(mailbox.join(format!("{swapped}.call")), &spawn).unwrap();
+    std::fs::write(mailbox.join(format!("{kept}.call")), &inspect).unwrap();
+    let answering = super::super::master::Answering {
+        access: &f.access,
+        stored: &f.setup,
+        landing: &f.base,
+        agents: &agents_folder,
+        events: None,
+        host: Some(host.as_ref()),
+    };
+    let host_ref = host.as_ref();
+    let served = super::super::history::serve_agent_calls(
+        &mut f.connection,
+        &project,
+        (lead, "Lead"),
+        &agents_folder,
+        &mailbox,
+        &mut |connection, call, digest| {
+            let pane = digest.and_then(|digest| callers.take(call, digest));
+            team_caller(
+                connection,
+                Some(host_ref),
+                &project,
+                (lead, "Lead"),
+                pane.as_deref(),
+            )
+        },
+        &mut |connection, caller, call| {
+            super::super::master::answer_sub(connection, &answering, caller, call)
+                .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+        },
+    );
+    assert_eq!(served, 2);
+    let reply = |id: &str| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+            .unwrap()
+    };
+    let refused = reply(&swapped);
+    assert!(
+        refused["error"] == true
+            && refused["text"]
+                .as_str()
+                .is_some_and(|text| text.ends_with("(team_caller_unknown).")),
+        "{refused}"
+    );
+    let answered = reply(&kept);
+    assert!(
+        !answered["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("team_caller_unknown")),
+        "{answered}"
+    );
+    assert_eq!(rows(&f.connection), before, "no agent was started");
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+/// A native lead's short temp folder may have been swapped for a link to a folder the
+/// agent chose before an engine restart. The restarted engine binds no caller socket
+/// through it and removes nothing there, and the lead's calls stay refused (DEC-111
+/// S1R1-1).
+#[test]
+fn a_restarted_engine_binds_no_caller_socket_through_a_swapped_temp_folder() {
+    struct Unlinked(PathBuf);
+    impl Drop for Unlinked {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let bin = f.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let mut team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let scratch = crate::sandbox::toolchains::tmp_path(&agent_home(&team.state, lead));
+    let elsewhere = tempfile::Builder::new()
+        .prefix("ca-elsewhere-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let planted = elsewhere.path().join(crate::team::caller::CALLER_SOCKET);
+    std::fs::write(&planted, b"owner data").unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), &scratch).unwrap();
+    let _link = Unlinked(scratch);
+
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert_eq!(
+        std::fs::read(&planted).ok().as_deref(),
+        Some(&b"owner data"[..]),
+        "the file behind the link survives"
+    );
+    assert!(
+        matches!(team.callers.get(&lead), Some(None)),
+        "the lead's calls stay refused"
+    );
+}
+
+/// Any agent in a native lead's sandbox can unlink the lead's caller socket. The engine
+/// sees the socket gone on its next tick and binds a new one, so the next call is named
+/// again (DEC-111 S1R1-2).
+#[test]
+fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let bin = f.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let mut team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+
+    std::fs::remove_file(&socket).unwrap();
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound(), "bound again after one tick");
+    let mailbox = team.mailbox(lead);
+    let digest = [7_u8; crate::team::tool::CALL_DIGEST_BYTES];
+    let id = format!("{:032x}", 1);
+    let callers = team
+        .callers
+        .get_mut(&lead)
+        .and_then(Option::as_mut)
+        .unwrap();
+    let own = std::process::id();
+    let named = std::thread::scope(|scope| {
+        let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
+        let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
+        while !asked.is_finished() && Instant::now() < deadline {
+            callers.serve(&mut || vec![("%5".to_owned(), own)]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        asked.join().unwrap()
+    });
+    assert!(named);
+    assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
 }
 
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
@@ -7862,6 +8085,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         native: false,
         tmux: None,
         hookless,
+        scratch_pin: None,
     }
 }
 
@@ -8772,6 +8996,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         native: true,
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
         hookless: false,
+        scratch_pin: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
