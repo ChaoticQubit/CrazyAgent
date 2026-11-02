@@ -599,8 +599,9 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
 
 /// A name a finished and a running sub-agent share reaches the running one (DEC-111 Q19), so
 /// the master's finished list names the finished one by its number only, whether they share
-/// the persona in any case or the handle. A name only it carries, or one only a stopped
-/// agent or another project's agent also carries, still shows with its number.
+/// the persona or the handle in any case, or one's persona is the other's handle. A name only
+/// it carries, or one only a stopped agent or another project's agent also carries, still
+/// shows with its number.
 #[test]
 fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
     let fixture = Fixture::new();
@@ -634,11 +635,15 @@ fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
     let di = finished("Di", Some("api"));
     let bo = finished("Bo", Some("docs"));
     let fay = finished("Fay", None);
+    let gus = finished("Gus", Some("maps"));
+    let ivy = finished("Ivy", Some("kit"));
     other(PROJECT, "working", "Ada", None);
     other(PROJECT, "idle", "cy", Some("login"));
     other(PROJECT, "starting", "Eve", Some("API"));
     other(PROJECT, "stopped", "Bo", Some("docs"));
     other(OTHER, "working", "Fay", None);
+    other(PROJECT, "working", "Hal", Some("gus"));
+    other(PROJECT, "idle", "Kit", None);
     let lines: std::collections::BTreeMap<i64, String> =
         finished_agents(&fixture.connection, &project(), 1)
             .unwrap()
@@ -653,6 +658,8 @@ fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
             (di, line(format!("Sub-agent {di}"))),
             (bo, line(format!("Bo (@docs), Sub-agent {bo}"))),
             (fay, line(format!("Fay, Sub-agent {fay}"))),
+            (gus, line(format!("Sub-agent {gus}"))),
+            (ivy, line(format!("Sub-agent {ivy}"))),
         ])
     );
     assert!(!lines[&ada].contains("Ada"), "{}", lines[&ada]);
