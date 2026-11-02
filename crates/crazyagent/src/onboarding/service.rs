@@ -419,7 +419,7 @@ fn run_step(
         lost.get() || halted()
     };
     let (step, drafted) = match claimed.kind {
-        Kind::Graph => (graph_step(work, claimed, &beat), None),
+        Kind::Graph => (graph_step(work, database, claimed, &beat), None),
         Kind::Mapping => {
             let (step, drafted) = mapping_step(work, database, claimed, &beat);
             (step, Some(drafted))
@@ -430,15 +430,25 @@ fn run_step(
     waits
 }
 
-fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
+fn graph_step(
+    work: &Work,
+    database: &rusqlite::Connection,
+    claimed: &Claimed,
+    beat: &dyn Fn() -> bool,
+) -> Step {
     let Some(graphify) = (work.graphify)() else {
         return Step::failed(GRAPHIFY_MISSING);
+    };
+    let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
+        Ok(hidden) => hidden,
+        Err(_) => return Step::failed("project hidden folders unreadable"),
     };
     match graph::update(
         &graphify,
         &claimed.repo,
         work.runner.state(),
         &run_name(claimed),
+        &hidden,
         work.limits.graph_time,
         beat,
     ) {

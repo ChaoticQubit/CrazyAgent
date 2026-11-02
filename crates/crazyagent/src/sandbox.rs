@@ -78,7 +78,7 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
-const HIDDEN_MAX: usize = 8;
+const HIDDEN_MAX: usize = 9;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
@@ -1178,7 +1178,7 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         if !self.hidden.is_empty() {
-            text.push_str("(deny file-read* file-write* process-exec");
+            text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
             for folder in &self.hidden {
                 if clean_absolute(folder) {
                     text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));

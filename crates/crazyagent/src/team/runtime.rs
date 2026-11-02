@@ -5002,6 +5002,8 @@ impl TeamRuntime {
         let hidden =
             crate::sandbox::hidden_paths::load(&self.connection, stored.project_id.as_str())
                 .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
+        crate::sandbox::hidden_paths::none_tracked(&root, &hidden)
+            .map_err(|code| with_code("a hidden folder is now tracked by git", Some(code)))?;
         for folder in &hidden {
             sandbox = sandbox.hide(folder).map_err(sandboxed)?;
         }

@@ -286,12 +286,27 @@ pub(in crate::tui) fn project_screen(
         let start = column.saturating_sub(field - 1);
         let shown: String = value.iter().skip(start).take(field).collect();
         let mut body: Vec<Row> = wrap_words(
-            "Folders inside the project that agents, the master and research jobs can't read, write or run. Separate them with a colon. Each must be a folder inside the project.",
+            "Folders inside the project that agents, the master and research jobs can't read, write or run. Separate them with a colon. Each must be a folder inside the project that git does not track.",
             56,
         )
         .into_iter()
         .map(|line| Row::of(line, look.muted))
         .collect();
+        if screen
+            .agent_policy
+            .as_ref()
+            .is_some_and(|view| view.access == crate::sandbox::policy::AgentAccess::Full)
+        {
+            body.push(Row::default());
+            body.extend(
+                wrap_words(
+                    "Full access runs agents without a sandbox, so hidden folders do not apply.",
+                    56,
+                )
+                .into_iter()
+                .map(|line| Row::of(line, look.warning)),
+            );
+        }
         body.push(Row::default());
         let at = body.len();
         body.push(

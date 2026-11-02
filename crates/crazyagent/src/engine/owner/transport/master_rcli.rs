@@ -209,6 +209,7 @@ impl OwnerRuntimeHandle {
             &launch.executable,
             &prepared.attempt.connection.endpoint,
             &prepared.agent_policy,
+            &prepared.hidden_paths,
         )?;
         if !given.text.is_empty() {
             launch.instructions = Some(super::master_host_launch::write_master_instructions(

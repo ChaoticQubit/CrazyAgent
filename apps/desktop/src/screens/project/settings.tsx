@@ -240,7 +240,7 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
 export function addHiddenPath(paths: string[], typed: string): { paths: string[] } | { error: string } {
   const path = typed.trim();
   if (!path.startsWith("/")) return { error: "Type the full path of a folder, starting with /." };
-  if (path.length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return { error: "Each folder must be one plain path of up to 1024 characters." };
+  if (path.length > 1024 || /["'\\\u0000-\u001f\u007f]/.test(path)) return { error: "Each folder must be one plain path of up to 1024 characters, without quotes or backslashes." };
   if (paths.includes(path)) return { error: "That folder is already in the list." };
   if (paths.length >= HIDDEN_PATHS_MAX) return { error: `A project can hide at most ${HIDDEN_PATHS_MAX} folders.` };
   return { paths: [...paths, path] };
@@ -308,6 +308,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [fullAccess, setFullAccess] = useState(false);
   const notReady = "Not ready yet: hidden folders aren't in this build.";
   useEffect(() => {
     let live = true;
@@ -315,6 +316,10 @@ function HiddenSection({ data }: { data: ProjectData }) {
       if (!live) return;
       if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
       else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    void loadAgentPolicy(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") setFullAccess(result.value.access === "full");
     });
     return () => { live = false; };
   }, [data.id]);
@@ -342,7 +347,8 @@ function HiddenSection({ data }: { data: ProjectData }) {
   const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
-    <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run, even with Full access off. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project.</p>
+    <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
+    {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
     {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
       {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}

@@ -112,10 +112,103 @@ fn with_the_folder_hidden_the_agent_cannot_read_a_file_in_it() {
 }
 
 #[test]
-fn with_the_folder_hidden_the_agent_cannot_run_a_program_in_it() {
+fn with_the_folder_hidden_the_agent_cannot_run_a_macho_in_it() {
+    let case = case();
+    let binary = case.secret.join("echo");
+    fs::copy("/bin/echo", &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let sandbox = sandbox_with_hidden(&case, std::slice::from_ref(&case.secret));
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!("'{}' hi", binary.display()),
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
+    let case = case();
+    let git = |args: &[&str]| {
+        let mut command = std::process::Command::new("/usr/bin/git");
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(&case.project)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let status = crazyagent::spawn_gate::status(&mut command).unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "a@b.c"]);
+    git(&["config", "user.name", "t"]);
+    fs::write(case.project.join("open.txt"), "open\n").unwrap();
+    git(&["add", "open.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+    let worktrees = case.project.join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let worktree = worktrees.join("w").canonicalize().ok();
+    git(&["worktree", "add", "-q", "worktrees/w"]);
+    let worktree = worktree.unwrap_or_else(|| worktrees.join("w").canonicalize().unwrap());
+    let connection = Connection::open_in_memory().unwrap();
+    hidden_paths::save(&connection, "app", std::slice::from_ref(&case.secret)).unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .confine_to_worktree(&worktree)
+    .unwrap();
+    for folder in hidden_paths::load(&connection, "app").unwrap() {
+        sandbox = sandbox.hide(&folder).unwrap();
+    }
+    let notes = case.secret.join("notes.txt");
+    let output = run(
+        &sandbox,
+        &case.profile,
+        &format!("cat '{}'", notes.display()),
+    );
+    assert!(!output.status.success(), "{output:?}");
+}
+
+#[test]
+fn a_hidden_folder_resists_hard_link_clone_and_firmlink() {
     let case = case();
     let sandbox = sandbox_with_hidden(&case, std::slice::from_ref(&case.secret));
-    let tool = case.secret.join("slot.sh");
-    let output = run(&sandbox, &case.profile, &format!("'{}'", tool.display()));
-    assert!(!output.status.success(), "{output:?}");
+    let notes = case.secret.join("notes.txt");
+    let linked = case.project.join("linked.txt");
+    let link = run(
+        &sandbox,
+        &case.profile,
+        &format!(
+            "ln '{}' '{}' && cat '{}'",
+            notes.display(),
+            linked.display(),
+            linked.display()
+        ),
+    );
+    assert!(!link.status.success(), "hard link leaked: {link:?}");
+    let cloned = case.project.join("cloned.txt");
+    let clone = run(
+        &sandbox,
+        &case.profile,
+        &format!(
+            "cp -c '{}' '{}' && cat '{}'",
+            notes.display(),
+            cloned.display(),
+            cloned.display()
+        ),
+    );
+    assert!(!clone.status.success(), "clonefile leaked: {clone:?}");
+    let firmlink = format!("/System/Volumes/Data{}", notes.display());
+    let aliased = run(&sandbox, &case.profile, &format!("cat '{firmlink}'"));
+    assert!(
+        !aliased.status.success(),
+        "FIRMLINK READ LEAKED through {firmlink}: {aliased:?}"
+    );
 }

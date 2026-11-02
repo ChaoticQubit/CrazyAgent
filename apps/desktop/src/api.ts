@@ -130,6 +130,7 @@ const COPY: Record<string, string> = {
   hidden_path_missing: "That folder can't be found. Pick a folder that exists.",
   hidden_path_not_folder: "That path isn't a folder. Pick a folder.",
   hidden_path_outside_project: "A hidden folder must sit inside the project. Pick a folder within it.",
+  hidden_path_tracked: "Git tracks files in that folder. Hidden folders cover only files git doesn't track; pick a folder git ignores.",
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",

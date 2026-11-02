@@ -2266,10 +2266,14 @@ fn set_hidden_paths(
     let Some(setup) = load_setup(tx, project_id)? else {
         return Ok(rejected("invalid_project"));
     };
-    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &setup.project_folder()) {
+    let folder = setup.project_folder();
+    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
+    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
+        return Ok(rejected(code));
+    }
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
