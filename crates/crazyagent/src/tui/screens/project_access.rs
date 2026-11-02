@@ -1,5 +1,5 @@
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView, ToolchainChoice};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolchainChoice};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -11,6 +11,11 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
     "Lowering the level stops agents running above it; they restart at the new level.";
 
+/// Why the network choice has no effect under Full access: Full access runs agents with no
+/// sandbox, so nothing bounds their network.
+pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
+    "Full access runs agents without a sandbox, so this choice does not apply.";
+
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
@@ -20,6 +25,7 @@ const TEXT_WIDTH: usize = 56;
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
     pub access: AgentAccess,
+    pub network: AgentNetwork,
     pub allowed: Vec<bool>,
     pub cursor: usize,
     pub confirm_full: bool,
@@ -41,6 +47,7 @@ impl AccessEdit {
     pub fn of(view: &PolicyView) -> Self {
         Self {
             access: view.access,
+            network: view.network,
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             view: view.clone(),
             cursor: 0,
@@ -55,7 +62,7 @@ impl AccessEdit {
     /// Output: what the screen does next.
     pub fn key(&mut self, key: KeyEvent) -> AccessKey {
         assert_eq!(self.allowed.len(), self.view.toolchains.len());
-        assert!(self.cursor <= self.allowed.len());
+        assert!(self.cursor <= self.allowed.len() + 1);
         if self.busy {
             return match key.code {
                 KeyCode::Esc => AccessKey::Close,
@@ -78,7 +85,7 @@ impl AccessEdit {
         match key.code {
             KeyCode::Esc => return AccessKey::Close,
             KeyCode::Up => self.cursor = self.cursor.saturating_sub(1),
-            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.allowed.len()),
+            KeyCode::Down => self.cursor = (self.cursor + 1).min(self.allowed.len() + 1),
             KeyCode::Left => self.change(false),
             KeyCode::Right | KeyCode::Char(' ') => self.change(true),
             KeyCode::Enter if self.access == AgentAccess::Full => {
@@ -107,6 +114,7 @@ impl AccessEdit {
             .collect();
         let policy = AgentPolicy {
             access: self.access,
+            network: self.network,
             toolchains,
         };
         assert!(policy.validate().is_ok());
@@ -190,6 +198,33 @@ impl AccessEdit {
             );
         }
         body.push(Row::default());
+        body.push(Row::of("Network for agents with tools on", look.accent));
+        let network_row = self.allowed.len() + 1;
+        body.push(
+            Row::of(mark(network_row), look.accent)
+                .push("Network     ", look.muted)
+                .push(
+                    format!("< {} >", self.network.label()),
+                    if self.cursor == network_row {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(network_help(self.network), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("              {line}"), look.muted)),
+        );
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
+        body.push(Row::default());
         if self.confirm_full {
             body.extend(
                 wrap_words(&format!("Full access: {FULL_ACCESS_WARNING}"), TEXT_WIDTH)
@@ -221,6 +256,10 @@ impl AccessEdit {
             self.access = next_level(self.access, forward);
             return;
         }
+        if self.cursor == self.allowed.len() + 1 {
+            self.network = next_network(self.network, forward);
+            return;
+        }
         let row = self.cursor - 1;
         assert!(row < self.allowed.len());
         self.allowed[row] = !self.allowed[row];
@@ -247,6 +286,34 @@ pub(in crate::tui) fn next_level(current: AgentAccess, forward: bool) -> AgentAc
         .map(|index| AgentAccess::ALL[index])
         .find(|candidate| candidate.unavailable().is_none())
         .unwrap_or(current)
+}
+
+/// The next network choice, cycling in either direction; every choice runs on every
+/// computer. Input: the current choice and the direction. Output: the next choice.
+pub(in crate::tui) fn next_network(current: AgentNetwork, forward: bool) -> AgentNetwork {
+    let at = AgentNetwork::ALL
+        .iter()
+        .position(|network| *network == current)
+        .unwrap_or(0);
+    let count = AgentNetwork::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    AgentNetwork::ALL[(at + step) % count]
+}
+
+/// One line on what a network choice lets agents and the plugin check reach. Input: the
+/// choice. Output: the line.
+pub(in crate::tui) fn network_help(network: AgentNetwork) -> &'static str {
+    match network {
+        AgentNetwork::Open => {
+            "Agents with tools on reach the whole network, and so does the plugin check."
+        }
+        AgentNetwork::Https => {
+            "Agents and the plugin check reach port 443 only; agents also still reach the model."
+        }
+        AgentNetwork::None => {
+            "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing."
+        }
+    }
 }
 
 /// One line on what an access level lets agents do. Input: the level. Output: the line.

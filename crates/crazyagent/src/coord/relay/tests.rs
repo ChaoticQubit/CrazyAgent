@@ -301,7 +301,7 @@ fn serve_posts_waiting_messages_as_letters_and_a_taken_letter_becomes_delivered(
     );
     assert_eq!(
         read_json(&team.entry("relay.json")),
-        json!({"overlaps": "warn", "root": "/repo/lead"})
+        json!({"overlaps": "warn", "nudges": "off", "root": "/repo/lead"})
     );
     assert_eq!(team.receipt(to_lead), Receipt::Sent);
 

@@ -941,7 +941,7 @@ fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
         crate::coord::record_tool(&db, sub, tool, NOW).unwrap();
     }
     let nudges = crate::coord::settings::CoordSettings {
-        nudges: true,
+        nudges: crate::coord::settings::Nudges::TenMinutes,
         ..Default::default()
     };
     crate::coord::settings::write(&db, project, &nudges).unwrap();
@@ -1005,7 +1005,7 @@ fn a_project_page_shows_workflow_adoption_after_its_settings() {
     };
     let heading = at("Workflow adoption");
     assert!(
-        rows[heading].contains("Nudges on: each flag sends that agent one reminder."),
+        rows[heading].contains("Nudges every 10 minutes: each flag sends that agent one reminder."),
         "{shown}"
     );
     let hookless_row = at(&format!("#{hookless} sub claude-code"));

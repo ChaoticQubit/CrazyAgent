@@ -265,15 +265,6 @@ fn prepare(
     }
 }
 
-fn reason(code: &str) -> String {
-    if code.starts_with("setup_") || code.starts_with("pack_") {
-        return plain_reason(code).to_owned();
-    }
-    crate::plugins::plain_problem(code)
-        .unwrap_or_else(|| plain_reason(code))
-        .to_owned()
-}
-
 #[cfg(unix)]
 async fn install_entry(
     sender: &mpsc::Sender<Job>,
@@ -327,7 +318,7 @@ async fn install_entry(
             state.pack.insert(
                 id.clone(),
                 PackState::Failed {
-                    reason: reason(&code),
+                    reason: crate::setup::pack_reason(&code),
                 },
             );
         }
@@ -349,7 +340,7 @@ async fn install_entry(
         state.pack.insert(
             entry.id,
             PackState::Failed {
-                reason: reason(crate::setup::PLATFORM_UNSUPPORTED),
+                reason: crate::setup::pack_reason(crate::setup::PLATFORM_UNSUPPORTED),
             },
         );
     });
@@ -375,8 +366,8 @@ fn extract_bundled(_setup: &Path) -> Option<PathBuf> {
 /// nothing, so an owner who continued without installing gets no folder. Otherwise the
 /// shipped hook folders are unpacked first; nothing is downloaded, a linked checkout is
 /// skipped and an entry whose hooks are present is left alone. Inputs: the storage job
-/// sender and the engine root. Output: nothing; an entry that fails is logged and the rest
-/// still run.
+/// sender and the engine root. Output: nothing; an entry that fails is logged, its setup
+/// row says why, and the rest still run.
 #[cfg(unix)]
 pub(super) async fn backfill_hooks(sender: mpsc::Sender<Job>, root: PathBuf) {
     let setup = root.join("setup");

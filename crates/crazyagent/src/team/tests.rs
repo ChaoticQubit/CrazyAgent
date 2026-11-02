@@ -360,6 +360,71 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
     );
 }
 
+/// The finished agents the TUI and desktop list show one whose name a running sub-agent
+/// shares by its number only (DEC-111 Q19), since that name reaches the running one; the
+/// running agent and a finished agent with an unshared name keep their names.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_shows_by_number_in_the_team_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
+    let setup = stored("team-shared-name", vec![]);
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let agent = |status: &str, persona: &str, handle: Option<&str>| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,turns,created_ms,heartbeat_ms) VALUES ('team-shared-name','sub','codex',0,?1,1,1,1)",
+                params![status],
+            )
+            .unwrap();
+        let id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,'team-shared-name','.',?2,'.git')",
+                params![id, format!("worktrees/agent-{id}")],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'team-shared-name',?2,?3)",
+                params![id, persona, handle],
+            )
+            .unwrap();
+        id
+    };
+    let shared = agent("stopped", "Ada", Some("charts"));
+    let unshared = agent("failed", "Bo", None);
+    let running = agent("working", "Ada", Some("login"));
+    let read = status(&connection, &setup).unwrap();
+    let mut shown: Vec<(i64, bool, &str)> = read
+        .agents
+        .iter()
+        .map(|a| (a.id, a.finished, a.label.as_str()))
+        .collect();
+    shown.sort_unstable();
+    let expected = format!("Sub-agent {shared}");
+    assert_eq!(
+        shown,
+        [
+            (shared, true, expected.as_str()),
+            (unshared, true, "Bo"),
+            (running, false, "Ada (@login)"),
+        ],
+        "{read:#?}"
+    );
+}
+
 #[test]
 fn only_keyless_endpoint_accounts_that_fit_the_harness_are_eligible() {
     let project = ProjectId::new("team-accounts").unwrap();
@@ -4365,7 +4430,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,
         overlaps: Overlaps::Block,
-        nudges: false,
+        nudges: crate::coord::settings::Nudges::FirstEdit,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
     };
     for action in [

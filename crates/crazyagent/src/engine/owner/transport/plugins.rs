@@ -1347,7 +1347,7 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
-    let ResultValue::Check(spec, secrets) =
+    let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
         return Err(unknown());
@@ -1380,7 +1380,7 @@ async fn start_check(
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let kept = settings.owner_ports();
-            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept);
+            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept, network);
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -1422,8 +1422,9 @@ fn boundary_check(
     args: &[String],
     secrets: &[(String, Vec<u8>)],
     kept: &[u16],
+    network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
@@ -1467,7 +1468,7 @@ fn boundary_check(
         .create(&profiles)
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
-    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
@@ -1494,6 +1495,7 @@ fn boundary_check(
     _args: &[String],
     _secrets: &[(String, Vec<u8>)],
     _kept: &[u16],
+    _network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
     Err("server_check_unavailable")
 }
