@@ -6,46 +6,68 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const OBSERVATION_BYTES_MAX = 4096;
 
-/** Acts on the first visible element a selector names, the way an owner reaches it.
- * Inputs: "button=<exact text>", "text=<part of a button or link>", "label=<part of a label>",
- * or a CSS selector; the action ("ready", "click", "type" or "checked"); the typed value.
- * Output: whether the element is usable, was clicked or typed into, or is checked. */
-export function control(selector, action = "ready", value = "") {
-  return browser.execute((selector, action, value) => {
-    const visible = (node) => Boolean(node && node.getClientRects().length);
-    const among = (query, match) => [...document.querySelectorAll(query)].find((node) => visible(node) && match(node));
-    const node = selector.startsWith("button=") ? among("button, a", (item) => item.textContent.trim() === selector.slice(7))
-      : selector.startsWith("text=") ? among("button, a", (item) => item.textContent.includes(selector.slice(5)))
-      : selector.startsWith("label=") ? among("label", (item) => item.textContent.includes(selector.slice(6)))
-      : among(selector, () => true);
-    const usable = Boolean(node && !node.disabled && node.getAttribute("aria-disabled") !== "true");
-    if (action === "ready") return usable;
-    if (action === "checked") {
-      const box = node?.matches("input") ? node : node?.querySelector("input");
-      return Boolean(box?.checked);
-    }
-    if (!usable) return false;
-    if (action === "click") {
-      node.click();
-      return true;
-    }
-    if (action === "type") {
-      const prototype = node instanceof HTMLInputElement ? HTMLInputElement.prototype
-        : node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : null;
-      if (!prototype) return false;
-      Object.getOwnPropertyDescriptor(prototype, "value").set.call(node, value);
-      node.dispatchEvent(new Event("input", { bubbles: true }));
-      return node.value === value;
-    }
-    return false;
-  }, selector, action, value);
+/** Quotes text as an XPath string literal. Input: text without a double quote. Output: the literal. */
+function literal(text) {
+  assert(!text.includes('"'), "XPath text has no double quote");
+  return `"${text}"`;
+}
+
+/** Turns a step selector into a WebDriver selector. Input: "button=<exact text>" or
+ * "text=<part>" for a button or link by its visible text, "label=<part>" for a label, or a CSS
+ * or XPath selector as given. Output: the CSS or XPath selector. */
+function locator(selector) {
+  if (selector.startsWith("button=")) return `//*[self::button or self::a][normalize-space(.)=${literal(selector.slice(7))}]`;
+  if (selector.startsWith("text=")) return `//*[self::button or self::a][contains(normalize-space(.), ${literal(selector.slice(5))})]`;
+  if (selector.startsWith("label=")) return `//label[contains(normalize-space(.), ${literal(selector.slice(6))})]`;
+  return selector;
+}
+
+/** Finds the first displayed element a step selector names. Input: the selector.
+ * Output: the WebDriver element, or null when none is displayed. */
+async function find(selector) {
+  for (const element of await $$(locator(selector))) {
+    if (await element.isDisplayed()) return element;
+  }
+  return null;
+}
+
+/** Whether the owner could act on an element: displayed, enabled, not aria-disabled, and the
+ * element under its centre (document.elementFromPoint) is the element or inside it, so a
+ * dialog, backdrop or overlay above it makes it unreachable. Input: the element. */
+async function reachable(element) {
+  return await element.isClickable() && await element.getAttribute("aria-disabled") !== "true";
+}
+
+/** Whether a step selector names a displayed element. Input: the selector. Output: a boolean. */
+export async function shown(selector) {
+  return Boolean(await find(selector));
+}
+
+/** Reads the visible text of every element a CSS selector matches. Input: the selector.
+ * Output: their texts in page order. */
+export function texts(selector) {
+  return browser.execute((selector) => [...document.querySelectorAll(selector)]
+    .filter((node) => node.getClientRects().length).map((node) => node.textContent), selector);
 }
 
 /** Reads the visible text of every element a CSS selector matches. Input: the selector.
  * Output: their text joined by newlines, empty when none is visible. */
-export function text(selector) {
-  return browser.execute((selector) => [...document.querySelectorAll(selector)]
-    .filter((node) => node.getClientRects().length).map((node) => node.textContent).join("\n"), selector);
+export async function text(selector) {
+  return (await texts(selector)).join("\n");
+}
+
+/** Whether exactly one visible element matches a CSS selector and its text is exactly the
+ * expected text. Inputs: the selector and the text. Output: a boolean. */
+export async function says(selector, expected) {
+  const found = await texts(selector);
+  return found.length === 1 && found[0] === expected;
+}
+
+/** Reads each visible toast's own message, without its icon or Open button. Output: the
+ * messages in page order. */
+export function toasts() {
+  return browser.execute(() => [...document.querySelectorAll(".toast")].filter((node) => node.getClientRects().length)
+    .map((node) => [...node.childNodes].filter((child) => child.nodeType === Node.TEXT_NODE).map((child) => child.textContent).join("")));
 }
 
 /** Waits for a condition and fails with what the window shows when it never holds.
@@ -54,21 +76,46 @@ export async function until(condition, timeout, label) {
   try {
     await browser.waitUntil(condition, { timeout, interval: 250 });
   } catch {
-    const shown = await text("main, dialog[open], .toast");
-    throw new Error(`${label}; on screen: ${JSON.stringify(shown.slice(0, 2000))}; at ${await browser.execute(() => location.hash)}`);
+    const screen = await text("main, dialog[open], .toast");
+    throw new Error(`${label}; on screen: ${JSON.stringify(screen.slice(0, 2000))}; at ${await browser.execute(() => location.hash)}`);
   }
 }
 
-/** Clicks a control once it is usable. Inputs: the selector and the time limit in ms. */
+/** Clicks a control with a WebDriver element click once the owner could reach it.
+ * Inputs: the step selector and the time limit in ms. */
 export async function click(selector, timeout = 15000) {
-  await until(() => control(selector), timeout, `${selector} never became usable`);
-  assert.equal(await control(selector, "click"), true, `${selector} click`);
+  let target = null;
+  await until(async () => {
+    target = await find(selector);
+    return Boolean(target) && await reachable(target);
+  }, timeout, `${selector} was never shown, enabled and on top`);
+  await target.click();
 }
 
-/** Types into a field once it is usable. Inputs: the selector and the value. */
+/** Types into a field with WebDriver setValue once the owner could reach it, and waits for
+ * the field to hold exactly that value. Inputs: the step selector and the value. */
 export async function type(selector, value) {
-  await until(() => control(selector), 15000, `${selector} never became usable`);
-  assert.equal(await control(selector, "type", value), true, `${selector} typing`);
+  let field = null;
+  await until(async () => {
+    field = await find(selector);
+    return Boolean(field) && await reachable(field);
+  }, 15000, `${selector} was never shown, enabled and on top`);
+  await field.setValue(value);
+  await until(async () => await field.getValue() === value, 10000, `${selector} did not keep the typed value`);
+}
+
+/** Whether the checkbox inside a label is checked. Input: the "label=<part>" selector.
+ * Output: a boolean. */
+export async function checked(selector) {
+  const label = await find(selector);
+  assert(label, `${selector} is shown`);
+  return (await label.$("input")).isSelected();
+}
+
+/** Waits until no dialog is open, so a page-level click cannot land under a dialog that was
+ * meant to close. Input: what the page click is for. */
+async function noDialog(purpose) {
+  await until(async () => !(await shown("dialog[open]")), 15000, `a dialog stayed open over the page before ${purpose}`);
 }
 
 /** Saves a screenshot of the settled window into the run's private evidence folder: finite
@@ -84,55 +131,45 @@ export async function shot(name) {
 
 /** Opens one Settings tab by its label, as the owner clicks it. Input: the tab label. */
 export async function settingsTab(label) {
-  await until(() => browser.execute((label) => [...document.querySelectorAll("[aria-label='Settings sections'] a, [aria-label='Settings sections'] button")]
-    .some((node) => node.textContent.trim() === label && node.getClientRects().length), label), 15000, `Settings tab ${label} never showed`);
-  await browser.execute((label) => [...document.querySelectorAll("[aria-label='Settings sections'] a, [aria-label='Settings sections'] button")]
-    .find((node) => node.textContent.trim() === label).click(), label);
+  await noDialog(`Settings, ${label}`);
+  await click(`//*[@aria-label="Settings sections"]//*[self::a or self::button][normalize-space(.)=${literal(label)}]`);
 }
 
 /** Picks one Add account tile or sign-in method by its title, as the owner clicks it.
  * Inputs: "tile" or "method" and the exact title (a method's Recommended badge is ignored). */
 export async function pick(kind, title) {
   assert(["tile", "method"].includes(kind), "an Add account tile or method");
-  const act = (kind, title, press) => {
-    const node = [...document.querySelectorAll(`dialog[open] button.${kind}`)]
-      .find((item) => item.getClientRects().length && item.querySelector(".title")?.firstChild?.textContent === title);
-    if (node && press) node.click();
-    return Boolean(node);
-  };
-  await until(() => browser.execute(act, kind, title, false), 15000, `${kind} ${title} never showed`);
-  assert.equal(await browser.execute(act, kind, title, true), true, `${kind} ${title} click`);
+  const has = (name) => `contains(concat(" ", normalize-space(@class), " "), " ${name} ")`;
+  await click(`//dialog[@open]//button[${has(kind)}][.//*[${has("title")}][normalize-space(text()[1])=${literal(title)}]]`);
 }
 
 /** Opens a row's actions menu and picks one item. Inputs: the menu's accessible label
  * ("More for <name>") and the item text. */
 export async function menu(label, item) {
-  await click(`button[aria-label='${label}']`);
-  await until(() => browser.execute((item) => [...document.querySelectorAll("[role=menuitem]")]
-    .some((node) => node.textContent.trim() === item && node.getClientRects().length), item), 15000, `menu item ${item} never showed`);
-  await browser.execute((item) => [...document.querySelectorAll("[role=menuitem]")]
-    .find((node) => node.textContent.trim() === item).click(), item);
+  await noDialog(label);
+  await click(`button[aria-label=${JSON.stringify(label)}]`);
+  await click(`//*[@role="menuitem"][normalize-space(.)=${literal(item)}]`);
 }
 
 /** Goes through first run the way an owner does: saves the profile, continues past the
  * projects folder, skips tool setup (nothing is installed) and picks Add account, which
  * opens Settings, Accounts with the Add account dialog. Input: the owner's name. */
 export async function finishWelcome(name) {
-  await until(() => control("#profile-name"), 60000, "first-run Welcome page did not appear");
-  assert.match(await text("h1"), /Tell CrazyAgent about you/);
+  await until(() => shown("#profile-name"), 60000, "first-run Welcome page did not appear");
+  assert.deepEqual(await texts("h1"), ["Tell CrazyAgent about you"]);
   await type("#profile-name", name);
   await type("#profile-role", "Founder");
   await type("#profile-bio", "Checks Settings on the real desktop app.");
   await click("button=Save and continue");
-  await until(async () => (await text("h1")).includes("Choose your projects folder"), 15000, "the projects folder step did not open");
+  await until(() => says("h1", "Choose your projects folder"), 15000, "the projects folder step did not open");
   await click("button=Continue");
-  await until(async () => (await text("h1")).includes("Set up tools"), 15000, "the tools step did not open");
-  await until(async () => await control("button=Skip for now") || await control("button=Continue"), 30000, "the tools step offered no way on");
-  await click(await control("button=Skip for now") ? "button=Skip for now" : "button=Continue");
-  await until(async () => (await text("h1")).includes("Add an account"), 15000, "the accounts step did not open");
+  await until(() => says("h1", "Set up tools"), 15000, "the tools step did not open");
+  await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), 30000, "the tools step offered no way on");
+  await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
+  await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
   await click("button=Add account");
   await until(async () => /^#\/settings\/accounts/.test(await browser.execute(() => location.hash)) &&
-    (await text("dialog[open] h2")).includes("Add an account"), 15000, "Add account did not open in Settings, Accounts");
+    await says("dialog[open] h2", "Add an account"), 15000, "Add account did not open in Settings, Accounts");
 }
 
 /** Reads what the engine itself holds for model access through the desktop owner fixture,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { click, control, finishWelcome, observeModelAccess, pick, shot, text, type, until } from "./settings-steps.mjs";
+import { click, finishWelcome, observeModelAccess, pick, says, shot, shown, toasts, type, until } from "./settings-steps.mjs";
 
 const execute = promisify(execFile);
 const CODEX_MISSING = "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.";
@@ -21,11 +21,11 @@ async function observeSignIn(connection) {
 async function startUnavailable(tile, method, name, start, missing) {
   await pick("tile", tile);
   await pick("method", method);
-  await until(() => control("#account-name"), 15000, `${method} did not open`);
+  await until(() => shown("#account-name"), 15000, `${method} did not open`);
   await type("#account-name", name);
   await click(`button=${start}`);
-  await until(async () => (await text("dialog[open] [role=alert]")).includes(missing), 30000, `${method} did not report the missing harness`);
-  assert.equal(await control("button=Use an API key instead"), true, "the owner is offered a key instead");
+  await until(() => says("dialog[open] .notice[role=alert]", missing), 30000, `${method} did not report the missing harness`);
+  assert.equal(await shown("button=Use an API key instead"), true, "the owner is offered a key instead");
   const engine = await observeModelAccess();
   assert.equal(engine.connections.length, 1, "starting a sign-in saved the account first");
   const [connection] = engine.connections;
@@ -37,7 +37,8 @@ async function startUnavailable(tile, method, name, start, missing) {
 }
 
 async function removedAgain(name) {
-  await until(async () => (await text(".toast")).includes(`${name} wasn't signed in, so it was removed.`), 15000, "the unfinished account was not removed");
+  const removed = `${name} wasn't signed in, so it was removed.`;
+  await until(async () => JSON.stringify(await toasts()) === JSON.stringify([removed]), 15000, `the toast did not say exactly ${removed}`);
   const engine = await observeModelAccess();
   assert.deepEqual([engine.registry, engine.accounts, engine.connections], [[], [], []]);
 }
@@ -55,7 +56,7 @@ describe("Settings sign-in on the real desktop app and an engine without a sign-
     await shot("codex-missing");
     await click("dialog[open] button[aria-label='Close']");
     await removedAgain("ChatGPT check");
-    await until(async () => (await text("main")).includes("No accounts yet"), 15000, "the account list was not empty");
+    await until(() => says("main .empty-state h2", "No accounts yet"), 15000, "the account list was not empty");
   });
 
   it("Claude sign-in says Claude Code is missing, and a key instead drops the unfinished account", async () => {
@@ -64,7 +65,7 @@ describe("Settings sign-in on the real desktop app and an engine without a sign-
     assert.match(connection.id, /^claude-account-[0-9a-f]{20}$/);
     await shot("claude-missing");
     await click("button=Use an API key instead");
-    await until(() => control("#account-key"), 15000, "the key form did not open");
+    await until(() => shown("#account-key"), 15000, "the key form did not open");
     await removedAgain("Claude check");
     await click("dialog[open] button[aria-label='Close']");
   });

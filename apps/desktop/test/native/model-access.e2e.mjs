@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { closedPort } from "./e2e-harness.mjs";
-import { click, control, finishWelcome, menu, observeModelAccess, pick, settingsTab, shot, text, type, until } from "./settings-steps.mjs";
+import { checked, click, finishWelcome, menu, observeModelAccess, pick, says, settingsTab, shot, shown, texts, toasts, type, until } from "./settings-steps.mjs";
 
 const LOCAL = "Local closed";
 const RENAMED = "Local renamed";
@@ -9,6 +9,22 @@ const POOL = "Native pool";
 const POOL_RENAMED = "Native pool two";
 const UNREACHABLE = "Saved. Can't reach this URL. Check the address and that the server is running.";
 const ids = {};
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+
+async function listed(names, count) {
+  await until(async () => same(await texts("main .account-row .cell .ellipsis"), names) && same(await texts("main .count"), [count]), 15000,
+    `the account list did not show exactly ${names.join(", ")}`);
+}
+
+async function pools(rows) {
+  await until(async () => !(await shown("#pool-name")) &&
+    same([await texts("main .pool-row .name"), await texts("main .pool-row .mono")], [rows.map(([name]) => name), rows.map(([, members]) => members)]),
+  30000, `the pool list did not show exactly ${JSON.stringify(rows)}`);
+}
+
+async function toast(message) {
+  await until(async () => same(await toasts(), [message]), 15000, `the toast did not say exactly ${message}`);
+}
 
 function saved(engine, id) {
   const account = engine.registry.find((item) => item.id === id);
@@ -18,13 +34,13 @@ function saved(engine, id) {
 
 async function addUrlAccount(tile, name, url, model) {
   await pick("tile", tile);
-  await until(() => control("#account-url"), 15000, `${tile} form did not open`);
+  await until(() => shown("#account-url"), 15000, `${tile} form did not open`);
   await type("#account-name", name);
   await type("#account-url", url);
   await type("#account-model", model);
   await click("button=Save");
-  await until(async () => (await text("dialog[open] .success")).includes(UNREACHABLE), 30000, `${name} was not saved and checked`);
-  assert.match(await text("dialog[open] .success"), new RegExp(name));
+  await until(() => says("dialog[open] .success p:last-child", UNREACHABLE), 30000, `${name} was not saved and checked`);
+  assert.deepEqual(await texts("dialog[open] .success strong"), [name]);
 }
 
 describe("Settings, Accounts and Pools on the real desktop app and a writable engine", () => {
@@ -61,26 +77,20 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     saved(engine, ids.local);
     ids.compatible = compatible.id;
     await click("button=Done");
-    await until(async () => {
-      const main = await text("main");
-      return main.includes(LOCAL) && main.includes(COMPATIBLE) && main.includes("2 accounts");
-    }, 15000, "the account list did not show both accounts");
+    await listed([LOCAL, COMPATIBLE], "2 accounts");
     await shot("two-accounts");
   });
 
   it("renames an account from its details and the engine keeps the connection", async () => {
     await click(`text=${LOCAL}`);
-    await until(() => control("#drawer-account-name"), 15000, "the account details did not open");
+    await until(() => shown("#drawer-account-name"), 15000, "the account details did not open");
     await type("#drawer-account-name", RENAMED);
     await click("button=Rename");
-    await until(async () => (await text("dialog[open] h2")).includes(RENAMED), 15000, "the details did not show the new name");
+    await until(() => says("dialog[open] h2", RENAMED), 15000, "the details did not show the new name");
     await click("dialog[open] button[aria-label='Close']");
     await settingsTab("Pools");
     await settingsTab("Accounts");
-    await until(async () => {
-      const main = await text("main");
-      return main.includes(RENAMED) && !main.includes(LOCAL);
-    }, 15000, "the account list read back from the engine did not show the new name");
+    await listed([RENAMED, COMPATIBLE], "2 accounts");
     const engine = await observeModelAccess();
     assert.deepEqual(engine.registry.map((account) => account.id).sort(), [ids.local, ids.compatible].sort());
     assert.equal(saved(engine, ids.local).name, RENAMED);
@@ -92,11 +102,10 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await type("#pool-name", POOL);
     await click(`label=${RENAMED}`);
     await click(`label=${COMPATIBLE}`);
-    assert.equal(await control(`label=${RENAMED}`, "checked"), true);
-    assert.equal(await control(`label=${COMPATIBLE}`, "checked"), true);
+    assert.deepEqual([await checked(`label=${RENAMED}`), await checked(`label=${COMPATIBLE}`)], [true, true]);
     await click("button=Save pool");
-    await until(async () => !(await control("#pool-name")) && (await text(".pool-row")).includes(POOL), 30000, "the pool was not saved");
-    assert.match(await text(".pool-row"), /2 of 15/);
+    await toast(`${POOL} saved.`);
+    await pools([[POOL, "2 of 15"]]);
     await shot("pool-saved");
     const [pool, ...others] = (await observeModelAccess()).pools;
     assert.deepEqual(others, []);
@@ -109,13 +118,13 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
 
   it("edits the pool: renames it and takes one account out", async () => {
     await menu(`More for ${POOL}`, "Edit pool");
-    await until(() => control("#pool-name"), 15000, "the pool editor did not open");
+    await until(() => shown("#pool-name"), 15000, "the pool editor did not open");
     await type("#pool-name", POOL_RENAMED);
     await click(`label=${COMPATIBLE}`);
-    assert.equal(await control(`label=${COMPATIBLE}`, "checked"), false);
+    assert.deepEqual([await checked(`label=${RENAMED}`), await checked(`label=${COMPATIBLE}`)], [true, false]);
     await click("button=Save pool");
-    await until(async () => !(await control("#pool-name")) && (await text(".pool-row")).includes(POOL_RENAMED), 30000, "the pool edit was not saved");
-    assert.match(await text(".pool-row"), /1 of 15/);
+    await toast(`${POOL_RENAMED} saved.`);
+    await pools([[POOL_RENAMED, "1 of 15"]]);
     const [pool] = (await observeModelAccess()).pools;
     assert.equal(pool.id, ids.pool);
     assert.equal(pool.name, POOL_RENAMED);
@@ -125,15 +134,18 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
   it("deleting the only account of a pool deletes that pool too, as the question says", async () => {
     await settingsTab("Accounts");
     await menu(`More for ${RENAMED}`, "Delete");
-    await until(async () => (await text("dialog[open] h2")).includes(`Delete ${RENAMED}?`), 15000, "the delete question did not open");
-    assert.match(await text("dialog[open]"), new RegExp(`${POOL_RENAMED} has no other account, so it is deleted too`));
+    await until(() => says("dialog[open] h2", `Delete ${RENAMED}?`), 15000, "the delete question did not open");
+    assert.deepEqual(await texts("dialog[open] p .stack-small > span"), [
+      `${RENAMED} and its saved sign-in or key are removed from CrazyAgent. A running sign-in is cancelled first.`,
+      `It leaves pool ${POOL_RENAMED}. ${POOL_RENAMED} has no other account, so it is deleted too and its projects have no pool.`,
+    ]);
     await click("button=Remove from pools and delete");
-    await until(async () => (await text(".toast")).includes(`Deleted ${RENAMED}.`), 15000, "the delete did not finish");
+    await toast(`Deleted ${RENAMED}.`);
     const engine = await observeModelAccess();
     assert.deepEqual(engine.registry.map((account) => account.id), [ids.compatible]);
     assert.deepEqual(engine.pools, []);
     await settingsTab("Pools");
-    await until(async () => (await text("main")).includes("No pools yet"), 15000, "the emptied pool still showed");
+    await until(() => says("main .empty-state h2", "No pools yet"), 15000, "the emptied pool still showed");
   });
 
   it("deletes a pool from its menu, keeping its account, then the last account, leaving the engine empty", async () => {
@@ -141,18 +153,21 @@ describe("Settings, Accounts and Pools on the real desktop app and a writable en
     await type("#pool-name", POOL);
     await click(`label=${COMPATIBLE}`);
     await click("button=Save pool");
-    await until(async () => !(await control("#pool-name")) && (await text(".pool-row")).includes(POOL), 30000, "the pool was not saved");
+    await toast(`${POOL} saved.`);
+    await pools([[POOL, "1 of 15"]]);
     await menu(`More for ${POOL}`, "Delete pool");
-    await until(async () => (await text("dialog[open]")).includes("Its accounts stay in your list. Only the pool goes away."), 15000,
-      "the pool delete question did not open");
+    await until(() => says("dialog[open] p", "Its accounts stay in your list. Only the pool goes away."), 15000, "the pool delete question did not open");
     await click("button=Delete pool");
-    await until(async () => (await text("main")).includes("No pools yet"), 15000, "the pool was not deleted");
+    await toast(`${POOL} deleted.`);
+    await until(() => says("main .empty-state h2", "No pools yet"), 15000, "the pool was not deleted");
     const kept = await observeModelAccess();
     assert.deepEqual([kept.registry.map((account) => account.id), kept.pools], [[ids.compatible], []]);
     await settingsTab("Accounts");
     await menu(`More for ${COMPATIBLE}`, "Delete");
+    await until(() => says("dialog[open] h2", `Delete ${COMPATIBLE}?`), 15000, "the delete question did not open");
     await click("button=Delete account");
-    await until(async () => (await text("main")).includes("No accounts yet"), 15000, "the last account was not deleted");
+    await toast(`Deleted ${COMPATIBLE}.`);
+    await until(() => says("main .empty-state h2", "No accounts yet"), 15000, "the last account was not deleted");
     const engine = await observeModelAccess();
     assert.deepEqual([engine.registry, engine.connections, engine.pools], [[], [], []]);
     await shot("empty-again");
