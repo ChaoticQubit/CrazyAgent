@@ -151,6 +151,7 @@ fn team() -> TeamStatus {
         show_finished: false,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
+        land_on: None,
         ask_before_merge: false,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
@@ -1738,7 +1739,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
 
     assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
     assert_eq!(
-        view.branch_edit.as_ref().map(TextInput::value),
+        view.branch_edit.as_ref().map(|edit| edit.input.value()),
         Some("release/2.0")
     );
     for _ in "release/2.0".chars() {
@@ -1787,6 +1788,108 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
     assert!(view.help().contains(&("g", "Ask before merge")));
+}
+
+#[test]
+fn shift_l_edits_the_land_on_branch_and_an_empty_name_goes_back_to_the_masters_branch() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('L'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    assert!(!view.typing());
+    let mut view = loaded();
+    assert!(view.help().contains(&("L", "Land on")));
+    assert!(shows(&view, "Land on  Master's branch"));
+    assert_eq!(view.key(press(KeyCode::Char('L'))), TeamReply::Handled);
+    assert!(view.typing());
+    assert_eq!(view.help(), vec![("Enter", "Save"), ("Esc", "Close")]);
+    assert!(shows(&view, "[ The master's branch"));
+    let rows = frame(&view, 120, 48);
+    assert!(rows.iter().all(|row| row.chars().count() <= 120));
+    let words = rows
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        words.contains(
+            "It can be a branch checked out nowhere: then your project folder's files stay as they are."
+        ),
+        "{}",
+        rows.join("\n")
+    );
+    typed(&mut view, "sta");
+    assert!(view.paste("ge"));
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::LandOn {
+            project_id: project(),
+            branch: Some("stage".into()),
+        })
+    );
+    applied(&mut view, reply);
+    assert!(!view.typing());
+    assert_eq!(view.notice, Some(Notice::plain("Work now lands on stage.")));
+    let mut chosen = team();
+    chosen.land_on = Some("stage".into());
+    reread(&mut view, chosen, NOW + 10);
+    assert!(shows(&view, "Land on  stage"));
+    assert!(shows(&view, "Master's branch  Repository default"));
+
+    assert_eq!(view.key(press(KeyCode::Char('L'))), TeamReply::Handled);
+    assert_eq!(
+        view.branch_edit
+            .as_ref()
+            .map(|edit| (edit.setting, edit.input.value())),
+        Some((BranchSetting::LandOn, "stage"))
+    );
+    for _ in "stage".chars() {
+        assert_eq!(view.key(press(KeyCode::Backspace)), TeamReply::Handled);
+    }
+    let reply = view.key(press(KeyCode::Enter));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::LandOn {
+            project_id: project(),
+            branch: None,
+        })
+    );
+    let TeamReply::Change(action) = reply else {
+        unreachable!();
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 10,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "team_land_on_invalid".into(),
+        })),
+    );
+    assert!(view.typing(), "a refused name stays in the editor");
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch."
+        ))
+    );
+    let reply = view.key(press(KeyCode::Enter));
+    applied(&mut view, reply);
+    assert!(!view.typing());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Work now lands on the master's branch."))
+    );
+
+    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(
+        view.branch_edit.as_ref().map(|edit| edit.setting),
+        Some(BranchSetting::Master),
+        "m still opens the Master's branch"
+    );
 }
 
 #[test]

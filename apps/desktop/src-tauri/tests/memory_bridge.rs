@@ -611,8 +611,7 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let served = mailbox.clone();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        serve_live(std::io::Cursor::new(request), &mut output, &served, &[])
-        .map(|()| output)
+        serve_live(std::io::Cursor::new(request), &mut output, &served, &[]).map(|()| output)
     });
     let agents = root.join("agents");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
