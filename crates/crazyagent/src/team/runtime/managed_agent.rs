@@ -1,6 +1,6 @@
 use super::{
     Adoption, Grant, Launch, Managed, Mode, Order, Plan, Report, Seat, TeamLimits, TeamRuntime,
-    TurnEnd, per_turn,
+    TurnEnd, TurnRules, per_turn,
 };
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
@@ -162,6 +162,7 @@ pub(crate) struct ManagedAgent {
     pub(crate) project: PathBuf,
     pub(crate) working_dir: PathBuf,
     pub(crate) sandbox_profile: PathBuf,
+    pub(crate) background: crate::team::BackgroundAtEnd,
     role: AgentRole,
     stamp: HostStamp,
     binding: NativeProfileBinding,
@@ -433,6 +434,7 @@ impl ManagedAgent {
             project: project.canonicalize().unwrap(),
             working_dir,
             sandbox_profile,
+            background: crate::team::BackgroundAtEnd::Wait,
             role,
             stamp: host,
             binding,
@@ -458,9 +460,10 @@ impl ManagedAgent {
     }
 
     /// Runs one per-turn worker over several turns the way the runtime runs a managed
-    /// agent, continuing `resume` when a wake gives one. Inputs: the conversation to
-    /// continue, each turn's prompt with the profile held for it and the turn's time.
-    /// Output: every report the worker sent and the problem that ended it, if any.
+    /// agent, continuing `resume` when a wake gives one, under the agent's Background
+    /// commands at task end choice. Inputs: the conversation to continue, each turn's
+    /// prompt with the profile held for it and the turn's time. Output: every report the
+    /// worker sent and the problem that ended it, if any.
     pub(super) fn run_turns(
         &mut self,
         resume: Option<Resume>,
@@ -489,7 +492,10 @@ impl ManagedAgent {
                         context,
                         access: crate::sandbox::policy::AgentAccess::Sandboxed,
                     })),
-                    Some(turn_time),
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: self.background,
+                    },
                 ))
                 .unwrap();
         }
@@ -536,7 +542,10 @@ impl ManagedAgent {
                     context,
                     access: crate::sandbox::policy::AgentAccess::Sandboxed,
                 })),
-                Some(turn_time),
+                TurnRules {
+                    limit: Some(turn_time),
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
             ))
             .unwrap();
         drop(orders);
@@ -598,7 +607,10 @@ impl ManagedAgent {
                 context,
                 access,
             })),
-            Some(turn_time),
+            TurnRules {
+                limit: Some(turn_time),
+                background: crate::team::BackgroundAtEnd::Wait,
+            },
         )
     }
 
@@ -623,7 +635,14 @@ impl ManagedAgent {
             .unwrap();
         for prompt in &prompts[1..] {
             orders
-                .send(Order::Turn((*prompt).to_owned(), None, Some(turn_time)))
+                .send(Order::Turn(
+                    (*prompt).to_owned(),
+                    None,
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: crate::team::BackgroundAtEnd::Wait,
+                    },
+                ))
                 .unwrap();
         }
         orders.send(Order::Stop).unwrap();

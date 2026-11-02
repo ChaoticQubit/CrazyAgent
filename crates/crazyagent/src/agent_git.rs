@@ -9,6 +9,9 @@ const NAME_BYTES_MAX: usize = 48;
 /// `<clone>/.worktrees/<teammate>` each, which landing leaves out of the harness's change
 /// set and cleanup removes with the clone.
 pub const TEAMMATES_FOLDER: &str = ".worktrees";
+/// The most bytes of a native teammate's name, which names its worktree folder.
+pub const WORKTREE_NAME_BYTES_MAX: usize = 64;
+const CLAUDE_LEAD_NAME: &str = "team-lead";
 
 /// Where an agent keeps its git state, by the project's agent access level (DEC-102).
 /// `Linked`: a worktree the project repository added, whose git folder sits in the
@@ -111,6 +114,20 @@ pub fn is_teammate_branch(task: &str, branch: &str) -> bool {
         .strip_prefix(task)
         .and_then(|rest| rest.strip_prefix(TEAMMATE_SEPARATOR))
         .is_some_and(|name| !name.is_empty())
+}
+
+/// Says whether a native teammate's name can name its worktree folder under
+/// `TEAMMATES_FOLDER`: 1 to `WORKTREE_NAME_BYTES_MAX` bytes of letters, digits, `-`, `_`
+/// and `.`, not starting with a dot, and not the name Claude Code gives the lead. Input:
+/// the name. Output: the answer.
+pub fn worktree_name_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= WORKTREE_NAME_BYTES_MAX
+        && !name.starts_with('.')
+        && name != CLAUDE_LEAD_NAME
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// Tells whether a name is lower-case ASCII letters and digits joined by single hyphens,

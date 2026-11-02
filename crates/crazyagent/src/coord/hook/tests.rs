@@ -71,6 +71,7 @@ fn the_first_edit_without_a_graph_query_gets_one_reminder_and_is_allowed() {
         activity: Some(tag.to_owned()),
         teammate: None,
         cwd: None,
+        unnamed: false,
     };
     let input = json!({
         "tool_name": "Edit",

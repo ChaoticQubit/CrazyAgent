@@ -893,6 +893,21 @@ async fn desktop_team_land_on(
 }
 
 #[tauri::command]
+async fn desktop_team_background(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    choice: crazyagent::team::BackgroundAtEnd,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_background(&id, choice, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_ask_before_merge(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3020,6 +3035,7 @@ pub fn run() {
             desktop_team_agent_branches,
             desktop_team_master_branch,
             desktop_team_land_on,
+            desktop_team_background,
             desktop_team_ask_before_merge,
             desktop_team_new_folder_limit,
             desktop_team_coordination,
