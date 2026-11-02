@@ -34,10 +34,12 @@ fn a_real_claude_team_agent_turn_is_signed_in_inside_the_agent_sandbox() {
 /// The running processes whose command line holds `needle`, as `ps` lists them.
 /// Input: the text. Output: each process's pid and command line.
 fn processes_with(needle: &str) -> Vec<String> {
-    let listed = std::process::Command::new("/bin/ps")
-        .args(["-axww", "-o", "pid=,command="])
-        .output()
-        .unwrap();
+    let listed = crate::spawn_gate::output(std::process::Command::new("/bin/ps").args([
+        "-axww",
+        "-o",
+        "pid=,command=",
+    ]))
+    .unwrap();
     assert!(listed.status.success());
     String::from_utf8_lossy(&listed.stdout)
         .lines()
