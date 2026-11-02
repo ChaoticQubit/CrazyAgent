@@ -340,7 +340,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
-    {view && <NetworkChoices name="ps-network" value={network} onChange={setNetwork} />}
+    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}

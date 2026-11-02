@@ -117,8 +117,9 @@ export interface ContextChunk {
 /** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
-/** How far a project's tools-on agents, the live master and the plugin check may reach on the
- * network: open is the whole network, https is port 443 only, none is nothing beyond the model. */
+/** How far a project's tools-on agents and the plugin check may reach on the network: open is
+ * the whole network, https is port 443 only, none is nothing beyond the model. It does not
+ * widen or narrow the live master, which always reaches the model's port only. */
 export type AgentNetwork = "open" | "https" | "none";
 
 /** A toolchain family the engine detects in the owner's home folder and the project. */

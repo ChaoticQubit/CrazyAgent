@@ -788,17 +788,13 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let network = if job.tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![model_remote(account)?])
-        };
         let policy = jobs
             .agent_policy(&project)
             .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
+        let network = job_network(&policy, job.tools, model_remote(account)?);
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
@@ -1477,6 +1473,22 @@ fn read_folders(
     folders.sort();
     folders.dedup();
     Ok(folders)
+}
+
+/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
+/// reaches only its model endpoint, and a tools-on job follows the project's network choice
+/// with the model still reachable. Inputs: the project's agent policy, whether the job has
+/// tools, and the model endpoint. Output: the sandbox network.
+pub(crate) fn job_network(
+    policy: &crate::sandbox::policy::AgentPolicy,
+    tools: bool,
+    model: SandboxRemote,
+) -> SandboxNetwork {
+    if tools {
+        policy.network.sandbox(Some(model))
+    } else {
+        SandboxNetwork::Only(vec![model])
+    }
 }
 
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
@@ -2781,6 +2793,44 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_research_job_network_follows_the_project_choice_only_with_tools() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let model = SandboxRemote::AnyHost(8443);
+        let profile = |choice: AgentNetwork, tools: bool| {
+            let policy = AgentPolicy {
+                network: choice,
+                ..AgentPolicy::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            let make = |name: &str| {
+                let folder = base.join(name);
+                std::fs::create_dir(&folder).unwrap();
+                folder
+            };
+            ProjectSandbox::new(
+                &make("project"),
+                &make("home"),
+                &make("tmp"),
+                job_network(&policy, tools, model),
+            )
+            .unwrap()
+            .profile()
+        };
+        let off = profile(AgentNetwork::Open, false);
+        assert!(off.contains("(remote ip \"*:8443\")"), "{off}");
+        assert!(!off.contains("(remote ip \"*:*\")"), "{off}");
+        let open = profile(AgentNetwork::Open, true);
+        assert!(open.contains("(remote ip \"*:*\")"), "{open}");
+        let https = profile(AgentNetwork::Https, true);
+        assert!(https.contains("(remote ip \"*:443\")"), "{https}");
+        assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
+        let none = profile(AgentNetwork::None, true);
+        assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
+        assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+    }
 
     #[test]
     fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
