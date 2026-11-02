@@ -10985,6 +10985,90 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
 }
 
+/// A subscription agent with tools under the None network reaches only its model (Q17 C,
+/// rv-secreview S4R1-1). Nothing listens on 127.0.0.1:443, so the connect's error names
+/// the verdict: Seatbelt's denial is "Operation not permitted", while "Connection refused"
+/// means the profile let the packet out. Seatbelt matches by port, so loopback 443 stands
+/// for every host on 443.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_443() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(managed.join("auth.json"), "{}").unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .args(["/usr/bin/nc", "-z", "-G", "3", "127.0.0.1", "443"])
+            .current_dir(&plan.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(id).join("home"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("connectx to 127.0.0.1 port 443 (tcp) failed: Operation not permitted"),
+        "under None a managed tools-on agent reached a non-model host on 443: {said}"
+    );
+}
+
 #[test]
 fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
