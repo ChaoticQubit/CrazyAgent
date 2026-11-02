@@ -3962,6 +3962,14 @@ fn edit_runtime(
     script: &str,
     edits: crate::instruction_files::EditDelivery,
 ) -> TeamRuntime {
+    edit_settings(fixture, edits);
+    check_runtime(fixture, host, script, None, None)
+}
+
+/// Stores the fixture's app instructions as `STARTED_TEXT` and the project's choice of how
+/// an instruction edit reaches running agents. Takes the fixture and the choice.
+#[cfg(target_os = "macos")]
+fn edit_settings(fixture: &Fixture, edits: crate::instruction_files::EditDelivery) {
     crate::agent_home::save_app(&fixture.base, STARTED_TEXT).unwrap();
     crate::instruction_files::save(
         &fixture.connection,
@@ -3972,7 +3980,56 @@ fn edit_runtime(
         },
     )
     .unwrap();
-    check_runtime(fixture, host, script, None, None)
+}
+
+/// Sends the owner's team message to the project's master, as the owner's chat does. Takes
+/// the fixture and the text.
+#[cfg(target_os = "macos")]
+fn tell_master(fixture: &Fixture, text: &str) {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::Message {
+            project_id: fixture.setup.project_id.clone(),
+            text: text.into(),
+        }],
+    );
+}
+
+/// How many replies the project's master gave in the team chat.
+#[cfg(target_os = "macos")]
+fn master_replies(fixture: &Fixture) -> usize {
+    fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.author == MessageAuthor::Master)
+        .count()
+}
+
+/// The instruction file the engine wrote into one agent's Codex home.
+#[cfg(target_os = "macos")]
+fn codex_instructions(fixture: &Fixture, agent: i64) -> String {
+    std::fs::read_to_string(
+        fixture
+            .base
+            .join("team/agents")
+            .join(format!("agent-{agent}"))
+            .join("home/AGENTS.md"),
+    )
+    .unwrap_or_default()
+}
+
+/// The change block one typed text carries: from the change header to `next`, the text
+/// that follows it. Takes the typed text and `next`. Returns the block.
+#[cfg(target_os = "macos")]
+fn change_block<'a>(typed: &'a str, next: &str) -> &'a str {
+    let header = typed
+        .find(CHANGED_HEADER)
+        .unwrap_or_else(|| panic!("a change block: {typed}"));
+    let end = typed[header..]
+        .find(next)
+        .unwrap_or_else(|| panic!("{next:?} after the change block: {typed}"));
+    &typed[header..header + end]
 }
 
 /// Hands the fixture's Claude Code sub-agents one more task, as the owner's Delegate does.
@@ -4157,6 +4214,261 @@ fn with_badge_nothing_is_sent_and_the_status_shows_instructions_changed() {
     assert!(typed.contains("Write the second page."), "{typed}");
     assert_eq!(started.len(), 1, "the agent kept running: {started:?}");
     assert!(shown, "the badge stays while the agent runs");
+}
+
+/// With the default choice, an owner edit reaches a master that keeps running between
+/// messages: its next message starts with the changed section only, once, and the
+/// message after it carries no change block (DEC-111 QR1, master follow-up of S10).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_an_edit_reaches_the_masters_next_message_once() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        master_replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        master_replies(f) == 2
+    });
+    tell_master(&fixture, "Plan the footer");
+    fixture.until(&mut team, "the master answers the third message", |f| {
+        master_replies(f) == 3
+    });
+    let text = typed(&fixture, master);
+    let started = launches(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(text.matches(CHANGED_HEADER).count(), 1, "{text}");
+    assert!(
+        text.find("Plan the page").unwrap() < text.find(CHANGED_HEADER).unwrap(),
+        "{text}"
+    );
+    let block = change_block(&text, "Plan the title");
+    assert!(
+        block.contains("## Style") && block.contains("Use spaces."),
+        "{block}"
+    );
+    assert!(
+        !block.contains("## Tests") && !block.contains("Use tabs."),
+        "{block}"
+    );
+    assert!(text.contains("Plan the footer"), "{text}");
+    assert_eq!(started.len(), 1, "the master kept running: {started:?}");
+}
+
+/// With the default choice, an owner edit reaches the live master in the next team message
+/// the engine types into its pane, once; the owner's later message carries no change block.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_an_edit_reaches_the_live_masters_next_typed_message_once() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    for (turns, text) in [
+        (1, "Plan the page"),
+        (2, "Plan the title"),
+        (3, "Plan the footer"),
+    ] {
+        if turns == 2 {
+            crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+        }
+        tell_master(&fixture, text);
+        fixture.until(&mut team, "the live master's turn ends", |f| {
+            typed(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
+        });
+    }
+    let text = typed(&fixture, master);
+    let started = launches(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(text.matches(CHANGED_HEADER).count(), 1, "{text}");
+    assert!(
+        text.find("Plan the page").unwrap() < text.find(CHANGED_HEADER).unwrap(),
+        "{text}"
+    );
+    let block = change_block(&text, "Plan the title");
+    assert!(
+        block.contains("## Style") && block.contains("Use spaces."),
+        "{block}"
+    );
+    assert!(
+        !block.contains("## Tests") && !block.contains("Use tabs."),
+        "{block}"
+    );
+    assert_eq!(
+        started.len(),
+        1,
+        "the live master kept running: {started:?}"
+    );
+}
+
+/// With Restart chosen, an idle live master stops after each owner edit and starts again
+/// in its own conversation with the new text, types nothing, and stays live: three
+/// restarts in a row never count as the start failures that turn the live master off.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_restart_an_idle_live_master_restarts_in_its_own_conversation_with_the_new_text() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(&fixture, crate::instruction_files::EditDelivery::Restart);
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let (conversation, _) = kept_conversation(&fixture.connection, "s-one").unwrap();
+    for (round, text) in [EDITED_TEXT, STARTED_TEXT, EDITED_TEXT]
+        .into_iter()
+        .enumerate()
+    {
+        crate::agent_home::save_app(&fixture.base, text).unwrap();
+        fixture.until(&mut team, "the live master starts again", |f| {
+            launches(f, master).len() == round + 2
+                && live_agent(&f.connection) == Some(master)
+                && host.alive().unwrap() == names(&[master])
+        });
+    }
+    let started = launches(&fixture, master);
+    let given = codex_instructions(&fixture, master);
+    let text = typed(&fixture, master);
+    let on = super::super::master::live(&fixture.connection, &project).unwrap();
+    let turns = live_turns(&fixture.connection);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(started.len(), 4, "{started:?}");
+    assert!(
+        started[1..]
+            .iter()
+            .all(|line| line.ends_with(&format!(" resume {conversation}"))),
+        "{started:?}"
+    );
+    assert!(on, "three instruction restarts leave the live master on");
+    assert_eq!(masters(&fixture.connection), [master]);
+    assert!(
+        given.contains("Use spaces.") && !given.contains("Use tabs."),
+        "{given}"
+    );
+    assert!(!text.contains(CHANGED_HEADER), "{text}");
+    assert_eq!(turns, (0, false), "nothing typed on restart");
+}
+
+/// With Restart chosen, an idle master that is not live stops after an owner edit, and the
+/// owner's next message starts the project's master again the way a stopped master always
+/// starts: fresh, with the new text and the conversation so far, and no change block.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_restart_an_idle_master_stops_and_its_next_message_starts_it_with_the_new_text() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(&fixture, crate::instruction_files::EditDelivery::Restart);
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        master_replies(f) == 1
+    });
+    let first = masters(&fixture.connection)[0];
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    fixture.until(&mut team, "the idle master stops", |f| {
+        f.agent_status(first).0 == AgentStatus::Stopped
+    });
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        master_replies(f) == 2
+    });
+    let all = masters(&fixture.connection);
+    let master = *all.last().unwrap();
+    let given = codex_instructions(&fixture, master);
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(all.len(), 2, "{all:?}");
+    assert_eq!(launches(&fixture, first).len(), 1);
+    assert!(
+        given.contains("Use spaces.") && !given.contains("Use tabs."),
+        "{given}"
+    );
+    assert!(
+        text.contains("Plan the page") && text.contains("Plan the title"),
+        "{text}"
+    );
+    assert!(!text.contains(CHANGED_HEADER), "{text}");
+}
+
+/// With Badge chosen, an owner edit sends nothing to the running live master: the next
+/// team message typed into it carries no change block, it keeps its process, and the team
+/// status shows its instructions changed until the owner turns it off and on again.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_badge_the_master_gets_nothing_and_shows_instructions_changed_until_it_starts_again() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(&fixture, crate::instruction_files::EditDelivery::Badge);
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    assert!(!badge(&fixture, master), "no badge before an edit");
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    fixture.until(&mut team, "the badge shows", |f| badge(f, master));
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the live master's turn ends", |f| {
+        typed(f, master).contains("Plan the title") && live_turns(&f.connection) == (1, false)
+    });
+    let text = typed(&fixture, master);
+    assert_eq!(launches(&fixture, master).len(), 1, "it kept running");
+    assert!(badge(&fixture, master), "the badge stays while it runs");
+
+    super::super::master::set_live(&fixture.connection, &project, false).unwrap();
+    fixture.until(
+        &mut team,
+        "the master stops as the owner turns it off",
+        |f| f.agent_status(master).0 == AgentStatus::Stopped,
+    );
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the master starts again without the badge",
+        |f| {
+            launches(f, master).len() == 2
+                && live_agent(&f.connection) == Some(master)
+                && !badge(f, master)
+        },
+    );
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    idle_ticks(&mut team);
+    let cleared = !badge(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(!text.contains(CHANGED_HEADER), "{text}");
+    assert!(
+        cleared,
+        "the badge stays cleared once the master started again"
+    );
 }
 
 /// A woken sub-agent continues only a conversation kept on the same harness and account,
