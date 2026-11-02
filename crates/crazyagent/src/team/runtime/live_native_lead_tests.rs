@@ -1,5 +1,5 @@
 use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude};
-use super::{Order, Report, TurnEnd};
+use super::{Order, Report, TurnEnd, TurnRules};
 use crate::sandbox::policy::AgentAccess;
 use crate::team::AgentRole;
 use crate::terminal::tmux::{Tmux, installed};
@@ -257,7 +257,14 @@ fn live_order_held_during_own_turn() {
     assert!(answered(&turns, "ONE"), "{turns:?}");
     team.type_into_pane(COUNT);
     team.reports_until(TURN, own_started);
-    team.order(Order::Turn(TWO.to_owned(), None, Some(TURN)));
+    team.order(Order::Turn(
+        TWO.to_owned(),
+        None,
+        TurnRules {
+            limit: Some(TURN),
+            background: crate::team::BackgroundAtEnd::Wait,
+        },
+    ));
     let after = team.until_finished(TURN * 2);
     let turns = finished(&after);
     let own = after

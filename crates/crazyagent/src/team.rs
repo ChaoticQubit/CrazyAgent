@@ -496,6 +496,58 @@ impl BranchMode {
     }
 }
 
+/// What a sub-agent's task does when its turn ends while a command its agent started in
+/// the background still runs (DEC-111 Q13): `Wait` keeps the task open until the command
+/// ends, bounded by the task time limit; `Grace` waits at most `secs` seconds, then stops
+/// it; `Stop` ends the task with its turn and stops it, and the agent's task prompt says
+/// so wherever the engine stops it. Wait is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BackgroundAtEnd {
+    #[default]
+    Wait,
+    Grace {
+        secs: u32,
+    },
+    Stop,
+}
+
+/// The grace times, in seconds, the owner may give background commands at task end.
+pub const BACKGROUND_GRACE_SECS: std::ops::RangeInclusive<u32> = 10..=3600;
+
+/// The grace time, in seconds, offered when the owner first picks a grace time.
+pub const BACKGROUND_GRACE_SECS_DEFAULT: u32 = 120;
+
+/// The grace times, in seconds, a client steps through, each inside
+/// [`BACKGROUND_GRACE_SECS`].
+pub const BACKGROUND_GRACE_CHOICES_SECS: [u32; 8] = [10, 30, 60, 120, 300, 600, 1800, 3600];
+
+impl BackgroundAtEnd {
+    /// The stored mode name and grace time. Output: `wait`, `grace` with its seconds, or
+    /// `stop`, each without seconds but grace.
+    pub fn stored(self) -> (&'static str, Option<u32>) {
+        match self {
+            Self::Wait => ("wait", None),
+            Self::Grace { secs } => ("grace", Some(secs)),
+            Self::Stop => ("stop", None),
+        }
+    }
+
+    /// Reads a stored mode and grace time. Inputs: the name and the seconds. Output: the
+    /// choice, or None for a pair it never stores or a grace time outside
+    /// [`BACKGROUND_GRACE_SECS`].
+    pub fn named(name: &str, secs: Option<u32>) -> Option<Self> {
+        match (name, secs) {
+            ("wait", None) => Some(Self::Wait),
+            ("grace", Some(secs)) if BACKGROUND_GRACE_SECS.contains(&secs) => {
+                Some(Self::Grace { secs })
+            }
+            ("stop", None) => Some(Self::Stop),
+            _ => None,
+        }
+    }
+}
+
 /// A project's nested sub-agent settings: how deep leads may start workers and where a
 /// worker's change set lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,6 +649,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         #[serde(default)]
         branch: Option<String>,
+    },
+    BackgroundAtEnd {
+        project_id: ProjectId,
+        choice: BackgroundAtEnd,
     },
     AskBeforeMerge {
         project_id: ProjectId,
@@ -827,6 +883,12 @@ impl TeamAction {
                 .is_none_or(plain_branch_name)
                 .then_some(())
                 .ok_or_else(|| failure("team_land_on_invalid")),
+            Self::BackgroundAtEnd { choice, .. } => match choice {
+                BackgroundAtEnd::Grace { secs } if !BACKGROUND_GRACE_SECS.contains(secs) => {
+                    Err(failure("team_background_grace_invalid"))
+                }
+                _ => Ok(()),
+            },
             Self::AnswerQuestion { message, text, .. } => {
                 if *message <= 0 {
                     return Err(failure("coord_question_missing"));
@@ -866,6 +928,7 @@ impl TeamAction {
             | Self::AgentBranches { project_id, .. }
             | Self::MasterBranch { project_id, .. }
             | Self::LandOn { project_id, .. }
+            | Self::BackgroundAtEnd { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::LiveMaster { project_id, .. }
@@ -1289,6 +1352,11 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_land_on (
                 project TEXT PRIMARY KEY,
                 branch TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_background (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('wait','grace','stop')),
+                grace_secs INTEGER CHECK((mode = 'grace') = (grace_secs IS NOT NULL))
             );
             CREATE TABLE IF NOT EXISTS team_merge_ask (
                 project TEXT PRIMARY KEY,
@@ -2129,6 +2197,16 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::BackgroundAtEnd { choice, .. } => {
+            let (mode, secs) = choice.stored();
+            tx.execute(
+                "INSERT INTO team_background(project,mode,grace_secs) VALUES (?1,?2,?3)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode,grace_secs=excluded.grace_secs",
+                params![project.as_str(), mode, secs],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::AskBeforeMerge { on, .. } => {
             tx.execute(
                 "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
@@ -2715,6 +2793,8 @@ pub struct TeamStatus {
     #[serde(default)]
     pub land_on: Option<String>,
     #[serde(default)]
+    pub background_at_end: BackgroundAtEnd,
+    #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
@@ -3186,6 +3266,29 @@ pub fn land_on(
     match branch {
         Some(branch) if !plain_branch_name(&branch) => Err(error("team_land_on_invalid")),
         branch => Ok(branch),
+    }
+}
+
+/// What the project's sub-agent tasks do at their turn end while commands their agents
+/// started in the background still run (DEC-111 Q13): the owner's choice, Wait by default.
+/// Takes a connection and the project. Returns the choice.
+pub fn background_at_end(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<BackgroundAtEnd, EngineError> {
+    let row: Option<(String, Option<u32>)> = connection
+        .query_row(
+            "SELECT mode,grace_secs FROM team_background WHERE project=?1",
+            [project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    match row {
+        None => Ok(BackgroundAtEnd::default()),
+        Some((mode, secs)) => {
+            BackgroundAtEnd::named(&mode, secs).ok_or_else(|| error("team_background_invalid"))
+        }
     }
 }
 
@@ -3888,6 +3991,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent_branches: agent_branches(connection, project)?,
         master_branch: master_branch_choice(connection, project)?,
         land_on: land_on(connection, project)?,
+        background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),

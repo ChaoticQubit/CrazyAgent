@@ -153,6 +153,7 @@ fn team() -> TeamStatus {
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
+        background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
@@ -2587,4 +2588,107 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
             )))
         );
     }
+}
+
+/// B steps Background commands at task end from Wait to a 2 min grace time, to Stop and
+/// back to Wait, and G steps the grace time through every choice, starting a grace time
+/// from another choice (DEC-111 Q13): each key sends its change, the engine's answer says
+/// the new choice and the team rows show what the engine stored. A grace time the engine
+/// refuses has its own plain text.
+#[test]
+fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
+    use crate::team::BackgroundAtEnd;
+    let mut view = TeamView::new(project());
+    for key in ['B', 'G'] {
+        assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
+        assert_eq!(
+            view.notice,
+            Some(Notice::plain("The team is still loading."))
+        );
+    }
+    let mut view = loaded();
+    assert!(view.help().contains(&("B", "Background commands")));
+    assert!(view.help().contains(&("G", "Grace time")));
+    assert!(shows(&view, "Background commands  Wait"));
+    let grace = |secs: u32, span: &str| {
+        (
+            BackgroundAtEnd::Grace { secs },
+            format!("A task's background commands now get {span} after its turn ends, then stop."),
+            format!("Background commands  Stop after {span}"),
+        )
+    };
+    let stop = (
+        BackgroundAtEnd::Stop,
+        "A task's background commands now stop when its turn ends, and its agent is told so."
+            .to_owned(),
+        "Background commands  Stop at turn end".to_owned(),
+    );
+    let wait = (
+        BackgroundAtEnd::Wait,
+        "A task now waits for the commands its agent started in the background, up to its task limit."
+            .to_owned(),
+        "Background commands  Wait".to_owned(),
+    );
+    let mut stored = team();
+    let mut at = NOW;
+    for (key, (choice, done, shown)) in [
+        ('B', grace(120, "2 min")),
+        ('G', grace(300, "5 min")),
+        ('B', stop.clone()),
+        ('G', grace(120, "2 min")),
+        ('B', stop),
+        ('B', wait),
+    ] {
+        let reply = view.key(press(KeyCode::Char(key)));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::BackgroundAtEnd {
+                project_id: project(),
+                choice,
+            }),
+            "{key} {choice:?}"
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(done)));
+        stored.background_at_end = choice;
+        at += 60_000;
+        reread(&mut view, stored.clone(), at);
+        assert!(shows(&view, &shown), "{shown}");
+    }
+
+    let choices = [10, 30, 60, 120, 300, 600, 1800, 3600];
+    for (index, secs) in choices.iter().copied().enumerate() {
+        let mut status = team();
+        status.background_at_end = BackgroundAtEnd::Grace { secs };
+        let mut view = TeamView::new(project());
+        let query = view.next_query(NOW).unwrap();
+        view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+        let next = choices[(index + 1) % choices.len()];
+        assert_eq!(
+            view.key(press(KeyCode::Char('G'))),
+            TeamReply::Change(TeamAction::BackgroundAtEnd {
+                project_id: project(),
+                choice: BackgroundAtEnd::Grace { secs: next },
+            }),
+            "{secs}"
+        );
+    }
+
+    let mut view = loaded();
+    let TeamReply::Change(action) = view.key(press(KeyCode::Char('G'))) else {
+        panic!("G sends a grace time");
+    };
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "team_background_grace_invalid".into(),
+        })),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem("Pick a grace time from 10 s to 1 h."))
+    );
 }

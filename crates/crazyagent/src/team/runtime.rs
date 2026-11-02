@@ -137,12 +137,19 @@ impl TeamLimits {
 
 /// What a worker thread is told to do next: start a live master with the instructions its
 /// harness reads at launch and the signed-in account it needs, run one turn, with its
-/// prompt, the signed-in account it needs and the owner's task time limit for it (none for
-/// no limit), or stop.
+/// prompt, the signed-in account it needs and the owner's rules for it, or stop.
 enum Order {
     Start(String, Option<Box<Grant>>),
-    Turn(String, Option<Box<Grant>>, Option<Duration>),
+    Turn(String, Option<Box<Grant>>, TurnRules),
     Stop,
+}
+
+/// The owner's rules for one turn: its task time limit (none for no limit) and what it does
+/// at its end while commands its agent started in the background still run (DEC-111 Q13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TurnRules {
+    limit: Option<Duration>,
+    background: super::BackgroundAtEnd,
 }
 
 /// What one turn of an agent on a signed-in managed account needs: the profile, held
@@ -2656,7 +2663,14 @@ impl TeamRuntime {
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         if worker
             .orders
-            .send(Order::Turn(prompt, grant, bound.map(|(limit, _)| limit)))
+            .send(Order::Turn(
+                prompt,
+                grant,
+                TurnRules {
+                    limit: bound.map(|(limit, _)| limit),
+                    background: super::BackgroundAtEnd::Wait,
+                },
+            ))
             .is_err()
         {
             return Ok(());
@@ -3949,6 +3963,7 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            let background = super::background_at_end(&self.connection, &stored.project_id)?;
             let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
             prompt.push_str(&waiting);
             let home = agent_home(&self.state, agent);
@@ -3966,7 +3981,14 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&agent).expect("worker exists");
             if worker
                 .orders
-                .send(Order::Turn(prompt, grant, bound.map(|(limit, _)| limit)))
+                .send(Order::Turn(
+                    prompt,
+                    grant,
+                    TurnRules {
+                        limit: bound.map(|(limit, _)| limit),
+                        background,
+                    },
+                ))
                 .is_err()
             {
                 continue;
@@ -6983,7 +7005,7 @@ fn live_serve(
 
 enum Next {
     Start(String, Option<Box<Grant>>),
-    Turn(String, Option<Box<Grant>>, Option<Duration>),
+    Turn(String, Option<Box<Grant>>, TurnRules),
     Stop,
     Closed(Option<String>),
 }
@@ -7001,7 +7023,7 @@ fn next_turn(
         }
         match orders.recv_timeout(ORDER_WAIT) {
             Ok(Order::Start(instructions, grant)) => return Next::Start(instructions, grant),
-            Ok(Order::Turn(prompt, grant, limit)) => return Next::Turn(prompt, grant, limit),
+            Ok(Order::Turn(prompt, grant, rules)) => return Next::Turn(prompt, grant, rules),
             Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
             Err(RecvTimeoutError::Timeout) => {
                 if let Some(session) = idle.as_deref_mut() {
@@ -7020,7 +7042,7 @@ fn next_turn(
 /// if any, and the account's credential copy in its home with the custody use it was
 /// handed under, both held while the process runs.
 struct Kept {
-    first: Option<(String, Option<Duration>)>,
+    first: Option<(String, TurnRules)>,
     held: (AgentCredential, NativeProfileUse),
 }
 
@@ -7053,7 +7075,7 @@ fn native_session(
 ) -> Option<String> {
     assert!(plan.native && !plan.live && plan.pane.is_some());
     let (first, grant) = match next_turn(orders, cancel, None) {
-        Next::Turn(prompt, grant, limit) => (Some((prompt, limit)), grant),
+        Next::Turn(prompt, grant, rules) => (Some((prompt, rules)), grant),
         Next::Start(_, grant) => (None, grant),
         Next::Stop | Next::Closed(_) => return None,
     };
@@ -7149,7 +7171,7 @@ fn native_adopted(
         turn_closed(reports, taken, cause);
     };
     let (first, grant) = match next_turn(orders, cancel, None) {
-        Next::Turn(prompt, grant, limit) => (Some((prompt, limit)), grant),
+        Next::Turn(prompt, grant, rules) => (Some((prompt, rules)), grant),
         Next::Start(_, grant) => (None, grant),
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
@@ -7277,7 +7299,7 @@ fn next_lead_turn(
             }
             match orders.recv_timeout(ORDER_WAIT) {
                 Ok(Order::Start(instructions, grant)) => return Next::Start(instructions, grant),
-                Ok(Order::Turn(prompt, grant, limit)) => return Next::Turn(prompt, grant, limit),
+                Ok(Order::Turn(prompt, grant, rules)) => return Next::Turn(prompt, grant, rules),
                 Ok(Order::Stop) | Err(RecvTimeoutError::Disconnected) => return Next::Stop,
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -7287,8 +7309,8 @@ fn next_lead_turn(
                     Ok(Order::Start(instructions, grant)) => {
                         own.held = Some(Next::Start(instructions, grant));
                     }
-                    Ok(Order::Turn(prompt, grant, limit)) => {
-                        own.held = Some(Next::Turn(prompt, grant, limit));
+                    Ok(Order::Turn(prompt, grant, rules)) => {
+                        own.held = Some(Next::Turn(prompt, grant, rules));
                     }
                     Ok(Order::Stop) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         return Next::Stop;
@@ -7339,12 +7361,12 @@ fn serve(
     let mut own = OwnTurn::default();
     loop {
         let next = match first.take() {
-            Some((prompt, limit)) => Next::Turn(prompt, None, limit),
+            Some((prompt, rules)) => Next::Turn(prompt, None, rules),
             None if lead => next_lead_turn(orders, cancel, &mut session, reports, &mut own),
             None => next_turn(orders, cancel, Some(&mut session)),
         };
-        let (prompt, grant, limit) = match next {
-            Next::Turn(prompt, grant, limit) => (prompt, grant, limit),
+        let (prompt, grant, rules) = match next {
+            Next::Turn(prompt, grant, rules) => (prompt, grant, rules),
             Next::Start(..) => unreachable!("only a live master is started with its instructions"),
             Next::Stop => break,
             Next::Closed(cause) => {
@@ -7353,11 +7375,13 @@ fn serve(
             }
         };
         assert!(grant.is_none());
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, limit);
+        let prompt = told(prompt, rules, session.reports_background());
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
-        ) && (end != TurnEnd::Interrupted || session.background_running() == 0);
+        ) && (end != TurnEnd::Interrupted || session.background_running() == 0)
+            && !session.held();
         if end == TurnEnd::Closed {
             problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
@@ -7401,7 +7425,7 @@ fn per_turn(
     interrupt: &AtomicBool,
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
-    while let Next::Turn(prompt, grant, limit) = next_turn(orders, cancel, None) {
+    while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
         let Some(grant) = grant else {
             let _ = reports.send(Report::Finished {
                 text: String::new(),
@@ -7431,7 +7455,7 @@ fn per_turn(
                 return Some(problem);
             }
         };
-        let process = limit.map_or(plan.limits.run_time, |limit| {
+        let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
         let credential = match profile.hand_to_agent(home, process, &plan.executable) {
@@ -7472,7 +7496,8 @@ fn per_turn(
             group: session.process_group(),
             pane: None,
         });
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, limit);
+        let prompt = told(prompt, rules, true);
+        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
         if let Some(recorded) = session
             .conversation()
             .filter(|c| plan.continues && resume.as_ref() != Some(c))
@@ -7513,6 +7538,13 @@ const PROCESS_CLOSED: &str = "The agent process closed";
 const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// What a task cut by a time limit says when commands its agent started still ran.
 const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
+/// What a task the owner's background grace time ended says (DEC-111 Q13).
+const BACKGROUND_GRACE_ENDED: &str = "The background grace time in Team settings ended this task while a command it started in the background still ran; that command was stopped.";
+/// What a task that ended with its turn under the owner's Stop setting says (DEC-111 Q13).
+const BACKGROUND_STOPPED: &str = "This task ended with its turn, as Team settings say, while a command it started in the background still ran; that command was stopped.";
+/// The task prompt line for agents whose background commands stop at task end, only then.
+const BACKGROUND_STOPS_LINE: &str =
+    "Commands you start in the background stop when your turn ends.";
 /// The task line a kept native lead's own turn is recorded under: a turn its app started
 /// by itself, such as after messages from its teammates, with no task given to it.
 const OWN_TURN_TASK: &str =
@@ -7957,6 +7989,20 @@ fn run_code(error: &RunError) -> &str {
     }
 }
 
+/// The prompt one turn is typed with: the task's own, and under Stop the line telling the
+/// agent its background commands stop when its turn ends, only where the engine stops them:
+/// a session that ends with the turn, or a pane app whose record reports them. A kept
+/// session reporting none, such as a Codex app's, keeps them running, so its agent is not
+/// told so (rv-audit S3 F2). Takes the prompt, the turn's rules and whether the engine stops
+/// them. Returns the prompt.
+fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
+    if rules.background == super::BackgroundAtEnd::Stop && stops {
+        format!("{prompt}\n{BACKGROUND_STOPS_LINE}")
+    } else {
+        prompt
+    }
+}
+
 /// How a turn ends on a launch error: the deadline and the output limits keep their own
 /// ends; any other error closes the agent and keeps its code, as does the deadline, so a
 /// cut turn can name the session limit. Input: the error. Output: the end and its code.
@@ -7968,13 +8014,20 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
     }
 }
 
+/// Runs one engine-typed turn on the agent's session until it ends: by its app, the cancel
+/// flag, the owner's interrupt, its time limit, or, while the app's turn is held open only
+/// for commands it started in the background, the owner's Background commands at task end
+/// choice: at once under Stop, after the grace time under Grace (DEC-111 Q13). A turn ended
+/// for its background commands is still held, so its caller stops the agent and them with
+/// it. Takes the session, the prompt, the reports channel, the cancel and interrupt flags
+/// and the turn's rules. Returns the turn's text, its end and the end's cause.
 fn turn(
     session: &mut AgentSession,
     prompt: &str,
     reports: &Sender<Report>,
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
-    limit: Option<Duration>,
+    rules: TurnRules,
 ) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
     if let Err(problem) = session.send_or_cancel(prompt, cancel) {
@@ -7983,12 +8036,14 @@ fn turn(
         }
         return (String::new(), TurnEnd::Closed, Some(problem.0));
     }
-    let deadline = limit.map(|limit| Instant::now() + limit);
+    let deadline = rules.limit.map(|limit| Instant::now() + limit);
     let mut text = String::new();
     let mut limited = false;
     let mut interrupted = false;
     let mut progress = Instant::now();
     let mut cause = None;
+    let mut held_since = None;
+    let mut released = None;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
@@ -7999,6 +8054,21 @@ fn turn(
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             cause = Some(TURN_LIMIT.to_owned());
             break TurnEnd::TimedOut;
+        }
+        if session.held() {
+            let since = *held_since.get_or_insert_with(Instant::now);
+            released = match rules.background {
+                super::BackgroundAtEnd::Wait => None,
+                super::BackgroundAtEnd::Grace { secs } => (since.elapsed()
+                    >= Duration::from_secs(u64::from(secs)))
+                .then_some(BACKGROUND_GRACE_ENDED),
+                super::BackgroundAtEnd::Stop => Some(BACKGROUND_STOPPED),
+            };
+            if released.is_some() {
+                break TurnEnd::Success;
+            }
+        } else {
+            held_since = None;
         }
         if progress.elapsed() >= PROGRESS_EVERY {
             progress = Instant::now();
@@ -8037,17 +8107,23 @@ fn turn(
             Ok(Some(_)) => {}
         }
     };
+    assert!(released.is_none() || (end == TurnEnd::Success && session.held()));
     if session.background_running() > 0 {
-        match end {
-            TurnEnd::TimedOut => text = format!("{BACKGROUND_CUT}\n{text}"),
-            TurnEnd::Interrupted => text = format!("{BACKGROUND_INTERRUPTED}\n{text}"),
+        match (end, released) {
+            (TurnEnd::TimedOut, _) => text = format!("{BACKGROUND_CUT}\n{text}"),
+            (TurnEnd::Interrupted, _) => text = format!("{BACKGROUND_INTERRUPTED}\n{text}"),
+            (TurnEnd::Success, Some(line)) => text = format!("{line}\n{text}"),
             _ => {}
         }
     }
     assert!(
         text.len()
             <= super::RESULT_BYTES_MAX * 4
-                + BACKGROUND_CUT.len().max(BACKGROUND_INTERRUPTED.len())
+                + BACKGROUND_CUT
+                    .len()
+                    .max(BACKGROUND_INTERRUPTED.len())
+                    .max(BACKGROUND_GRACE_ENDED.len())
+                    .max(BACKGROUND_STOPPED.len())
                 + 1
     );
     (text, end, cause)
