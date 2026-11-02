@@ -766,13 +766,14 @@ fn process_adoption_round_trip() {
         ));
         tx.commit().unwrap();
         let on = crate::coord::settings::CoordSettings {
-            nudges: true,
+            nudges: crate::coord::settings::Nudges::TenMinutes,
             ..Default::default()
         };
         crate::coord::settings::write(&connection, &project, &on).unwrap();
     }
-    assert!(
+    assert_eq!(
         adoption(&root, &project).unwrap().nudges,
+        crate::coord::settings::Nudges::TenMinutes,
         "the view shows nudges the owner turned on"
     );
 
