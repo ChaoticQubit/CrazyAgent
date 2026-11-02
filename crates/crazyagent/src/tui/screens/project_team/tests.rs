@@ -1806,7 +1806,20 @@ fn shift_l_edits_the_land_on_branch_and_an_empty_name_goes_back_to_the_masters_b
     assert!(view.typing());
     assert_eq!(view.help(), vec![("Enter", "Save"), ("Esc", "Close")]);
     assert!(shows(&view, "[ The master's branch"));
-    assert!(shows(&view, "It can be a branch checked out nowhere"));
+    let rows = frame(&view, 120, 48);
+    assert!(rows.iter().all(|row| row.chars().count() <= 120));
+    let words = rows
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        words.contains(
+            "It can be a branch checked out nowhere: then your project folder's files stay as they are."
+        ),
+        "{}",
+        rows.join("\n")
+    );
     typed(&mut view, "sta");
     assert!(view.paste("ge"));
     let reply = view.key(press(KeyCode::Enter));
