@@ -88,8 +88,8 @@ fn a_call_is_named_once_by_the_listed_pane_of_its_process_or_a_parent() {
     assert_eq!(callers.take(&id(3), &digest), None);
     drop(callers);
     assert!(
-        std::fs::symlink_metadata(&socket).is_err(),
-        "the socket is removed"
+        std::fs::symlink_metadata(&socket).is_ok_and(|meta| meta.file_type().is_socket()),
+        "the dropped socket's node stays for later askers to be refused on"
     );
 }
 
@@ -193,7 +193,6 @@ fn a_team_server_sends_its_call_only_once_the_engine_named_it() {
         );
     }
     drop(callers);
-    std::fs::write(&socket, b"").unwrap();
     assert!(
         !name_call(&mailbox, &id(4), &digest),
         "a caller socket nobody serves names nothing"

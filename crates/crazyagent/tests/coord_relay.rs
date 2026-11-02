@@ -11,11 +11,11 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use pane_support::{LEAD_PANE, PaneCallers};
+use pane_support::{LEAD_PANE, PaneCallers, PaneRun};
 
 const LEAD_SESSION: &str = "lead-session";
 const MATE_SESSION: &str = "mate-session";
@@ -79,13 +79,10 @@ impl Team {
         command
     }
 
-    fn start_hook(&self, event: &str, pane: Option<&str>, input: Value) -> Child {
-        let mut child = self.callers.spawn(
+    fn start_hook(&self, event: &str, pane: Option<&str>, input: Value) -> PaneRun {
+        let mut child = self.callers.run(
             pane.unwrap_or(LEAD_PANE),
-            self.command(&["coord-hook", event], pane)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
+            &self.command(&["coord-hook", event], pane),
         );
         child
             .stdin
@@ -127,7 +124,7 @@ impl Team {
     }
 }
 
-fn finished(child: Child) -> String {
+fn finished(child: PaneRun) -> String {
     let done = child.wait_with_output().unwrap();
     assert!(
         done.status.success(),

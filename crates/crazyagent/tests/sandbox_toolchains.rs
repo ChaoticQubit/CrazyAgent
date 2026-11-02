@@ -1084,6 +1084,9 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     );
 }
 
+/// Runs a probe script in one of a native lead's two sandboxes.
+type Probe = fn(&LiveTeam, &str) -> Output;
+
 /// Neither a native lead nor its teammates can bind, block or take the engine's caller
 /// socket (DEC-111 Q18, rv-secreview RH-1): with the path free, a listener, a folder or a
 /// file either places there is refused; once the engine listens, both reach it and get its
@@ -1094,7 +1097,7 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
     use std::os::macos::fs::MetadataExt;
     let team = LiveTeam::start();
     let c = quoted(&team.callers);
-    let roles: [(&str, fn(&LiveTeam, &str) -> Output); 2] = [
+    let roles: [(&str, Probe); 2] = [
         ("lead", LiveTeam::as_lead),
         ("teammate", LiveTeam::teammate),
     ];
@@ -1102,7 +1105,7 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
         let free = run(
             &team,
             &format!(
-                "{}; echo bind=$?\nmkdir {c}; echo mkdir=$?\n: > {c}; echo file=$?\n",
+                "{}; echo bind=$?\nmkdir {c}; echo mkdir=$?\n/usr/bin/touch {c}; echo file=$?\n",
                 team.session(&team.callers, "planted")
             ),
         );

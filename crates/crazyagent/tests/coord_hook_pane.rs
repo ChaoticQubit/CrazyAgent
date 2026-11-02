@@ -128,7 +128,7 @@ impl Team {
                 "-P",
                 "-F",
                 "#{pane_id}",
-                "sleep 600",
+                "/bin/sh",
             ])
         };
         let alpha = split();
@@ -178,9 +178,10 @@ impl Team {
         }
     }
 
-    /// Runs one relay hook the way a teammate's harness does, in `pane` of the tmux server,
-    /// with `TMUX_PANE` set to `claimed`; detached, it runs a second after its parent shell
-    /// left, under pid 1. The test serves the caller socket meanwhile. Takes the pane, the
+    /// Runs one relay hook the way a teammate's harness does, as a child of the one shell
+    /// that is `pane`'s process for the whole test, as Claude Code's hooks run under its
+    /// pane's one process, with `TMUX_PANE` set to `claimed`; detached, it runs a second
+    /// after the subshell that started it left, under pid 1. The test serves the caller socket meanwhile. Takes the pane, the
     /// claimed pane, the event, the hook input and whether it is detached. Returns what the
     /// hook printed.
     fn hook(
@@ -208,12 +209,12 @@ impl Team {
             done.display(),
         );
         let command = if detached {
-            format!("( (sleep 1; {run}) & ); sleep 600")
+            format!("( (sleep 1; {run}) & )")
         } else {
-            format!("{run}; sleep 600")
+            run
         };
-        self.server
-            .run(&["respawn-pane", "-k", "-t", pane, &command]);
+        self.server.run(&["send-keys", "-t", pane, "-l", &command]);
+        self.server.run(&["send-keys", "-t", pane, "Enter"]);
         let server = &self.server;
         let rows = [
             (self.lead.as_str(), Whom::Lead),

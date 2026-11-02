@@ -6,7 +6,7 @@ use pane_support::{LEAD_PANE, PaneCallers};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 const MATE_PANE: &str = "%7";
 const MATE_RESTS: &str = "00000000000000000000000000000008.idle";
@@ -49,17 +49,14 @@ impl Team {
     }
 
     fn hook(&self, event: &str, pane: &str, input: serde_json::Value) -> String {
-        let mut child = self.callers.spawn(
+        let mut child = self.callers.run(
             pane,
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("coord-hook")
                 .arg(event)
                 .arg(&self.mailbox)
                 .env("CLAUDE_CONFIG_DIR", &self.config)
-                .env("TMUX_PANE", pane)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
+                .env("TMUX_PANE", pane),
         );
         child
             .stdin
