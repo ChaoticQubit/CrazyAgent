@@ -1894,7 +1894,8 @@ impl TeamView {
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
-    /// settings summary folds toward its first row so they stay visible.
+    /// blank rows before the panel and before the tasks go first, then the settings summary
+    /// folds toward its first row, so every setting shows while blank rows can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -1956,17 +1957,18 @@ impl TeamView {
         let footer = self.footer(look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
-        let folded = (fixed + 2)
-            .saturating_sub(room)
-            .min(summary_rows.saturating_sub(1));
+        let over = (fixed + 2).saturating_sub(room);
+        let spacers = over.min(2);
+        let folded = (over - spacers).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
         );
+        assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - folded;
+        let fixed = fixed - spacers - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -2033,7 +2035,9 @@ impl TeamView {
                 look.muted,
             ));
         }
-        lines.push(Row::default());
+        if spacers < 2 {
+            lines.push(Row::default());
+        }
 
         lines.push(Row::of("Tasks", look.heading).push(format!("  {}", tasks.len()), look.muted));
         let task_widths = if wide {
@@ -2072,7 +2076,9 @@ impl TeamView {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spacers == 0 {
+            lines.push(Row::default());
+        }
         let cursor = caret.map(|(row, column)| (lines.len() + row, column));
         lines.extend(panel);
         lines.extend(footer);
