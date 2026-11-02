@@ -1842,6 +1842,60 @@ mod tests {
         );
     }
 
+    /// A master launch refuses a hidden folder git now tracks: the same none_tracked gate the
+    /// team and research launches use, here on the master turn sandbox, fails the launch with
+    /// the plain code rather than install a profile that promises to hide a file in history.
+    #[test]
+    fn master_sandbox_refuses_a_folder_git_now_tracks() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        std::fs::write(hidden.join("key.txt"), "tracked\n").unwrap();
+        let git = |args: &[&str]| {
+            let mut command = Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&repository)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "secret/key.txt"]);
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        assert_eq!(
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                std::slice::from_ref(&hidden),
+            )
+            .unwrap_err()
+            .0,
+            "hidden_path_tracked"
+        );
+    }
+
     /// A tools-off master in a real git worktree lease reads the repository's refs but
     /// cannot move them: real git and plain writes from inside its boundary are refused for
     /// the owner's branch, `HEAD`, a new engine ref, the reflog, `packed-refs` and both its

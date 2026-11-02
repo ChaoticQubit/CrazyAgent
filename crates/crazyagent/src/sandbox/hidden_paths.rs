@@ -21,13 +21,14 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_hidden_paths (
 /// refusal code.
 pub fn checked(text: &str, project_root: &Path) -> Result<PathBuf, &'static str> {
     let typed = Path::new(text);
-    if text.len() > PATH_TEXT_MAX
-        || !typed.is_absolute()
-        || text
-            .chars()
-            .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
-    {
+    if text.len() > PATH_TEXT_MAX || !typed.is_absolute() {
         return Err("hidden_path_not_absolute");
+    }
+    if text
+        .chars()
+        .any(|c| c.is_control() || c == '"' || c == '\\' || c == '\'')
+    {
+        return Err("hidden_path_not_plain");
     }
     let real = canonical(typed).map_err(|_| "hidden_path_missing")?;
     if !real.is_dir() {
@@ -103,42 +104,106 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
     Ok(paths)
 }
 
-/// Whether git tracks any file inside this folder, asked in the project's own checkout. A
-/// hidden folder covers only files git does not track; tracked files are copied into each
-/// agent's worktree and live in history, so hiding one would be a false promise. Run outside
-/// any sandbox. Inputs: the project root and the canonical folder. Output: true when tracked;
-/// false when nothing is tracked or git cannot answer (no repository, say).
-pub fn git_tracks(project_root: &Path, folder: &Path) -> bool {
-    let root = canonical(project_root).unwrap_or_else(|_| project_root.to_path_buf());
-    let real = canonical(folder).unwrap_or_else(|_| folder.to_path_buf());
+/// The longest the tracked-files check lets git run before it is killed and the folder is
+/// refused as unchecked.
+const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(unix)]
+const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
+/// The most of git's answer the check reads; a tracked folder shows in the first bytes.
+const CHECK_BYTES_MAX: u64 = 64 * 1024;
+
+/// Whether git tracks any file inside this folder, asked in the project's own checkout with
+/// the real git under no outside config, hooks, fsmonitor or lazy fetch, so a hostile
+/// imported repository cannot run a command as the owner. A hidden folder covers only files
+/// git does not track; a tracked file is copied into each agent's worktree and lives in
+/// history, so hiding one would be a false promise. Run outside any sandbox with a deadline
+/// that kills git. Inputs: the project root and the canonical folder. Output: `Ok(true)` when
+/// a file is tracked, `Ok(false)` when the folder is outside the root or the root has no real
+/// `.git` folder, and `Err("hidden_path_unchecked")` on any git error, timeout or unreadable
+/// answer, so the caller fails closed.
+#[cfg(unix)]
+pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let unchecked = "hidden_path_unchecked";
+    let root = canonical(project_root).map_err(|_| unchecked)?;
+    let real = canonical(folder).map_err(|_| unchecked)?;
     let Ok(relative) = real.strip_prefix(&root) else {
-        return false;
+        return Ok(false);
     };
-    let git = if cfg!(unix) { "/usr/bin/git" } else { "git" };
-    let mut command = std::process::Command::new(git);
+    let git_dir = root.join(".git");
+    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(false);
+    }
+    let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
+        .arg("--git-dir")
+        .arg(&git_dir)
+        .arg("--work-tree")
+        .arg(&root)
         .current_dir(&root)
         .args(["ls-files", "-z", "--"])
         .arg(relative)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    match crate::spawn_gate::output(&mut command) {
-        Ok(output) if output.status.success() => !output.stdout.is_empty(),
-        _ => false,
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
+    let mut stdout = child.stdout.take().ok_or(unchecked)?;
+    let reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = (&mut stdout).take(CHECK_BYTES_MAX).read_to_end(&mut buffer);
+        buffer
+    });
+    let deadline = std::time::Instant::now() + CHECK_TIME;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(unchecked);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(unchecked);
+        }
+        std::thread::sleep(CHECK_POLL);
+    };
+    let bytes = reader.join().map_err(|_| unchecked)?;
+    if status.success() {
+        Ok(!bytes.is_empty())
+    } else {
+        Err(unchecked)
     }
 }
 
-/// Refuses a list that holds a folder git tracks. Inputs: the project root and the checked
-/// folders. Output: ok, or the plain code for the first tracked folder.
+/// Refuses the tracked-files check where no confined git runs. Inputs unused. Output:
+/// `Err("hidden_path_unchecked")`, so the caller fails closed.
+#[cfg(not(unix))]
+pub fn git_tracks(_project_root: &Path, _folder: &Path) -> Result<bool, &'static str> {
+    Err("hidden_path_unchecked")
+}
+
+/// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
+/// cannot answer for any folder. Inputs: the project root and the checked folders. Output:
+/// ok, `hidden_path_tracked` for the first tracked folder, or `hidden_path_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     for folder in folders {
-        if git_tracks(project_root, folder) {
+        if git_tracks(project_root, folder)? {
             return Err("hidden_path_tracked");
         }
     }
@@ -204,8 +269,8 @@ mod tests {
     #[test]
     fn a_folder_whose_name_holds_a_quote_or_backslash_is_refused() {
         let root = project();
-        for bad in ["/tmp/a\"b", "/tmp/a\\b", "/tmp/a'b"] {
-            assert_eq!(checked(bad, root.path()), Err("hidden_path_not_absolute"));
+        for bad in ["/tmp/a\"b", "/tmp/a\\b", "/tmp/a'b", "/tmp/a\nb"] {
+            assert_eq!(checked(bad, root.path()), Err("hidden_path_not_plain"));
         }
     }
 
@@ -234,13 +299,83 @@ mod tests {
         std::fs::write(tracked.join("key.txt"), "k\n").unwrap();
         std::fs::write(untracked.join("tmp.txt"), "t\n").unwrap();
         git(&["add", "secret/key.txt"]);
-        assert!(git_tracks(&path, &tracked));
-        assert!(!git_tracks(&path, &untracked));
+        assert_eq!(git_tracks(&path, &tracked), Ok(true));
+        assert_eq!(git_tracks(&path, &untracked), Ok(false));
         assert_eq!(
             none_tracked(&path, &[tracked.clone(), untracked.clone()]),
             Err("hidden_path_tracked")
         );
         assert_eq!(none_tracked(&path, &[untracked]), Ok(()));
+    }
+
+    #[test]
+    fn a_folder_with_no_repository_is_not_tracked() {
+        let root = project();
+        let path = root.path().canonicalize().unwrap();
+        let folder = path.join("plain");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(git_tracks(&path, &folder), Ok(false));
+        assert_eq!(none_tracked(&path, &[folder]), Ok(()));
+    }
+
+    #[test]
+    fn a_hostile_fsmonitor_command_never_runs_during_the_check() {
+        let root = project();
+        let path = root.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let mut command = std::process::Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&path)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        let marker = path.join("pwned");
+        let folder = path.join("secret");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
+        git(&["add", "secret/key.txt"]);
+        let hostile = format!("touch {}", marker.display());
+        std::fs::write(
+            path.join(".git").join("config"),
+            format!(
+                "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = {hostile}\n\tfsmonitorHookVersion = 1\n"
+            ),
+        )
+        .unwrap();
+        let _ = git_tracks(&path, &folder);
+        assert!(!marker.exists(), "fsmonitor command ran: marker written");
+    }
+
+    #[test]
+    fn a_corrupt_index_fails_the_check_closed() {
+        let root = project();
+        let path = root.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let mut command = std::process::Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&path)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        let folder = path.join("secret");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
+        git(&["add", "secret/key.txt"]);
+        std::fs::write(path.join(".git").join("index"), b"not a git index\n").unwrap();
+        assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
     }
 
     #[test]

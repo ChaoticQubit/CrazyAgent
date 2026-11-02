@@ -2419,9 +2419,13 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_outside_project" => {
             "A hidden folder must sit inside the project. Pick a folder within it."
         }
+        "hidden_path_not_plain" => {
+            "A folder path can't hold quotes, backslashes or control characters."
+        }
         "hidden_path_tracked" => {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
+        "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {

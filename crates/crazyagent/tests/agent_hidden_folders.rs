@@ -206,6 +206,10 @@ fn a_hidden_folder_resists_hard_link_clone_and_firmlink() {
     );
     assert!(!clone.status.success(), "clonefile leaked: {clone:?}");
     let firmlink = format!("/System/Volumes/Data{}", notes.display());
+    assert!(
+        Path::new(&firmlink).exists(),
+        "firmlink alias {firmlink} does not resolve on this host, so the deny is untested"
+    );
     let aliased = run(&sandbox, &case.profile, &format!("cat '{firmlink}'"));
     assert!(
         !aliased.status.success(),
