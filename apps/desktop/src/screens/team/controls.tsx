@@ -435,10 +435,10 @@ export function TeamControls({ projectId, status, harness, reload }: {
     <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}
       onValue={(value) => { if (!busy) chooseBackground(value); }}
       helper="Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first." />
-    {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs !== null) void saveBackground({ mode: "grace", secs }); }}>
+    {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs === null) setNote(failureCopy("team_background_grace_invalid")); else void saveBackground({ mode: "grace", secs }); }}>
       <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
         onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />
-      <Button type="submit" size="small" disabled={busy || graceText === null || graceSecs(graceTyped) === null} pending={busy && background !== null} pendingLabel="Saving...">Save</Button>
+      <Button type="submit" size="small" disabled={busy || graceText === null} pending={busy && background !== null} pendingLabel="Saving...">Save</Button>
       <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
     </form>}
     <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={status.max_harnesses == null ? NO_LIMIT : String(status.max_harnesses)} options={capOptions()}
