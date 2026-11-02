@@ -5434,6 +5434,69 @@ fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
     assert!(!finished);
 }
 
+/// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
+/// background commands stop when its turn ends: its rollout reports no such commands, so
+/// the engine neither holds its turn for them nor stops them, and the line would be untrue
+/// (rv-audit S3 F2). Its task still reaches it and ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Write page.md").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let text = typed(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(text.contains("Write page.md"), "{text}");
+    assert!(!text.contains(BACKGROUND_STOPS_LINE), "{text}");
+}
+
+/// Under Stop, an agent whose harness starts for each turn on a signed-in account is told
+/// that its background commands stop when its turn ends, whatever its harness: the engine
+/// stops that harness after every turn (rv-audit S3 F2).
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_per_turn_agent_is_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut agent = super::managed_agent::ManagedAgent::in_pane(
+        "codex",
+        &codex,
+        fixture.host(),
+        AgentRole::Sub,
+    );
+    let record = agent.profile_home.join("auth.json");
+    std::fs::write(&record, signed_in_codex_record()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    agent.background = crate::team::BackgroundAtEnd::Stop;
+    let turns = vec![("Write the page", agent.acquire("s3-f2-per-turn"))];
+    let (reports, problem) = agent.run_turns(None, turns, WAIT);
+    assert_eq!(problem, None);
+    let ends: Vec<TurnEnd> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Finished { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [TurnEnd::Success]);
+    let typed = std::fs::read_to_string(agent.home.join("typed")).unwrap();
+    assert!(
+        typed.contains("Write the page") && typed.contains(BACKGROUND_STOPS_LINE),
+        "{typed}"
+    );
+}
+
 /// A task its time limit ends while a command its agent started in the background still
 /// runs says so first in its result, so the master and the owner read that the command was
 /// stopped with the task rather than that it finished, and the command really stops with
