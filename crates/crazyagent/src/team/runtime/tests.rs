@@ -4021,7 +4021,7 @@ fn recording_codex() -> String {
 
 /// The instruction file the engine wrote into one agent's Codex home.
 #[cfg(target_os = "macos")]
-fn codex_instructions(fixture: &Fixture, agent: i64) -> String {
+fn agents_md(fixture: &Fixture, agent: i64) -> String {
     std::fs::read_to_string(
         fixture
             .base
@@ -4363,7 +4363,7 @@ fn with_restart_an_idle_live_master_restarts_in_its_own_conversation_with_the_ne
         });
     }
     let started = launches(&fixture, master);
-    let given = codex_instructions(&fixture, master);
+    let given = agents_md(&fixture, master);
     let text = typed(&fixture, master);
     let on = super::super::master::live(&fixture.connection, &project).unwrap();
     let turns = live_turns(&fixture.connection);
@@ -4411,7 +4411,7 @@ fn with_restart_an_idle_master_stops_and_its_next_message_starts_it_with_the_new
     });
     let all = masters(&fixture.connection);
     let master = *all.last().unwrap();
-    let given = codex_instructions(&fixture, master);
+    let given = agents_md(&fixture, master);
     let text = typed(&fixture, master);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
