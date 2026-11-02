@@ -2103,7 +2103,10 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         [("Enter", "Save hidden folders"), ("Esc", "Cancel")]
     );
     assert!(drawn.cursor.is_some());
-    assert_eq!(screen.paste(" : /Users/owner/project/vendor : "), ProjectReply::Handled);
+    assert_eq!(
+        screen.paste(" : /Users/owner/project/vendor : "),
+        ProjectReply::Handled
+    );
     let save = SetupAction::SetHiddenPaths {
         project_id: project.clone(),
         paths: vec![

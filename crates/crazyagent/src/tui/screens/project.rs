@@ -822,9 +822,7 @@ impl ProjectScreen {
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
                     SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
-                    SetupQuery::HiddenPaths { .. } => {
-                        self.hidden_paths_read_ms = Some(self.now_ms)
-                    }
+                    SetupQuery::HiddenPaths { .. } => self.hidden_paths_read_ms = Some(self.now_ms),
                     SetupQuery::AgentPolicy { .. } => {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
@@ -2022,8 +2020,7 @@ impl ProjectScreen {
                         });
                     }
                     None => {
-                        self.problem =
-                            Some("Still loading the hidden folders. Try again.".into());
+                        self.problem = Some("Still loading the hidden folders. Try again.".into());
                     }
                 }
                 ProjectReply::Handled
