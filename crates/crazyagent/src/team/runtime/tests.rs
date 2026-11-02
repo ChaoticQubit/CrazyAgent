@@ -5438,14 +5438,19 @@ fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
 /// runs says so first in its result, so the master and the owner read that the command was
 /// stopped with the task rather than that it finished, and the command really stops with
 /// the task: while the runtime and its panes still run, it never writes what it would have
-/// written on finishing (w-review LTK-L1, rounds 1 and 2).
+/// written on finishing (w-review LTK-L1, rounds 1 and 2). The agent's reply comes 2 s after
+/// its background command, later than the 1 s limit, as on a loaded machine, and the result
+/// still holds it.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let slow = BACKGROUND_CLAUDE.replace("/bin/sleep 2\n", "/bin/sleep 4\n");
-    assert_ne!(slow, BACKGROUND_CLAUDE);
+    let late = format!("  /bin/sleep 2\n{WAITING_REPLY}");
+    let slow = BACKGROUND_CLAUDE
+        .replace("/bin/sleep 2\n", "/bin/sleep 4\n")
+        .replace(WAITING_REPLY, &late);
+    assert!(slow.contains(&late) && slow.contains("/bin/sleep 4\n"));
     let mut team = check_runtime(&fixture, &host, &slow, Some(1), None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let (status, result, error) = check_end(&fixture).unwrap();
