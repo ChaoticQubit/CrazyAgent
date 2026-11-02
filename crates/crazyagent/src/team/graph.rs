@@ -172,8 +172,6 @@ fn edge_state(status: TaskStatus) -> EdgeState {
     }
 }
 
-/// Tells whether an agent row is a team member the graph places under a lead: a sub-agent or
-/// a native teammate the engine adopted as its own row. Takes the agent. Returns the answer.
 /// The status words an agent's node shows: its status, and after it "Instructions changed"
 /// while the owner's Badge choice flags that its instructions changed since it started.
 /// Input: the agent. Output: the words.
@@ -184,6 +182,8 @@ fn status_words(agent: &TeamAgent) -> String {
     }
 }
 
+/// Tells whether an agent row is a team member the graph places under a lead: a sub-agent or
+/// a native teammate the engine adopted as its own row. Takes the agent. Returns the answer.
 fn team_member(agent: &TeamAgent) -> bool {
     matches!(agent.role, AgentRole::Sub | AgentRole::Teammate)
 }
