@@ -35,6 +35,7 @@ export const config = {
   },
   before: async function () {
     await globalThis.browser.setWindowSize(1180, 800);
+    await globalThis.browser.switchToWindow(await globalThis.browser.getWindowHandle());
   },
   afterTest: async function (test, context, result) {
     if (!result.passed) {
