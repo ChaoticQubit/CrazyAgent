@@ -11383,3 +11383,187 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         "the lead's teammate pane is listed for it: {listed:?}"
     );
 }
+
+/// A native lead's teammate cannot change a hook its lead runs (brief residual 3). The
+/// project holds one owner hook, added through the plugin store as the owner adds one, and
+/// the lead's launch installs it into the lead's agent home as Claude Code reads it. The
+/// teammate, in its installed profile, overwrites the hook's script, replaces it, and
+/// rewrites the hooks file. The lead then runs the hook command the engine wrote, in the
+/// lead's profile, as Claude Code runs it on its next matching event: only the owner's
+/// script runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let source = fixture.base.join("lead-guard");
+    std::fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(source.join("hooks")).unwrap();
+    std::fs::write(
+        source.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"lead-guard"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("start.sh"),
+        "echo ran > lead-ran.txt\n",
+    )
+    .unwrap();
+    let mut store = Connection::open(fixture.base.join("engine.db")).unwrap();
+    crate::storage::plugins::execute(
+        &mut store,
+        &fixture.base,
+        crate::storage::plugins::Command::AddHooks {
+            scope: crate::plugins::Scope::Project {
+                project_id: project.clone(),
+            },
+            source: source.to_str().unwrap().into(),
+            follows: None,
+        },
+    )
+    .unwrap();
+    drop(store);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    assert!(teammates.is_file());
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("claude-code", &home, true)
+        .unwrap();
+    assert!(installed.runs_hooks());
+    let plugin = home.join("crazyagent").join("plugin");
+    let copies: Vec<PathBuf> = std::fs::read_dir(plugin.join("hook-plugins"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let script = copies[0].join("hooks").join("start.sh");
+    let manifest = plugin.join("hooks").join("hooks.json");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let command = written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let work = plan.working_dir.clone();
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "printf 'echo planted > {marker}\\n' > '{script}'; echo overwrite=$? > {tried}\n\
+             rm -f '{script}' && printf 'echo planted > {marker}\\n' > '{script}'; echo replace=$? >> {tried}\n\
+             printf '{{\"hooks\":{{}}}}\\n' > '{manifest}'; echo manifest=$? >> {tried}\n",
+            marker = marker.display(),
+            script = script.display(),
+            manifest = manifest.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CLAUDE_PLUGIN_ROOT", &plugin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    drop(installed);
+
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate changed a hook its lead runs: {attempts} {}",
+        String::from_utf8_lossy(&mated.stderr)
+    );
+    assert!(
+        work.join("lead-ran.txt").is_file(),
+        "the lead ran the owner's hook"
+    );
+    for attempt in ["overwrite", "replace", "manifest"] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "{attempts}"
+        );
+    }
+}
