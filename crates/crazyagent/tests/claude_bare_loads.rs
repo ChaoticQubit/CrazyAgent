@@ -166,10 +166,10 @@ fn claude_bare_loads_a_plugin_dir_s_skills_but_runs_none_of_its_hooks_or_servers
     );
     assert!(!run.hook_ran, "--bare runs no plugin SessionStart hook");
     assert!(!run.hook_started(), "--bare starts no hook at all");
-    assert!(
-        !run.listed("mcp_servers").contains(&PLUGIN_SERVER),
-        "--bare starts no server from the plugin's .mcp.json: {:?}",
-        run.listed("mcp_servers")
+    assert_eq!(
+        run.listed("mcp_servers"),
+        Vec::<&str>::new(),
+        "--bare starts no server, so none from the plugin's .mcp.json"
     );
 }
 
@@ -184,9 +184,9 @@ fn without_bare_the_same_plugin_dir_runs_its_session_start_hook_and_lists_its_se
     );
     assert!(run.hook_ran, "the plugin's SessionStart hook runs");
     assert!(run.hook_started(), "the run reports the hook starting");
-    assert!(
-        run.listed("mcp_servers").contains(&PLUGIN_SERVER),
-        "the plugin's .mcp.json server is listed: {:?}",
-        run.listed("mcp_servers")
+    assert_eq!(
+        run.listed("mcp_servers"),
+        [PLUGIN_SERVER],
+        "the plugin's .mcp.json server is the only server listed"
     );
 }
