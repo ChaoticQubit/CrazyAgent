@@ -1,6 +1,6 @@
 use super::*;
 use crate::client_controller::OwnerController;
-use crate::coord::settings::CoordSettings;
+use crate::coord::settings::{CoordSettings, RoleSkills};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -1988,7 +1988,7 @@ fn clear_counted(view: &mut TeamView) {
     let typed = view
         .coord
         .as_ref()
-        .and_then(|edit| edit.counted.as_ref())
+        .and_then(|edit| edit.input.as_ref())
         .unwrap()
         .value()
         .chars()
@@ -2135,6 +2135,131 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     );
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(view.coord.is_none());
+}
+
+/// DEC-111 R3 through a real engine: the coordination editor lists Master, Lead and Worker
+/// skills on All approved skills; Space on Worker opens its names, a name no skill can have
+/// is refused, Enter saves the names as Chosen skills, an empty list gives Lead no skills,
+/// and Space returns Worker to All approved skills.
+#[tokio::test]
+async fn skills_per_role_are_set_in_the_coordination_editor_through_a_real_engine() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-roles-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let config = crate::tui::test_home::engine_config();
+    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let ordinary = Client::new(
+        root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
+    controller
+        .setup_project(
+            project(),
+            ProjectSpec {
+                name: "Tidepool".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Live dashboard for sensor buoys.".into(),
+                tech_stack: vec![],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            1,
+        )
+        .await
+        .unwrap();
+
+    let mut view = TeamView::new(project());
+    read_team(&mut controller, &mut view, NOW).await;
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let shown = frame(&view, 120, 40);
+    for role in ["Master skills", "Lead skills", "Worker skills"] {
+        assert!(find(&shown, role).contains("All approved skills"), "{role}");
+    }
+    for _ in 0..12 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 12);
+    let (_, help) = view.rows(116, 40, &accounts(), &Look::plain());
+    assert!(
+        help.contains(&("Space", "All or chosen")) && help.contains(&("Enter", "Edit skills")),
+        "{help:?}"
+    );
+
+    assert_eq!(view.key(press(KeyCode::Char(' '))), TeamReply::Handled);
+    assert!(
+        view.typing(),
+        "Space on All approved skills opens the names"
+    );
+    assert!(!view.busy(), "opening the names sends nothing");
+    typed(&mut view, "Bad Name");
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(team_plain("coord_settings_invalid")))
+    );
+    assert!(view.typing(), "refused names stay open for editing");
+    clear_counted(&mut view);
+    typed(&mut view, "style-guide, release-notes style-guide");
+    let reply = view.key(press(KeyCode::Enter));
+    coord_send(&mut view, &mut controller, reply, 2).await;
+    assert!(!view.typing(), "applied names close the input");
+    assert_eq!(
+        coordination_of(&view).settings.role_skills,
+        RoleSkills {
+            worker: Some(vec!["style-guide".into(), "release-notes".into()]),
+            ..RoleSkills::default()
+        }
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Worker skills: style-guide, release-notes."))
+    );
+    assert!(
+        find(&frame(&view, 120, 40), "Worker skills")
+            .contains("Chosen skills: style-guide, release-notes")
+    );
+
+    assert_eq!(view.key(press(KeyCode::Up)), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
+    assert!(view.typing());
+    let reply = view.key(press(KeyCode::Enter));
+    coord_send(&mut view, &mut controller, reply, 3).await;
+    assert_eq!(
+        coordination_of(&view).settings.role_skills.lead,
+        Some(Vec::new())
+    );
+    assert!(find(&frame(&view, 120, 40), "Lead skills").contains("Chosen skills: none"));
+
+    assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    let reply = view.key(press(KeyCode::Char(' ')));
+    coord_send(&mut view, &mut controller, reply, 4).await;
+    assert_eq!(
+        coordination_of(&view).settings.role_skills,
+        RoleSkills {
+            lead: Some(Vec::new()),
+            ..RoleSkills::default()
+        }
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("Worker skills: all approved skills."))
+    );
+    assert!(find(&frame(&view, 120, 40), "Worker skills").contains("All approved skills"));
 }
 
 /// Workflow nudges show Off in the coordination editor of a project with no saved settings,
