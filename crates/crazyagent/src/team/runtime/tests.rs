@@ -9071,6 +9071,120 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
     team.shutdown().unwrap();
 }
 
+/// A managed lead on a kept session in a stand-in pane, in the state `run_worker` gives a
+/// fresh native lead (managed, kept, not briefed), and one owner task queued for its
+/// harness. Input: the fixture. Output: the runtime, the lead and the task.
+fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
+    let host = fixture.host();
+    let mut team = fixture.runtime();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, lead);
+    team.run_worker(
+        lead,
+        Launch::Adopt(Box::new(Adoption {
+            host: host.clone(),
+            agent: AgentId::team(lead).unwrap(),
+            record,
+            limits: LaunchLimits::default(),
+            live: false,
+            managed: Some(Managed {
+                home: fixture.base.join("lead-home"),
+                executable: PathBuf::from("/bin/sh"),
+            }),
+            access: AgentAccess::Sandboxed,
+        })),
+        Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: AgentRole::Sub,
+            harness: "codex".into(),
+            connection: reference(ENDPOINT),
+            tools: false,
+            hosted: None,
+        },
+    )
+    .unwrap();
+    let worker = &team.workers[&lead];
+    assert!(worker.managed && worker.kept_session && !worker.briefed);
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let task = crate::team::admit(
+        &tx,
+        &fixture.access,
+        &fixture.setup,
+        Some("codex"),
+        "Write the release notes",
+        crate::team::TaskSource::Owner,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    (team, lead, task)
+}
+
+fn task_row(fixture: &Fixture, task: i64) -> (String, Option<i64>, Option<String>) {
+    fixture
+        .connection
+        .query_row(
+            "SELECT status,agent,error FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+}
+
+#[test]
+fn dispatch_grants_an_unbriefed_kept_session_and_a_refused_sign_in_fails_its_task() {
+    let fixture = Fixture::new(1);
+    let (mut team, lead, task) = kept_lead_with_a_task(&fixture);
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let (status, agent, error) = task_row(&fixture, task);
+    assert_eq!(
+        (status.as_str(), agent),
+        ("failed", None),
+        "the first task of an unbriefed kept session needs a grant, and this engine has no sign-in"
+    );
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("The sub-agent could not start: ")),
+        "{error:?}"
+    );
+    let worker = &team.workers[&lead];
+    assert!(worker.stopping, "the refused grant stops the lead");
+    assert!(
+        !worker.briefed,
+        "a lead whose grant was refused is not briefed"
+    );
+    team.shutdown().unwrap();
+}
+
+#[test]
+fn dispatch_hands_a_briefed_kept_session_its_task_with_no_grant() {
+    let fixture = Fixture::new(1);
+    let (mut team, lead, task) = kept_lead_with_a_task(&fixture);
+    let (orders, turns) = channel();
+    let worker = team.workers.get_mut(&lead).unwrap();
+    worker.orders = orders;
+    worker.briefed = true;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(
+        !team.workers[&lead].stopping,
+        "no grant was tried, so no refused sign-in stopped the lead"
+    );
+    assert_eq!(
+        task_row(&fixture, task),
+        ("running".to_owned(), Some(lead), None)
+    );
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the briefed kept session got no turn without a grant");
+    };
+    assert!(typed.contains("Write the release notes"), "{typed}");
+    team.shutdown().unwrap();
+}
+
 /// Wiring test of engine mechanics, not Claude Code: a shell stand-in pane plays a native
 /// lead an earlier engine left running. A Stop before any order, or a first order without
 /// the signed-in account, ends its pane; a Stop while the engine leaves panes running
