@@ -7142,7 +7142,7 @@ fn per_turn(
                 return Some(problem);
             }
         };
-        let process = limit.map_or(plan.limits.run_time, |limit| {
+        let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
         let credential = match profile.hand_to_agent(home, process, &plan.executable) {
