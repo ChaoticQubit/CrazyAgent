@@ -252,7 +252,8 @@ fn every_catalog_harness_has_its_own_interactive_app_except_rcli() {
 
 /// A tools-off Codex agent runs its own app with `--no-daemon` and the headless settings,
 /// never through the bridge: Codex 0.164's shared app server keeps unified exec on, so a
-/// session that turns it off refuses that server and the app exits. With tools on, Codex
+/// session that turns it off refuses that server and the app exits. It also turns off
+/// `request_user_input`, the one tool those settings leave on. With tools on, Codex
 /// runs its app through the bridge script (K2b), which gets the executable and an empty
 /// resume id before the settings, the same for the app server it starts first and the app.
 #[test]
@@ -285,6 +286,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
         "features.goals=false",
         "web_search=\"disabled\"",
         "mcp_servers={}",
+        "tools.experimental_request_user_input.enabled=false",
         "check_for_update_on_startup=false",
     ] {
         argv.extend(strings(&["-c", setting]));
@@ -340,6 +342,12 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
         ])
     );
     assert!(!built.argv.iter().any(|argument| argument == "--no-daemon"));
+    assert!(
+        !built
+            .argv
+            .iter()
+            .any(|argument| argument == "tools.experimental_request_user_input.enabled=false")
+    );
     for setting in [
         "sandbox_mode=\"danger-full-access\"",
         "approval_policy=\"never\"",
