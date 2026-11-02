@@ -240,7 +240,8 @@ pub enum AcceptOutcome {
 /// The local branches of a change set's repository that an Accept can land on, at most
 /// `BRANCHES_MAX`, the checked-out one, None when the owner's checkout is on a detached
 /// HEAD, and the Land on branch an Accept with no branch named lands on (DEC-111 Q1),
-/// None when it cannot be resolved.
+/// None when it cannot be resolved. `land_on_problem` is the plain sentence naming the
+/// Land on setting and its missing branch when it cannot, so a client offers no default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetBranches {
@@ -248,6 +249,8 @@ pub struct TargetBranches {
     pub current: Option<String>,
     #[serde(default)]
     pub land_on: Option<String>,
+    #[serde(default)]
+    pub land_on_problem: Option<String>,
 }
 
 /// What merging a sub-agent's branch into its lead's task branch did (DEC-104 K5b):

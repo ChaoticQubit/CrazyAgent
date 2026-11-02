@@ -123,11 +123,13 @@ export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeD
 }
 
 /** The local branches a change set can land on, the checked-out one and the team's Land on
- * branch, where an Accept with no branch picked lands. */
+ * branch, where an Accept with no branch picked lands, or the plain sentence naming the Land on
+ * setting and its missing branch when that branch cannot be found. */
 export interface TargetBranches {
   branches: string[];
   current: string | null;
   land_on?: string | null;
+  land_on_problem?: string | null;
 }
 
 /** Lands a change set as one commit on a local branch: the team's Land on branch by default, or

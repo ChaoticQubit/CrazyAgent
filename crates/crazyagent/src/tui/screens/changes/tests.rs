@@ -387,6 +387,7 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
             land_on: None,
+            land_on_problem: None,
         })),
     );
     assert_eq!(asked, ChangesQuery::Branches { id: id('1') });
@@ -896,6 +897,7 @@ fn accept_lists_the_branches_and_tab_picks_another_target() {
         branches: vec!["main".into(), "release".into(), "next".into()],
         current: Some("main".into()),
         land_on: None,
+        land_on_problem: None,
     };
     let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
     assert_eq!(query, ChangesQuery::Branches { id: id('1') });
@@ -942,6 +944,7 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
             land_on: None,
+            land_on_problem: None,
         })),
     );
     assert!(view.key(key(KeyCode::Enter), NOW));
@@ -978,6 +981,7 @@ fn accept_preselects_the_land_on_branch_and_sends_a_plain_accept_for_it() {
         branches: vec!["feat/x".into(), "main".into(), "stage".into()],
         current: Some("feat/x".into()),
         land_on: Some("stage".into()),
+        land_on_problem: None,
     };
     let mut view = listed(vec![set('1', ChangeState::Pending)]);
     assert!(view.key(key(KeyCode::Char('a')), NOW));

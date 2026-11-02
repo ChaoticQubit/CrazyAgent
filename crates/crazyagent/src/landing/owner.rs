@@ -451,6 +451,7 @@ pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranch
         branches,
         current,
         land_on,
+        land_on_problem: None,
     })
 }
 
