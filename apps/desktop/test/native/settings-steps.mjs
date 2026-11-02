@@ -22,9 +22,19 @@ function locator(selector) {
   return selector;
 }
 
-/** Finds the first displayed element a step selector names. Input: the selector.
- * Output: the WebDriver element, or null when none is displayed. */
+/** Finishes every finite CSS animation, such as a dialog rising from opacity 0, so the window
+ * shows what the owner sees once it settles: WebKit leaves them on their first frame in a
+ * window that is not in front. Infinite animations (spin, shimmer) keep running. */
+function settle() {
+  return browser.execute(() => document.getAnimations()
+    .filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity)
+    .forEach((animation) => animation.finish()));
+}
+
+/** Finds the first displayed element a step selector names, once animations have settled.
+ * Input: the selector. Output: the WebDriver element, or null when none is displayed. */
 async function find(selector) {
+  await settle();
   for (const element of await $$(locator(selector))) {
     if (await element.isDisplayed()) return element;
   }
@@ -118,14 +128,11 @@ async function noDialog(purpose) {
   await until(async () => !(await shown("dialog[open]")), 15000, `a dialog stayed open over the page before ${purpose}`);
 }
 
-/** Saves a screenshot of the settled window into the run's private evidence folder: finite
- * CSS animations such as a dialog's entry are finished first, since WebKit can leave them
- * on their first frame in a window that is not in front. Input: the file stem. */
+/** Saves a screenshot of the settled window into the run's private evidence folder.
+ * Input: the file stem. */
 export async function shot(name) {
   assert.match(name, /^[a-z0-9-]{1,40}$/);
-  await browser.execute(() => document.getAnimations()
-    .filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity)
-    .forEach((animation) => animation.finish()));
+  await settle();
   await browser.saveScreenshot(join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, `${name}.png`));
 }
 
