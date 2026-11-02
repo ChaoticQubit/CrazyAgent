@@ -1708,42 +1708,11 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
     (context, connection, install)
 }
 
-/// Installs the Seatbelt profile a tools-on agent of `context` runs under, with Node and
-/// the context's own read paths granted, plus `reads`. Inputs: the test folder, the agent
-/// home, the context and the extra folders to read. Output: the sandbox, its profile path
-/// and the agent's project folder.
-#[cfg(target_os = "macos")]
-fn agent_sandbox(
-    base: &Path,
-    home: &Path,
-    context: &AgentContext,
-    reads: &[&Path],
-) -> (crate::sandbox::ProjectSandbox, PathBuf, PathBuf) {
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
-    let project = private_folder(&base.join("project"));
-    let tmp = private_folder(&base.join("tmp"));
-    let mut sandbox = ProjectSandbox::new(&project, home, &tmp, SandboxNetwork::Only(Vec::new()))
-        .unwrap()
-        .allow_tools(&Toolchains::grant(
-            &ToolHomes::owner().unwrap(),
-            &[Toolchain::Node],
-        ))
-        .unwrap();
-    for read in context.read_paths() {
-        sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
-    }
-    for read in reads {
-        sandbox = sandbox.allow_read(read).unwrap();
-    }
-    let profile = base.join("agent.sb");
-    sandbox.install(&profile).unwrap();
-    (sandbox, profile, project)
-}
-
 #[cfg(target_os = "macos")]
 #[test]
 fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
     const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -1756,7 +1725,20 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         "a fresh home never starts context-mode through npx"
     );
 
-    let (sandbox, profile, _project) = agent_sandbox(&base, &home, &context, &[]);
+    let project = private_folder(&base.join("project"));
+    let tmp = private_folder(&base.join("tmp"));
+    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_tools(&Toolchains::grant(
+            &ToolHomes::owner().unwrap(),
+            &[Toolchain::Node],
+        ))
+        .unwrap();
+    for read in context.read_paths() {
+        sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
+    }
+    let profile = base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
     let mut server = sandbox.command(&profile, Path::new(&command));
     server.args(&args);
     let (took, tools) = mcp_handshake(server, CLAUDE_CONNECT_LIMIT);
@@ -1774,108 +1756,130 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     );
 }
 
-/// A fresh Claude Code agent whose home the engine's launch context set up, with
-/// context-mode started from the engine's shared install, lists the context-mode tools it
-/// actually has: real Claude Code runs once in the agent's sandbox with its provider port
-/// closed, and its own init event shows the server connected and the ctx tools in its tool
-/// list. Needs Claude Code and `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens.
+/// Starts a local model endpoint that records each request body and answers 500, so a real
+/// harness sends its first model request and no reply is made up. Output: the port and the
+/// recorded bodies.
+#[cfg(target_os = "macos")]
+fn request_capture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    const BODY_BYTES_MAX: usize = 8 * 1024 * 1024;
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+            let sink = sink.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; length.min(BODY_BYTES_MAX)];
+                if reader.read_exact(&mut body).is_ok() {
+                    sink.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).into_owned());
+                }
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            });
+        }
+    });
+    (port, bodies)
+}
+
+/// A fresh Claude Code agent the engine launches with its launch context, context-mode
+/// started from the engine's shared install, lists the context-mode tools it actually has:
+/// real Claude Code sends its first model request to a local endpoint that records it and
+/// answers 500, and that request offers the ctx tools. Needs Claude Code and
+/// `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens. The handshake test covers the server
+/// inside the agent sandbox.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
 fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
-    const RUN_TIME_MAX: Duration = Duration::from_secs(120);
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    const TASK: &str = "Name the tools you have for check 4471.";
     const SERVER: &str = "plugin_context-mode_context-mode";
     let Some(claude) = on_path("claude") else {
         panic!("UNAVAILABLE: no claude executable on PATH");
     };
-    let claude = claude.canonicalize().unwrap();
-    let node = on_path("node").expect("UNAVAILABLE: npx and node on PATH");
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let (context, _connection, _install) = shared_context_mode(&base);
     let home = private_folder(&base.join("home"));
-    let installed = context.install("claude-code", &home, true).unwrap();
-    let (sandbox, profile, project) =
-        agent_sandbox(&base, &home, &context, &[claude.parent().unwrap()]);
-    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let stream = base.join("stream.jsonl");
-    let mut command = sandbox.command(&profile, &claude);
-    command
-        .env_clear()
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", node.parent().unwrap().display()),
-        )
-        .env("HOME", &home)
-        .env("CLAUDE_CONFIG_DIR", &home)
-        .env("TMPDIR", base.join("tmp"))
-        .env("TERM", "dumb")
-        .env("DISABLE_TELEMETRY", "1")
-        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        .env("CLAUDE_CODE_MAX_RETRIES", "0")
-        .env("MCP_TIMEOUT", "60000")
-        .env("ANTHROPIC_API_KEY", "crazyagent-offline-placeholder")
-        .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{closed}"))
-        .current_dir(&project)
-        .stdin(std::process::Stdio::null())
-        .stdout(fs::File::create(&stream).unwrap())
-        .stderr(std::process::Stdio::null())
-        .args([
-            "-p",
-            "check",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--strict-mcp-config",
-        ])
-        .args(installed.arguments());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
-    let deadline = std::time::Instant::now() + RUN_TIME_MAX;
-    while child.try_wait().unwrap().is_none() {
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("claude did not finish within {RUN_TIME_MAX:?} with the provider port closed");
+    let work = private_folder(&base.join("work"));
+    let initialized = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .arg(&work),
+    )
+    .unwrap();
+    assert!(initialized.success());
+    let profile = base.join("agent.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let (port, bodies) = request_capture();
+    let mut session = Session::start_with_context(
+        LaunchRequest {
+            harness: "claude-code".into(),
+            executable: claude.canonicalize().unwrap(),
+            working_dir: work,
+            account: AccountBinding::Url {
+                home,
+                base_url: format!("http://127.0.0.1:{port}"),
+                key: None,
+            },
+            model: Some("qwen2.5:0.5b".into()),
+            tools: true,
+            sandbox_profile: Some(profile),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits {
+                run_time: Duration::from_secs(180),
+                ..LaunchLimits::default()
+            },
+        },
+        context,
+    )
+    .unwrap();
+    session.send(TASK).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let body = loop {
+        if let Some(body) = bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|body| body.contains("check 4471") && body.contains("\"tools\""))
+        {
+            break body.clone();
         }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    drop(installed);
-
-    let events: Vec<serde_json::Value> = fs::read_to_string(&stream)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|_| panic!("claude wrote a line that is not JSON: {line}"))
-        })
-        .collect();
-    let init = events
-        .iter()
-        .find(|event| event["type"] == "system" && event["subtype"] == "init")
-        .unwrap_or_else(|| panic!("claude wrote no init event: {events:?}"));
-    let server = init["mcp_servers"]
-        .as_array()
-        .and_then(|servers| servers.iter().find(|server| server["name"] == SERVER))
-        .unwrap_or_else(|| panic!("the init event lists no {SERVER} server: {init}"));
-    assert_eq!(
-        server["status"], "connected",
-        "context-mode connects from the shared install: {server}"
-    );
-    let tools: Vec<&str> = init["tools"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the init event has no tool list: {init}"))
-        .iter()
-        .filter_map(|tool| tool.as_str())
-        .collect();
+        let seen = bodies.lock().unwrap().len();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no model request carried the task with its tools ({seen} requests seen)"
+        );
+        if session.next_event(Duration::from_millis(500)).is_err() {
+            panic!("the agent ended before its first model request ({seen} requests seen)");
+        }
+    };
+    session.stop().unwrap();
     for tool in ["ctx_execute", "ctx_batch_execute", "ctx_search"] {
         let name = format!("mcp__{SERVER}__{tool}");
-        assert!(
-            tools.contains(&name.as_str()),
-            "the agent has {name}: {tools:?}"
-        );
+        assert!(body.contains(&name), "the agent is offered {name}");
     }
 }
