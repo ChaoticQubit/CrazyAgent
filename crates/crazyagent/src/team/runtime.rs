@@ -471,6 +471,10 @@ pub struct TeamRuntime {
     restarted_for: BTreeMap<i64, u64>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
+    #[cfg(unix)]
+    caller_folders: BTreeMap<i64, (u64, u64)>,
+    #[cfg(unix)]
+    caller_pins: BTreeMap<i64, Vec<(String, u32)>>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -620,6 +624,10 @@ impl TeamRuntime {
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
+            #[cfg(unix)]
+            caller_folders: BTreeMap::new(),
+            #[cfg(unix)]
+            caller_pins: BTreeMap::new(),
             adoption_failed: None,
             reproving: None,
             instructions_next: BTreeMap::new(),
@@ -3123,6 +3131,8 @@ impl TeamRuntime {
     /// the lead calls that reach only the workers it started (DEC-104, N1, N2). Takes the
     /// setup and live access.
     fn serve_agent_calls(&mut self, stored: &StoredSetup, access: &ModelAccess) {
+        #[cfg(unix)]
+        self.tend_callers(&stored.project_id);
         if self.delegation_tool.is_none() {
             return;
         }
@@ -3144,31 +3154,6 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect();
-        #[cfg(unix)]
-        {
-            let workers = &self.workers;
-            self.callers.retain(|id, _| workers.contains_key(id));
-            for id in &subs {
-                let (pinned, pins) = match self.callers.get(id) {
-                    Some(Some(callers)) if callers.intact() => continue,
-                    Some(Some(callers)) => (Some(callers.folder()), callers.pins()),
-                    Some(None) => continue,
-                    None if self.stored_mode(*id).as_deref()
-                        == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
-                    {
-                        (None, Vec::new())
-                    }
-                    None => continue,
-                };
-                let bound = self
-                    .bind_callers(*id, pinned)
-                    .map(|bound| bound.with_pins(pins));
-                if pinned.is_some() && bound.is_ok() {
-                    eprintln!("team_caller_socket_rebound");
-                }
-                self.callers.insert(*id, bound.ok());
-            }
-        }
         let host = self.terminal.as_deref();
         for id in subs {
             let label = super::events::label(&self.connection, id)
@@ -3176,13 +3161,6 @@ impl TeamRuntime {
             let mailbox = self.mailbox(id);
             #[cfg(unix)]
             let mut callers = self.callers.get_mut(&id).and_then(Option::as_mut);
-            #[cfg(unix)]
-            {
-                if let Some(callers) = callers.as_mut() {
-                    let lead = AgentId::team(id).ok();
-                    callers.serve(&mut || listed_panes(host, lead.as_ref()));
-                }
-            }
             super::history::serve_agent_calls(
                 &mut self.connection,
                 project,
@@ -3207,6 +3185,67 @@ impl TeamRuntime {
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
             );
+        }
+    }
+
+    /// Keeps the caller socket of each native lead of a project bound and answered (DEC-111
+    /// Q18): binds it again in the folder it was pinned to when it is gone, replaced or was
+    /// refused on an earlier tick, under the pane pins of the socket it replaces, also kept
+    /// across a refused bind, logging only a change; then serves each bound socket once,
+    /// whether or not the lead has the team tool, so its hooks and monitors learn their pane
+    /// and who the engine's rows put there, and its team servers get their calls named.
+    /// Takes the project.
+    #[cfg(unix)]
+    fn tend_callers(&mut self, project: &ProjectId) {
+        let workers = &self.workers;
+        self.callers.retain(|id, _| workers.contains_key(id));
+        self.caller_folders.retain(|id, _| workers.contains_key(id));
+        self.caller_pins.retain(|id, _| workers.contains_key(id));
+        let leads: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.role == AgentRole::Sub)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &leads {
+            let (was_bound, pins) = match self.callers.get(id) {
+                Some(Some(callers)) if callers.intact() => continue,
+                Some(Some(callers)) => (Some(true), callers.pins()),
+                Some(None) => (Some(false), self.caller_pins.remove(id).unwrap_or_default()),
+                None if self.stored_mode(*id).as_deref()
+                    == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
+                {
+                    (None, Vec::new())
+                }
+                None => continue,
+            };
+            let pinned = self.caller_folders.get(id).copied();
+            match self.bind_callers(*id, pinned) {
+                Ok(bound) => {
+                    if was_bound.is_some() {
+                        eprintln!("team_caller_socket_rebound");
+                    }
+                    self.caller_folders.insert(*id, bound.folder());
+                    self.callers.insert(*id, Some(bound.with_pins(pins)));
+                }
+                Err(error) => {
+                    if was_bound != Some(false) {
+                        eprintln!("team_caller_socket_not_bound kind={:?}", error.kind());
+                    }
+                    self.caller_pins.insert(*id, pins);
+                    self.callers.insert(*id, None);
+                }
+            }
+        }
+        let host = self.terminal.as_deref();
+        let connection = &self.connection;
+        for id in leads {
+            if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
+                let lead = AgentId::team(id).ok();
+                callers.serve(&mut || listed_panes(host, lead.as_ref()), &mut |pane| {
+                    pane_whom(connection, host, project, id, pane)
+                });
+            }
         }
     }
 
@@ -4490,12 +4529,16 @@ impl TeamRuntime {
         let prepared = prepared.and_then(|(root, plan, mode)| {
             if plan.native {
                 self.callers.remove(&id);
+                self.caller_folders.remove(&id);
+                self.caller_pins.remove(&id);
                 let bound = self.bind_callers(id, plan.scratch_pin).map_err(|e| {
+                    eprintln!("team_caller_socket_not_bound kind={:?}", e.kind());
                     with_code(
                         "the lead's caller socket could not be made",
                         Some(io_code(&e)),
                     )
                 })?;
+                self.caller_folders.insert(id, bound.folder());
                 self.callers.insert(id, Some(bound));
             }
             Ok((root, plan, mode))
@@ -4804,8 +4847,9 @@ impl TeamRuntime {
     }
 
     /// Binds a native lead's caller socket in its short temp folder, where its team servers
-    /// find it from their mailbox (DEC-111 Q18); a failure is logged and leaves the lead's
-    /// calls unnamed, so they are refused. Takes the lead. Returns the socket or the failure.
+    /// find it from their mailbox (DEC-111 Q18), in the folder `pinned` names when given.
+    /// Takes the lead and the folder pin. Returns the socket, or the failure, which leaves
+    /// the lead's calls unnamed and so refused until a later bind succeeds.
     #[cfg(unix)]
     fn bind_callers(
         &self,
@@ -4819,9 +4863,7 @@ impl TeamRuntime {
             Some(socket.as_path()),
             "the lead's servers find the socket the engine binds"
         );
-        super::caller::Callers::bind(&socket, pinned).inspect_err(|error| {
-            eprintln!("team_caller_socket_not_bound kind={:?}", error.kind());
-        })
+        super::caller::Callers::bind(&socket, pinned)
     }
 
     /// The sub-agent mode name stored on an agent's row, if any. Takes the agent. Returns
@@ -8199,7 +8241,6 @@ pub fn team_caller(
     (lead, label): (i64, &str),
     pane: Option<&str>,
 ) -> Option<(i64, String)> {
-    let name = AgentId::team(lead).ok()?;
     let mode: Option<String> = connection
         .query_row(
             "SELECT mode FROM team_agents WHERE id=?1 AND project=?2",
@@ -8212,7 +8253,37 @@ pub fn team_caller(
     if mode.as_deref() != Some(crate::coord::settings::SubagentMode::Native.as_str()) {
         return Some((lead, label.to_owned()));
     }
-    let pane = pane.filter(|pane| crate::terminal::pane_id_valid(pane))?;
+    match pane_member(connection, host, project, lead, pane?)? {
+        PaneMember::Lead => Some((lead, label.to_owned())),
+        PaneMember::Teammate(teammate) => {
+            let named = super::events::label(connection, teammate).ok()?;
+            Some((teammate, named))
+        }
+    }
+}
+
+/// Who runs in one pane of a native lead's team by the engine's own rows.
+enum PaneMember {
+    Lead,
+    Teammate(i64),
+}
+
+/// Finds who runs in one pane of a native lead's team from the engine's own rows, never
+/// from a file the agents write (DEC-111 Q18): the lead when the pane is the one its pane
+/// record names and the host lists under the recorded process, or the newest live teammate
+/// row of the lead in that pane. Inputs: the database, the terminal host, the project, the
+/// lead and the pane. Output: the member, or none for a pane id that is not plain or a pane
+/// no row names.
+fn pane_member(
+    connection: &Connection,
+    host: Option<&dyn Host>,
+    project: &ProjectId,
+    lead: i64,
+    pane: &str,
+) -> Option<PaneMember> {
+    if !crate::terminal::pane_id_valid(pane) {
+        return None;
+    }
     let teammate: Option<i64> = connection
         .query_row(
             "SELECT id FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
@@ -8224,9 +8295,9 @@ pub fn team_caller(
         .ok()?;
     if let Some(teammate) = teammate {
         assert_ne!(teammate, lead);
-        let named = super::events::label(connection, teammate).ok()?;
-        return Some((teammate, named));
+        return Some(PaneMember::Teammate(teammate));
     }
+    let name = AgentId::team(lead).ok()?;
     let record: Option<String> = connection
         .query_row(
             "SELECT record FROM team_panes WHERE agent=?1",
@@ -8241,7 +8312,28 @@ pub fn team_caller(
         .ok()?
         .iter()
         .any(|listed| listed.pid == own.pid && listed.id == pane)
-        .then(|| (lead, label.to_owned()))
+        .then_some(PaneMember::Lead)
+}
+
+/// Who runs in one pane of a native lead's team, for the lead's caller socket to answer
+/// `who` with, from the engine's own rows (DEC-111 Q18, RH-2): the lead, or a live teammate
+/// by the name the engine kept for it when it first saw it. Inputs: the database, the
+/// terminal host, the project, the lead and the pane. Output: the lead, the teammate's
+/// name, or none, also for a teammate with no name kept.
+#[cfg(unix)]
+pub(crate) fn pane_whom(
+    connection: &Connection,
+    host: Option<&dyn Host>,
+    project: &ProjectId,
+    lead: i64,
+    pane: &str,
+) -> Option<super::caller::Whom> {
+    match pane_member(connection, host, project, lead, pane)? {
+        PaneMember::Lead => Some(super::caller::Whom::Lead),
+        PaneMember::Teammate(teammate) => {
+            teammates::name(connection, teammate).map(super::caller::Whom::Teammate)
+        }
+    }
 }
 
 /// The panes a native lead's own tmux server lists, live ones only, as (pane id, pid).

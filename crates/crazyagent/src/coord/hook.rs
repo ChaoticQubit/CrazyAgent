@@ -20,14 +20,22 @@ const ASK_POLL: Duration = Duration::from_millis(50);
 const TEAM_FOLDERS_MAX: usize = 16;
 const CONFIG_BYTES_MAX: u64 = 256 * 1024;
 const MEMBERS_MAX: usize = 64;
-const NAME_BYTES_MAX: usize = 64;
-const LEAD_NAME: &str = "team-lead";
 const GRAPHIFY: &str = "graphify";
 const GRAPHED: &str = ".graphed";
 const NUDGED: &str = ".nudged";
 
 const _: () = assert!(CONTEXT_CHARS_MAX < 10_000 && CONTEXT_CHARS_MAX > 2 * super::BODY_BYTES_MAX);
 const _: () = assert!(ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64);
+/// How long a hook or monitor waits for the engine to name the pane it runs in.
+const PANE_WAIT: Duration = Duration::from_secs(3);
+const _: () = assert!(
+    PANE_WAIT.as_secs() < Event::Asked.timeout_seconds() as u64
+        && PANE_WAIT.as_secs() < Event::Notification.timeout_seconds() as u64
+        && PANE_WAIT.as_secs() < Event::Prompt.timeout_seconds() as u64
+        && PANE_WAIT.as_secs() + ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64
+);
+/// Why an edit of a session the engine placed in no pane is held (DEC-111 Q18).
+const UNNAMED_EDIT: &str = "CrazyAgent: the engine could not tell which agent this session is, so this edit is held. Try again in a moment.";
 
 /// The Claude Code hook events the relay runs on, each named by its `coord-hook`
 /// argument: after every tool call, at a stop, before AskUserQuestion, on a permission
@@ -80,30 +88,26 @@ impl Event {
     }
 }
 
-/// Who a hook or monitor runs for, from Claude Code's own team config: the tag whose
-/// messages the session's main thread takes (none inside a subagent or in-process
-/// teammate), the tag its activity counts for, and, for a native teammate, its name, whose
-/// `.worktrees/<name>` its edits must stay in (Q17).
+/// Who a hook or monitor runs for, as the engine places it: the tag whose messages the
+/// session's main thread takes (none inside a subagent or in-process teammate), the tag its
+/// activity counts for, and, for a native teammate, its name, whose `.worktrees/<name>`
+/// its edits must stay in (Q17); `unnamed` when the engine placed the process nowhere, so
+/// it is nobody (DEC-111 Q18).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub inbox: Option<String>,
     pub activity: Option<String>,
     pub teammate: Option<String>,
     pub cwd: Option<PathBuf>,
+    pub unnamed: bool,
 }
 
-/// One member of a Claude Code agent team config.
+/// One in-process member of a Claude Code agent team config: its name, `agentId` and
+/// folder.
 struct Member {
     name: String,
-    pane: Option<String>,
-    agent: Option<String>,
+    agent: String,
     cwd: Option<String>,
-}
-
-/// One Claude Code agent team config: the lead's session and the members.
-struct Team {
-    lead_session: Option<String>,
-    members: Vec<Member>,
 }
 
 /// Runs one relay hook (K2a) for Claude Code: reads the hook input JSON, writes the JSON
@@ -143,7 +147,7 @@ pub fn run(
     let Ok(folder) = Mailbox::open(mailbox) else {
         return Ok(());
     };
-    let who = identify(input["session_id"].as_str(), input["agent_id"].as_str());
+    let who = identify(mailbox, input["agent_id"].as_str());
     let mate = who.teammate.as_ref().and(who.activity.as_deref());
     let answer = match event {
         Event::PostTool => {
@@ -213,84 +217,96 @@ pub fn run(
     Ok(())
 }
 
-/// Finds who a hook or monitor runs for. The lead's own session is the one its team config
-/// names as `leadSessionId`; a native teammate runs in the tmux pane its member entry
-/// names (`tmuxPaneId`, from `TMUX_PANE`); an in-process teammate is the member whose
-/// `agentId` the hook input carries; any other `agent_id` is a subagent of the session.
-/// The team configs are read from `CLAUDE_CONFIG_DIR` (`teams/` or `.claude/teams/`).
-/// Inputs: the hook's `session_id` and `agent_id`, none for the monitor. Output: the
-/// identity; with no team config the session is the lead.
-pub(crate) fn identify(session: Option<&str>, agent: Option<&str>) -> Identity {
-    let teams = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
-        .map(|config| teams(&config))
-        .unwrap_or_default();
-    let lead_session = session.is_some_and(|session| {
-        teams
-            .iter()
-            .any(|team| team.lead_session.as_deref() == Some(session))
-    });
-    let members = || teams.iter().flat_map(|team| team.members.iter());
-    let pane = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|pane| crate::terminal::pane_id_valid(pane));
-    let mate = pane
-        .as_deref()
-        .filter(|_| !lead_session)
-        .and_then(|pane| members().find(|member| member.pane.as_deref() == Some(pane)));
-    let inner =
-        agent.and_then(|agent| members().find(|member| member.agent.as_deref() == Some(agent)));
-    let cwd = |member: &Member| member.cwd.as_ref().map(PathBuf::from);
-    let own = |inner: &Member, mate: &Member| inner.name == mate.name && inner.agent == mate.agent;
-    let identity = match (agent, inner, mate, pane.as_deref()) {
-        (None, _, Some(mate), Some(pane)) => Identity {
-            inbox: Some(pane.to_owned()),
-            activity: Some(pane.to_owned()),
-            teammate: Some(mate.name.clone()),
-            cwd: cwd(mate),
-        },
-        (Some(_), Some(inner), Some(mate), Some(pane)) if own(inner, mate) => Identity {
-            inbox: Some(pane.to_owned()),
-            activity: Some(pane.to_owned()),
-            teammate: Some(mate.name.clone()),
-            cwd: cwd(mate),
-        },
-        (None, ..) => Identity {
+/// Finds who a hook or monitor runs for, from the engine's answer alone (DEC-111 Q18,
+/// RH-2). The engine names the pane the asking process runs in from the process the kernel
+/// says connected, never from `TMUX_PANE`, and who runs there from its own rows, never from
+/// the team config, which every agent of the team can write. In the lead's pane, or for an
+/// agent that leads no native team, the session is the lead, an in-process teammate whose
+/// `agentId` the hook input carries as the config lists it, or a subagent of the lead. In
+/// a teammate's pane it is that teammate under the engine's name for it, or a subagent of
+/// it; a process the engine places nowhere is nobody, its edits held. Inputs: the mailbox
+/// and the hook's `agent_id`, none for the monitor. Output: the identity.
+pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
+    #[cfg(unix)]
+    let seat = {
+        use crate::team::caller::{Place, Whom};
+        match crate::team::caller::own_place(mailbox, PANE_WAIT) {
+            Place::Alone | Place::Placed(_, Whom::Lead) => Some(None),
+            Place::Placed(pane, Whom::Teammate(name)) => Some(Some((pane, name))),
+            Place::Unplaced => None,
+        }
+    };
+    #[cfg(not(unix))]
+    let seat: Option<Option<(String, String)>> = {
+        let _ = mailbox;
+        Some(None)
+    };
+    let Some(seat) = seat else {
+        return Identity {
+            inbox: None,
+            activity: None,
+            teammate: None,
+            cwd: None,
+            unnamed: true,
+        };
+    };
+    let in_process = |agent: &str| {
+        std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")))
+            .and_then(|config| {
+                in_process_members(&config)
+                    .into_iter()
+                    .find(|member| member.agent == agent)
+            })
+    };
+    let identity = match (seat, agent) {
+        (None, None) => Identity {
             inbox: Some(LEAD_TAG.to_owned()),
             activity: Some(LEAD_TAG.to_owned()),
             teammate: None,
             cwd: None,
+            unnamed: false,
         },
-        (Some(_), Some(inner), ..) => Identity {
-            inbox: None,
-            activity: None,
-            teammate: Some(inner.name.clone()),
-            cwd: cwd(inner),
+        (None, Some(agent)) => match in_process(agent) {
+            Some(member) => Identity {
+                inbox: None,
+                activity: None,
+                teammate: Some(member.name),
+                cwd: member.cwd.map(PathBuf::from),
+                unnamed: false,
+            },
+            None => Identity {
+                inbox: None,
+                activity: Some(LEAD_TAG.to_owned()),
+                teammate: None,
+                cwd: None,
+                unnamed: false,
+            },
         },
-        (Some(_), None, Some(mate), Some(pane)) => Identity {
-            inbox: None,
-            activity: Some(pane.to_owned()),
-            teammate: Some(mate.name.clone()),
-            cwd: cwd(mate),
-        },
-        (Some(_), None, ..) => Identity {
-            inbox: None,
-            activity: Some(LEAD_TAG.to_owned()),
-            teammate: None,
-            cwd: None,
-        },
+        (Some((pane, name)), agent) => {
+            let own = agent
+                .is_none_or(|agent| in_process(agent).is_some_and(|member| member.name == name));
+            Identity {
+                inbox: own.then(|| pane.clone()),
+                activity: Some(pane),
+                teammate: Some(name),
+                cwd: None,
+                unnamed: false,
+            }
+        }
     };
     assert!(identity.inbox.is_none() || identity.inbox == identity.activity);
     identity
 }
 
-/// Reads the Claude Code agent team configs below a config folder, read-only: at most
-/// `TEAM_FOLDERS_MAX` `teams/<team>/config.json` files of at most `CONFIG_BYTES_MAX`
-/// bytes, each a plain file. The files are the agent's own, so every field is untrusted
-/// and bounded; the lead's own entry and members with a name that is not plain are left
-/// out. Takes the config folder. Returns the teams.
-fn teams(config: &Path) -> Vec<Team> {
+/// Reads the in-process members of the Claude Code agent team configs below a config
+/// folder, read-only: at most `TEAM_FOLDERS_MAX` `teams/<team>/config.json` files of at
+/// most `CONFIG_BYTES_MAX` bytes, each a plain file. The files are the agents' own, so
+/// every field is untrusted and bounded, and they serve only to name an in-process
+/// teammate by the `agentId` its hook input carries; members whose name names no worktree
+/// are left out. Takes the config folder. Returns the members.
+fn in_process_members(config: &Path) -> Vec<Member> {
     let mut found = Vec::new();
     for root in [config.join("teams"), config.join(".claude").join("teams")] {
         let Ok(entries) = std::fs::read_dir(&root) else {
@@ -305,41 +321,25 @@ fn teams(config: &Path) -> Vec<Team> {
                 continue;
             };
             let text_of = |value: &Value, key: &str| value[key].as_str().map(str::to_owned);
-            let members = config["members"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .take(MEMBERS_MAX)
-                .filter_map(|member| {
-                    let name = text_of(member, "name")?;
-                    plain_name(&name).then(|| Member {
-                        pane: text_of(member, "tmuxPaneId")
-                            .filter(|pane| crate::terminal::pane_id_valid(pane)),
-                        agent: text_of(member, "agentId").filter(|agent| agent.len() <= 256),
-                        cwd: text_of(member, "cwd").filter(|cwd| Path::new(cwd).is_absolute()),
-                        name,
-                    })
-                })
-                .collect();
-            found.push(Team {
-                lead_session: text_of(&config, "leadSessionId"),
-                members,
-            });
+            found.extend(
+                config["members"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(MEMBERS_MAX)
+                    .filter_map(|member| {
+                        let name = text_of(member, "name")
+                            .filter(|name| crate::agent_git::worktree_name_valid(name))?;
+                        Some(Member {
+                            agent: text_of(member, "agentId").filter(|agent| agent.len() <= 256)?,
+                            cwd: text_of(member, "cwd").filter(|cwd| Path::new(cwd).is_absolute()),
+                            name,
+                        })
+                    }),
+            );
         }
     }
     found
-}
-
-/// Says whether a teammate name can name its worktree folder: 1 to `NAME_BYTES_MAX` bytes
-/// of letters, digits, `-`, `_` and `.`, not starting with a dot, and not the lead's.
-fn plain_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= NAME_BYTES_MAX
-        && !name.starts_with('.')
-        && name != LEAD_NAME
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 /// Takes the session's waiting messages, oldest first, by renaming each letter addressed
@@ -518,12 +518,16 @@ fn first_edit(folder: &Mailbox, who: &Identity) -> Option<&'static str> {
     Some(super::adoption::FIRST_EDIT_REMINDER)
 }
 
-/// Decides one file edit before it runs. A native teammate may edit only inside
+/// Decides one file edit before it runs. A session the engine placed in no pane may not
+/// edit (DEC-111 Q18). A native teammate may edit only inside
 /// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block, an edit to a
 /// repository file another active agent claimed is refused after asking the engine (Q15).
 /// The guard is cooperative: the session owns its home and mailbox. Takes the mailbox, the
 /// identity and the hook input. Returns the reason to deny, or None to let it run.
 fn guard(folder: &Mailbox, who: &Identity, input: &Value) -> Option<String> {
+    if who.unnamed {
+        return Some(UNNAMED_EDIT.to_owned());
+    }
     let tool_input = &input["tool_input"];
     let path = tool_input["file_path"]
         .as_str()
