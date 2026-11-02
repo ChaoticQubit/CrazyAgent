@@ -1,20 +1,31 @@
 #![cfg(unix)]
 
 use crazyagent::client_controller::OwnerController;
+use crazyagent::engine::EngineError;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{
     AccountSecret, OwnerClientKind, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
 };
-use crazyagent::plugins::{Scope, ServerSpec, ServerStatus, plain_problem};
+use crazyagent::plugins::{Scope, ServerSpec, ServerStatus, ServerView, plain_problem};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 
 const SETTINGS: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n";
 const FIXTURE: &str = include_str!("fixtures/mcp_fixture.py");
+static ONE_CHECK: Mutex<()> = Mutex::const_new(());
+
+/// Checks a server while no other test of this binary checks one. The engine caps server
+/// checks per process, and every test here runs its own engine in this one process, so
+/// parallel tests would take each other's places. Inputs: the controller and the server id.
+/// Output: the checked server, or the engine's refusal.
+async fn check(controller: &OwnerController, id: String) -> Result<ServerView, EngineError> {
+    let _one = ONE_CHECK.lock().await;
+    controller.check_mcp_server(id).await
+}
 
 struct Case {
     root: tempfile::TempDir,
@@ -443,10 +454,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
     assert_eq!(effective.servers[0].spec, spec);
     assert_eq!(effective.servers[0].secrets[0].name, "FIXTURE_TOKEN");
 
-    let checked = controller
-        .check_mcp_server(server.id.clone())
-        .await
-        .unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
     assert_eq!(checked.tools, vec!["echo", "authorized"]);
     assert_eq!(checked.status, ServerStatus::Approved);
     assert_eq!(checked.problem, None);
@@ -529,10 +537,7 @@ async fn wiring_mcp_servers_wait_for_approval_and_agents_get_only_approved_ones(
         .approve_mcp_server(broken.id.clone(), broken_spec)
         .await
         .unwrap();
-    let broken = controller
-        .check_mcp_server(broken.id.clone())
-        .await
-        .unwrap();
+    let broken = check(&controller, broken.id.clone()).await.unwrap();
     assert_eq!(broken.status_label, "Can't start");
     assert_eq!(
         broken.problem.as_deref(),
@@ -716,10 +721,7 @@ async fn a_server_check_cannot_write_outside_or_read_another_servers_secret() {
         .approve_mcp_server(server.id.clone(), spec)
         .await
         .unwrap();
-    let checked = controller
-        .check_mcp_server(server.id.clone())
-        .await
-        .unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
     assert!(
         !marker.exists(),
         "the checked server must not write outside its boundary"
@@ -828,10 +830,7 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
             .approve_mcp_server(server.id.clone(), spec)
             .await
             .unwrap();
-        let checked = controller
-            .check_mcp_server(server.id.clone())
-            .await
-            .unwrap();
+        let checked = check(&controller, server.id.clone()).await.unwrap();
         assert_eq!(checked.problem, None, "{name}");
         assert_eq!(
             checked.tools,
@@ -868,20 +867,14 @@ async fn a_server_check_folder_swapped_for_a_link_is_refused() {
         .approve_mcp_server(server.id.clone(), spec)
         .await
         .unwrap();
-    let first = controller
-        .check_mcp_server(server.id.clone())
-        .await
-        .unwrap();
+    let first = check(&controller, server.id.clone()).await.unwrap();
     assert_eq!(first.tools, vec!["echo", "authorized"]);
     let home = root.join("mcp-checks").join(&server.id).join("home");
     assert!(
         fs::symlink_metadata(&home).unwrap().is_symlink(),
         "the server swapped its home for a link"
     );
-    let second = controller
-        .check_mcp_server(server.id.clone())
-        .await
-        .unwrap();
+    let second = check(&controller, server.id.clone()).await.unwrap();
     assert!(
         !target.join("planted").exists(),
         "a later check must not write through the link"
@@ -943,10 +936,7 @@ async fn tool_switches_round_trip_through_the_owner_socket() {
         )
         .await
         .unwrap();
-    let checked = controller
-        .check_mcp_server(server.id.clone())
-        .await
-        .unwrap();
+    let checked = check(&controller, server.id.clone()).await.unwrap();
     assert_eq!(checked.tools, vec!["echo", "anonymous"]);
     let listed = controller
         .tool_switches(Some(project.clone()), Some(server.id.clone()))

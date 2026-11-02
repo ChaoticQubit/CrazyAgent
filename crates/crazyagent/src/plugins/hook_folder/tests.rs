@@ -4,6 +4,12 @@ use std::path::PathBuf;
 fn plugin(parent: &Path, name: &str) -> PathBuf {
     let folder = parent.join(name);
     fs::create_dir_all(folder.join("hooks")).unwrap();
+    fs::create_dir_all(folder.join(".claude-plugin")).unwrap();
+    fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{name}"}}"#),
+    )
+    .unwrap();
     folder
 }
 
@@ -41,6 +47,41 @@ fn inline_manifest_hooks_and_a_hooks_file_both_read_with_their_events_and_comman
         Some("startup|resume|clear|compact")
     );
     assert_eq!(found.skipped, 1);
+}
+
+#[test]
+fn a_hooks_folder_without_plugin_json_is_refused_with_a_plain_reason() {
+    let directory = tempfile::tempdir().unwrap();
+    let folder = directory.path().join("a-folder-name-short-enough");
+    fs::create_dir_all(folder.join("hooks")).unwrap();
+    fs::write(
+        folder.join("hooks").join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"true"}]}]}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read(&folder).map(|found| found.plugin),
+        Err("hooks_plugin_manifest_missing")
+    );
+    fs::create_dir(folder.join(".claude-plugin")).unwrap();
+    fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        r#"{"description":"no name"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read(&folder).map(|found| found.plugin),
+        Err("hook_plugin_name_invalid")
+    );
+    fs::write(
+        folder.join(".claude-plugin/plugin.json"),
+        r#"{"name":"guard"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        read(&folder).map(|found| found.plugin),
+        Ok("guard".to_owned())
+    );
 }
 
 #[test]

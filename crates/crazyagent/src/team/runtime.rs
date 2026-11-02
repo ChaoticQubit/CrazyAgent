@@ -4072,7 +4072,8 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. It clears only
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. The agent shows no
+    /// process group until its new process is ready, never the one that ended. It clears only
     /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
@@ -4109,7 +4110,7 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4
+                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
                 params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
             )
@@ -4517,9 +4518,10 @@ impl TeamRuntime {
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
-    /// and, in its own clone, where its agent team's teammates work, each in
-    /// `.worktrees/<name>` on `<task branch>--<name>`, merged into the task branch before it
-    /// reports done. Takes the project and the agent. Returns the line, empty for an agent
+    /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
+    /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
+    /// the task branch before it reports done; an app-spawned lead delegates only through
+    /// the spawn tool. Takes the project and the agent. Returns the line, empty for an agent
     /// with no task branch of its own.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
@@ -4551,6 +4553,14 @@ impl TeamRuntime {
             return format!(
                 "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
                 finish = super::tool::FINISH_WORK_TOOL
+            );
+        }
+        if !matches!(
+            super::lead_mode(&self.connection, project, agent),
+            Ok(crate::coord::settings::SubagentMode::Native)
+        ) {
+            return format!(
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
             );
         }
         format!(

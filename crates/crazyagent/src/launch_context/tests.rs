@@ -1237,30 +1237,61 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
 }
 
 #[test]
-fn the_skills_index_names_each_skill_once_under_one_path_pattern_within_its_bound() {
+fn the_skills_index_gives_each_skill_its_description_and_path_and_says_check_it_first() {
+    let sources = tempfile::tempdir().unwrap();
     let folder = Path::new("/private/tmp/home/crazyagent/plugin/skills");
+    let long = format!("{}tail", "word ".repeat(60));
     let skills: Vec<EffectiveSkill> = (0..400)
-        .map(|index| EffectiveSkill {
-            name: format!("skill-{index:03}"),
-            folder: PathBuf::from(format!("/private/tmp/sources/skill-{index:03}")),
+        .map(|index| {
+            let name = format!("skill-{index:03}");
+            let source = sources.path().join(&name);
+            fs::create_dir_all(&source).unwrap();
+            let description = match index {
+                1 => long.clone(),
+                _ => format!("Does task {index}."),
+            };
+            if index != 2 {
+                fs::write(
+                    source.join("SKILL.md"),
+                    format!("---\nname: {name}\ndescription: {description}\n---\n\nSteps.\n"),
+                )
+                .unwrap();
+            }
+            EffectiveSkill {
+                name,
+                folder: source,
+            }
         })
         .collect();
-    let index = skills_index(folder, &skills[..3]);
+    let index = skills_index(folder, &skills[..3], true);
     assert_eq!(
         index,
-        "\n## Skills\n\nThe owner approved these skills for this project. Before you use one, read `/private/tmp/home/crazyagent/plugin/skills/NAME/SKILL.md`, with the skill's name in place of NAME.\n\n- skill-000\n- skill-001\n- skill-002\n"
+        format!(
+            "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n- skill-001: {}... (/private/tmp/home/crazyagent/plugin/skills/skill-001/SKILL.md)\n- skill-002 (/private/tmp/home/crazyagent/plugin/skills/skill-002/SKILL.md)\n",
+            ["word"; 31].join(" ")
+        ),
+        "a long description is cut at a word within its bound, and a skill whose description cannot be read keeps its name and path"
     );
-    let index = skills_index(folder, &skills);
+    assert_eq!(
+        skills_index(folder, &skills[..1], false),
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- skill-000: Does task 0. (/private/tmp/home/crazyagent/plugin/skills/skill-000/SKILL.md)\n",
+        "a harness with no Skill tool is told to read the file"
+    );
+    assert_eq!(short_description("one two", 6), "one...");
+    assert_eq!(short_description("one twothree", 9), "one...");
+    assert_eq!(short_description("abcdefgh", 6), "abc...");
+    assert_eq!(short_description("aé bc", 5), "a...");
+    let index = skills_index(folder, &skills, true);
     assert!(index.len() <= SKILLS_INDEX_BYTES_MAX + SECTION_SLACK);
-    assert_eq!(index.matches("SKILL.md").count(), 1);
-    let listed = index
+    let listed: Vec<&str> = index
         .lines()
         .filter(|line| line.starts_with("- skill-"))
-        .count();
-    assert!(listed > 0 && listed < skills.len());
+        .collect();
+    assert!(listed.len() > 50 && listed.len() < skills.len());
+    assert!(listed.iter().all(|line| line.ends_with("/SKILL.md)")));
     assert!(index.ends_with(&format!(
         "- and {} more skills in the same folder\n",
-        skills.len() - listed
+        skills.len() - listed.len()
     )));
 }
 

@@ -3,6 +3,7 @@ use super::settings_accounts::{send as send_settings, settings_event};
 use super::settings_plugins::SkillDetailPage;
 use crate::agent_home::TEXT_BYTES_MAX;
 use crate::coord::adoption::AgentAdoption;
+use crate::coord::settings::Nudges;
 use crate::engine::owner::{Adoption, InstructionSettings};
 use crate::instruction_files::Mode;
 use crate::plugins::SkillView;
@@ -968,7 +969,7 @@ impl ProcessPage {
 }
 
 impl ProcessPage {
-    /// Adds the project's workflow adoption below its settings: whether nudges are on, then
+    /// Adds the project's workflow adoption below its settings: its nudges option, then
     /// the newest agents, at most `ADOPTION_ROWS_MAX`, each with its count per counted tool
     /// and its flags in red, marked when the agent was reminded. Inputs: the width, the
     /// lines so far and the context. Output: unit.
@@ -987,10 +988,14 @@ impl ProcessPage {
             }
             Some(Ok(adoption)) => adoption,
         };
-        let nudges = if adoption.nudges {
-            "Nudges on: each flag sends that agent one reminder."
-        } else {
-            "Nudges off: flags show here, agents get no reminder."
+        let nudges = match adoption.nudges {
+            Nudges::Off => "Nudges off: flags show here, agents get no reminder.",
+            Nudges::TenMinutes => {
+                "Nudges every 10 minutes: each flag sends that agent one reminder."
+            }
+            Nudges::FirstEdit => {
+                "Nudges on first edit: an edit before any graph query gets one reminder."
+            }
         };
         lines.push(row(
             width,

@@ -178,8 +178,9 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 });
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
-  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"],
-    ["release.yml", "build", "Install pinned Node on the owner's runner"], ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
+  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
+    ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
+    ["release.yml", "build", "Install pinned arm64 bun on the owner's runner"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
     assert(step, `${job}: ${title}`);
     assert.doesNotMatch(step, /\.complete/, `${job}: ${title} keeps no install marker`);
@@ -187,6 +188,24 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
     assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
     assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
   }
+});
+
+test("macOS CI runs a Codex release in codex::VERSIONS, from the pinned, checksum-checked release archive", async () => {
+  const ci = await workflow("ci.yml");
+  const pinned = ci.match(/^ {2}CODEX_VERSION: "(\d+)\.(\d+)\.(\d+)"$/m);
+  assert(pinned, "CI pins an exact Codex version");
+  const source = await readFile(new URL("../../crates/crazyagent/src/coord/delivery/codex.rs", import.meta.url), "utf8");
+  const versions = source.match(/^pub const VERSIONS: \[\(u64, u64\); \d+\] = \[(.+)\];$/m);
+  assert(versions, "codex::VERSIONS is one line");
+  const supported = [...versions[1].matchAll(/\((\d+), (\d+)\)/g)].map((pair) => `${pair[1]}.${pair[2]}`);
+  assert(supported.length > 0, "codex::VERSIONS names a release");
+  assert(supported.includes(`${pinned[1]}.${pinned[2]}`), `CI Codex ${pinned[0]} is one of codex::VERSIONS ${supported.join(", ")}`);
+  const step = steps(ci, "macos").find((text) => text.includes("name: Install Codex"));
+  assert(step, "macOS CI installs Codex");
+  assert.match(step, /\n\s+CODEX_SHA256: [0-9a-f]{64}\n/);
+  assert.match(step, /"https:\/\/github\.com\/openai\/codex\/releases\/download\/rust-v\$CODEX_VERSION\/\$CODEX_PACKAGE"/);
+  assert.match(step, /\n\s+test "\$\("\$work\/bin\/codex" --version\)" = "codex-cli \$CODEX_VERSION"\n/);
+  assert.doesNotMatch(ci, /codex[^\n]*latest/i, "no unpinned Codex");
 });
 
 test("a release on the owner's runner signs with pinned, checksum-checked Node, bun and Rust, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
