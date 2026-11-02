@@ -67,6 +67,16 @@ impl Notice {
             if self.error { look.error } else { look.fg },
         )
     }
+
+    /// Draws the notice wrapped to a width, so a long one is read whole instead of cut.
+    /// Takes the look and the width in cells. Returns its rows in the error or plain style.
+    pub fn rows(&self, look: &Look, width: usize) -> Vec<Row> {
+        let style = if self.error { look.error } else { look.fg };
+        wrap_words(&self.text, width)
+            .into_iter()
+            .map(|line| Row::of(line, style))
+            .collect()
+    }
 }
 
 /// Which list of the Team view has focus.
@@ -1571,8 +1581,9 @@ impl TeamView {
         self.save_background(BackgroundAtEnd::Grace { secs })
     }
 
-    /// Sends one Background commands choice with the notice that says what it now does.
-    /// Takes the choice. Output: the change to send, or Handled while saving.
+    /// Sends one Background commands choice with the notice that says what it now does and
+    /// which agents it acts on. Takes the choice. Output: the change to send, or Handled
+    /// while saving.
     fn save_background(&mut self, choice: BackgroundAtEnd) -> TeamReply {
         let done = match choice {
             BackgroundAtEnd::Wait => "A task now waits for the commands its agent started in the background, up to its task limit.".to_owned(),
@@ -1582,6 +1593,7 @@ impl TeamView {
             ),
             BackgroundAtEnd::Stop => "A task's background commands now stop when its turn ends, and its agent is told so.".to_owned(),
         };
+        let done = format!("{done} {BACKGROUND_SCOPE}");
         let action = TeamAction::BackgroundAtEnd {
             project_id: self.project.clone(),
             choice,
@@ -2078,7 +2090,11 @@ impl TeamView {
         let summary_rows = lines.len();
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
-            lines.extend(self.notice.iter().map(|notice| notice.row(look)));
+            lines.extend(
+                self.notice
+                    .iter()
+                    .flat_map(|notice| notice.rows(look, content)),
+            );
             return (lines, self.help(), None);
         };
         lines.push(Row::of(plan_line(status), look.muted));
@@ -2094,7 +2110,11 @@ impl TeamView {
             lines.push(Row::of(label, look.muted));
         }
         if self.alerts {
-            let notice: Vec<Row> = self.notice.iter().map(|notice| notice.row(look)).collect();
+            let notice: Vec<Row> = self
+                .notice
+                .iter()
+                .flat_map(|notice| notice.rows(look, content))
+                .collect();
             let room = room.saturating_sub(lines.len() + notice.len());
             lines.extend(self.alert_rows(content, room, look));
             lines.extend(notice);
@@ -2121,7 +2141,7 @@ impl TeamView {
                 None => (self.panel(content, accounts, look), None),
             },
         };
-        let footer = self.footer(look);
+        let footer = self.footer(content, look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
@@ -2541,7 +2561,7 @@ impl TeamView {
         rows
     }
 
-    fn footer(&self, look: &Look) -> Vec<Row> {
+    fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
         if let Some(ask) = self.ask {
             let label = |id: i64| {
                 self.agent(id)
@@ -2597,7 +2617,7 @@ impl TeamView {
             ];
         }
         if let Some(notice) = &self.notice {
-            return vec![notice.row(look)];
+            return notice.rows(look, content);
         }
         self.status
             .iter()
@@ -2828,6 +2848,10 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
             .and_then(|at| choices.get(at + 1).copied()),
     }
 }
+
+/// Which agents Background commands at task end acts on, said with every choice in the
+/// TUI and the desktop alike: only where the engine sees or ends background commands.
+const BACKGROUND_SCOPE: &str = "It applies to Claude agents and to agents run per turn; a kept Codex pane keeps its background commands whatever the choice.";
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.
