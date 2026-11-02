@@ -150,6 +150,7 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
         let policy = AgentPolicy {
             access,
             toolchains: Vec::new(),
+            ..AgentPolicy::default()
         };
         let set = owner
             .set_project_agent_policy(project.clone(), policy, generation)

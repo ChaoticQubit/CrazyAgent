@@ -61,6 +61,12 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::HiddenPaths { project } => SetupView::HiddenPaths(
+                controller
+                    .project_hidden_paths(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
                 controller
                     .project_agent_policy(project)

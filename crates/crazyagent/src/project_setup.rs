@@ -620,6 +620,9 @@ pub enum SetupQuery {
     ReadPaths {
         project: ProjectId,
     },
+    HiddenPaths {
+        project: ProjectId,
+    },
     AgentPolicy {
         project: ProjectId,
     },
@@ -667,6 +670,7 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     ReadPaths(Vec<String>),
+    HiddenPaths(Vec<String>),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),

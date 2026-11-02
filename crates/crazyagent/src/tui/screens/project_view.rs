@@ -279,6 +279,63 @@ pub(in crate::tui) fn project_screen(
             status: header_status(running, look),
         };
     }
+    if let Some(hidden) = &screen.hidden {
+        let field = 52;
+        let (_, (_, column)) = hidden.input.wrap(16384);
+        let value: Vec<char> = hidden.input.value().chars().collect();
+        let start = column.saturating_sub(field - 1);
+        let shown: String = value.iter().skip(start).take(field).collect();
+        let mut body: Vec<Row> = wrap_words(
+            "Folders inside the project that agents, the master and research jobs can't read, write or run. Separate them with a colon. Each must be a folder inside the project.",
+            56,
+        )
+        .into_iter()
+        .map(|line| Row::of(line, look.muted))
+        .collect();
+        body.push(Row::default());
+        let at = body.len();
+        body.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(Row::of(shown, look.fg).pad(field))
+                .push(" ", Style::new())
+                .push("]", look.accent),
+        );
+        body.push(Row::default());
+        body.extend(
+            hidden
+                .error
+                .iter()
+                .flat_map(|error| wrap_words(error, 56))
+                .map(|line| Row::of(line, look.error)),
+        );
+        body.push(if hidden.busy {
+            Row::of(format!("{SPINNER} Saving..."), look.running)
+        } else {
+            Row::of("[> Save hidden folders ]", look.selection).push("   [ Cancel ]", look.fg)
+        });
+        let top = 4;
+        let box_left = width.saturating_sub(62) / 2;
+        rows = modal(&rows, width, 62, "Hidden folders", body, top, look);
+        help = if hidden.busy {
+            vec![("Esc", "Close")]
+        } else {
+            vec![("Enter", "Save hidden folders"), ("Esc", "Cancel")]
+        };
+        let cursor = (!hidden.busy).then(|| {
+            (
+                (box_left + 4 + column - start) as u16,
+                (top + 1 + at) as u16,
+            )
+        });
+        return Screen {
+            rows,
+            cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
     if let Some(access) = &screen.access {
         let body = access.body(look);
         rows = modal(&rows, width, 62, "Agent access", body, 4, look);
@@ -1889,6 +1946,18 @@ fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
     Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
 }
 
+/// The Settings line for a project's hidden folders: how many, or loading.
+/// Takes the screen and look. Returns the row with its edit key.
+fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
+    let text = match screen.hidden_paths.as_deref() {
+        None => "Loading...".to_owned(),
+        Some([]) => "None hidden".to_owned(),
+        Some([one]) => one.clone(),
+        Some(many) => format!("{} hidden folders", many.len()),
+    };
+    Row::of(text, look.fg).push("   d Edit hidden folders", look.muted)
+}
+
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     if let Some(general) = &screen.general {
         return general_form(general, content, look);
@@ -1929,6 +1998,7 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
+        entry("Hidden", hidden_line(screen, look)),
         entry(
             "Access",
             Row::of(
