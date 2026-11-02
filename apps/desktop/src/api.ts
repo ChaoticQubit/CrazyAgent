@@ -127,6 +127,7 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);
@@ -135,7 +136,7 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
  * sentence, or undefined when there is none. */
 export function knownError(code: string): string | undefined {
   if (Object.hasOwn(COPY, code)) return COPY[code];
-  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
+  return /^(skill|server|plugins?|hooks?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
 }
 
 /** The owner's line for a failure, never opaque: its own sentence, else the generic sentence;
@@ -1188,6 +1189,13 @@ export function setSpreadAccounts(id: string, on: boolean): Promise<Result<Inten
  * null for the default. Output: the engine receipt, not ready, or a plain error. */
 export function setMasterBranch(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_master_branch", { id, branch, generation: nextGeneration() });
+}
+
+/** Sets the branch the project's team work lands on: the master's merges, an Accept with no
+ * branch picked and what each change set counts. Inputs: the project id and the branch, null
+ * for the master's branch. Output: the engine receipt, not ready, or a plain error. */
+export function setLandOn(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_land_on", { id, branch, generation: nextGeneration() });
 }
 
 /** Turns the project's "Ask me before merging into the master's branch" setting on or off;

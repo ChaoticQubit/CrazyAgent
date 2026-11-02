@@ -113,6 +113,18 @@ test("the On master harness switch setting offers Carry over first and shows the
   assert.match(fresh, /<option value="carry">Carry conversation over<\/option><option value="fresh" selected="">Start fresh<\/option>/);
 });
 
+test("Land on offers the master's branch by default and a named branch, and shows the engine's choice", () => {
+  const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const field = (value) => `<input id="tg-land-on-chores" class="pj-input" placeholder="The master&#x27;s branch" aria-describedby="tg-land-on-help-chores" value="${value}"/>`;
+  const unset = render();
+  assert.match(unset, /<form class="pj-row" aria-label="Land on"><label for="tg-land-on-chores">Land on<\/label>/);
+  assert.ok(unset.includes(field("")), "no branch named shows the master's branch as the default");
+  assert.ok(unset.includes('<button type="button" class="btn small" disabled="">Use the master&#x27;s branch</button>'), "with no branch named there is nothing to clear");
+  const named = render({ land_on: "stage" });
+  assert.ok(named.includes(field("stage")), "a named branch shows as the engine keeps it");
+  assert.ok(named.includes('<button type="button" class="btn small">Use the master&#x27;s branch</button>'), "a named branch can go back to the master's branch");
+});
+
 test("a team view the engine shortened to fit says older history is hidden", () => {
   const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.doesNotMatch(whole, /Older team history is hidden/);
@@ -127,12 +139,12 @@ test("the idle stop says when an idle master stops, which no setting changes", (
 
 const coordination = await import("../src/screens/team/coordination.tsx");
 
-test("workflow nudges offer Off first and On, and show Off for a project with no saved coordination settings", () => {
-  assert.equal(coordination.COORD_DEFAULTS.nudges, false);
+test("workflow nudges offer Off first, Every 10 minutes and First edit, and show Off for a project with no saved coordination settings", () => {
+  assert.equal(coordination.COORD_DEFAULTS.nudges, "off");
   const html = renderToStaticMarkup(createElement(coordination.CoordinationControls, { projectId: "chores", status: status(), reload: () => {} }));
   const group = html.match(/<div class="segmented" role="radiogroup" aria-label="Workflow nudges">(.*?)<\/div>/)[1];
   const choices = [...group.matchAll(/aria-checked="(true|false)"[^>]*>([^<]+)<\/button>/g)].map(([, checked, label]) => [label, checked === "true"]);
-  assert.deepEqual(choices, [["Off", true], ["On", false]], "the default comes first, as in the panel's other settings");
+  assert.deepEqual(choices, [["Off", true], ["Every 10 minutes", false], ["First edit", false]], "the default comes first, as in the panel's other settings");
 });
 
 const rustList = (name) => {

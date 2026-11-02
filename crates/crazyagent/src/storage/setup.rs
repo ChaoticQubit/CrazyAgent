@@ -663,9 +663,10 @@ fn seed_hooks(
 }
 
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
-/// MCP server in one transaction, add the hooks of its plugin folder, or sweep folders and
-/// secrets that removals left. Copied skill folders are removed again and moved ones put
-/// back when an install does not commit; replaced ones are deleted after it commits.
+/// MCP server in one transaction, add the hooks of its plugin folder and keep why they were
+/// refused for the entry's setup row, or sweep folders and secrets that removals left.
+/// Copied skill folders are removed again and moved ones put back when an install does not
+/// commit; replaced ones are deleted after it commits.
 /// Inputs: the engine connection, the engine root and the job. Output: nothing, or the
 /// plain reason.
 #[cfg(unix)]
@@ -681,7 +682,16 @@ pub(crate) fn execute(
             skills,
             server,
         } => (id, source, skills, server),
-        Command::SeedHooks { id, plugin } => return seed_hooks(connection, root, &id, &plugin),
+        Command::SeedHooks { id, plugin } => {
+            let seeded = seed_hooks(connection, root, &id, &plugin);
+            progress::with(root, |state| match &seeded {
+                Ok(()) => state.hooks.remove(&id),
+                Err(problem) => state
+                    .hooks
+                    .insert(id.clone(), crate::setup::pack_reason(&problem.0)),
+            });
+            return seeded;
+        }
         Command::Sweep => return sweep(connection, root),
     };
     if source.is_empty() || source == PRESENT || (skills.is_empty() && server.is_none()) {

@@ -54,8 +54,25 @@ fn request(id: &str, revision: u64, command: Command) -> WireRequest {
     }
 }
 
+/// Sends one request the way the engine's contract asks a client to: while it answers
+/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit),
+/// the same request goes again, and storage replays a recorded mutation's reply. Gives up
+/// after 30 s. Inputs: the engine and the request. Output: the reply.
+async fn send(engine: &Engine, request: WireRequest) -> WireReply {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match engine.apply(request.clone()).await {
+            Ok(reply) => return reply,
+            Err(error)
+                if error.0 == "outcome_unknown_retry_same_identity"
+                    && std::time::Instant::now() < until => {}
+            Err(error) => panic!("engine apply failed: {error:?}"),
+        }
+    }
+}
+
 async fn apply(engine: &Engine, id: &str, revision: u64, command: Command) -> WireReply {
-    engine.apply(request(id, revision, command)).await.unwrap()
+    send(engine, request(id, revision, command)).await
 }
 
 async fn setup(root: &Path, repo: &Path) -> (Engine, crazyagent::config::EffectiveConfig) {
@@ -159,9 +176,9 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
         3,
         allocate(&repo, "owner", Some("native-child")),
     );
-    let first = engine.apply(operation.clone()).await.unwrap();
+    let first = send(&engine, operation.clone()).await;
     assert_eq!(first.outcome, Outcome::Applied);
-    assert_eq!(engine.apply(operation.clone()).await.unwrap(), first);
+    assert_eq!(send(&engine, operation.clone()).await, first);
     let lease = leases(&engine).await.remove(0);
     assert_eq!(
         std::fs::read(Path::new(&lease.path).join("tracked")).unwrap(),
@@ -179,7 +196,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
         recovered.state,
         crazyagent::worktrees::LeaseState::RecoveryRequired
     );
-    assert_eq!(engine.apply(operation).await.unwrap(), first);
+    assert_eq!(send(&engine, operation).await, first);
     let release = apply(
         &engine,
         "release",
@@ -242,14 +259,16 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     let (first, second) = tokio::join!(
-        engine.apply(request("one", 3, allocate(&repo, "owner-one", None))),
-        engine.apply(request(
-            "two",
-            3,
-            allocate(&repo, "owner-two", Some("native-two"))
-        ))
+        send(
+            &engine,
+            request("one", 3, allocate(&repo, "owner-one", None))
+        ),
+        send(
+            &engine,
+            request("two", 3, allocate(&repo, "owner-two", Some("native-two")))
+        )
     );
-    let results = [first.unwrap(), second.unwrap()];
+    let results = [first, second];
     assert_eq!(
         results
             .iter()

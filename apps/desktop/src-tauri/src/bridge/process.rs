@@ -201,7 +201,7 @@ impl NativeBridge {
     }
 
     /// Reads one project's workflow adoption, run without the bridge lock. Input: the
-    /// project id. Output: whether nudges are on, the counted tools and each recent agent's
+    /// project id. Output: its nudges option, the counted tools and each recent agent's
     /// counts, flags and reminders.
     pub fn adoption(&self, project_id: String) -> Result<Unlocked<Adoption>, BridgeError> {
         let project =

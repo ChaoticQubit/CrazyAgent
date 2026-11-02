@@ -401,7 +401,7 @@ impl OwnerClient {
             .await
     }
 
-    /// Reads one project's workflow adoption: whether nudges are on, the counted tools and
+    /// Reads one project's workflow adoption: its nudges option, the counted tools and
     /// each recent agent's counts, flags and reminders. Input: the project. Output: the
     /// view, or a `PROCESS_CODES` refusal such as `process_adoption_unavailable`.
     pub async fn adoption(&self, project: ProjectId) -> Result<Adoption, EngineError> {

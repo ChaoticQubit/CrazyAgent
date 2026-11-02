@@ -5,7 +5,7 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Overlaps, QuestionsTo, SubagentMode,
+    Nudges, Overlaps, QuestionsTo, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -164,6 +164,21 @@ pub(in crate::tui) enum Ask {
 
 const TEAMMATE_KEYS_MAX: usize = 9;
 
+/// The branch setting the open branch editor writes: the Master's branch (DEC-100) or the
+/// Land on branch (DEC-111 Q1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum BranchSetting {
+    Master,
+    LandOn,
+}
+
+/// The open branch editor: the setting it writes and the branch name being typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct BranchEdit {
+    pub setting: BranchSetting,
+    pub input: TextInput,
+}
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -176,7 +191,7 @@ pub(in crate::tui) struct TeamView {
     pub confirm: Option<i64>,
     pub ask: Option<Ask>,
     pub draft: Option<Draft>,
-    pub branch_edit: Option<TextInput>,
+    pub branch_edit: Option<BranchEdit>,
     pub wake: Option<WakeEdit>,
     pub coord: Option<CoordEdit>,
     pub alerts: bool,
@@ -264,7 +279,10 @@ impl TeamView {
                         if matches!(action, TeamAction::Delegate { .. }) {
                             self.draft = None;
                         }
-                        if matches!(action, TeamAction::MasterBranch { .. }) {
+                        if matches!(
+                            action,
+                            TeamAction::MasterBranch { .. } | TeamAction::LandOn { .. }
+                        ) {
                             self.branch_edit = None;
                         }
                         if matches!(action, TeamAction::CoordSettings { .. })
@@ -293,7 +311,7 @@ impl TeamView {
         self.changing.is_some()
     }
 
-    /// Says whether the owner is writing a new task or the Master's branch, so the host
+    /// Says whether the owner is writing a new task or a branch setting, so the host
     /// sends pastes here, keeps its own letter keys off and shows the cursor.
     /// Takes the view. Returns true while the task composer or the branch editor is open.
     pub fn typing(&self) -> bool {
@@ -305,12 +323,12 @@ impl TeamView {
                 .is_some_and(|edit| edit.counted.is_some())
     }
 
-    /// Adds pasted text to the task or the Master's branch being written.
+    /// Adds pasted text to the task or the branch setting being written.
     /// Takes untrusted pasted text; control characters are dropped.
     /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
-        if let Some(input) = &mut self.branch_edit {
-            input.insert_str(text);
+        if let Some(edit) = &mut self.branch_edit {
+            edit.input.insert_str(text);
             return true;
         }
         if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut()) {
@@ -516,7 +534,11 @@ impl TeamView {
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
-                self.open_branch_edit();
+                self.open_branch_edit(BranchSetting::Master);
+                TeamReply::Handled
+            }
+            KeyCode::Char('L') => {
+                self.open_branch_edit(BranchSetting::LandOn);
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
@@ -1375,43 +1397,52 @@ impl TeamView {
         })
     }
 
-    /// Opens the Master's branch editor filled with the current choice, empty for the
-    /// repository default. Output: none; a notice while the team is loading.
-    fn open_branch_edit(&mut self) {
+    /// Opens the editor of one branch setting filled with the current choice, empty for
+    /// its default: the repository's default branch for the Master's branch, the Master's
+    /// branch for Land on. Takes the setting. Output: none; a notice while the team is
+    /// loading.
+    fn open_branch_edit(&mut self, setting: BranchSetting) {
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return;
         };
         let mut input = TextInput::single(MASTER_BRANCH_BYTES_MAX);
-        input.set(status.master_branch.as_deref().unwrap_or(""));
-        self.branch_edit = Some(input);
+        input.set(
+            match setting {
+                BranchSetting::Master => status.master_branch.as_deref(),
+                BranchSetting::LandOn => status.land_on.as_deref(),
+            }
+            .unwrap_or(""),
+        );
+        self.branch_edit = Some(BranchEdit { setting, input });
     }
 
-    /// Handles one key while the Master's branch editor is open: Enter saves, Esc closes,
-    /// other keys edit. Takes the key. Output: the change to send, or Handled.
+    /// Handles one key while a branch editor is open: Enter saves, Esc closes, other keys
+    /// edit. Takes the key. Output: the change to send, or Handled.
     fn branch_key(&mut self, key: KeyEvent) -> TeamReply {
         match key.code {
             KeyCode::Esc => {
                 self.branch_edit = None;
                 TeamReply::Handled
             }
-            KeyCode::Enter => self.save_master_branch(),
+            KeyCode::Enter => self.save_branch(),
             _ => {
-                if let Some(input) = &mut self.branch_edit {
-                    input.handle(key);
+                if let Some(edit) = &mut self.branch_edit {
+                    edit.input.handle(key);
                 }
                 TeamReply::Handled
             }
         }
     }
 
-    /// Sends the Master's branch typed in the editor; an empty name goes back to the
-    /// repository default. Output: the change to send, or Handled with a notice while saving.
-    fn save_master_branch(&mut self) -> TeamReply {
-        let Some(input) = &self.branch_edit else {
+    /// Sends the branch typed in the open editor to its setting; an empty name goes back to
+    /// the setting's default. Output: the change to send, or Handled with a notice while
+    /// saving.
+    fn save_branch(&mut self) -> TeamReply {
+        let Some(edit) = &self.branch_edit else {
             return TeamReply::Handled;
         };
-        let typed = input.value().trim();
+        let typed = edit.input.value().trim();
         let branch = (!typed.is_empty()).then(|| typed.to_owned());
         if self.changing.is_some() {
             self.notice = Some(Notice::problem(
@@ -1419,13 +1450,19 @@ impl TeamView {
             ));
             return TeamReply::Handled;
         }
-        self.changing = Some(match &branch {
-            Some(name) => format!("The master now works on {name}."),
-            None => "The master now works on the repository's default branch.".to_owned(),
+        let setting = edit.setting;
+        self.changing = Some(match (setting, &branch) {
+            (BranchSetting::Master, Some(name)) => format!("The master now works on {name}."),
+            (BranchSetting::Master, None) => {
+                "The master now works on the repository's default branch.".to_owned()
+            }
+            (BranchSetting::LandOn, Some(name)) => format!("Work now lands on {name}."),
+            (BranchSetting::LandOn, None) => "Work now lands on the master's branch.".to_owned(),
         });
-        TeamReply::Change(TeamAction::MasterBranch {
-            project_id: self.project.clone(),
-            branch,
+        let project_id = self.project.clone();
+        TeamReply::Change(match setting {
+            BranchSetting::Master => TeamAction::MasterBranch { project_id, branch },
+            BranchSetting::LandOn => TeamAction::LandOn { project_id, branch },
         })
     }
 
@@ -1667,18 +1704,17 @@ impl TeamView {
                 )
             }
             CoordRow::Nudges => {
-                settings.nudges = !settings.nudges;
-                let done = if settings.nudges {
-                    "Workflow nudges are on."
-                } else {
-                    "Workflow nudges are off."
-                };
+                settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
+                let done = format!(
+                    "Workflow nudges: {}.",
+                    settings.nudges.words().to_lowercase()
+                );
                 (
                     TeamAction::CoordSettings {
                         project_id,
                         settings,
                     },
-                    done.to_owned(),
+                    done,
                 )
             }
             CoordRow::Counted => return TeamReply::Handled,
@@ -1798,7 +1834,7 @@ impl TeamView {
                 ),
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
-                    if view.settings.nudges { "On" } else { "Off" }.to_owned(),
+                    view.settings.nudges.words().to_owned(),
                     "",
                 ),
                 CoordRow::Counted => (
@@ -1856,8 +1892,9 @@ impl TeamView {
     }
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
-    /// While the footer asks a question, the settings summary folds toward its first row
-    /// when the window is too short to keep the question beside the lists and the panel.
+    /// When the window is too short for the lists, the panel and any footer question, the
+    /// blank rows before the panel and before the tasks go first, then the settings summary
+    /// folds toward its first row, so every setting shows while blank rows can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -1906,8 +1943,8 @@ impl TeamView {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            (None, Some(input), _) => {
-                let (rows, at) = branch_rows(input, content, look);
+            (None, Some(edit), _) => {
+                let (rows, at) = branch_rows(edit, content, look);
                 (rows, Some(at))
             }
             (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
@@ -1919,21 +1956,18 @@ impl TeamView {
         let footer = self.footer(look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
-        let folded = if footer.is_empty() {
-            0
-        } else {
-            (fixed + 2)
-                .saturating_sub(room)
-                .min(summary_rows.saturating_sub(1))
-        };
+        let over = (fixed + 2).saturating_sub(room);
+        let spacers = over.min(2);
+        let folded = (over - spacers).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
         );
+        assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - folded;
+        let fixed = fixed - spacers - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -2000,7 +2034,9 @@ impl TeamView {
                 look.muted,
             ));
         }
-        lines.push(Row::default());
+        if spacers < 2 {
+            lines.push(Row::default());
+        }
 
         lines.push(Row::of("Tasks", look.heading).push(format!("  {}", tasks.len()), look.muted));
         let task_widths = if wide {
@@ -2039,7 +2075,9 @@ impl TeamView {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spacers == 0 {
+            lines.push(Row::default());
+        }
         let cursor = caret.map(|(row, column)| (lines.len() + row, column));
         lines.extend(panel);
         lines.extend(footer);
@@ -2049,7 +2087,7 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Ask before merge, New folder limit), each whole. A
+    /// budget, Master's branch, Land on, Ask before merge, New folder limit), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2151,6 +2189,13 @@ impl TeamView {
                     .master_branch
                     .clone()
                     .unwrap_or_else(|| "Repository default".to_owned()),
+            ),
+            setting(
+                "Land on",
+                status
+                    .land_on
+                    .clone()
+                    .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
                 "Ask before merge",
@@ -2480,6 +2525,7 @@ impl TeamView {
                 },
             ),
             ("m", "Master's branch"),
+            ("L", "Land on"),
             ("g", "Ask before merge"),
             ("F", "New folder limit"),
             ("c", "Coordination"),
@@ -2652,6 +2698,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_master_branch_invalid" => {
             "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
         }
+        "team_land_on_invalid" => {
+            "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.".into()
+        }
         other => plain_problem(other),
     }
 }
@@ -2709,20 +2758,33 @@ fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, 
     (rows, cursor)
 }
 
-/// Draws the Master's branch editor. Takes the input, the content width and the look.
-/// Returns the rows and the cursor as a row and a column inside those rows.
-fn branch_rows(input: &TextInput, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
-    let mut rows = vec![
-        Row::of("Master's branch", look.heading),
-        Row::of(
+/// Draws the editor of one branch setting: the Master's branch or Land on. Takes the
+/// editor, the content width and the look. Returns the rows and the cursor as a row and a
+/// column inside those rows.
+fn branch_rows(edit: &BranchEdit, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    let (heading, help, empty) = match edit.setting {
+        BranchSetting::Master => (
+            "Master's branch",
             "The master works there and merges finished harnesses into it. Leave it empty for the repository default.",
-            look.muted,
+            "Repository default",
         ),
-    ];
+        BranchSetting::LandOn => (
+            "Land on",
+            "The master's merges and your Accept land there, and each change set counts only what it lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Leave it empty for the master's branch.",
+            "The master's branch",
+        ),
+    };
+    let input = &edit.input;
+    let mut rows = vec![Row::of(heading, look.heading)];
+    rows.extend(
+        wrap_words(help, content)
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+    );
     let inner = content.saturating_sub(4).max(2);
     let (lines, (line, column)) = input.wrap(inner - 1);
     let text = if input.value().is_empty() {
-        Row::of("Repository default", look.muted)
+        Row::of(empty, look.muted)
     } else {
         Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
     };

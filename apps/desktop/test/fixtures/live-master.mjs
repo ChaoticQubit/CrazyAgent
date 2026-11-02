@@ -108,13 +108,19 @@ export function click(text) {
   return true;
 }
 
-/** What the master area shows: which views are mounted, the buttons, and how much of the
- * area the terminal fills. */
+/** What the master area shows: which views are mounted, the buttons, how much of the area
+ * the terminal fills below the Sessions bar, and how far in from the console's edges the
+ * head's title and the Sessions bar's text and last button sit. */
 export function shown() {
   const area = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   const box = document.querySelector(".pj-master-live > .tg-terminal")?.getBoundingClientRect();
   const above = document.querySelector(".pj-master-live > .tg-terminal")?.previousElementSibling?.getBoundingClientRect();
   const sessions = document.querySelector(".pj-master-live > .pj-sessions")?.getBoundingClientRect();
+  const head = document.querySelector(".pj-master-live > .pj-console-head");
+  const title = head?.querySelector(".pj-console-title")?.getBoundingClientRect();
+  const said = document.querySelector('.pj-master-live > .pj-sessions [data-testid="master-live-session"]')?.getBoundingClientRect();
+  const last = document.querySelector('.pj-master-live > .pj-sessions [data-testid="sessions-toggle"]')?.getBoundingClientRect();
+  const edge = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   return {
     live: Boolean(document.querySelector(".pj-master-live")),
     terminal: Boolean(document.querySelector(".tg-terminal")),
@@ -134,6 +140,12 @@ export function shown() {
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
     above: above ? Math.round(above.bottom) : null,
     sessions: sessions ? { top: Math.round(sessions.top), bottom: Math.round(sessions.bottom) } : null,
+    inset: head && title && said && last && edge ? {
+      head: Math.round(title.left - edge.left),
+      bar: Math.round(said.left - edge.left),
+      headEnd: Math.round(parseFloat(getComputedStyle(head).paddingRight)),
+      barEnd: Math.round(edge.right - last.right - parseFloat(getComputedStyle(document.querySelector(".pj-master-live")).borderRightWidth)),
+    } : null,
   };
 }
 

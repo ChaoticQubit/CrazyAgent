@@ -814,6 +814,7 @@ version = "0.2.0"
 dependencies = [
  "crazyagent",
  "getrandom 0.4.3",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",

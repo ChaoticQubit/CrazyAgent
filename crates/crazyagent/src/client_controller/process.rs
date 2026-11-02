@@ -107,7 +107,7 @@ impl OwnerController {
             .await
     }
 
-    /// Reads one project's workflow adoption: whether nudges are on, the counted tools and
+    /// Reads one project's workflow adoption: its nudges option, the counted tools and
     /// each recent agent's counts, flags and reminders. Input: the project. Output: the view.
     pub async fn adoption(
         &self,

@@ -4122,7 +4122,8 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. It clears only
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. The agent shows no
+    /// process group until its new process is ready, never the one that ended. It clears only
     /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
@@ -4159,7 +4160,7 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4
+                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
                 params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
             )
@@ -4464,19 +4465,25 @@ impl TeamRuntime {
         }
     }
 
-    /// The commit a new master or harness worktree starts from (DEC-100): the tip of the
-    /// project's Master's branch, so the master works there and each harness's task branch
-    /// is cut from the branch it merges into. Takes the project and its canonical folder.
-    /// Returns the tip, None to start from the owner's HEAD when the project has no such
-    /// branch and none was chosen, or the plain reason a chosen Master's branch is missing.
+    /// The commit a new master or harness worktree starts from (DEC-100, DEC-111 Q1): the
+    /// tip of the project's Land on branch, the Master's branch unless the owner named
+    /// another, so each new agent starts where the team's merged work lands. Takes the
+    /// project and its canonical folder. Returns the tip, None to start from the owner's
+    /// HEAD when the project has no such branch and none was chosen, or the plain reason a
+    /// chosen branch is missing.
     fn master_tip(&self, project: &ProjectId, root: &Path) -> Result<Option<String>, String> {
+        let land_on = super::land_on(&self.connection, project)
+            .map_err(|e| with_code("the Land on setting could not be read", Some(&e.0)))?;
         let choice = super::master_branch_choice(&self.connection, project)
             .map_err(|e| with_code("the Master's branch setting could not be read", Some(&e.0)))?;
-        match crate::landing::master_branch(root, choice.as_deref()) {
+        match crate::landing::land_on(&self.connection, root, project) {
             Ok(found) => Ok(found.map(|(_, tip)| tip)),
-            Err(_) if choice.is_none() => Ok(None),
+            Err(_) if land_on.is_none() && choice.is_none() => Ok(None),
             Err(problem) => Err(with_code(
-                "the Master's branch is not a local branch of the project",
+                match land_on {
+                    Some(_) => "the Land on branch is not a local branch of the project",
+                    None => "the Master's branch is not a local branch of the project",
+                },
                 Some(&problem.0),
             )),
         }
@@ -4602,9 +4609,10 @@ impl TeamRuntime {
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
-    /// and, in its own clone, where its agent team's teammates work, each in
-    /// `.worktrees/<name>` on `<task branch>--<name>`, merged into the task branch before it
-    /// reports done. Takes the project and the agent. Returns the line, empty for an agent
+    /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
+    /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
+    /// the task branch before it reports done; an app-spawned lead delegates only through
+    /// the spawn tool. Takes the project and the agent. Returns the line, empty for an agent
     /// with no task branch of its own.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
@@ -4636,6 +4644,14 @@ impl TeamRuntime {
             return format!(
                 "\nYour branch is {branch}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {finish}().",
                 finish = super::tool::FINISH_WORK_TOOL
+            );
+        }
+        if !matches!(
+            super::lead_mode(&self.connection, project, agent),
+            Ok(crate::coord::settings::SubagentMode::Native)
+        ) {
+            return format!(
+                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
             );
         }
         format!(
@@ -4827,16 +4843,16 @@ impl TeamRuntime {
             })?;
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
-        let network = if tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![remote])
-        };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        let network = if tools {
+            policy.network.sandbox(Some(remote))
+        } else {
+            SandboxNetwork::Only(vec![remote])
+        };
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
