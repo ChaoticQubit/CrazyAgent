@@ -1717,6 +1717,15 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
     warm_agents_ended(b"#!/bin/sh\nexit 1\n");
 }
 
+/// The second warm sub-agent dies 2 s after the first has turned keeping warm off: it still
+/// ends Failed, and nothing starts again in its place.
+#[test]
+fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
+    warm_agents_ended(
+        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n/bin/sleep 2\nexit 1\n",
+    );
+}
+
 #[test]
 fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
     let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
