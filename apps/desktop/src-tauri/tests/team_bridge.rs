@@ -547,7 +547,7 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
-        CoordSettings, Delivery, HarnessKind, Overlaps, QuestionsTo, SubagentMode,
+        CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, SubagentMode,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -620,7 +620,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     let chosen = CoordSettings {
         questions_to: QuestionsTo::Me,
         overlaps: Overlaps::Block,
-        nudges: false,
+        nudges: Nudges::TenMinutes,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
     };
     for receipt in [

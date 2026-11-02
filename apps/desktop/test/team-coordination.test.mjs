@@ -13,9 +13,9 @@ test("an engine that sends no coordination shows the plan defaults, native only 
     { harness: "codex", mode: "app_spawned", delivery: "auto", native: false },
     { harness: "rcli", mode: "app_spawned", delivery: "auto", native: false },
   ]);
-  const sent = { settings: { ...coord.COORD_DEFAULTS, nudges: false }, harnesses: [{ harness: "codex", mode: "app_spawned", delivery: "typing_only", native: false }] };
+  const sent = { settings: { ...coord.COORD_DEFAULTS, nudges: "first_edit" }, harnesses: [{ harness: "codex", mode: "app_spawned", delivery: "typing_only", native: false }] };
   const merged = coord.coordination({ coordination: sent });
-  assert.equal(merged.settings.nudges, false);
+  assert.equal(merged.settings.nudges, "first_edit");
   assert.equal(merged.harnesses[1].delivery, "typing_only");
   assert.equal(merged.harnesses[0].harness, "claude-code");
 });

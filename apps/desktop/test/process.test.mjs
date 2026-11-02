@@ -317,7 +317,7 @@ test("the move notice names the files, says this or these deletions, offers Leav
 });
 
 const ADOPTION = {
-  nudges: true,
+  nudges: "ten_minutes",
   counted: ["start_work", "graphify"],
   skills: ["tdd", "zeta"],
   hidden: 2,
@@ -338,7 +338,7 @@ const rowOf = (markup, label) => {
 
 test("workflow adoption shows each counted tool's column, skill counts, red flags and the nudges line", () => {
   const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
-  assert.match(markup, /Nudges are on: each red flag sends that agent one reminder\./);
+  assert.match(markup, /Nudges run every 10 minutes: each red flag sends that agent one reminder\./);
   assert.match(markup, /<th scope="col">Agent<\/th><th scope="col">start_work<\/th><th scope="col">graphify<\/th><th scope="col">Skills<\/th><th scope="col">Flags<\/th>/);
   const codex = rowOf(markup, "#2 sub codex");
   assert.match(codex, /class="adoption-stopped"/, "a stopped agent is dimmed");
@@ -354,8 +354,10 @@ test("workflow adoption shows each counted tool's column, skill counts, red flag
   assert.match(master, /10\+ min without graphify or context-mode/);
   assert.doesNotMatch(master, /reminded/);
   assert.match(markup, /2 older agents are not listed\./);
-  const off = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: false, hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
+  const off = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "off", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
   assert.match(off, /Nudges are off: flags show here, and agents get no reminder\./);
+  const firstEdit = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "first_edit", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
+  assert.match(firstEdit, /Nudges run on the first edit: an edit before any graph query gets one reminder, and flags send none\./);
   assert.match(off, /No agents yet/);
   assert.doesNotMatch(off, /not listed/);
   const failed = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRefresh() {} }));
