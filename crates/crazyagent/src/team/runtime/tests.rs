@@ -7179,6 +7179,218 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
     }
 }
 
+/// Starts a Claude Code lead the master started while the project's Claude Code sub-agent
+/// mode is `mode`, in its own clone of the committed project on the task branch the engine
+/// claimed for it, as a lead's launch does. Takes the fixture and the mode. Returns the
+/// lead and its task branch.
+#[cfg(target_os = "macos")]
+fn lead_in_its_own_clone(
+    fixture: &Fixture,
+    mode: crate::coord::settings::SubagentMode,
+) -> (i64, String) {
+    use crate::coord::settings::{HarnessKind, set_mode};
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+    committed_project(fixture);
+    let repository = fixture.base.join("project");
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    assert_eq!(
+        super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
+        mode
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{lead}"));
+    let branch =
+        crate::landing::claim_task_branch(&db, &repository, &worktree, "write-the-page").unwrap();
+    crate::landing::add_agent_clone_on(&repository, &worktree, None, &branch).unwrap();
+    let git_dir = crate::agent_git::git_dir(&worktree);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                lead,
+                PROJECT,
+                repository.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    (lead, branch)
+}
+
+/// DEC-111 Q10: an app-spawned lead's task prompt names its task branch only. It says
+/// nothing of Claude Code native teammates, `git worktree add` or the teammates folder,
+/// so the lead delegates only through the spawn tool.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_spawned_lead_s_task_prompt_has_no_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::AppSpawned);
+    let mut team = fixture.runtime();
+    let line = team.branch_line(&fixture.setup.project_id, lead);
+    assert!(
+        !line.contains("git worktree add") && !line.contains(crate::agent_git::TEAMMATES_FOLDER),
+        "{line}"
+    );
+    assert_eq!(
+        line,
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a native lead's task prompt keeps the native-teammates paragraph: each
+/// teammate works in its own worktree under the teammates folder, on `<task branch>--<name>`,
+/// merged into the task branch before the lead reports done.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, lead),
+        format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            folder = crate::agent_git::TEAMMATES_FOLDER
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a worker its lead started reads its own branch and that its lead merges
+/// it, never a lead's task-branch line, whatever the project's sub-agent mode says.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_s_task_prompt_names_its_branch_and_its_lead_s_merge_not_a_lead_line() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let repository = fixture.base.join("project");
+    let lead_worktree = fixture.base.join(format!("agent-{lead}"));
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktree = fixture.base.join(format!("agent-{worker}"));
+    let own = crate::landing::claim_sub_agent_branch(
+        &db,
+        &repository,
+        &worktree,
+        &branch,
+        Some(&lead_worktree),
+        "notes",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(own, format!("{branch}--notes"));
+    crate::landing::add_agent_clone_on(&repository, &worktree, None, &own).unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                worker,
+                PROJECT,
+                repository.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                crate::agent_git::git_dir(&worktree).to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let mut team = fixture.runtime();
+    assert_eq!(
+        team.branch_line(&fixture.setup.project_id, worker),
+        format!(
+            "\nYour branch is {own}, checked out in your own worktree and cut from your lead's commit: commit your work there. Your lead merges it into its task branch after you call {}().",
+            super::super::tool::FINISH_WORK_TOOL
+        )
+    );
+    team.shutdown().unwrap();
+}
+
+/// DEC-111 Q10: a lead in a linked worktree of the owner repository reads that the engine
+/// commits its edits on its branch, for either sub-agent mode, never the line of a lead
+/// in its own clone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_s_task_prompt_says_the_engine_commits_its_edits_in_either_mode() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let home = committed_project(&fixture);
+    let repository = fixture.base.join("project");
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let mut leads = Vec::new();
+    for (mode, name) in [
+        (SubagentMode::AppSpawned, "write-the-page"),
+        (SubagentMode::Native, "write-the-notes"),
+    ] {
+        set_mode(&fixture.connection, &project, HarnessKind::ClaudeCode, mode).unwrap();
+        let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+        assert_eq!(
+            super::super::lead_mode(&fixture.connection, &project, lead).unwrap(),
+            mode
+        );
+        let worktree = fixture.base.join(format!("linked-{lead}"));
+        let added = level_git(
+            &repository,
+            &home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        assert!(added.status.success(), "{added:?}");
+        let git_dir = level_git(&worktree, &home, &["rev-parse", "--absolute-git-dir"]);
+        assert!(git_dir.status.success(), "{git_dir:?}");
+        let git_dir = PathBuf::from(String::from_utf8(git_dir.stdout).unwrap().trim());
+        assert_ne!(git_dir, crate::agent_git::git_dir(&worktree));
+        let branch = crate::landing::claim_task_branch(&db, &repository, &worktree, name).unwrap();
+        assert_eq!(
+            crate::landing::name_agent_branch(&db, &repository, &worktree, &git_dir).unwrap(),
+            branch
+        );
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    lead,
+                    PROJECT,
+                    repository.to_str().unwrap(),
+                    worktree.to_str().unwrap(),
+                    git_dir.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        leads.push((lead, branch));
+    }
+    let mut team = fixture.runtime();
+    for (lead, branch) in leads {
+        assert_eq!(
+            team.branch_line(&fixture.setup.project_id, lead),
+            format!("\nYour branch is {branch}; the engine commits your edits there.")
+        );
+    }
+    team.shutdown().unwrap();
+}
+
 #[test]
 fn only_an_agent_with_tools_on_gets_the_message_relay() {
     let fixture = Fixture::new(1);
