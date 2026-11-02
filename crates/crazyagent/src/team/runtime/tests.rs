@@ -7073,6 +7073,7 @@ fn between_turns(
         ran_before: Duration::ZERO,
         told_finished: BTreeSet::new(),
         parent: None,
+        ready: true,
     }
 }
 
