@@ -256,9 +256,9 @@ fn runs_graphify(command: &str) -> bool {
 /// The flags one agent's habits raise now (Q18). Edits by an agent that never started or
 /// owned work raise the first. A running agent with tools that worked `UNGROUNDED_MS`
 /// since its start, busy or calling tools, with no graphify and no `ctx_*` call, raises
-/// the second. An agent whose launch fires no hooks raises none, since none of its calls are
-/// counted (DEC-104 bare-hooks). Takes the database, the agent, its row, its counts by stored
-/// tool name and the time in ms. Returns the flags in `Flag::ALL` order.
+/// the second. An agent whose launch fires no hooks raises none, and clients show its counts
+/// and flags as unavailable (DEC-104 bare-hooks). Takes the database, the agent, its row,
+/// its counts by stored tool name and the time in ms. Returns the flags in `Flag::ALL` order.
 pub(super) fn flags(
     db: &Connection,
     id: AgentId,

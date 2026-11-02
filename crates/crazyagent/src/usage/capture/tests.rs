@@ -1271,3 +1271,94 @@ fn codex_rollout_tool_calls_count_once_per_line() {
         "a scan for no agent counts no tool calls"
     );
 }
+
+/// One Claude Code transcript line of an assistant message that calls one tool.
+/// Inputs: the message id, the tool's name and its input. Output: the line.
+fn claude_call(id: &str, name: &str, input: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": id,
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input}],
+                "usage": {"input_tokens": 10, "output_tokens": 2}
+            }
+        })
+    )
+}
+
+/// A Claude Code agent launched without hooks (DEC-104 bare-hooks) has its tool calls
+/// counted from its transcript, each call once however often the home is scanned, the way a
+/// Codex agent's rollout is. One with hooks counts its own through them, so its transcript
+/// counts tokens only.
+#[test]
+fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let agent = |hookless: bool| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+             VALUES ('alpha','sub','claude-code',1,'running',?1,?1,?2)",
+            params![NOW, hookless],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let bare = agent(true);
+    let hooked = agent(false);
+    let lines = [
+        claude_call(
+            "m1",
+            "Bash",
+            serde_json::json!({"command": "graphify query \"pools\""}),
+        ),
+        claude_call("m2", "Skill", serde_json::json!({"skill": "tdd"})),
+        claude_call(
+            "m3",
+            "Edit",
+            serde_json::json!({"file_path": "/repo/a.rs", "old_string": "a", "new_string": "b"}),
+        ),
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_m3\",\"content\":\"ok\"}]}}\n".to_owned(),
+        claude_assistant("m4", 10, 2, 0, 0, "end_turn"),
+    ];
+    let homes = [bare, hooked].map(|agent| {
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("projects/-repo/s1.jsonl");
+        for line in &lines {
+            append(&record, line);
+        }
+        (agent, home)
+    });
+    let who = attribution(RunKind::Agent, None);
+    let scan = |at: i64| {
+        homes.each_ref().map(|(agent, home)| {
+            let added =
+                scan_agent_home(&db, home.path(), Format::Claude, &who, *agent, at).unwrap();
+            (added.input, added.output)
+        })
+    };
+
+    assert_eq!(
+        scan(NOW),
+        [(40, 8); 2],
+        "both transcripts count their tokens"
+    );
+    assert_eq!(scan(NOW + 1), [(0, 0); 2]);
+    assert_eq!(
+        tool_counts(&db, bare),
+        vec![
+            ("Edit".to_owned(), 1),
+            ("Skill".to_owned(), 1),
+            ("graphify".to_owned(), 1),
+            ("skill:tdd".to_owned(), 1),
+        ],
+        "each call of the agent without hooks counts once"
+    );
+    assert_eq!(
+        tool_counts(&db, hooked),
+        Vec::new(),
+        "the agent with hooks counts its calls through them"
+    );
+}

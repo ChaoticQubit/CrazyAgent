@@ -481,7 +481,7 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
 /// two edits and the engine notes the lead's agent got.
 fn nudged(team: &Team, nudges: Nudges) -> ([String; 2], Vec<String>) {
     let (db, project) = engine(team, nudges);
-    let lead = tools_agent(&db, "claude-code");
+    let lead = tools_agent(&db, "claude-code", false);
     let home = team.root.join("agent").join("home");
     std::fs::create_dir_all(&home).unwrap();
     let serve = || {
@@ -523,12 +523,12 @@ fn engine(team: &Team, nudges: Nudges) -> (Connection, ProjectId) {
 }
 
 /// Adds one working tools-on sub-agent of a harness to project `alpha`. Inputs: the
-/// database and the harness id. Output: the agent's id.
-fn tools_agent(db: &Connection, harness: &str) -> i64 {
+/// database, the harness id and whether its launch fires no hooks. Output: the agent's id.
+fn tools_agent(db: &Connection, harness: &str, hookless: bool) -> i64 {
     db.execute(
-        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-         VALUES ('alpha','sub_agent',?1,1,'working',0,0)",
-        [harness],
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+         VALUES ('alpha','sub_agent',?1,1,'working',0,0,?2)",
+        params![harness, hookless],
     )
     .unwrap();
     db.last_insert_rowid()
@@ -567,11 +567,13 @@ fn with_ten_minutes_the_adoption_reminder_is_sent() {
         ["", ""],
         "the 10-minute option never reminds on an edit"
     );
-    assert!(
-        notes
-            .iter()
-            .any(|note| note == Flag::EditsWithoutWork.reminder()),
-        "the logged edit without start_work earns the engine's reminder: {notes:?}"
+    assert_eq!(
+        notes,
+        [
+            Flag::EditsWithoutWork.reminder(),
+            Flag::Ungrounded.reminder()
+        ],
+        "the logged edit without start_work and without a graph query earns one reminder per flag"
     );
 }
 
@@ -609,14 +611,59 @@ fn with_first_edit_the_hook_returns_the_reminder_once() {
     );
 }
 
+/// Runs the FirstEdit engine fallback (DEC-111 R4) for two agents of one harness: one whose
+/// real session record edits a file before any graphify call and one whose record queried
+/// the graph first. The engine's usage scan of each real home and the adoption tick run
+/// twice. Inputs: the team, the harness id, whether its launch fires no hooks, the record's
+/// path inside a home, and the edit and graph-query lines. Output: the engine notes of the
+/// editing agent and of the grounded one.
+fn engine_fallback(
+    team: &Team,
+    harness: &str,
+    hookless: bool,
+    record: &str,
+    edit: &Value,
+    graph: &Value,
+) -> [Vec<String>; 2] {
+    let (db, project) = engine(team, Nudges::FirstEdit);
+    let format = Format::of(harness).unwrap();
+    let agents = [vec![edit], vec![graph, edit]].map(|lines| {
+        let agent = tools_agent(&db, harness, hookless);
+        let home = team
+            .root
+            .join("agents")
+            .join(format!("agent-{agent}"))
+            .join("home");
+        let path = home.join(record);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        (agent, home)
+    });
+    for _ in 0..2 {
+        for (agent, home) in &agents {
+            let who = Attribution {
+                kind: RunKind::Agent,
+                project: Some(project.clone()),
+                pool: None,
+                account: None,
+                agent: format!("team-{agent}"),
+                harness: harness.to_owned(),
+            };
+            crazyagent::usage::capture::scan_agent_home(&db, home, format, &who, *agent, now_ms())
+                .unwrap();
+        }
+        crazyagent::coord::adoption::tick(&db, &project, now_ms()).unwrap();
+    }
+    agents.map(|(agent, _)| engine_notes(&db, agent))
+}
+
 /// Under FirstEdit an agent without hooks gets the same reminder from the engine (DEC-111
 /// R4): a Codex agent's real rollout file records a patch before any graphify call, the
 /// engine's usage scan of its home counts the calls, and the adoption tick sends one note,
 /// however often both run. A Codex agent whose rollout ran graphify first gets none.
 #[test]
 fn with_first_edit_a_codex_agent_without_hooks_gets_the_engine_reminder_once() {
-    let team = Team::new();
-    let (db, project) = engine(&team, Nudges::FirstEdit);
     let patch = json!({"type": "response_item", "payload": {
         "type": "custom_tool_call", "name": "apply_patch", "input": "*** Begin Patch",
     }});
@@ -624,57 +671,71 @@ fn with_first_edit_a_codex_agent_without_hooks_gets_the_engine_reminder_once() {
         "type": "function_call", "name": "exec_command",
         "arguments": json!({"cmd": "graphify query \"parser\""}).to_string(),
     }});
-    let codex = |lines: &[&Value]| {
-        let agent = tools_agent(&db, "codex");
-        let home = team
-            .root
-            .join("agents")
-            .join(format!("agent-{agent}"))
-            .join("home");
-        let record = home.join("sessions/2026/11/01/rollout-2026-11-01T14-00-00-t.jsonl");
-        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
-        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-        std::fs::write(&record, text).unwrap();
-        (agent, home)
-    };
-    let edited = codex(&[&patch]);
-    let grounded = codex(&[&graphify, &patch]);
-    let scan = || {
-        for (agent, home) in [&edited, &grounded] {
-            let who = Attribution {
-                kind: RunKind::Agent,
-                project: Some(project.clone()),
-                pool: None,
-                account: None,
-                agent: format!("team-{agent}"),
-                harness: "codex".to_owned(),
-            };
-            crazyagent::usage::capture::scan_agent_home(
-                &db,
-                home,
-                Format::Codex,
-                &who,
-                *agent,
-                now_ms(),
-            )
-            .unwrap();
-        }
-        crazyagent::coord::adoption::tick(&db, &project, now_ms()).unwrap();
-    };
-
-    scan();
-    scan();
+    let [edited, grounded] = engine_fallback(
+        &Team::new(),
+        "codex",
+        false,
+        "sessions/2026/11/01/rollout-2026-11-01T14-00-00-t.jsonl",
+        &patch,
+        &graphify,
+    );
     assert_eq!(
-        engine_notes(&db, edited.0),
+        edited,
         [
             "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
         ],
         "one engine reminder, the hook's own words"
     );
     assert_eq!(
-        engine_notes(&db, grounded.0),
+        grounded,
         Vec::<String>::new(),
         "a Codex agent that queried the graph first"
+    );
+}
+
+/// Under FirstEdit a Claude Code agent launched with --bare, whose hooks never run (DEC-104
+/// bare-hooks), gets the engine's reminder too (DEC-111 R4): its real transcript records an
+/// Edit before any graphify call, the usage scan of its home counts the calls, and the
+/// adoption tick sends one note, however often both run. One whose transcript ran graphify
+/// first gets none, and a Claude Code agent with hooks is left to its hook.
+#[test]
+fn with_first_edit_a_bare_claude_agent_gets_the_engine_reminder_once() {
+    let call = |id: &str, name: &str, input: Value| {
+        json!({"type": "assistant", "message": {
+            "id": id, "role": "assistant",
+            "content": [{"type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input}],
+        }})
+    };
+    let edit = call(
+        "msg_edit",
+        "Edit",
+        json!({"file_path": "/repo/src/a.rs", "old_string": "a", "new_string": "b"}),
+    );
+    let graphify = call(
+        "msg_graph",
+        "Bash",
+        json!({"command": "graphify query \"parser\""}),
+    );
+    let record = "projects/-repo/0b6f1c52-5a8e-4f43-9a51-1f2d7c3e9a10.jsonl";
+    let [edited, grounded] =
+        engine_fallback(&Team::new(), "claude-code", true, record, &edit, &graphify);
+    assert_eq!(
+        edited,
+        [
+            "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
+        ],
+        "one engine reminder, the hook's own words"
+    );
+    assert_eq!(
+        grounded,
+        Vec::<String>::new(),
+        "a bare Claude agent that queried the graph first"
+    );
+    let [hooked, _] = engine_fallback(&Team::new(), "claude-code", false, record, &edit, &graphify);
+    assert_eq!(
+        hooked,
+        Vec::<String>::new(),
+        "a Claude agent with hooks gets its reminder from the hook, not the engine"
     );
 }
 
