@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -28,9 +28,11 @@ static VOLUMES: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 
 /// A scratch APFS disk image attached without Finder at its own mount point, detached
 /// when dropped, so a test can give its volume another device number as a restart does.
+/// It holds the whole disk its last attach returned and only ever detaches that disk.
 struct Volume {
     image: PathBuf,
     mount: PathBuf,
+    disk: Mutex<Option<String>>,
 }
 
 impl Volume {
@@ -47,68 +49,111 @@ impl Volume {
         Self {
             image,
             mount: base.join(name),
+            disk: Mutex::new(None),
         }
     }
 
     fn attach(&self) {
         std::fs::create_dir_all(&self.mount).unwrap();
-        if let Err(refused) = hdiutil(
-            &["attach", "-quiet", "-nobrowse", "-mountpoint"],
+        let attached = hdiutil(
+            &["attach", "-plist", "-nobrowse", "-mountpoint"],
             &[&self.mount, &self.image],
-        ) {
-            panic!("hdiutil attach {}: {refused}", self.image.display());
-        }
+        )
+        .unwrap_or_else(|refused| panic!("hdiutil attach {}: {refused}", self.image.display()));
+        let disk = first_disk(&attached)
+            .unwrap_or_else(|| panic!("hdiutil attach {} names a disk", self.image.display()));
+        let previous = self.disk.lock().unwrap().replace(disk);
+        assert!(
+            previous.is_none(),
+            "{} is attached once",
+            self.image.display()
+        );
     }
 
     fn detach(&self) {
-        let mut attached = self.disk();
-        assert!(
-            attached.is_some(),
-            "hdiutil info lists {} as attached",
-            self.image.display()
-        );
-        let mut refused = Vec::new();
-        while let Some(disk) = attached {
-            match hdiutil(&["detach", "-quiet"], &[Path::new(&disk)]) {
-                Ok(_) => return,
-                Err(reason) => refused.push(format!("{disk}: {reason}")),
-            }
-            assert!(
-                refused.len() < DETACH_ATTEMPTS,
-                "hdiutil detach {}: {refused:?}",
+        let disk = self.disk.lock().unwrap().clone();
+        let disk = disk.unwrap_or_else(|| panic!("{} is attached", self.image.display()));
+        if let Err(refused) = self.release(&disk, false) {
+            panic!(
+                "hdiutil detach {disk} for {}: {refused:?}",
                 self.mount.display()
             );
-            std::thread::sleep(DETACH_PAUSE);
-            attached = self.disk();
         }
-    }
-
-    /// The whole disk hdiutil attached this volume's image as, found by the image, so a
-    /// detach that unmounted the volume but could not eject the image can still finish.
-    /// Output: the `/dev/diskN` path, or none when the image is not attached.
-    fn disk(&self) -> Option<String> {
-        const DISK: &str = "/dev/disk";
-        let info = hdiutil(&["info", "-plist"], &[]).ok()?;
-        let image = format!("<string>{}</string>", self.image.display());
-        let entities = &info[info.find(&image)? + image.len()..];
-        let number: String = entities[entities.find(DISK)? + DISK.len()..]
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        (!number.is_empty()).then(|| format!("{DISK}{number}"))
+        *self.disk.lock().unwrap() = None;
     }
 
     fn device(&self) -> u64 {
         std::fs::metadata(&self.mount).unwrap().dev()
     }
+
+    /// Detaches the disk this volume's image was attached as, while hdiutil still lists
+    /// that disk under this image, and tries again after a refusal. Input: the disk and
+    /// whether to force it. Output: nothing once hdiutil no longer lists the image, or
+    /// every reason it gave, including a failed `hdiutil info`.
+    fn release(&self, disk: &str, force: bool) -> Result<(), Vec<String>> {
+        let detach: &[&str] = if force {
+            &["detach", "-quiet", "-force"]
+        } else {
+            &["detach", "-quiet"]
+        };
+        let listed = format!("<string>{disk}</string>");
+        let mut refused = Vec::new();
+        for _ in 0..DETACH_ATTEMPTS {
+            let info = hdiutil(&["info", "-plist"], &[])
+                .map_err(|reason| vec![format!("hdiutil info: {reason}")])?;
+            let Some(entry) = image_entry(&info, &self.image) else {
+                return Ok(());
+            };
+            if !entry.contains(&listed) {
+                refused.push(format!("{} is listed without {disk}", self.image.display()));
+            } else if let Err(reason) = hdiutil(detach, &[Path::new(disk)]) {
+                refused.push(format!("{disk}: {reason}"));
+            } else {
+                continue;
+            }
+            std::thread::sleep(DETACH_PAUSE);
+        }
+        Err(refused)
+    }
 }
 
 impl Drop for Volume {
     fn drop(&mut self) {
-        if let Some(disk) = self.disk() {
-            let _ = hdiutil(&["detach", "-quiet", "-force"], &[Path::new(&disk)]);
+        let held = self
+            .disk
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(disk) = held
+            && let Err(refused) = self.release(&disk, true)
+        {
+            eprintln!(
+                "hdiutil detach -force {disk} for {}: {refused:?}",
+                self.image.display()
+            );
         }
     }
+}
+
+/// The part of `hdiutil info -plist` that describes one image, from its path to the next
+/// image's path, so a lookup never reads another image's disks. Input: the plist text and
+/// the image. Output: that part, or none when hdiutil does not list the image.
+fn image_entry<'a>(info: &'a str, image: &Path) -> Option<&'a str> {
+    let path = format!("<string>{}</string>", image.display());
+    info.split("<key>image-path</key>")
+        .skip(1)
+        .find_map(|entry| entry.trim_start().strip_prefix(path.as_str()))
+}
+
+/// The first disk `hdiutil attach -plist` lists, which is the image's own whole disk.
+/// Input: the attach output. Output: its `/dev/diskN` path, or none if it lists no disk.
+fn first_disk(attached: &str) -> Option<String> {
+    const DISK: &str = "/dev/disk";
+    let number: String = attached[attached.find(DISK)? + DISK.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (!number.is_empty()).then(|| format!("{DISK}{number}"))
 }
 
 /// Runs hdiutil. Input: its arguments, then the paths it acts on. Output: what it printed
@@ -495,4 +540,46 @@ async fn settings_split_across_two_renumbered_volumes_are_not_taken_for_the_jour
     assert!(!published(&rig));
     assert_eq!(count(&db, "settings_publication"), 1);
     assert!(rig.staged(&request).is_file());
+}
+
+#[tokio::test]
+async fn an_image_entry_of_hdiutil_info_holds_its_own_disk_and_never_the_next_images() {
+    let _volumes = VOLUMES.lock().await;
+    let root = tempfile::Builder::new()
+        .prefix("ca-renum-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let volumes = [Volume::new(&base, "first"), Volume::new(&base, "second")];
+    for volume in &volumes {
+        volume.attach();
+    }
+    let info = hdiutil(&["info", "-plist"], &[]).unwrap();
+    let path = |volume: &Volume| format!("<string>{}</string>", volume.image.display());
+    let disk = |volume: &Volume| {
+        let disk = volume.disk.lock().unwrap().clone().unwrap();
+        format!("<string>{disk}</string>")
+    };
+    let [earlier, later] = if info.find(&path(&volumes[0])) < info.find(&path(&volumes[1])) {
+        [&volumes[0], &volumes[1]]
+    } else {
+        [&volumes[1], &volumes[0]]
+    };
+    for (volume, other) in [(earlier, later), (later, earlier)] {
+        let entry = image_entry(&info, &volume.image).unwrap();
+        assert!(entry.contains(&disk(volume)), "{entry}");
+        assert!(!entry.contains(&disk(other)), "{entry}");
+    }
+
+    let at = info.find(&path(earlier)).unwrap();
+    let entities = at + info[at..].find("<key>system-entities</key>").unwrap();
+    let close = entities + info[entities..].find("</array>").unwrap() + "</array>".len();
+    let bare = format!("{}{}", &info[..entities], &info[close..]);
+    let entry = image_entry(&bare, &earlier.image).unwrap();
+    assert!(!entry.contains("/dev/disk"), "{entry}");
+    assert!(
+        image_entry(&bare, &later.image)
+            .unwrap()
+            .contains(&disk(later))
+    );
 }
