@@ -306,10 +306,17 @@ pub fn finished(
             disk_bytes(&target.place.worktree, &mut budget)
         };
         let (folder, all_folder) = disk_bytes(&agent_folder(team, agent.id), &mut budget);
+        let label = if agent.role == AgentRole::Sub
+            && super::events::name_reaches_running(db, project, agent.id)?
+        {
+            AgentRole::Sub.agent_label(agent.id)
+        } else {
+            agent.label
+        };
         found.push(FinishedAgent {
             id: agent.id,
             role: agent.role,
-            label: agent.label,
+            label,
             harness: agent.harness,
             stopped_ms: agent.stopped_ms,
             bytes: worktree.saturating_add(folder),

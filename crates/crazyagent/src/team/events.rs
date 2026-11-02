@@ -1395,8 +1395,8 @@ pub(crate) fn finished_agents(
                     stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
                 let label = label(connection, id)?;
                 let number = AgentRole::Sub.agent_label(id);
-                let named = if label == number {
-                    label
+                let named = if label == number || name_reaches_running(connection, project, id)? {
+                    number
                 } else {
                     format!("{label}, {number}")
                 };
@@ -1410,6 +1410,30 @@ pub(crate) fn finished_agents(
             },
         )
         .collect()
+}
+
+/// Says whether a sub-agent's persona or handle, ignoring case, is also the persona or handle
+/// of another running sub-agent of the project, so a message sent by that name reaches the
+/// running agent and the finished one is listed by its number only (DEC-111 Q19).
+/// Takes the database, the project and the agent id. Returns true when such an agent runs.
+pub(crate) fn name_reaches_running(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_names f
+                 JOIN team_names r ON r.project=f.project AND r.agent<>f.agent
+                 JOIN team_agents a ON a.id=r.agent AND a.project=r.project
+                 WHERE f.project=?1 AND f.agent=?2
+                   AND a.role='sub' AND a.status IN ('starting','idle','working')
+                   AND (f.persona=r.persona COLLATE NOCASE OR f.persona=r.handle COLLATE NOCASE
+                        OR f.handle=r.persona COLLATE NOCASE OR f.handle=r.handle COLLATE NOCASE))",
+            params![project.as_str(), agent],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
