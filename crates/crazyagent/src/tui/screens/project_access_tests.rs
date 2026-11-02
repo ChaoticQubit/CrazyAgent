@@ -108,12 +108,18 @@ fn the_settings_line_names_the_level_and_the_allowed_toolchains() {
 }
 
 #[test]
-fn the_network_choice_explains_the_none_overlap_and_notes_full_access_makes_it_moot() {
-    assert!(
-        network_help(AgentNetwork::None).contains("same as Port 443 only"),
-        "{}",
-        network_help(AgentNetwork::None)
+fn the_none_choice_says_port_443_to_any_host_and_full_access_makes_it_moot() {
+    assert_eq!(
+        network_help(AgentNetwork::None),
+        "None limits agents to port 443 (HTTPS to any host); it does not yet limit them to the model host. The plugin check reaches nothing."
     );
+    for network in AgentNetwork::ALL {
+        let help = network_help(network);
+        assert!(
+            !help.contains("model's port") && !help.contains("only the model"),
+            "{help}"
+        );
+    }
     let look = super::new_project_view::Look::plain();
     let note_shows = |access: AgentAccess| {
         let shown = AccessEdit::of(&PolicyView { access, ..view() })

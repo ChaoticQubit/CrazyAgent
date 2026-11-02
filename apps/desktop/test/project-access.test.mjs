@@ -74,9 +74,12 @@ test("Settings says beside the level choice that lowering it stops agents runnin
   assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
 });
 
-test("None explains the Port 443 overlap and Full access annotates the network choice as moot", () => {
+test("None says it limits agents to port 443, not yet the model host, and Full access annotates the network choice as moot", () => {
   const none = access.NETWORK_CHOICES.find((choice) => choice.network === "none");
-  assert.match(none.help, /same as Port 443 only/);
+  assert.equal(none.help, "None limits agents to port 443 (HTTPS to any host); it does not yet limit them to the model host. The plugin check reaches nothing.");
+  for (const choice of access.NETWORK_CHOICES) assert.doesNotMatch(choice.help, /model's port|only the model/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${none.help}"`), "the TUI shows the same None line");
   assert.equal(access.NETWORK_IGNORED_UNDER_FULL, "Full access runs agents without a sandbox, so this choice does not apply.");
   const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
   assert.match(card, /access === "full"[^\n]*NETWORK_IGNORED_UNDER_FULL/);
